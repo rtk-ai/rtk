@@ -256,18 +256,19 @@ show_gain 400 80
 #######################################
 section "10. Kubernetes Pods"
 
-echo -e "${RED}❌ Standard: kubectl get pods${RESET}"
+echo -e "${RED}❌ Standard: kubectl get pods -A${RESET}"
 think
-type_cmd "kubectl get pods 2>&1 | head -8"
-kubectl get pods 2>&1 | head -8
+type_cmd "kubectl get pods -A"
+kubectl get pods -A 2>&1 | head -15
+echo -e "${GRAY}... (truncated)${RESET}"
 sleep 1.5
 
 echo ""
 echo -e "${GREEN}✓ rtk kubectl pods${RESET}"
 think
 type_cmd "rtk kubectl pods"
-rtk kubectl pods 2>&1 | head -8
-show_gain 600 150
+rtk kubectl pods 2>&1 | head -10
+show_gain 1200 180
 
 #######################################
 # SUMMARY
