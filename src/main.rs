@@ -14,6 +14,7 @@ mod ls;
 mod read;
 mod runner;
 mod summary;
+mod wget_cmd;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -179,6 +180,18 @@ enum Commands {
         /// Show current configuration
         #[arg(long)]
         show: bool,
+    },
+
+    /// Download with compact output (strips progress bars)
+    Wget {
+        /// URL to download
+        url: String,
+        /// Output to stdout instead of file
+        #[arg(short = 'O', long)]
+        stdout: bool,
+        /// Additional wget arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -390,6 +403,14 @@ fn main() -> Result<()> {
                 init::show_config()?;
             } else {
                 init::run(global, cli.verbose)?;
+            }
+        }
+
+        Commands::Wget { url, stdout, args } => {
+            if stdout {
+                wget_cmd::run_stdout(&url, &args, cli.verbose)?;
+            } else {
+                wget_cmd::run(&url, &args, cli.verbose)?;
             }
         }
     }
