@@ -26,6 +26,10 @@ Thumbs.db
 # Test artifacts
 *.cast.bak
 
+# Benchmark results
+scripts/benchmark/
+benchmark-report.md
+
 # SQLite databases
 *.db
 *.sqlite
