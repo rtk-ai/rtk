@@ -7,6 +7,15 @@ const RTK_INSTRUCTIONS: &str = r#"# Instructions: Utiliser rtk pour économiser 
 ## Règle obligatoire
 Remplacer les commandes Unix standard par `rtk` pour minimiser la consommation de tokens.
 
+**IMPORTANT:** Même lors du chaînage de commandes avec `&&`, utiliser `rtk`:
+```bash
+# ❌ Ne pas faire
+git add . && git commit -m "msg" && git push
+
+# ✅ Faire
+rtk git add && rtk git commit -m "msg" && rtk git push
+```
+
 ## Substitutions
 
 | ❌ Ne pas utiliser | ✅ Utiliser |
@@ -30,11 +39,14 @@ Remplacer les commandes Unix standard par `rtk` pour minimiser la consommation d
 | `cat Cargo.toml` (pour deps) | `rtk deps` |
 | `env`, `printenv` | `rtk env` |
 | `docker ps` | `rtk docker ps` |
+| `docker images` | `rtk docker images` |
+| `docker logs <c>` | `rtk docker logs <c>` |
 | `kubectl get pods` | `rtk kubectl pods` |
-| `<longue commande>` | `rtk summary <cmd>` |
+| `kubectl logs <pod>` | `rtk kubectl logs <pod>` |
 | `grep -rn`, `rg` | `rtk grep <pattern>` |
+| `<longue commande>` | `rtk summary <cmd>` |
 
-## Commandes rtk
+## Commandes rtk (15 total)
 
 ```bash
 # Fichiers

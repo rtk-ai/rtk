@@ -49,13 +49,13 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Max depth
-        #[arg(short, long, default_value = "10")]
+        #[arg(short, long, default_value = "1")] // psk : change tree subdir for ls
         depth: usize,
         /// Show hidden files
         #[arg(short = 'a', long)]
         all: bool,
         /// Output format: tree, flat, json
-        #[arg(short, long, default_value = "tree")]
+        #[arg(short, long, default_value = "flat")] 
         format: ls::OutputFormat,
     },
 

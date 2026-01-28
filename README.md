@@ -48,14 +48,14 @@ cargo install rtk
 
 ### Debian/Ubuntu
 ```bash
-curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk_0.2.0-1_amd64.deb
-sudo dpkg -i rtk_0.2.0-1_amd64.deb
+curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk_0.2.1-1_amd64.deb
+sudo dpkg -i rtk_0.2.1-1_amd64.deb
 ```
 
 ### Fedora/RHEL
 ```bash
-curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk-0.2.0-1.x86_64.rpm
-sudo rpm -i rtk-0.2.0-1.x86_64.rpm
+curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk-0.2.1-1.x86_64.rpm
+sudo rpm -i rtk-0.2.1-1.x86_64.rpm
 ```
 
 ### Manual Download
@@ -283,6 +283,32 @@ rtk reads from `CLAUDE.md` files to instruct Claude Code to use rtk automaticall
 rtk init --show    # Show current configuration
 rtk init           # Create local CLAUDE.md
 rtk init --global  # Create ~/CLAUDE.md
+```
+
+example of 3 days session:
+```bash
+📊 RTK Token Savings
+════════════════════════════════════════
+
+Total commands:    133
+Input tokens:      30.5K
+Output tokens:     10.7K
+Tokens saved:      25.3K (83.0%)
+
+By Command:
+────────────────────────────────────────
+Command               Count      Saved     Avg%
+rtk git status           41      17.4K    82.9%
+rtk git push             54       3.4K    91.6%
+rtk grep                 15       3.2K    26.5%
+rtk ls                   23       1.4K    37.2%
+
+Daily Savings (last 30 days):
+────────────────────────────────────────
+01-23 │███████████████████                      6.4K
+01-24 │██████████████████                       5.9K
+01-25 │                                         18
+01-26 │████████████████████████████████████████ 13.0K
 ```
 
 ## License

@@ -1,0 +1,27 @@
+name: Benchmark Token Savings
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build rtk
+        run: cargo build --release
+
+      - name: Run benchmark
+        run: ./scripts/benchmark.sh
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: benchmark-report.md
