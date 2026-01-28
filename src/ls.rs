@@ -225,9 +225,9 @@ fn format_flat(entries: &[DirEntry]) -> String {
     let mut output = String::new();
     for entry in entries {
         if entry.is_dir {
-            output.push_str(&format!("{}/\n", entry.path));
+            output.push_str(&format!("{}/\n", entry.name));
         } else {
-            output.push_str(&format!("{}\n", entry.path));
+            output.push_str(&format!("{}\n", entry.name));
         }
     }
     output

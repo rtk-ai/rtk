@@ -62,21 +62,8 @@ pub fn run(pattern: &str, path: &str, max_results: usize, verbose: u8) -> Result
             dir.clone()
         };
 
-        if files_in_dir.len() <= 3 {
-            println!("{}/ ({})", dir_display, files_in_dir.len());
-            for f in files_in_dir {
-                println!("  └─ {}", f);
-                shown += 1;
-            }
-        } else {
-            println!("{}/ ({}F)", dir_display, files_in_dir.len());
-            for f in files_in_dir.iter().take(2) {
-                println!("  ├─ {}", f);
-                shown += 1;
-            }
-            println!("  +{}", files_in_dir.len() - 2);
-            shown += files_in_dir.len() - 2;
-        }
+        println!("{}/ {}", dir_display, files_in_dir.join(" "));
+        shown += files_in_dir.len();
     }
 
     let mut by_ext: HashMap<String, usize> = HashMap::new();

@@ -26,6 +26,34 @@ pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: 
 }
 
 fn run_diff(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()> {
+    // Check if user wants stat output
+    let wants_stat = args.iter().any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
+
+    // Check if user wants compact diff (default RTK behavior)
+    let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
+
+    if wants_stat || !wants_compact {
+        // User wants stat or explicitly no compacting - pass through directly
+        let mut cmd = Command::new("git");
+        cmd.arg("diff");
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        let output = cmd.output().context("Failed to run git diff")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("{}", stderr);
+            std::process::exit(output.status.code().unwrap_or(1));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        println!("{}", stdout.trim());
+        return Ok(());
+    }
+
+    // Default RTK behavior: stat first, then compacted diff
     let mut cmd = Command::new("git");
     cmd.arg("diff").arg("--stat");
 
@@ -132,31 +160,56 @@ fn compact_diff(diff: &str, max_lines: usize) -> String {
     result.join("\n")
 }
 
-fn run_log(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()> {
-    let limit = max_lines.unwrap_or(10);
-
+fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()> {
     let mut cmd = Command::new("git");
-    cmd.args([
-        "log",
-        &format!("-{}", limit),
-        "--pretty=format:%h %s (%ar) <%an>",
-        "--no-merges",
-    ]);
+    cmd.arg("log");
 
+    // Check if user provided format flags
+    let has_format_flag = args.iter().any(|arg| {
+        arg.starts_with("--oneline")
+            || arg.starts_with("--pretty")
+            || arg.starts_with("--format")
+    });
+
+    // Check if user provided limit flag
+    let has_limit_flag = args.iter().any(|arg| arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()));
+
+    // Apply RTK defaults only if user didn't specify them
+    if !has_format_flag {
+        cmd.args(["--pretty=format:%h %s (%ar) <%an>"]);
+    }
+
+    if !has_limit_flag {
+        cmd.arg("-10");
+    }
+
+    // Only add --no-merges if user didn't explicitly request merge commits
+    let wants_merges = args.iter().any(|arg| arg == "--merges" || arg == "--min-parents=2");
+    if !wants_merges {
+        cmd.arg("--no-merges");
+    }
+
+    // Pass all user arguments
     for arg in args {
         cmd.arg(arg);
     }
 
     let output = cmd.output().context("Failed to run git log")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("{}", stderr);
+        // Propagate git's exit code
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     if verbose > 0 {
-        eprintln!("Last {} commits:", limit);
+        eprintln!("Git log output:");
     }
 
-    for line in stdout.lines().take(limit) {
-        println!("{}", line);
-    }
+    println!("{}", stdout.trim());
 
     Ok(())
 }
