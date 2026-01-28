@@ -13,6 +13,7 @@ mod json_cmd;
 mod local_llm;
 mod log_cmd;
 mod ls;
+mod pnpm_cmd;
 mod read;
 mod runner;
 mod summary;
@@ -88,6 +89,12 @@ enum Commands {
     Git {
         #[command(subcommand)]
         command: GitCommands,
+    },
+
+    /// pnpm commands with ultra-compact output
+    Pnpm {
+        #[command(subcommand)]
+        command: PnpmCommands,
     },
 
     /// Run command and show only errors/warnings
@@ -238,19 +245,15 @@ enum Commands {
 enum GitCommands {
     /// Condensed diff output
     Diff {
-        #[arg(trailing_var_arg = true)]
+        /// Git arguments (supports all git diff flags like --stat, --cached, etc)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-        /// Max lines
-        #[arg(short, long)]
-        max_lines: Option<usize>,
     },
     /// One-line commit history
     Log {
-        #[arg(trailing_var_arg = true)]
+        /// Git arguments (supports all git log flags like --oneline, --graph, --all)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-        /// Number of commits
-        #[arg(short = 'n', long, default_value = "10")]
-        count: usize,
     },
     /// Compact status
     Status,
@@ -270,6 +273,33 @@ enum GitCommands {
     Push,
     /// Pull → "ok ✓ <stats>"
     Pull,
+}
+
+#[derive(Subcommand)]
+enum PnpmCommands {
+    /// List installed packages (ultra-dense)
+    List {
+        /// Depth level (default: 0)
+        #[arg(short, long, default_value = "0")]
+        depth: usize,
+        /// Additional pnpm arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Show outdated packages (condensed: "pkg: old → new")
+    Outdated {
+        /// Additional pnpm arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Install packages (filter progress bars)
+    Install {
+        /// Packages to install
+        packages: Vec<String>,
+        /// Additional pnpm arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -327,11 +357,11 @@ fn main() -> Result<()> {
         }
 
         Commands::Git { command } => match command {
-            GitCommands::Diff { args, max_lines } => {
-                git::run(git::GitCommand::Diff, &args, max_lines, cli.verbose)?;
+            GitCommands::Diff { args } => {
+                git::run(git::GitCommand::Diff, &args, None, cli.verbose)?;
             }
-            GitCommands::Log { args, count } => {
-                git::run(git::GitCommand::Log, &args, Some(count), cli.verbose)?;
+            GitCommands::Log { args } => {
+                git::run(git::GitCommand::Log, &args, None, cli.verbose)?;
             }
             GitCommands::Status => {
                 git::run(git::GitCommand::Status, &[], None, cli.verbose)?;
@@ -347,6 +377,18 @@ fn main() -> Result<()> {
             }
             GitCommands::Pull => {
                 git::run(git::GitCommand::Pull, &[], None, cli.verbose)?;
+            }
+        },
+
+        Commands::Pnpm { command } => match command {
+            PnpmCommands::List { depth, args } => {
+                pnpm_cmd::run(pnpm_cmd::PnpmCommand::List { depth }, &args, cli.verbose)?;
+            }
+            PnpmCommands::Outdated { args } => {
+                pnpm_cmd::run(pnpm_cmd::PnpmCommand::Outdated, &args, cli.verbose)?;
+            }
+            PnpmCommands::Install { packages, args } => {
+                pnpm_cmd::run(pnpm_cmd::PnpmCommand::Install { packages }, &args, cli.verbose)?;
             }
         },
 
