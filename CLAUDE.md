@@ -104,6 +104,12 @@ main.rs (CLI entry)
 - Reads ~/.config/rtk/config.toml for user preferences
 - `rtk init` command bootstraps LLM integration
 
+**5. Shared Utilities** (src/utils.rs)
+- Common functions for command modules: truncate, strip_ansi, execute_command
+- Package manager auto-detection (pnpm/yarn/npm/npx)
+- Consistent error handling and output formatting
+- Used by all modern JavaScript/TypeScript tooling commands
+
 ### Command Routing Flow
 
 All commands follow this pattern:
@@ -144,6 +150,16 @@ main.rs:Commands enum
 | runner.rs | Command execution | Stderr only (err), failures only (test) |
 | log_cmd.rs | Log parsing | Deduplication with counts |
 | json_cmd.rs | JSON inspection | Structure without values |
+| lint_cmd.rs | ESLint/Biome linting | Group by rule, file summary (84% reduction) |
+| tsc_cmd.rs | TypeScript compiler | Group by file/error code (83% reduction) |
+| next_cmd.rs | Next.js build/dev | Route metrics, bundle stats only (87% reduction) |
+| prettier_cmd.rs | Format checking | Files needing changes only (70% reduction) |
+| playwright_cmd.rs | E2E test results | Failures only, grouped by suite (94% reduction) |
+| prisma_cmd.rs | Prisma CLI | Strip ASCII art and verbose output (88% reduction) |
+| gh_cmd.rs | GitHub CLI | Compact PR/issue/run views (26-87% reduction) |
+| vitest_cmd.rs | Vitest test runner | Failures only with ANSI stripping (99.5% reduction) |
+| pnpm_cmd.rs | pnpm package manager | Compact dependency trees (70-90% reduction) |
+| utils.rs | Shared utilities | Package manager detection, common formatting |
 
 ## Fork-Specific Features
 
@@ -156,6 +172,18 @@ main.rs:Commands enum
 - **New Commands**: `rtk pnpm list`, `rtk pnpm outdated`, `rtk pnpm install`
 - **Token Savings**: 70-90% reduction on package manager operations
 - **Security**: Package name validation prevents command injection
+
+### PR #9: Modern JavaScript/TypeScript Tooling (2026-01-29)
+- **New Commands**: 6 commands for T3 Stack workflows
+  - `rtk lint`: ESLint/Biome with grouped rule violations (84% reduction)
+  - `rtk tsc`: TypeScript compiler errors grouped by file/code (83% reduction)
+  - `rtk next`: Next.js build with route/bundle metrics (87% reduction)
+  - `rtk prettier`: Format checker showing files needing changes (70% reduction)
+  - `rtk playwright`: E2E test results showing failures only (94% reduction)
+  - `rtk prisma`: Prisma CLI without ASCII art (88% reduction)
+- **Shared Infrastructure**: utils.rs module for package manager auto-detection
+- **Features**: Exit code preservation, error grouping, consistent formatting
+- **Testing**: Validated on production T3 Stack project (methode-aristote/app)
 
 ## Testing Strategy
 
