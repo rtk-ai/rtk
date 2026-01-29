@@ -340,6 +340,50 @@ bench "summary cargo --help" "cargo --help" "$RTK summary cargo --help"
 bench "summary rustc --help" "rustc --help 2>/dev/null || echo 'rustc not found'" "$RTK summary rustc --help"
 
 # ===================
+# Modern JavaScript Stack (skip si pas de package.json)
+# ===================
+if [ -f "package.json" ]; then
+  echo "" >> "$REPORT"
+  echo "| **Modern JS Stack** | | | |" >> "$REPORT"
+
+  # TypeScript compiler
+  if command -v tsc &> /dev/null || [ -f "node_modules/.bin/tsc" ]; then
+    bench "tsc" "tsc --noEmit 2>&1 || true" "$RTK tsc --noEmit"
+  fi
+
+  # Prettier format checker
+  if command -v prettier &> /dev/null || [ -f "node_modules/.bin/prettier" ]; then
+    bench "prettier --check" "prettier --check . 2>&1 || true" "$RTK prettier --check ."
+  fi
+
+  # ESLint/Biome linter
+  if command -v eslint &> /dev/null || [ -f "node_modules/.bin/eslint" ]; then
+    bench "lint" "eslint . 2>&1 || true" "$RTK lint ."
+  fi
+
+  # Next.js build (if Next.js project)
+  if [ -f "next.config.js" ] || [ -f "next.config.mjs" ] || [ -f "next.config.ts" ]; then
+    if command -v next &> /dev/null || [ -f "node_modules/.bin/next" ]; then
+      bench "next build" "next build 2>&1 || true" "$RTK next build"
+    fi
+  fi
+
+  # Playwright E2E tests (if Playwright configured)
+  if [ -f "playwright.config.ts" ] || [ -f "playwright.config.js" ]; then
+    if command -v playwright &> /dev/null || [ -f "node_modules/.bin/playwright" ]; then
+      bench "playwright test" "playwright test 2>&1 || true" "$RTK playwright test"
+    fi
+  fi
+
+  # Prisma (if Prisma schema exists)
+  if [ -f "prisma/schema.prisma" ]; then
+    if command -v prisma &> /dev/null || [ -f "node_modules/.bin/prisma" ]; then
+      bench "prisma generate" "prisma generate 2>&1 || true" "$RTK prisma generate"
+    fi
+  fi
+fi
+
+# ===================
 # docker (skip si pas dispo)
 # ===================
 if command -v docker &> /dev/null; then
