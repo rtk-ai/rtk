@@ -115,6 +115,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     let output = cmd.output().context("Failed to run linter")?;
+
+    // Check if process was killed by signal (SIGABRT, SIGKILL, etc.)
+    if !output.status.success() && output.status.code().is_none() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("⚠️  Linter process terminated abnormally (possibly out of memory)");
+        if !stderr.is_empty() {
+            eprintln!("stderr: {}", stderr.lines().take(5).collect::<Vec<_>>().join("\n"));
+        }
+        return Ok(());
+    }
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);

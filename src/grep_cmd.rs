@@ -10,14 +10,21 @@ pub fn run(
     max_line_len: usize,
     max_results: usize,
     context_only: bool,
+    file_type: Option<&str>,
     verbose: u8,
 ) -> Result<()> {
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern, path);
     }
 
-    let output = Command::new("rg")
-        .args(["-n", "--no-heading", pattern, path])
+    let mut rg_cmd = Command::new("rg");
+    rg_cmd.args(["-n", "--no-heading", pattern, path]);
+
+    if let Some(ft) = file_type {
+        rg_cmd.arg("--type").arg(ft);
+    }
+
+    let output = rg_cmd
         .output()
         .or_else(|_| {
             Command::new("grep")

@@ -169,6 +169,9 @@ enum Commands {
         /// Maximum results to show
         #[arg(short, long, default_value = "50")]
         max: usize,
+        /// Filter by type: f (file), d (directory)
+        #[arg(short = 't', long, default_value = "f")]
+        file_type: String,
     },
 
     /// Ultra-condensed diff (only changed lines)
@@ -220,6 +223,9 @@ enum Commands {
         /// Show only match context (not full line)
         #[arg(short, long)]
         context_only: bool,
+        /// Filter by file type (e.g., ts, py, rust)
+        #[arg(short = 't', long)]
+        file_type: Option<String>,
     },
 
     /// Initialize rtk instructions in CLAUDE.md
@@ -549,8 +555,8 @@ fn main() -> Result<()> {
             env_cmd::run(filter.as_deref(), show_all, cli.verbose)?;
         }
 
-        Commands::Find { pattern, path, max } => {
-            find_cmd::run(&pattern, &path, max, cli.verbose)?;
+        Commands::Find { pattern, path, max, file_type } => {
+            find_cmd::run(&pattern, &path, max, &file_type, cli.verbose)?;
         }
 
         Commands::Diff { file1, file2 } => {
@@ -617,8 +623,8 @@ fn main() -> Result<()> {
             summary::run(&cmd, cli.verbose)?;
         }
 
-        Commands::Grep { pattern, path, max_len, max, context_only } => {
-            grep_cmd::run(&pattern, &path, max_len, max, context_only, cli.verbose)?;
+        Commands::Grep { pattern, path, max_len, max, context_only, file_type } => {
+            grep_cmd::run(&pattern, &path, max_len, max, context_only, file_type.as_deref(), cli.verbose)?;
         }
 
         Commands::Init { global, show } => {
