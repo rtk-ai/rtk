@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crate::tracking::Tracker;
 
-pub fn run(graph: bool, history: bool, verbose: u8) -> Result<()> {
+pub fn run(graph: bool, history: bool, quota: bool, tier: &str, _verbose: u8) -> Result<()> {
     let tracker = Tracker::new()?;
     let summary = tracker.get_summary()?;
 
@@ -66,6 +66,29 @@ pub fn run(graph: bool, history: bool, verbose: u8) -> Result<()> {
                 );
             }
         }
+    }
+
+    if quota {
+        const ESTIMATED_PRO_MONTHLY: usize = 6_000_000; // ~6M tokens/month (heuristic: ~44K/5h × 6 periods/day × 30 days)
+
+        let (quota_tokens, tier_name) = match tier {
+            "pro" => (ESTIMATED_PRO_MONTHLY, "Pro ($20/mo)"),
+            "5x" => (ESTIMATED_PRO_MONTHLY * 5, "Max 5x ($100/mo)"),
+            "20x" => (ESTIMATED_PRO_MONTHLY * 20, "Max 20x ($200/mo)"),
+            _ => (ESTIMATED_PRO_MONTHLY, "Pro ($20/mo)"), // default fallback
+        };
+
+        let quota_pct = (summary.total_saved as f64 / quota_tokens as f64) * 100.0;
+
+        println!("Monthly Quota Analysis:");
+        println!("────────────────────────────────────────");
+        println!("Subscription tier:        {}", tier_name);
+        println!("Estimated monthly quota:  {}", format_tokens(quota_tokens));
+        println!("Tokens saved (lifetime):  {}", format_tokens(summary.total_saved));
+        println!("Quota preserved:          {:.1}%", quota_pct);
+        println!();
+        println!("Note: Heuristic estimate based on ~44K tokens/5h (Pro baseline)");
+        println!("      Actual limits use rolling 5-hour windows, not monthly caps.");
     }
 
     Ok(())
