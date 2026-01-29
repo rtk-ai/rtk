@@ -5,6 +5,10 @@ on:
     branches: [master, main]
   pull_request:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   benchmark:
     runs-on: ubuntu-latest
@@ -25,3 +29,21 @@ jobs:
         with:
           name: benchmark-report
           path: benchmark-report.md
+
+      - name: Update README metrics
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        run: ./scripts/update-readme-metrics.sh
+
+      - name: Create PR with updated metrics
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "docs: update README metrics from benchmark"
+          title: "docs: update README token savings metrics"
+          body: |
+            Automated update of README.md token savings metrics from latest benchmark run.
+
+            Generated from: ${{ github.sha }}
+          branch: docs/update-readme-metrics
+          delete-branch: true
+          labels: documentation
