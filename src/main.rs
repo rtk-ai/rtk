@@ -232,6 +232,12 @@ enum Commands {
         /// Show recent command history
         #[arg(short = 'H', long)]
         history: bool,
+        /// Show monthly quota savings estimate
+        #[arg(short, long)]
+        quota: bool,
+        /// Subscription tier for quota calculation: pro, 5x, 20x
+        #[arg(short, long, default_value = "20x", requires = "quota")]
+        tier: String,
     },
 
     /// Show or create configuration file
@@ -519,8 +525,8 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Gain { graph, history } => {
-            gain::run(graph, history, cli.verbose)?;
+        Commands::Gain { graph, history, quota, tier } => {
+            gain::run(graph, history, quota, &tier, cli.verbose)?;
         }
 
         Commands::Config { create } => {
