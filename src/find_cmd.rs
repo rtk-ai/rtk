@@ -3,17 +3,17 @@ use std::collections::HashMap;
 use std::process::Command;
 use crate::tracking;
 
-pub fn run(pattern: &str, path: &str, max_results: usize, verbose: u8) -> Result<()> {
+pub fn run(pattern: &str, path: &str, max_results: usize, file_type: &str, verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("find: {} in {}", pattern, path);
     }
 
     let output = Command::new("fd")
-        .args([pattern, path, "--type", "f"])
+        .args([pattern, path, "--type", file_type])
         .output()
         .or_else(|_| {
             Command::new("find")
-                .args([path, "-name", pattern, "-type", "f"])
+                .args([path, "-name", pattern, "-type", file_type])
                 .output()
         })?;
 
