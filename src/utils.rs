@@ -121,6 +121,9 @@ pub fn format_tokens(n: usize) -> String {
 /// assert_eq!(format_usd(0.0096), "$0.0096");
 /// ```
 pub fn format_usd(amount: f64) -> String {
+    if !amount.is_finite() {
+        return "$0.00".to_string();
+    }
     if amount >= 0.01 {
         format!("${:.2}", amount)
     } else {

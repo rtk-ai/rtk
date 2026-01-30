@@ -12,6 +12,10 @@ use crate::ccusage::{self, CcusagePeriod, Granularity};
 use crate::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::utils::{format_tokens, format_usd};
 
+// ── Constants ──
+
+const BILLION: f64 = 1e9;
+
 // ── Types ──
 
 #[derive(Debug, Serialize)]
@@ -142,16 +146,17 @@ fn merge_daily(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<DayStats>) -> Vec<Period
     // Insert ccusage data
     if let Some(cc_data) = cc {
         for entry in cc_data {
-            map.entry(entry.key.clone())
-                .or_insert_with(|| PeriodEconomics::new(&entry.key))
-                .set_ccusage(&entry.metrics);
+            let crate::ccusage::CcusagePeriod { key, metrics } = entry;
+            map.entry(key)
+                .or_insert_with_key(|k| PeriodEconomics::new(k))
+                .set_ccusage(&metrics);
         }
     }
 
     // Merge rtk data
     for entry in rtk {
         map.entry(entry.date.clone())
-            .or_insert_with(|| PeriodEconomics::new(&entry.date))
+            .or_insert_with_key(|k| PeriodEconomics::new(k))
             .set_rtk_from_day(&entry);
     }
 
@@ -170,9 +175,10 @@ fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<Peri
     // Insert ccusage data (key = ISO Monday "2026-01-20")
     if let Some(cc_data) = cc {
         for entry in cc_data {
-            map.entry(entry.key.clone())
-                .or_insert_with(|| PeriodEconomics::new(&entry.key))
-                .set_ccusage(&entry.metrics);
+            let crate::ccusage::CcusagePeriod { key, metrics } = entry;
+            map.entry(key)
+                .or_insert_with_key(|k| PeriodEconomics::new(k))
+                .set_ccusage(&metrics);
         }
     }
 
@@ -187,8 +193,8 @@ fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<Peri
             }
         };
 
-        map.entry(monday_key.clone())
-            .or_insert_with(|| PeriodEconomics::new(&monday_key))
+        map.entry(monday_key)
+            .or_insert_with_key(|key| PeriodEconomics::new(key))
             .set_rtk_from_week(&entry);
     }
 
@@ -206,16 +212,17 @@ fn merge_monthly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<MonthStats>) -> Vec<Pe
     // Insert ccusage data
     if let Some(cc_data) = cc {
         for entry in cc_data {
-            map.entry(entry.key.clone())
-                .or_insert_with(|| PeriodEconomics::new(&entry.key))
-                .set_ccusage(&entry.metrics);
+            let crate::ccusage::CcusagePeriod { key, metrics } = entry;
+            map.entry(key)
+                .or_insert_with_key(|k| PeriodEconomics::new(k))
+                .set_ccusage(&metrics);
         }
     }
 
     // Merge rtk data
     for entry in rtk {
         map.entry(entry.month.clone())
-            .or_insert_with(|| PeriodEconomics::new(&entry.month))
+            .or_insert_with_key(|k| PeriodEconomics::new(k))
             .set_rtk_from_month(&entry);
     }
 
@@ -406,7 +413,7 @@ fn display_summary(tracker: &Tracker) -> Result<()> {
     println!("  \"Active\" uses cost/(input+output) — reflects actual input token cost.");
     println!(
         "  \"Blended\" uses cost/all_tokens — diluted by {:.1}B cheap cache reads.",
-        (totals.cc_total_tokens - totals.cc_active_tokens) as f64 / 1_000_000_000.0
+        (totals.cc_total_tokens - totals.cc_active_tokens) as f64 / BILLION
     );
     println!();
 
