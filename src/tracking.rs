@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -34,6 +35,37 @@ pub struct GainSummary {
     pub avg_savings_pct: f64,
     pub by_command: Vec<(String, usize, usize, f64)>,
     pub by_day: Vec<(String, usize)>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DayStats {
+    pub date: String,
+    pub commands: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub saved_tokens: usize,
+    pub savings_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WeekStats {
+    pub week_start: String,
+    pub week_end: String,
+    pub commands: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub saved_tokens: usize,
+    pub savings_pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MonthStats {
+    pub month: String,
+    pub commands: usize,
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub saved_tokens: usize,
+    pub savings_pct: f64,
 }
 
 impl Tracker {
@@ -186,6 +218,128 @@ impl Tracker {
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
             ))
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        result.reverse();
+        Ok(result)
+    }
+
+    pub fn get_all_days(&self) -> Result<Vec<DayStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                DATE(timestamp) as date,
+                COUNT(*) as commands,
+                SUM(input_tokens) as input,
+                SUM(output_tokens) as output,
+                SUM(saved_tokens) as saved
+             FROM commands
+             GROUP BY DATE(timestamp)
+             ORDER BY DATE(timestamp) DESC"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let input = row.get::<_, i64>(2)? as usize;
+            let saved = row.get::<_, i64>(4)? as usize;
+            let savings_pct = if input > 0 {
+                (saved as f64 / input as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            Ok(DayStats {
+                date: row.get(0)?,
+                commands: row.get::<_, i64>(1)? as usize,
+                input_tokens: input,
+                output_tokens: row.get::<_, i64>(3)? as usize,
+                saved_tokens: saved,
+                savings_pct,
+            })
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        result.reverse();
+        Ok(result)
+    }
+
+    pub fn get_by_week(&self) -> Result<Vec<WeekStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                DATE(timestamp, 'weekday 0', '-6 days') as week_start,
+                DATE(timestamp, 'weekday 0') as week_end,
+                COUNT(*) as commands,
+                SUM(input_tokens) as input,
+                SUM(output_tokens) as output,
+                SUM(saved_tokens) as saved
+             FROM commands
+             GROUP BY week_start
+             ORDER BY week_start DESC"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let input = row.get::<_, i64>(3)? as usize;
+            let saved = row.get::<_, i64>(5)? as usize;
+            let savings_pct = if input > 0 {
+                (saved as f64 / input as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            Ok(WeekStats {
+                week_start: row.get(0)?,
+                week_end: row.get(1)?,
+                commands: row.get::<_, i64>(2)? as usize,
+                input_tokens: input,
+                output_tokens: row.get::<_, i64>(4)? as usize,
+                saved_tokens: saved,
+                savings_pct,
+            })
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        result.reverse();
+        Ok(result)
+    }
+
+    pub fn get_by_month(&self) -> Result<Vec<MonthStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                strftime('%Y-%m', timestamp) as month,
+                COUNT(*) as commands,
+                SUM(input_tokens) as input,
+                SUM(output_tokens) as output,
+                SUM(saved_tokens) as saved
+             FROM commands
+             GROUP BY month
+             ORDER BY month DESC"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let input = row.get::<_, i64>(2)? as usize;
+            let saved = row.get::<_, i64>(4)? as usize;
+            let savings_pct = if input > 0 {
+                (saved as f64 / input as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            Ok(MonthStats {
+                month: row.get(0)?,
+                commands: row.get::<_, i64>(1)? as usize,
+                input_tokens: input,
+                output_tokens: row.get::<_, i64>(3)? as usize,
+                saved_tokens: saved,
+                savings_pct,
+            })
         })?;
 
         let mut result = Vec::new();
