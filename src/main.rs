@@ -1,3 +1,5 @@
+mod cc_economics;
+mod ccusage;
 mod config;
 mod container;
 mod deps;
@@ -67,7 +69,7 @@ enum Commands {
         #[arg(short = 'a', long)]
         all: bool,
         /// Output format: tree, flat, json
-        #[arg(short, long, default_value = "flat")] 
+        #[arg(short, long, default_value = "flat")]
         format: ls::OutputFormat,
     },
 
@@ -282,6 +284,25 @@ enum Commands {
         format: String,
     },
 
+    /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
+    CcEconomics {
+        /// Show detailed daily breakdown
+        #[arg(short, long)]
+        daily: bool,
+        /// Show weekly breakdown
+        #[arg(short, long)]
+        weekly: bool,
+        /// Show monthly breakdown
+        #[arg(short, long)]
+        monthly: bool,
+        /// Show all time breakdowns (daily + weekly + monthly)
+        #[arg(short, long)]
+        all: bool,
+        /// Output format: text, json, csv
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
     /// Show or create configuration file
     Config {
         /// Create default config file
@@ -405,9 +426,7 @@ enum DockerCommands {
     /// List images
     Images,
     /// Show container logs (deduplicated)
-    Logs {
-        container: String,
-    },
+    Logs { container: String },
 }
 
 #[derive(Subcommand)]
@@ -496,15 +515,29 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Ls { path, depth, all, format } => {
+        Commands::Ls {
+            path,
+            depth,
+            all,
+            format,
+        } => {
             ls::run(&path, depth, all, format, cli.verbose)?;
         }
 
-        Commands::Read { file, level, max_lines, line_numbers } => {
+        Commands::Read {
+            file,
+            level,
+            max_lines,
+            line_numbers,
+        } => {
             read::run(&file, level, max_lines, line_numbers, cli.verbose)?;
         }
 
-        Commands::Smart { file, model, force_download } => {
+        Commands::Smart {
+            file,
+            model,
+            force_download,
+        } => {
             local_llm::run(&file, &model, force_download, cli.verbose)?;
         }
 
@@ -544,7 +577,11 @@ fn main() -> Result<()> {
                 pnpm_cmd::run(pnpm_cmd::PnpmCommand::Outdated, &args, cli.verbose)?;
             }
             PnpmCommands::Install { packages, args } => {
-                pnpm_cmd::run(pnpm_cmd::PnpmCommand::Install { packages }, &args, cli.verbose)?;
+                pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Install { packages },
+                    &args,
+                    cli.verbose,
+                )?;
             }
         },
 
@@ -570,7 +607,12 @@ fn main() -> Result<()> {
             env_cmd::run(filter.as_deref(), show_all, cli.verbose)?;
         }
 
-        Commands::Find { pattern, path, max, file_type } => {
+        Commands::Find {
+            pattern,
+            path,
+            max,
+            file_type,
+        } => {
             find_cmd::run(&pattern, &path, max, &file_type, cli.verbose)?;
         }
 
@@ -638,8 +680,23 @@ fn main() -> Result<()> {
             summary::run(&cmd, cli.verbose)?;
         }
 
-        Commands::Grep { pattern, path, max_len, max, context_only, file_type } => {
-            grep_cmd::run(&pattern, &path, max_len, max, context_only, file_type.as_deref(), cli.verbose)?;
+        Commands::Grep {
+            pattern,
+            path,
+            max_len,
+            max,
+            context_only,
+            file_type,
+        } => {
+            grep_cmd::run(
+                &pattern,
+                &path,
+                max_len,
+                max,
+                context_only,
+                file_type.as_deref(),
+                cli.verbose,
+            )?;
         }
 
         Commands::Init { global, show } => {
@@ -658,8 +715,39 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Gain { graph, history, quota, tier, daily, weekly, monthly, all, format } => {
-            gain::run(graph, history, quota, &tier, daily, weekly, monthly, all, &format, cli.verbose)?;
+        Commands::Gain {
+            graph,
+            history,
+            quota,
+            tier,
+            daily,
+            weekly,
+            monthly,
+            all,
+            format,
+        } => {
+            gain::run(
+                graph,
+                history,
+                quota,
+                &tier,
+                daily,
+                weekly,
+                monthly,
+                all,
+                &format,
+                cli.verbose,
+            )?;
+        }
+
+        Commands::CcEconomics {
+            daily,
+            weekly,
+            monthly,
+            all,
+            format,
+        } => {
+            cc_economics::run(daily, weekly, monthly, all, &format, cli.verbose)?;
         }
 
         Commands::Config { create } => {
