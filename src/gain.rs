@@ -1,6 +1,7 @@
+use crate::display_helpers::print_period_table;
 use crate::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::utils::format_tokens;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 pub fn run(
@@ -15,7 +16,7 @@ pub fn run(
     format: &str,
     _verbose: u8,
 ) -> Result<()> {
-    let tracker = Tracker::new()?;
+    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
 
     // Handle export formats
     match format {
@@ -24,7 +25,9 @@ pub fn run(
         _ => {} // Continue with text format
     }
 
-    let summary = tracker.get_summary()?;
+    let summary = tracker
+        .get_summary()
+        .context("Failed to load token savings summary from database")?;
 
     if summary.total_commands == 0 {
         println!("No tracking data yet.");
@@ -178,184 +181,21 @@ fn print_ascii_graph(data: &[(String, usize)]) {
     }
 }
 
-pub fn run_compact(verbose: u8) -> Result<()> {
-    let tracker = Tracker::new()?;
-    let summary = tracker.get_summary()?;
-
-    if summary.total_commands == 0 {
-        println!("0 cmds tracked");
-        return Ok(());
-    }
-
-    println!(
-        "{}cmds {}in {}out {}saved ({:.0}%)",
-        summary.total_commands,
-        format_tokens(summary.total_input),
-        format_tokens(summary.total_output),
-        format_tokens(summary.total_saved),
-        summary.avg_savings_pct
-    );
-
-    Ok(())
-}
-
 fn print_daily_full(tracker: &Tracker) -> Result<()> {
     let days = tracker.get_all_days()?;
-
-    if days.is_empty() {
-        println!("No daily data available.");
-        return Ok(());
-    }
-
-    println!("\n📅 Daily Breakdown ({} days)", days.len());
-    println!("════════════════════════════════════════════════════════════════");
-    println!(
-        "{:<12} {:>7} {:>10} {:>10} {:>10} {:>7}",
-        "Date", "Cmds", "Input", "Output", "Saved", "Save%"
-    );
-    println!("────────────────────────────────────────────────────────────────");
-
-    for day in &days {
-        println!(
-            "{:<12} {:>7} {:>10} {:>10} {:>10} {:>6.1}%",
-            day.date,
-            day.commands,
-            format_tokens(day.input_tokens),
-            format_tokens(day.output_tokens),
-            format_tokens(day.saved_tokens),
-            day.savings_pct
-        );
-    }
-
-    let total_cmds: usize = days.iter().map(|d| d.commands).sum();
-    let total_input: usize = days.iter().map(|d| d.input_tokens).sum();
-    let total_output: usize = days.iter().map(|d| d.output_tokens).sum();
-    let total_saved: usize = days.iter().map(|d| d.saved_tokens).sum();
-    let avg_pct = if total_input > 0 {
-        (total_saved as f64 / total_input as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    println!("────────────────────────────────────────────────────────────────");
-    println!(
-        "{:<12} {:>7} {:>10} {:>10} {:>10} {:>6.1}%",
-        "TOTAL",
-        total_cmds,
-        format_tokens(total_input),
-        format_tokens(total_output),
-        format_tokens(total_saved),
-        avg_pct
-    );
-    println!();
-
+    print_period_table(&days);
     Ok(())
 }
 
 fn print_weekly(tracker: &Tracker) -> Result<()> {
     let weeks = tracker.get_by_week()?;
-
-    if weeks.is_empty() {
-        println!("No weekly data available.");
-        return Ok(());
-    }
-
-    println!("\n📊 Weekly Breakdown ({} weeks)", weeks.len());
-    println!("════════════════════════════════════════════════════════════════════════");
-    println!(
-        "{:<22} {:>7} {:>10} {:>10} {:>10} {:>7}",
-        "Week", "Cmds", "Input", "Output", "Saved", "Save%"
-    );
-    println!("────────────────────────────────────────────────────────────────────────");
-
-    for week in &weeks {
-        let week_range = format!("{} → {}", &week.week_start[5..], &week.week_end[5..]);
-        println!(
-            "{:<22} {:>7} {:>10} {:>10} {:>10} {:>6.1}%",
-            week_range,
-            week.commands,
-            format_tokens(week.input_tokens),
-            format_tokens(week.output_tokens),
-            format_tokens(week.saved_tokens),
-            week.savings_pct
-        );
-    }
-
-    let total_cmds: usize = weeks.iter().map(|w| w.commands).sum();
-    let total_input: usize = weeks.iter().map(|w| w.input_tokens).sum();
-    let total_output: usize = weeks.iter().map(|w| w.output_tokens).sum();
-    let total_saved: usize = weeks.iter().map(|w| w.saved_tokens).sum();
-    let avg_pct = if total_input > 0 {
-        (total_saved as f64 / total_input as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    println!("────────────────────────────────────────────────────────────────────────");
-    println!(
-        "{:<22} {:>7} {:>10} {:>10} {:>10} {:>6.1}%",
-        "TOTAL",
-        total_cmds,
-        format_tokens(total_input),
-        format_tokens(total_output),
-        format_tokens(total_saved),
-        avg_pct
-    );
-    println!();
-
+    print_period_table(&weeks);
     Ok(())
 }
 
 fn print_monthly(tracker: &Tracker) -> Result<()> {
     let months = tracker.get_by_month()?;
-
-    if months.is_empty() {
-        println!("No monthly data available.");
-        return Ok(());
-    }
-
-    println!("\n📆 Monthly Breakdown ({} months)", months.len());
-    println!("════════════════════════════════════════════════════════════════");
-    println!(
-        "{:<10} {:>7} {:>10} {:>10} {:>10} {:>7}",
-        "Month", "Cmds", "Input", "Output", "Saved", "Save%"
-    );
-    println!("────────────────────────────────────────────────────────────────");
-
-    for month in &months {
-        println!(
-            "{:<10} {:>7} {:>10} {:>10} {:>10} {:>6.1}%",
-            month.month,
-            month.commands,
-            format_tokens(month.input_tokens),
-            format_tokens(month.output_tokens),
-            format_tokens(month.saved_tokens),
-            month.savings_pct
-        );
-    }
-
-    let total_cmds: usize = months.iter().map(|m| m.commands).sum();
-    let total_input: usize = months.iter().map(|m| m.input_tokens).sum();
-    let total_output: usize = months.iter().map(|m| m.output_tokens).sum();
-    let total_saved: usize = months.iter().map(|m| m.saved_tokens).sum();
-    let avg_pct = if total_input > 0 {
-        (total_saved as f64 / total_input as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    println!("────────────────────────────────────────────────────────────────");
-    println!(
-        "{:<10} {:>7} {:>10} {:>10} {:>10} {:>6.1}%",
-        "TOTAL",
-        total_cmds,
-        format_tokens(total_input),
-        format_tokens(total_output),
-        format_tokens(total_saved),
-        avg_pct
-    );
-    println!();
-
+    print_period_table(&months);
     Ok(())
 }
 
@@ -386,7 +226,9 @@ fn export_json(
     monthly: bool,
     all: bool,
 ) -> Result<()> {
-    let summary = tracker.get_summary()?;
+    let summary = tracker
+        .get_summary()
+        .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
         summary: ExportSummary {

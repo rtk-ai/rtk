@@ -4,6 +4,7 @@ mod config;
 mod container;
 mod deps;
 mod diff_cmd;
+mod display_helpers;
 mod env_cmd;
 mod filter;
 mod find_cmd;
@@ -63,7 +64,7 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Max depth
-        #[arg(short, long, default_value = "1")] // psk : change tree subdir for ls
+        #[arg(short, long, default_value = "1")]
         depth: usize,
         /// Show hidden files
         #[arg(short = 'a', long)]
@@ -773,7 +774,7 @@ fn main() -> Result<()> {
                 PrismaMigrateCommands::Dev { name, args } => {
                     prisma_cmd::run(
                         prisma_cmd::PrismaCommand::Migrate {
-                            subcommand: prisma_cmd::MigrateSubcommand::Dev { name: name.clone() },
+                            subcommand: prisma_cmd::MigrateSubcommand::Dev { name },
                         },
                         &args,
                         cli.verbose,

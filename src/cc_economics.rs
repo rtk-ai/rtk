@@ -3,7 +3,7 @@
 //! Combines ccusage (tokens spent) with rtk tracking (tokens saved) to provide
 //! dual-metric economic impact reporting with blended and active cost-per-token.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -125,7 +125,7 @@ pub fn run(
     format: &str,
     _verbose: u8,
 ) -> Result<()> {
-    let tracker = Tracker::new()?;
+    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
 
     match format {
         "json" => export_json(&tracker, daily, weekly, monthly, all),
@@ -326,8 +326,11 @@ fn display_text(
 }
 
 fn display_summary(tracker: &Tracker) -> Result<()> {
-    let cc_monthly = ccusage::fetch(Granularity::Monthly)?;
-    let rtk_monthly = tracker.get_by_month()?;
+    let cc_monthly =
+        ccusage::fetch(Granularity::Monthly).context("Failed to fetch ccusage monthly data")?;
+    let rtk_monthly = tracker
+        .get_by_month()
+        .context("Failed to load monthly token savings from database")?;
     let periods = merge_monthly(cc_monthly, rtk_monthly);
 
     if periods.is_empty() {
@@ -411,8 +414,11 @@ fn display_summary(tracker: &Tracker) -> Result<()> {
 }
 
 fn display_daily(tracker: &Tracker) -> Result<()> {
-    let cc_daily = ccusage::fetch(Granularity::Daily)?;
-    let rtk_daily = tracker.get_all_days()?;
+    let cc_daily =
+        ccusage::fetch(Granularity::Daily).context("Failed to fetch ccusage daily data")?;
+    let rtk_daily = tracker
+        .get_all_days()
+        .context("Failed to load daily token savings from database")?;
     let periods = merge_daily(cc_daily, rtk_daily);
 
     println!("📅 Daily Economics");
@@ -422,8 +428,11 @@ fn display_daily(tracker: &Tracker) -> Result<()> {
 }
 
 fn display_weekly(tracker: &Tracker) -> Result<()> {
-    let cc_weekly = ccusage::fetch(Granularity::Weekly)?;
-    let rtk_weekly = tracker.get_by_week()?;
+    let cc_weekly =
+        ccusage::fetch(Granularity::Weekly).context("Failed to fetch ccusage weekly data")?;
+    let rtk_weekly = tracker
+        .get_by_week()
+        .context("Failed to load weekly token savings from database")?;
     let periods = merge_weekly(cc_weekly, rtk_weekly);
 
     println!("📅 Weekly Economics");
@@ -433,8 +442,11 @@ fn display_weekly(tracker: &Tracker) -> Result<()> {
 }
 
 fn display_monthly(tracker: &Tracker) -> Result<()> {
-    let cc_monthly = ccusage::fetch(Granularity::Monthly)?;
-    let rtk_monthly = tracker.get_by_month()?;
+    let cc_monthly =
+        ccusage::fetch(Granularity::Monthly).context("Failed to fetch ccusage monthly data")?;
+    let rtk_monthly = tracker
+        .get_by_month()
+        .context("Failed to load monthly token savings from database")?;
     let periods = merge_monthly(cc_monthly, rtk_monthly);
 
     println!("📅 Monthly Economics");
@@ -506,26 +518,39 @@ fn export_json(
     };
 
     if all || daily {
-        let cc = ccusage::fetch(Granularity::Daily)?;
-        let rtk = tracker.get_all_days()?;
+        let cc = ccusage::fetch(Granularity::Daily)
+            .context("Failed to fetch ccusage daily data for JSON export")?;
+        let rtk = tracker
+            .get_all_days()
+            .context("Failed to load daily token savings for JSON export")?;
         export.daily = Some(merge_daily(cc, rtk));
     }
 
     if all || weekly {
-        let cc = ccusage::fetch(Granularity::Weekly)?;
-        let rtk = tracker.get_by_week()?;
+        let cc = ccusage::fetch(Granularity::Weekly)
+            .context("Failed to fetch ccusage weekly data for export")?;
+        let rtk = tracker
+            .get_by_week()
+            .context("Failed to load weekly token savings for export")?;
         export.weekly = Some(merge_weekly(cc, rtk));
     }
 
     if all || monthly {
-        let cc = ccusage::fetch(Granularity::Monthly)?;
-        let rtk = tracker.get_by_month()?;
+        let cc = ccusage::fetch(Granularity::Monthly)
+            .context("Failed to fetch ccusage monthly data for export")?;
+        let rtk = tracker
+            .get_by_month()
+            .context("Failed to load monthly token savings for export")?;
         let periods = merge_monthly(cc, rtk);
         export.totals = Some(compute_totals(&periods));
         export.monthly = Some(periods);
     }
 
-    println!("{}", serde_json::to_string_pretty(&export)?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&export)
+            .context("Failed to serialize economics data to JSON")?
+    );
     Ok(())
 }
 
@@ -540,8 +565,11 @@ fn export_csv(
     println!("period,spent,active_tokens,total_tokens,saved_tokens,active_savings,blended_savings,rtk_commands");
 
     if all || daily {
-        let cc = ccusage::fetch(Granularity::Daily)?;
-        let rtk = tracker.get_all_days()?;
+        let cc = ccusage::fetch(Granularity::Daily)
+            .context("Failed to fetch ccusage daily data for JSON export")?;
+        let rtk = tracker
+            .get_all_days()
+            .context("Failed to load daily token savings for JSON export")?;
         let periods = merge_daily(cc, rtk);
         for p in periods {
             print_csv_row(&p);
@@ -549,8 +577,11 @@ fn export_csv(
     }
 
     if all || weekly {
-        let cc = ccusage::fetch(Granularity::Weekly)?;
-        let rtk = tracker.get_by_week()?;
+        let cc = ccusage::fetch(Granularity::Weekly)
+            .context("Failed to fetch ccusage weekly data for export")?;
+        let rtk = tracker
+            .get_by_week()
+            .context("Failed to load weekly token savings for export")?;
         let periods = merge_weekly(cc, rtk);
         for p in periods {
             print_csv_row(&p);
@@ -558,8 +589,11 @@ fn export_csv(
     }
 
     if all || monthly {
-        let cc = ccusage::fetch(Granularity::Monthly)?;
-        let rtk = tracker.get_by_month()?;
+        let cc = ccusage::fetch(Granularity::Monthly)
+            .context("Failed to fetch ccusage monthly data for export")?;
+        let rtk = tracker
+            .get_by_month()
+            .context("Failed to load monthly token savings for export")?;
         let periods = merge_monthly(cc, rtk);
         for p in periods {
             print_csv_row(&p);
