@@ -122,11 +122,22 @@ rtk config                       # Show config (--create to generate)
 rtk json config.json            # Structure without values
 rtk deps                        # Dependencies summary
 rtk env -f AWS                  # Filtered env vars
-rtk gain                        # Token savings stats
-rtk gain --graph                # With ASCII graph
-rtk gain --history              # With command history
-rtk gain --quota                # Monthly quota savings estimate
-rtk gain --quota --tier pro     # Quota for specific tier (pro/5x/20x)
+
+# Token Savings Analytics
+rtk gain                        # Summary stats (default view)
+rtk gain --graph                # With ASCII graph of last 30 days
+rtk gain --history              # With recent command history (10)
+rtk gain --quota --tier 20x     # Monthly quota analysis (pro/5x/20x)
+
+# Temporal Breakdowns (NEW in v0.4.0)
+rtk gain --daily                # Day-by-day breakdown (all days)
+rtk gain --weekly               # Week-by-week breakdown
+rtk gain --monthly              # Month-by-month breakdown
+rtk gain --all                  # All breakdowns combined
+
+# Export Formats
+rtk gain --all --format json    # JSON export for APIs/dashboards
+rtk gain --all --format csv     # CSV export for Excel/analysis
 ```
 
 ### Containers
@@ -242,6 +253,12 @@ Daily Savings (last 30 days):
 01-25 │                                         18
 01-26 │████████████████████████████████████████ 13.0K
 ```
+
+## Documentation
+
+- **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Complete guide to token savings analytics, temporal breakdowns, and data export
+- **[CLAUDE.md](CLAUDE.md)** - Claude Code integration instructions and project context
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture and development guide
 
 ## License
 
