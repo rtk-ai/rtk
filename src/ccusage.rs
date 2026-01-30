@@ -82,13 +82,41 @@ struct MonthlyEntry {
 
 // ── Public API ──
 
-/// Check if ccusage CLI is available in PATH
-pub fn is_available() -> bool {
+/// Check if ccusage binary exists in PATH
+fn binary_exists() -> bool {
     Command::new("which")
         .arg("ccusage")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Build the ccusage command, falling back to npx if binary not in PATH
+fn build_command() -> Option<Command> {
+    if binary_exists() {
+        return Some(Command::new("ccusage"));
+    }
+
+    // Fallback: try npx
+    let npx_check = Command::new("npx")
+        .arg("ccusage")
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    if npx_check.map(|s| s.success()).unwrap_or(false) {
+        let mut cmd = Command::new("npx");
+        cmd.arg("ccusage");
+        return Some(cmd);
+    }
+
+    None
+}
+
+/// Check if ccusage CLI is available (binary or via npx)
+pub fn is_available() -> bool {
+    build_command().is_some()
 }
 
 /// Fetch usage data from ccusage for the last 90 days
@@ -97,10 +125,13 @@ pub fn is_available() -> bool {
 /// Returns `Ok(Some(vec))` with parsed data on success
 /// Returns `Err` only on unexpected failures (JSON parse, etc.)
 pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
-    if !is_available() {
-        eprintln!("⚠️  ccusage not found. Install: npm i -g ccusage");
-        return Ok(None);
-    }
+    let mut cmd = match build_command() {
+        Some(cmd) => cmd,
+        None => {
+            eprintln!("⚠️  ccusage not found. Install: npm i -g ccusage (or use npx ccusage)");
+            return Ok(None);
+        }
+    };
 
     let subcommand = match granularity {
         Granularity::Daily => "daily",
@@ -108,7 +139,7 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
         Granularity::Monthly => "monthly",
     };
 
-    let output = Command::new("ccusage")
+    let output = cmd
         .arg(subcommand)
         .arg("--json")
         .arg("--since")
