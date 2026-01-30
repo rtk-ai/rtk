@@ -79,6 +79,58 @@ pub fn execute_command(cmd: &str, args: &[&str]) -> Result<(String, String, i32)
     Ok((stdout, stderr, exit_code))
 }
 
+/// Formate un nombre de tokens avec suffixes K/M pour lisibilité.
+///
+/// # Arguments
+/// * `n` - Nombre de tokens
+///
+/// # Returns
+/// String formaté (ex: "1.2M", "59.2K", "694")
+///
+/// # Examples
+/// ```
+/// use rtk::utils::format_tokens;
+/// assert_eq!(format_tokens(1_234_567), "1.2M");
+/// assert_eq!(format_tokens(59_234), "59.2K");
+/// assert_eq!(format_tokens(694), "694");
+/// ```
+pub fn format_tokens(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
+}
+
+/// Formate un montant USD avec précision adaptée.
+///
+/// # Arguments
+/// * `amount` - Montant en dollars
+///
+/// # Returns
+/// String formaté avec $ prefix
+///
+/// # Examples
+/// ```
+/// use rtk::utils::format_usd;
+/// assert_eq!(format_usd(1234.567), "$1234.57");
+/// assert_eq!(format_usd(12.345), "$12.35");
+/// assert_eq!(format_usd(0.123), "$0.12");
+/// assert_eq!(format_usd(0.0096), "$0.0096");
+/// ```
+pub fn format_usd(amount: f64) -> String {
+    if !amount.is_finite() {
+        return "$0.00".to_string();
+    }
+    if amount >= 0.01 {
+        format!("${:.2}", amount)
+    } else {
+        format!("${:.4}", amount)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +197,47 @@ mod tests {
     fn test_execute_command_failure() {
         let result = execute_command("nonexistent_command_xyz_12345", &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_format_tokens_millions() {
+        assert_eq!(format_tokens(1_234_567), "1.2M");
+        assert_eq!(format_tokens(12_345_678), "12.3M");
+    }
+
+    #[test]
+    fn test_format_tokens_thousands() {
+        assert_eq!(format_tokens(59_234), "59.2K");
+        assert_eq!(format_tokens(1_000), "1.0K");
+    }
+
+    #[test]
+    fn test_format_tokens_small() {
+        assert_eq!(format_tokens(694), "694");
+        assert_eq!(format_tokens(0), "0");
+    }
+
+    #[test]
+    fn test_format_usd_large() {
+        assert_eq!(format_usd(1234.567), "$1234.57");
+        assert_eq!(format_usd(1000.0), "$1000.00");
+    }
+
+    #[test]
+    fn test_format_usd_medium() {
+        assert_eq!(format_usd(12.345), "$12.35");
+        assert_eq!(format_usd(0.99), "$0.99");
+    }
+
+    #[test]
+    fn test_format_usd_small() {
+        assert_eq!(format_usd(0.0096), "$0.0096");
+        assert_eq!(format_usd(0.0001), "$0.0001");
+    }
+
+    #[test]
+    fn test_format_usd_edge() {
+        assert_eq!(format_usd(0.01), "$0.01");
+        assert_eq!(format_usd(0.009), "$0.0090");
     }
 }

@@ -1,15 +1,10 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 const HISTORY_DAYS: i64 = 90;
-
-lazy_static::lazy_static! {
-    static ref TRACKER: Mutex<Option<Tracker>> = Mutex::new(None);
-}
 
 pub struct Tracker {
     conn: Connection,
@@ -18,10 +13,7 @@ pub struct Tracker {
 #[derive(Debug)]
 pub struct CommandRecord {
     pub timestamp: DateTime<Utc>,
-    pub original_cmd: String,
     pub rtk_cmd: String,
-    pub input_tokens: usize,
-    pub output_tokens: usize,
     pub saved_tokens: usize,
     pub savings_pct: f64,
 }
@@ -98,7 +90,13 @@ impl Tracker {
         Ok(Self { conn })
     }
 
-    pub fn record(&self, original_cmd: &str, rtk_cmd: &str, input_tokens: usize, output_tokens: usize) -> Result<()> {
+    pub fn record(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_tokens: usize,
+        output_tokens: usize,
+    ) -> Result<()> {
         let saved = input_tokens.saturating_sub(output_tokens);
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
@@ -139,9 +137,9 @@ impl Tracker {
         let mut total_output = 0usize;
         let mut total_saved = 0usize;
 
-        let mut stmt = self.conn.prepare(
-            "SELECT input_tokens, output_tokens, saved_tokens FROM commands"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT input_tokens, output_tokens, saved_tokens FROM commands")?;
 
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -185,7 +183,7 @@ impl Tracker {
              FROM commands
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10"
+             LIMIT 10",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -197,11 +195,7 @@ impl Tracker {
             ))
         })?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
-        Ok(result)
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     fn get_by_day(&self) -> Result<Vec<(String, usize)>> {
@@ -210,20 +204,14 @@ impl Tracker {
              FROM commands
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
-             LIMIT 30"
+             LIMIT 30",
         )?;
 
         let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? as usize,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
+        let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
         Ok(result)
     }
@@ -238,7 +226,7 @@ impl Tracker {
                 SUM(saved_tokens) as saved
              FROM commands
              GROUP BY DATE(timestamp)
-             ORDER BY DATE(timestamp) DESC"
+             ORDER BY DATE(timestamp) DESC",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -260,10 +248,7 @@ impl Tracker {
             })
         })?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
+        let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
         Ok(result)
     }
@@ -279,7 +264,7 @@ impl Tracker {
                 SUM(saved_tokens) as saved
              FROM commands
              GROUP BY week_start
-             ORDER BY week_start DESC"
+             ORDER BY week_start DESC",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -302,10 +287,7 @@ impl Tracker {
             })
         })?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
+        let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
         Ok(result)
     }
@@ -320,7 +302,7 @@ impl Tracker {
                 SUM(saved_tokens) as saved
              FROM commands
              GROUP BY month
-             ORDER BY month DESC"
+             ORDER BY month DESC",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -342,20 +324,17 @@ impl Tracker {
             })
         })?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
+        let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
         Ok(result)
     }
 
     pub fn get_recent(&self, limit: usize) -> Result<Vec<CommandRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct
+            "SELECT timestamp, rtk_cmd, saved_tokens, savings_pct
              FROM commands
              ORDER BY timestamp DESC
-             LIMIT ?1"
+             LIMIT ?1",
         )?;
 
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -363,30 +342,22 @@ impl Tracker {
                 timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now()),
-                original_cmd: row.get(1)?,
-                rtk_cmd: row.get(2)?,
-                input_tokens: row.get::<_, i64>(3)? as usize,
-                output_tokens: row.get::<_, i64>(4)? as usize,
-                saved_tokens: row.get::<_, i64>(5)? as usize,
-                savings_pct: row.get(6)?,
+                rtk_cmd: row.get(1)?,
+                saved_tokens: row.get::<_, i64>(2)? as usize,
+                savings_pct: row.get(3)?,
             })
         })?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            result.push(row?);
-        }
-        Ok(result)
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
 fn get_db_path() -> Result<PathBuf> {
-    let data_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(data_dir.join("rtk").join("history.db"))
 }
 
-pub fn estimate_tokens(text: &str) -> usize {
+fn estimate_tokens(text: &str) -> usize {
     // ~4 chars per token on average
     (text.len() as f64 / 4.0).ceil() as usize
 }
@@ -400,13 +371,6 @@ pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
     let input_tokens = estimate_tokens(input);
     let output_tokens = estimate_tokens(output);
 
-    if let Ok(tracker) = Tracker::new() {
-        let _ = tracker.record(original_cmd, rtk_cmd, input_tokens, output_tokens);
-    }
-}
-
-/// Track with pre-calculated token counts
-pub fn track_tokens(original_cmd: &str, rtk_cmd: &str, input_tokens: usize, output_tokens: usize) {
     if let Ok(tracker) = Tracker::new() {
         let _ = tracker.record(original_cmd, rtk_cmd, input_tokens, output_tokens);
     }
