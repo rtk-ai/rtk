@@ -48,14 +48,14 @@ cargo install rtk
 
 ### Debian/Ubuntu
 ```bash
-curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk_0.2.1-1_amd64.deb
-sudo dpkg -i rtk_0.2.1-1_amd64.deb
+curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk_0.3.1-1_amd64.deb
+sudo dpkg -i rtk_0.3.1-1_amd64.deb
 ```
 
 ### Fedora/RHEL
 ```bash
-curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk-0.2.1-1.x86_64.rpm
-sudo rpm -i rtk-0.2.1-1.x86_64.rpm
+curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk-0.3.1-1.x86_64.rpm
+sudo rpm -i rtk-0.3.1-1.x86_64.rpm
 ```
 
 ### Manual Download
@@ -72,6 +72,13 @@ rtk init --global    # Add to ~/CLAUDE.md (all projects)
 rtk init             # Add to ./CLAUDE.md (this project)
 ```
 
+## Global Flags
+
+```bash
+-u, --ultra-compact    # ASCII icons, inline format (extra token savings)
+-v, --verbose          # Increase verbosity (-v, -vv, -vvv)
+```
+
 ## Commands
 
 ### Files
@@ -79,6 +86,7 @@ rtk init             # Add to ./CLAUDE.md (this project)
 rtk ls .                        # Token-optimized directory tree
 rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
+rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk diff file1 file2            # Ultra-condensed diff
 rtk grep "pattern" .            # Grouped search results
@@ -101,6 +109,12 @@ rtk test cargo test             # Show failures only (-90% tokens)
 rtk err npm run build           # Errors/warnings only
 rtk summary <long command>      # Heuristic summary
 rtk log app.log                 # Deduplicated logs
+rtk gh pr list                   # Compact PR listing
+rtk gh pr view 42                # PR details + checks summary
+rtk gh issue list                # Compact issue listing
+rtk gh run list                  # Workflow run status
+rtk wget https://example.com    # Download, strip progress bars
+rtk config                       # Show config (--create to generate)
 ```
 
 ### Data
@@ -111,6 +125,8 @@ rtk env -f AWS                  # Filtered env vars
 rtk gain                        # Token savings stats
 rtk gain --graph                # With ASCII graph
 rtk gain --history              # With command history
+rtk gain --quota                # Monthly quota savings estimate
+rtk gain --quota --tier pro     # Quota for specific tier (pro/5x/20x)
 ```
 
 ### Containers
@@ -120,6 +136,21 @@ rtk docker images               # Compact image list
 rtk docker logs <container>     # Deduplicated logs
 rtk kubectl pods                # Compact pod list
 rtk kubectl logs <pod>          # Deduplicated logs
+rtk kubectl services             # Compact service list
+```
+
+### JavaScript / TypeScript Stack
+```bash
+rtk lint                         # ESLint grouped by rule/file
+rtk lint biome                   # Supports other linters too
+rtk tsc                          # TypeScript errors grouped by file
+rtk next build                   # Next.js build compact output
+rtk prettier --check .           # Files needing formatting
+rtk vitest run                   # Test failures only
+rtk playwright test              # E2E results (failures only)
+rtk prisma generate              # Schema generation (no ASCII art)
+rtk prisma migrate dev --name x  # Migration summary
+rtk prisma db-push               # Schema push summary
 ```
 
 ## Examples
@@ -175,108 +206,6 @@ FAILED: 2/15 tests
 2. **Grouping**: Aggregates similar items (files by directory, errors by type)
 3. **Truncation**: Keeps relevant context, cuts redundancy
 4. **Deduplication**: Collapses repeated log lines with counts
-
-## Improvements in This Fork
-
-This fork adds critical fixes and modern JavaScript stack support to RTK, validated on production T3 Stack codebases.
-
-### 🔧 PR #5: Git Argument Parsing Fix (CRITICAL)
-
-**Status**: [Open](https://github.com/pszymkowiak/rtk/pull/5) | **Priority**: Critical
-
-Fixes a major bug where git flags were rejected as invalid arguments.
-
-**Problem**:
-```bash
-rtk git log --oneline -20
-# Error: unexpected argument '--oneline' found
-```
-
-**Solution**:
-- Fixed Clap argument parsing with `trailing_var_arg + allow_hyphen_values`
-- Auto-detects `--merges` flag to skip `--no-merges` injection
-- Propagates git exit codes properly (fixes CI/CD false positives)
-
-**Now Working**:
-```bash
-rtk git log --oneline -20           # Compact commit history
-rtk git diff --cached               # Staged changes only
-rtk git log --graph --all           # Branch visualization
-rtk git status --short              # Ultra-compact status
-```
-
-**Impact**: All git flags now work correctly, preventing workflow disruptions.
-
-### 📦 PR #6: pnpm Support for Modern JavaScript Stacks
-
-**Status**: [Open](https://github.com/pszymkowiak/rtk/pull/6) | **Target**: T3 Stack users
-
-Adds first-class pnpm support with security hardening.
-
-**New Commands**:
-```bash
-rtk pnpm list              # Dependency tree (70% token reduction)
-rtk pnpm outdated          # Update candidates (80-90% reduction)
-rtk pnpm install <pkg>     # Silent success confirmation
-```
-
-**Token Savings**:
-| Command | Standard Output | rtk Output | Reduction |
-|---------|----------------|------------|-----------|
-| `pnpm list` | ~8,000 tokens | ~2,400 | -70% |
-| `pnpm outdated` | ~12,000 tokens | ~1,200-2,400 | -80-90% |
-| `pnpm install` | ~500 tokens | ~10 | -98% |
-
-**Security**:
-- Package name validation (prevents command injection)
-- Proper error propagation (fixes CI/CD reliability)
-- Comprehensive test coverage
-
-### 🐛 Related Upstream Issues
-
-This fork addresses issues reported upstream:
-- [Issue #2](https://github.com/pszymkowiak/rtk/issues/2): Git argument parsing bug
-- [Issue #3](https://github.com/pszymkowiak/rtk/issues/3): T3 Stack support request (pnpm + Vitest)
-- [Issue #4](https://github.com/pszymkowiak/rtk/issues/4): grep/ls filtering improvements
-
-### 🧪 Testing
-
-**Production Validation**: All improvements tested on a production T3 Stack codebase:
-- Framework: Next.js 15.1.5 + TypeScript
-- Package Manager: pnpm 10.0.0
-- Test Runner: Vitest
-- Repository: 50+ files, 10,000+ lines of code
-
-**Test Coverage**:
-- Unit tests for all new commands
-- Integration tests with real pnpm/git outputs
-- Security validation for command injection prevention
-- CI/CD pipeline validation (exit code propagation)
-
-### 📥 Installation
-
-**Use This Fork** (recommended until PRs are merged):
-```bash
-# Clone and build
-git clone https://github.com/FlorianBruniaux/rtk.git
-cd rtk
-cargo build --release
-
-# Install globally
-cargo install --path .
-
-# Or use directly
-./target/release/rtk --version
-```
-
-**Track Upstream Merge Status**:
-- Watch [PR #5](https://github.com/pszymkowiak/rtk/pull/5) for git fixes
-- Watch [PR #6](https://github.com/pszymkowiak/rtk/pull/6) for pnpm support
-
-**Switch to Upstream** (once merged):
-```bash
-cargo install rtk --force
-```
 
 ## Configuration
 
