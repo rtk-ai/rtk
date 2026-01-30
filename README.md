@@ -48,14 +48,14 @@ cargo install rtk
 
 ### Debian/Ubuntu
 ```bash
-curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk_0.3.1-1_amd64.deb
-sudo dpkg -i rtk_0.3.1-1_amd64.deb
+curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk_amd64.deb
+sudo dpkg -i rtk_amd64.deb
 ```
 
 ### Fedora/RHEL
 ```bash
-curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk-0.3.1-1.x86_64.rpm
-sudo rpm -i rtk-0.3.1-1.x86_64.rpm
+curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk.x86_64.rpm
+sudo rpm -i rtk.x86_64.rpm
 ```
 
 ### Manual Download
