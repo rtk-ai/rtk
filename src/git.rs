@@ -1,6 +1,6 @@
+use crate::tracking;
 use anyhow::{Context, Result};
 use std::process::Command;
-use crate::tracking;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -11,6 +11,10 @@ pub enum GitCommand {
     Commit { message: String },
     Push,
     Pull,
+    Branch,
+    Fetch,
+    Stash { subcommand: Option<String> },
+    Worktree,
 }
 
 pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()> {
@@ -22,12 +26,18 @@ pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: 
         GitCommand::Commit { message } => run_commit(&message, verbose),
         GitCommand::Push => run_push(verbose),
         GitCommand::Pull => run_pull(verbose),
+        GitCommand::Branch => run_branch(args, verbose),
+        GitCommand::Fetch => run_fetch(args, verbose),
+        GitCommand::Stash { subcommand } => run_stash(subcommand.as_deref(), args, verbose),
+        GitCommand::Worktree => run_worktree(args, verbose),
     }
 }
 
 fn run_diff(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()> {
     // Check if user wants stat output
-    let wants_stat = args.iter().any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
+    let wants_stat = args
+        .iter()
+        .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
 
     // Check if user wants compact diff (default RTK behavior)
     let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
@@ -105,11 +115,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             if !current_file.is_empty() && (added > 0 || removed > 0) {
                 result.push(format!("  +{} -{}", added, removed));
             }
-            current_file = line
-                .split(" b/")
-                .nth(1)
-                .unwrap_or("unknown")
-                .to_string();
+            current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
             result.push(format!("\n📄 {}", current_file));
             added = 0;
             removed = 0;
@@ -166,13 +172,13 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
 
     // Check if user provided format flags
     let has_format_flag = args.iter().any(|arg| {
-        arg.starts_with("--oneline")
-            || arg.starts_with("--pretty")
-            || arg.starts_with("--format")
+        arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
     // Check if user provided limit flag
-    let has_limit_flag = args.iter().any(|arg| arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()));
+    let has_limit_flag = args.iter().any(|arg| {
+        arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+    });
 
     // Apply RTK defaults only if user didn't specify them
     if !has_format_flag {
@@ -184,7 +190,9 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
     }
 
     // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args.iter().any(|arg| arg == "--merges" || arg == "--min-parents=2");
+    let wants_merges = args
+        .iter()
+        .any(|arg| arg == "--merges" || arg == "--min-parents=2");
     if !wants_merges {
         cmd.arg("--no-merges");
     }
@@ -232,7 +240,12 @@ fn run_status(_verbose: u8) -> Result<()> {
 
     if lines.is_empty() {
         println!("Clean working tree");
-        tracking::track("git status", "rtk git status", &raw_output, "Clean working tree");
+        tracking::track(
+            "git status",
+            "rtk git status",
+            &raw_output,
+            "Clean working tree",
+        );
         return Ok(());
     }
 
@@ -320,7 +333,10 @@ fn run_status(_verbose: u8) -> Result<()> {
     }
 
     // Estimate output size for tracking
-    let rtk_output = format!("branch + {} staged + {} modified + {} untracked", staged, modified, untracked);
+    let rtk_output = format!(
+        "branch + {} staged + {} modified + {} untracked",
+        staged, modified, untracked
+    );
     tracking::track("git status", "rtk git status", &raw_output, &rtk_output);
 
     Ok(())
@@ -443,7 +459,7 @@ fn run_push(verbose: u8) -> Result<()> {
                 if line.contains("->") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 {
-                        let msg = format!("ok ✓ {}", parts[parts.len()-1]);
+                        let msg = format!("ok ✓ {}", parts[parts.len() - 1]);
                         println!("{}", msg);
                         tracking::track("git push", "rtk git push", &raw, &msg);
                         return Ok(());
@@ -494,11 +510,23 @@ fn run_pull(verbose: u8) -> Result<()> {
                     for part in line.split(',') {
                         let part = part.trim();
                         if part.contains("file") {
-                            files = part.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                            files = part
+                                .split_whitespace()
+                                .next()
+                                .and_then(|n| n.parse().ok())
+                                .unwrap_or(0);
                         } else if part.contains("insertion") {
-                            insertions = part.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                            insertions = part
+                                .split_whitespace()
+                                .next()
+                                .and_then(|n| n.parse().ok())
+                                .unwrap_or(0);
                         } else if part.contains("deletion") {
-                            deletions = part.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                            deletions = part
+                                .split_whitespace()
+                                .next()
+                                .and_then(|n| n.parse().ok())
+                                .unwrap_or(0);
                         }
                     }
                 }
@@ -523,6 +551,334 @@ fn run_pull(verbose: u8) -> Result<()> {
     Ok(())
 }
 
+fn run_branch(args: &[String], verbose: u8) -> Result<()> {
+    if verbose > 0 {
+        eprintln!("git branch");
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.arg("branch");
+
+    // If user passes flags like -d, -D, -m, pass through directly
+    let has_action_flag = args
+        .iter()
+        .any(|a| a == "-d" || a == "-D" || a == "-m" || a == "-M" || a == "-c" || a == "-C");
+
+    if has_action_flag {
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let output = cmd.output().context("Failed to run git branch")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            println!("ok ✓");
+        } else {
+            eprintln!("FAILED: git branch");
+            if !stderr.trim().is_empty() {
+                eprintln!("{}", stderr);
+            }
+            if !stdout.trim().is_empty() {
+                eprintln!("{}", stdout);
+            }
+        }
+        return Ok(());
+    }
+
+    // List mode: show compact branch list
+    cmd.arg("-a").arg("--no-color");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run git branch")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw = stdout.to_string();
+
+    let filtered = filter_branch_output(&stdout);
+    println!("{}", filtered);
+
+    tracking::track("git branch -a", "rtk git branch", &raw, &filtered);
+
+    Ok(())
+}
+
+fn filter_branch_output(output: &str) -> String {
+    let mut current = String::new();
+    let mut local: Vec<String> = Vec::new();
+    let mut remote: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(branch) = line.strip_prefix("* ") {
+            current = branch.to_string();
+        } else if line.starts_with("remotes/origin/") {
+            let branch = line.strip_prefix("remotes/origin/").unwrap_or(line);
+            // Skip HEAD pointer
+            if branch.starts_with("HEAD ") {
+                continue;
+            }
+            remote.push(branch.to_string());
+        } else {
+            local.push(line.to_string());
+        }
+    }
+
+    let mut result = Vec::new();
+    result.push(format!("* {}", current));
+
+    if !local.is_empty() {
+        for b in &local {
+            result.push(format!("  {}", b));
+        }
+    }
+
+    if !remote.is_empty() {
+        // Filter out remotes that already exist locally
+        let remote_only: Vec<&String> = remote
+            .iter()
+            .filter(|r| *r != &current && !local.contains(r))
+            .collect();
+        if !remote_only.is_empty() {
+            result.push(format!("  remote-only ({}):", remote_only.len()));
+            for b in remote_only.iter().take(10) {
+                result.push(format!("    {}", b));
+            }
+            if remote_only.len() > 10 {
+                result.push(format!("    ... +{} more", remote_only.len() - 10));
+            }
+        }
+    }
+
+    result.join("\n")
+}
+
+fn run_fetch(args: &[String], verbose: u8) -> Result<()> {
+    if verbose > 0 {
+        eprintln!("git fetch");
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.arg("fetch");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run git fetch")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}{}", stdout, stderr);
+
+    if !output.status.success() {
+        eprintln!("FAILED: git fetch");
+        if !stderr.trim().is_empty() {
+            eprintln!("{}", stderr);
+        }
+        return Ok(());
+    }
+
+    // Count new refs from stderr (git fetch outputs to stderr)
+    let new_refs: usize = stderr
+        .lines()
+        .filter(|l| l.contains("->") || l.contains("[new"))
+        .count();
+
+    let msg = if new_refs > 0 {
+        format!("ok fetched ({} new refs)", new_refs)
+    } else {
+        "ok fetched".to_string()
+    };
+
+    println!("{}", msg);
+    tracking::track("git fetch", "rtk git fetch", &raw, &msg);
+
+    Ok(())
+}
+
+fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<()> {
+    if verbose > 0 {
+        eprintln!("git stash {:?}", subcommand);
+    }
+
+    match subcommand {
+        Some("list") => {
+            let output = Command::new("git")
+                .args(["stash", "list"])
+                .output()
+                .context("Failed to run git stash list")?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let raw = stdout.to_string();
+
+            if stdout.trim().is_empty() {
+                let msg = "No stashes";
+                println!("{}", msg);
+                tracking::track("git stash list", "rtk git stash list", &raw, msg);
+                return Ok(());
+            }
+
+            let filtered = filter_stash_list(&stdout);
+            println!("{}", filtered);
+            tracking::track("git stash list", "rtk git stash list", &raw, &filtered);
+        }
+        Some("show") => {
+            let mut cmd = Command::new("git");
+            cmd.args(["stash", "show", "-p"]);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            let output = cmd.output().context("Failed to run git stash show")?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            if stdout.trim().is_empty() {
+                println!("Empty stash");
+            } else {
+                let compacted = compact_diff(&stdout, 100);
+                println!("{}", compacted);
+            }
+        }
+        Some("pop") | Some("apply") | Some("drop") | Some("push") => {
+            let sub = subcommand.unwrap();
+            let mut cmd = Command::new("git");
+            cmd.args(["stash", sub]);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            let output = cmd.output().context("Failed to run git stash")?;
+            if output.status.success() {
+                println!("ok stash {}", sub);
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("FAILED: git stash {}", sub);
+                if !stderr.trim().is_empty() {
+                    eprintln!("{}", stderr);
+                }
+            }
+        }
+        _ => {
+            // Default: git stash (push)
+            let mut cmd = Command::new("git");
+            cmd.arg("stash");
+            for arg in args {
+                cmd.arg(arg);
+            }
+            let output = cmd.output().context("Failed to run git stash")?;
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains("No local changes") {
+                    println!("ok (nothing to stash)");
+                } else {
+                    println!("ok stashed");
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("FAILED: git stash");
+                if !stderr.trim().is_empty() {
+                    eprintln!("{}", stderr);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn filter_stash_list(output: &str) -> String {
+    // Format: "stash@{0}: WIP on main: abc1234 commit message"
+    let mut result = Vec::new();
+    for line in output.lines() {
+        if let Some(colon_pos) = line.find(": ") {
+            let index = &line[..colon_pos];
+            let rest = &line[colon_pos + 2..];
+            // Compact: strip "WIP on branch:" prefix if present
+            let message = if let Some(second_colon) = rest.find(": ") {
+                rest[second_colon + 2..].trim()
+            } else {
+                rest.trim()
+            };
+            result.push(format!("{}: {}", index, message));
+        } else {
+            result.push(line.to_string());
+        }
+    }
+    result.join("\n")
+}
+
+fn run_worktree(args: &[String], verbose: u8) -> Result<()> {
+    if verbose > 0 {
+        eprintln!("git worktree list");
+    }
+
+    // If args contain "add", "remove", "prune" etc., pass through
+    let has_action = args.iter().any(|a| {
+        a == "add" || a == "remove" || a == "prune" || a == "lock" || a == "unlock" || a == "move"
+    });
+
+    if has_action {
+        let mut cmd = Command::new("git");
+        cmd.arg("worktree");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let output = cmd.output().context("Failed to run git worktree")?;
+        if output.status.success() {
+            println!("ok ✓");
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("FAILED: git worktree {}", args.join(" "));
+            if !stderr.trim().is_empty() {
+                eprintln!("{}", stderr);
+            }
+        }
+        return Ok(());
+    }
+
+    // Default: list mode
+    let output = Command::new("git")
+        .args(["worktree", "list"])
+        .output()
+        .context("Failed to run git worktree list")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw = stdout.to_string();
+
+    let filtered = filter_worktree_list(&stdout);
+    println!("{}", filtered);
+    tracking::track("git worktree list", "rtk git worktree", &raw, &filtered);
+
+    Ok(())
+}
+
+fn filter_worktree_list(output: &str) -> String {
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let mut result = Vec::new();
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Format: "/path/to/worktree  abc1234 [branch]"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let mut path = parts[0].to_string();
+            if !home.is_empty() && path.starts_with(&home) {
+                path = format!("~{}", &path[home.len()..]);
+            }
+            let hash = parts[1];
+            let branch = parts[2..].join(" ");
+            result.push(format!("{} {} {}", path, hash, branch));
+        } else {
+            result.push(line.to_string());
+        }
+    }
+    result.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +896,45 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_filter_branch_output() {
+        let output = "* main\n  feature/auth\n  fix/bug-123\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n  remotes/origin/feature/auth\n  remotes/origin/release/v2\n";
+        let result = filter_branch_output(output);
+        assert!(result.contains("* main"));
+        assert!(result.contains("feature/auth"));
+        assert!(result.contains("fix/bug-123"));
+        // remote-only should show release/v2 but not main or feature/auth (already local)
+        assert!(result.contains("remote-only"));
+        assert!(result.contains("release/v2"));
+    }
+
+    #[test]
+    fn test_filter_branch_no_remotes() {
+        let output = "* main\n  develop\n";
+        let result = filter_branch_output(output);
+        assert!(result.contains("* main"));
+        assert!(result.contains("develop"));
+        assert!(!result.contains("remote-only"));
+    }
+
+    #[test]
+    fn test_filter_stash_list() {
+        let output =
+            "stash@{0}: WIP on main: abc1234 fix login\nstash@{1}: On feature: def5678 wip\n";
+        let result = filter_stash_list(output);
+        assert!(result.contains("stash@{0}: abc1234 fix login"));
+        assert!(result.contains("stash@{1}: def5678 wip"));
+    }
+
+    #[test]
+    fn test_filter_worktree_list() {
+        let output =
+            "/home/user/project  abc1234 [main]\n/home/user/worktrees/feat  def5678 [feature]\n";
+        let result = filter_worktree_list(output);
+        assert!(result.contains("abc1234"));
+        assert!(result.contains("[main]"));
+        assert!(result.contains("[feature]"));
     }
 }

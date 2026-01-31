@@ -398,6 +398,32 @@ enum GitCommands {
     Push,
     /// Pull → "ok ✓ <stats>"
     Pull,
+    /// Compact branch listing (current/local/remote)
+    Branch {
+        /// Git branch arguments (supports -d, -D, -m, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Fetch → "ok fetched (N new refs)"
+    Fetch {
+        /// Git fetch arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Stash management (list, show, pop, apply, drop)
+    Stash {
+        /// Subcommand: list, show, pop, apply, drop, push
+        subcommand: Option<String>,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact worktree listing
+    Worktree {
+        /// Git worktree arguments (add, remove, prune, or empty for list)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -592,6 +618,23 @@ fn main() -> Result<()> {
             }
             GitCommands::Pull => {
                 git::run(git::GitCommand::Pull, &[], None, cli.verbose)?;
+            }
+            GitCommands::Branch { args } => {
+                git::run(git::GitCommand::Branch, &args, None, cli.verbose)?;
+            }
+            GitCommands::Fetch { args } => {
+                git::run(git::GitCommand::Fetch, &args, None, cli.verbose)?;
+            }
+            GitCommands::Stash { subcommand, args } => {
+                git::run(
+                    git::GitCommand::Stash { subcommand },
+                    &args,
+                    None,
+                    cli.verbose,
+                )?;
+            }
+            GitCommands::Worktree { args } => {
+                git::run(git::GitCommand::Worktree, &args, None, cli.verbose)?;
             }
         },
 
