@@ -90,7 +90,7 @@ fn run_diff(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()
     Ok(())
 }
 
-fn compact_diff(diff: &str, max_lines: usize) -> String {
+pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut result = Vec::new();
     let mut current_file = String::new();
     let mut added = 0;

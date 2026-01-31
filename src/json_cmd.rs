@@ -1,8 +1,8 @@
+use crate::tracking;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
-use crate::tracking;
 
 /// Show JSON structure without values
 pub fn run(file: &Path, max_depth: usize, verbose: u8) -> Result<()> {
@@ -13,13 +13,22 @@ pub fn run(file: &Path, max_depth: usize, verbose: u8) -> Result<()> {
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-    let value: Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse JSON: {}", file.display()))?;
-
-    let schema = extract_schema(&value, 0, max_depth);
+    let schema = filter_json_string(&content, max_depth)?;
     println!("{}", schema);
-    tracking::track(&format!("cat {}", file.display()), "rtk json", &content, &schema);
+    tracking::track(
+        &format!("cat {}", file.display()),
+        "rtk json",
+        &content,
+        &schema,
+    );
     Ok(())
+}
+
+/// Parse a JSON string and return its schema representation.
+/// Useful for piping JSON from other commands (e.g., `gh api`, `curl`).
+pub fn filter_json_string(json_str: &str, max_depth: usize) -> Result<String> {
+    let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
+    Ok(extract_schema(&value, 0, max_depth))
 }
 
 fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
@@ -82,7 +91,10 @@ fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
                     let val_trimmed = val_schema.trim();
 
                     // Inline simple types
-                    let is_simple = matches!(val, Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_));
+                    let is_simple = matches!(
+                        val,
+                        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
+                    );
 
                     if is_simple {
                         if i < keys.len() - 1 {
