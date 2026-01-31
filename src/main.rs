@@ -20,6 +20,7 @@ mod local_llm;
 mod log_cmd;
 mod ls;
 mod next_cmd;
+mod npm_cmd;
 mod playwright_cmd;
 mod pnpm_cmd;
 mod prettier_cmd;
@@ -33,7 +34,7 @@ mod utils;
 mod vitest_cmd;
 mod wget_cmd;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -55,6 +56,10 @@ struct Cli {
     /// Ultra-compact mode: ASCII icons, inline format (Level 2 optimizations)
     #[arg(short = 'u', long, global = true)]
     ultra_compact: bool,
+
+    /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
+    #[arg(long = "skip-env", global = true)]
+    skip_env: bool,
 }
 
 #[derive(Subcommand)]
@@ -364,6 +369,20 @@ enum Commands {
         #[command(subcommand)]
         command: CargoCommands,
     },
+
+    /// npm run with filtered output (strip boilerplate)
+    Npm {
+        /// npm run arguments (script name + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
+    Npx {
+        /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -448,6 +467,18 @@ enum PnpmCommands {
         /// Packages to install
         packages: Vec<String>,
         /// Additional pnpm arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Build (delegates to next build filter)
+    Build {
+        /// Additional build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Typecheck (delegates to tsc filter)
+    Typecheck {
+        /// Additional typecheck arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -655,6 +686,12 @@ fn main() -> Result<()> {
                     &args,
                     cli.verbose,
                 )?;
+            }
+            PnpmCommands::Build { args } => {
+                next_cmd::run(&args, cli.verbose)?;
+            }
+            PnpmCommands::Typecheck { args } => {
+                tsc_cmd::run(&args, cli.verbose)?;
             }
         },
 
@@ -907,6 +944,76 @@ fn main() -> Result<()> {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Clippy, &args, cli.verbose)?;
             }
         },
+
+        Commands::Npm { args } => {
+            npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
+        }
+
+        Commands::Npx { args } => {
+            if args.is_empty() {
+                anyhow::bail!("npx requires a command argument");
+            }
+
+            // Intelligent routing: delegate to specialized filters
+            match args[0].as_str() {
+                "tsc" | "typescript" => {
+                    tsc_cmd::run(&args[1..], cli.verbose)?;
+                }
+                "eslint" => {
+                    lint_cmd::run(&args[1..], cli.verbose)?;
+                }
+                "prisma" => {
+                    // Route to prisma_cmd based on subcommand
+                    if args.len() > 1 {
+                        let prisma_args: Vec<String> = args[2..].to_vec();
+                        match args[1].as_str() {
+                            "generate" => {
+                                prisma_cmd::run(
+                                    prisma_cmd::PrismaCommand::Generate,
+                                    &prisma_args,
+                                    cli.verbose,
+                                )?;
+                            }
+                            "db" if args.len() > 2 && args[2] == "push" => {
+                                prisma_cmd::run(
+                                    prisma_cmd::PrismaCommand::DbPush,
+                                    &args[3..],
+                                    cli.verbose,
+                                )?;
+                            }
+                            _ => {
+                                // Passthrough other prisma subcommands
+                                let mut cmd = std::process::Command::new("npx");
+                                for arg in &args {
+                                    cmd.arg(arg);
+                                }
+                                let status = cmd.status().context("Failed to run npx prisma")?;
+                                std::process::exit(status.code().unwrap_or(1));
+                            }
+                        }
+                    } else {
+                        let status = std::process::Command::new("npx")
+                            .arg("prisma")
+                            .status()
+                            .context("Failed to run npx prisma")?;
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
+                }
+                "next" => {
+                    next_cmd::run(&args[1..], cli.verbose)?;
+                }
+                "prettier" => {
+                    prettier_cmd::run(&args[1..], cli.verbose)?;
+                }
+                "playwright" => {
+                    playwright_cmd::run(&args[1..], cli.verbose)?;
+                }
+                _ => {
+                    // Generic passthrough with npm boilerplate filter
+                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
+                }
+            }
+        }
     }
 
     Ok(())
