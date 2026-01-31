@@ -3,6 +3,7 @@ mod cc_economics;
 mod ccusage;
 mod config;
 mod container;
+mod curl_cmd;
 mod deps;
 mod diff_cmd;
 mod display_helpers;
@@ -380,6 +381,13 @@ enum Commands {
     /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
     Npx {
         /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Curl with auto-JSON detection and schema output
+    Curl {
+        /// Curl arguments (URL + options)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -947,6 +955,10 @@ fn main() -> Result<()> {
 
         Commands::Npm { args } => {
             npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
+        }
+
+        Commands::Curl { args } => {
+            curl_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Npx { args } => {
