@@ -357,7 +357,7 @@ fn get_db_path() -> Result<PathBuf> {
     Ok(data_dir.join("rtk").join("history.db"))
 }
 
-fn estimate_tokens(text: &str) -> usize {
+pub fn estimate_tokens(text: &str) -> usize {
     // ~4 chars per token on average
     (text.len() as f64 / 4.0).ceil() as usize
 }

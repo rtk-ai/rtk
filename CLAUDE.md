@@ -160,6 +160,7 @@ main.rs:Commands enum
 | vitest_cmd.rs | Vitest test runner | Failures only with ANSI stripping (99.5% reduction) |
 | pnpm_cmd.rs | pnpm package manager | Compact dependency trees (70-90% reduction) |
 | utils.rs | Shared utilities | Package manager detection, common formatting |
+| discover/ | Claude Code history analysis | Scan JSONL sessions, classify commands, report missed savings |
 
 ## Fork-Specific Features
 

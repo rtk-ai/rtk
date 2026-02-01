@@ -7,6 +7,7 @@ pub enum GitCommand {
     Diff,
     Log,
     Status,
+    Show,
     Add { files: Vec<String> },
     Commit { message: String },
     Push,
@@ -22,10 +23,11 @@ pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: 
         GitCommand::Diff => run_diff(args, max_lines, verbose),
         GitCommand::Log => run_log(args, max_lines, verbose),
         GitCommand::Status => run_status(verbose),
+        GitCommand::Show => run_show(args, max_lines, verbose),
         GitCommand::Add { files } => run_add(&files, verbose),
         GitCommand::Commit { message } => run_commit(&message, verbose),
-        GitCommand::Push => run_push(verbose),
-        GitCommand::Pull => run_pull(verbose),
+        GitCommand::Push => run_push(args, verbose),
+        GitCommand::Pull => run_pull(args, verbose),
         GitCommand::Branch => run_branch(args, verbose),
         GitCommand::Fetch => run_fetch(args, verbose),
         GitCommand::Stash { subcommand } => run_stash(subcommand.as_deref(), args, verbose),
@@ -96,6 +98,95 @@ fn run_diff(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()
         let compacted = compact_diff(&diff_stdout, max_lines.unwrap_or(100));
         println!("{}", compacted);
     }
+
+    Ok(())
+}
+
+fn run_show(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()> {
+    // If user wants --stat or --format only, pass through
+    let wants_stat_only = args
+        .iter()
+        .any(|arg| arg == "--stat" || arg == "--numstat" || arg == "--shortstat");
+
+    let wants_format = args
+        .iter()
+        .any(|arg| arg.starts_with("--pretty") || arg.starts_with("--format"));
+
+    if wants_stat_only || wants_format {
+        let mut cmd = Command::new("git");
+        cmd.arg("show");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let output = cmd.output().context("Failed to run git show")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("{}", stderr);
+            std::process::exit(output.status.code().unwrap_or(1));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        println!("{}", stdout.trim());
+        return Ok(());
+    }
+
+    // Get raw output for tracking
+    let mut raw_cmd = Command::new("git");
+    raw_cmd.arg("show");
+    for arg in args {
+        raw_cmd.arg(arg);
+    }
+    let raw_output = raw_cmd
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    // Step 1: one-line commit summary
+    let mut summary_cmd = Command::new("git");
+    summary_cmd.args(["show", "--no-patch", "--pretty=format:%h %s (%ar) <%an>"]);
+    for arg in args {
+        summary_cmd.arg(arg);
+    }
+    let summary_output = summary_cmd.output().context("Failed to run git show")?;
+    if !summary_output.status.success() {
+        let stderr = String::from_utf8_lossy(&summary_output.stderr);
+        eprintln!("{}", stderr);
+        std::process::exit(summary_output.status.code().unwrap_or(1));
+    }
+    let summary = String::from_utf8_lossy(&summary_output.stdout);
+    println!("{}", summary.trim());
+
+    // Step 2: --stat summary
+    let mut stat_cmd = Command::new("git");
+    stat_cmd.args(["show", "--stat", "--pretty=format:"]);
+    for arg in args {
+        stat_cmd.arg(arg);
+    }
+    let stat_output = stat_cmd.output().context("Failed to run git show --stat")?;
+    let stat_stdout = String::from_utf8_lossy(&stat_output.stdout);
+    let stat_text = stat_stdout.trim();
+    if !stat_text.is_empty() {
+        println!("{}", stat_text);
+    }
+
+    // Step 3: compacted diff
+    let mut diff_cmd = Command::new("git");
+    diff_cmd.args(["show", "--pretty=format:"]);
+    for arg in args {
+        diff_cmd.arg(arg);
+    }
+    let diff_output = diff_cmd.output().context("Failed to run git show (diff)")?;
+    let diff_stdout = String::from_utf8_lossy(&diff_output.stdout);
+    let diff_text = diff_stdout.trim();
+
+    if !diff_text.is_empty() {
+        if verbose > 0 {
+            println!("\n--- Changes ---");
+        }
+        let compacted = compact_diff(diff_text, max_lines.unwrap_or(100));
+        println!("{}", compacted);
+    }
+
+    tracking::track("git show", "rtk git show", &raw_output, &summary);
 
     Ok(())
 }
@@ -436,15 +527,18 @@ fn run_commit(message: &str, verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn run_push(verbose: u8) -> Result<()> {
+fn run_push(args: &[String], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("git push");
     }
 
-    let output = Command::new("git")
-        .arg("push")
-        .output()
-        .context("Failed to run git push")?;
+    let mut cmd = Command::new("git");
+    cmd.arg("push");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run git push")?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -482,15 +576,18 @@ fn run_push(verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn run_pull(verbose: u8) -> Result<()> {
+fn run_pull(args: &[String], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("git pull");
     }
 
-    let output = Command::new("git")
-        .arg("pull")
-        .output()
-        .context("Failed to run git pull")?;
+    let mut cmd = Command::new("git");
+    cmd.arg("pull");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run git pull")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
