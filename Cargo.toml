@@ -24,6 +24,7 @@ dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 chrono = "0.4"
+thiserror = "1.0"
 
 [dev-dependencies]
 tempfile = "3"
