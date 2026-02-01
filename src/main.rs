@@ -1,3 +1,4 @@
+mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
 mod config;
@@ -357,6 +358,12 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Cargo commands with compact output
+    Cargo {
+        #[command(subcommand)]
+        command: CargoCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -507,6 +514,28 @@ enum PrismaMigrateCommands {
     /// Deploy migrations to production
     Deploy {
         /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CargoCommands {
+    /// Build with compact output (strip Compiling lines, keep errors)
+    Build {
+        /// Additional cargo build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Test with failures-only output
+    Test {
+        /// Additional cargo test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Clippy with warnings grouped by lint rule
+    Clippy {
+        /// Additional cargo clippy arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -823,6 +852,18 @@ fn main() -> Result<()> {
         Commands::Playwright { args } => {
             playwright_cmd::run(&args, cli.verbose)?;
         }
+
+        Commands::Cargo { command } => match command {
+            CargoCommands::Build { args } => {
+                cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?;
+            }
+            CargoCommands::Test { args } => {
+                cargo_cmd::run(cargo_cmd::CargoCommand::Test, &args, cli.verbose)?;
+            }
+            CargoCommands::Clippy { args } => {
+                cargo_cmd::run(cargo_cmd::CargoCommand::Clippy, &args, cli.verbose)?;
+            }
+        },
     }
 
     Ok(())
