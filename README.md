@@ -117,7 +117,7 @@ rtk wget https://example.com    # Download, strip progress bars
 rtk config                       # Show config (--create to generate)
 ```
 
-### Data
+### Data & Analytics
 ```bash
 rtk json config.json            # Structure without values
 rtk deps                        # Dependencies summary
@@ -129,7 +129,7 @@ rtk gain --graph                # With ASCII graph of last 30 days
 rtk gain --history              # With recent command history (10)
 rtk gain --quota --tier 20x     # Monthly quota analysis (pro/5x/20x)
 
-# Temporal Breakdowns (NEW in v0.4.0)
+# Temporal Breakdowns
 rtk gain --daily                # Day-by-day breakdown (all days)
 rtk gain --weekly               # Week-by-week breakdown
 rtk gain --monthly              # Month-by-month breakdown
@@ -138,6 +138,47 @@ rtk gain --all                  # All breakdowns combined
 # Export Formats
 rtk gain --all --format json    # JSON export for APIs/dashboards
 rtk gain --all --format csv     # CSV export for Excel/analysis
+```
+
+### Discover — Find Missed Savings
+
+Scans your Claude Code session history to find commands where rtk would have saved tokens. Use it to:
+- **Measure what you're missing** — see exactly how many tokens you could save
+- **Identify habits** — find which commands you keep running without rtk
+- **Spot new opportunities** — see unhandled commands that could become rtk features
+
+```bash
+rtk discover                    # Current project, last 30 days
+rtk discover --all              # All Claude Code projects
+rtk discover --all --since 7    # Last 7 days across all projects
+rtk discover -p aristote        # Filter by project name (substring)
+rtk discover --format json      # Machine-readable output
+```
+
+Example output:
+```
+RTK Discover -- Savings Opportunities
+====================================================
+Scanned: 142 sessions (last 30 days), 1786 Bash commands
+Already using RTK: 108 commands (6%)
+
+MISSED SAVINGS -- Commands RTK already handles
+----------------------------------------------------
+Command              Count    RTK Equivalent        Est. Savings
+git log                434    rtk git               ~55.9K tokens
+cargo test             203    rtk cargo             ~49.9K tokens
+ls -la                 107    rtk ls                ~11.8K tokens
+gh pr                   80    rtk gh                ~10.4K tokens
+----------------------------------------------------
+Total: 986 commands -> ~143.9K tokens saveable
+
+TOP UNHANDLED COMMANDS -- open an issue?
+----------------------------------------------------
+Command              Count    Example
+git checkout            84    git checkout feature/my-branch
+cargo run               32    cargo run -- gain --help
+----------------------------------------------------
+-> github.com/FlorianBruniaux/rtk/issues
 ```
 
 ### Containers
@@ -253,6 +294,74 @@ Daily Savings (last 30 days):
 01-25 │                                         18
 01-26 │████████████████████████████████████████ 13.0K
 ```
+
+## Auto-Rewrite Hook (Recommended)
+
+The most effective way to use rtk is with the **auto-rewrite hook** for Claude Code. Instead of relying on CLAUDE.md instructions (which subagents may ignore), this hook transparently intercepts Bash commands and rewrites them to their rtk equivalents before execution.
+
+**Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
+
+### How It Works
+
+The hook runs as a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks). When Claude Code is about to execute a Bash command like `git status`, the hook rewrites it to `rtk git status` before the command reaches the shell. Claude Code never sees the rewrite — it's transparent.
+
+### Global Install (all projects)
+
+```bash
+# 1. Copy the hook script
+mkdir -p ~/.claude/hooks
+cp .claude/hooks/rtk-rewrite.sh ~/.claude/hooks/rtk-rewrite.sh
+chmod +x ~/.claude/hooks/rtk-rewrite.sh
+
+# 2. Add to ~/.claude/settings.json under hooks.PreToolUse:
+```
+
+Add this entry to the `PreToolUse` array in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/rtk-rewrite.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Per-Project Install
+
+The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To use it in another project, copy the hook and add the same settings.json entry using a relative path or project-level `.claude/settings.json`.
+
+### Commands Rewritten
+
+| Raw Command | Rewritten To |
+|-------------|-------------|
+| `git status/diff/log/add/commit/push/pull/branch/fetch/stash` | `rtk git ...` |
+| `gh pr/issue/run` | `rtk gh ...` |
+| `cargo test/build/clippy` | `rtk cargo ...` |
+| `cat <file>` | `rtk read <file>` |
+| `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `ls` | `rtk ls` |
+| `vitest/pnpm test` | `rtk vitest run` |
+| `tsc/pnpm tsc` | `rtk tsc` |
+| `eslint/pnpm lint` | `rtk lint` |
+| `prettier` | `rtk prettier` |
+| `playwright` | `rtk playwright` |
+| `prisma` | `rtk prisma` |
+| `docker ps/images/logs` | `rtk docker ...` |
+| `kubectl get/logs` | `rtk kubectl ...` |
+| `curl` | `rtk curl` |
+| `pnpm list/ls/outdated` | `rtk pnpm ...` |
+
+Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
 
 ## Documentation
 
