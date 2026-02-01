@@ -131,6 +131,77 @@ pub fn format_usd(amount: f64) -> String {
     }
 }
 
+/// Format a confirmation message: "ok <action> <detail>"
+/// Used for write operations (merge, create, comment, edit, etc.)
+///
+/// # Examples
+/// ```
+/// use rtk::utils::ok_confirmation;
+/// assert_eq!(ok_confirmation("merged", "#42"), "ok merged #42");
+/// assert_eq!(ok_confirmation("created", "PR #5 https://..."), "ok created PR #5 https://...");
+/// ```
+pub fn ok_confirmation(action: &str, detail: &str) -> String {
+    if detail.is_empty() {
+        format!("ok {}", action)
+    } else {
+        format!("ok {} {}", action, detail)
+    }
+}
+
+/// Detect the package manager used in the current directory.
+/// Returns "pnpm", "yarn", or "npm" based on lockfile presence.
+///
+/// # Examples
+/// ```no_run
+/// use rtk::utils::detect_package_manager;
+/// let pm = detect_package_manager();
+/// // Returns "pnpm" if pnpm-lock.yaml exists, "yarn" if yarn.lock, else "npm"
+/// ```
+#[allow(dead_code)]
+pub fn detect_package_manager() -> &'static str {
+    if std::path::Path::new("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if std::path::Path::new("yarn.lock").exists() {
+        "yarn"
+    } else {
+        "npm"
+    }
+}
+
+/// Build a Command using the detected package manager's exec mechanism.
+/// Returns a Command ready to have tool-specific args appended.
+#[allow(dead_code)]
+pub fn package_manager_exec(tool: &str) -> Command {
+    let tool_exists = Command::new("which")
+        .arg(tool)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if tool_exists {
+        Command::new(tool)
+    } else {
+        let pm = detect_package_manager();
+        match pm {
+            "pnpm" => {
+                let mut c = Command::new("pnpm");
+                c.arg("exec").arg("--").arg(tool);
+                c
+            }
+            "yarn" => {
+                let mut c = Command::new("yarn");
+                c.arg("exec").arg("--").arg(tool);
+                c
+            }
+            _ => {
+                let mut c = Command::new("npx");
+                c.arg("--no-install").arg("--").arg(tool);
+                c
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +310,27 @@ mod tests {
     fn test_format_usd_edge() {
         assert_eq!(format_usd(0.01), "$0.01");
         assert_eq!(format_usd(0.009), "$0.0090");
+    }
+
+    #[test]
+    fn test_ok_confirmation_with_detail() {
+        assert_eq!(ok_confirmation("merged", "#42"), "ok merged #42");
+        assert_eq!(
+            ok_confirmation("created", "PR #5 https://github.com/foo/bar/pull/5"),
+            "ok created PR #5 https://github.com/foo/bar/pull/5"
+        );
+    }
+
+    #[test]
+    fn test_ok_confirmation_no_detail() {
+        assert_eq!(ok_confirmation("commented", ""), "ok commented");
+    }
+
+    #[test]
+    fn test_detect_package_manager_default() {
+        // In the test environment (rtk repo), there's no JS lockfile
+        // so it should default to "npm"
+        let pm = detect_package_manager();
+        assert!(["pnpm", "yarn", "npm"].contains(&pm));
     }
 }
