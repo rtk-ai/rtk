@@ -70,7 +70,12 @@ fn analyze_code(content: &str, lang: &Language) -> CodeSummary {
     let line1 = if components.is_empty() {
         format!("{} ({} lines)", main_type, total_lines)
     } else {
-        format!("{} ({}) - {} lines", main_type, components.join(", "), total_lines)
+        format!(
+            "{} ({}) - {} lines",
+            main_type,
+            components.join(", "),
+            total_lines
+        )
     };
 
     // Build line 2: Key details
@@ -124,7 +129,9 @@ fn extract_imports(content: &str, lang: &Language) -> Vec<String> {
     let pattern = match lang {
         Language::Rust => r"^use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:::[a-zA-Z_][a-zA-Z0-9_]*)?)",
         Language::Python => r"^(?:from\s+(\S+)|import\s+(\S+))",
-        Language::JavaScript | Language::TypeScript => r#"(?:import.*from\s+['"]([^'"]+)['"]|require\(['"]([^'"]+)['"]\))"#,
+        Language::JavaScript | Language::TypeScript => {
+            r#"(?:import.*from\s+['"]([^'"]+)['"]|require\(['"]([^'"]+)['"]\))"#
+        }
         Language::Go => r#"^\s*"([^"]+)"$"#,
         _ => return Vec::new(),
     };

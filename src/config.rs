@@ -61,11 +61,7 @@ impl Default for FilterConfig {
                 ".venv".into(),
                 "vendor".into(),
             ],
-            ignore_files: vec![
-                "*.lock".into(),
-                "*.min.js".into(),
-                "*.min.css".into(),
-            ],
+            ignore_files: vec!["*.lock".into(), "*.min.js".into(), "*.min.css".into()],
         }
     }
 }
@@ -103,8 +99,7 @@ impl Config {
 }
 
 fn get_config_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(config_dir.join("rtk").join("config.toml"))
 }
 
