@@ -26,8 +26,8 @@ pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: 
         GitCommand::Show => run_show(args, max_lines, verbose),
         GitCommand::Add { files } => run_add(&files, verbose),
         GitCommand::Commit { message } => run_commit(&message, verbose),
-        GitCommand::Push => run_push(verbose),
-        GitCommand::Pull => run_pull(verbose),
+        GitCommand::Push => run_push(args, verbose),
+        GitCommand::Pull => run_pull(args, verbose),
         GitCommand::Branch => run_branch(args, verbose),
         GitCommand::Fetch => run_fetch(args, verbose),
         GitCommand::Stash { subcommand } => run_stash(subcommand.as_deref(), args, verbose),
@@ -527,15 +527,18 @@ fn run_commit(message: &str, verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn run_push(verbose: u8) -> Result<()> {
+fn run_push(args: &[String], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("git push");
     }
 
-    let output = Command::new("git")
-        .arg("push")
-        .output()
-        .context("Failed to run git push")?;
+    let mut cmd = Command::new("git");
+    cmd.arg("push");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run git push")?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -573,15 +576,18 @@ fn run_push(verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn run_pull(verbose: u8) -> Result<()> {
+fn run_pull(args: &[String], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("git pull");
     }
 
-    let output = Command::new("git")
-        .arg("pull")
-        .output()
-        .context("Failed to run git pull")?;
+    let mut cmd = Command::new("git");
+    cmd.arg("pull");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run git pull")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

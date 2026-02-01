@@ -448,9 +448,17 @@ enum GitCommands {
         message: String,
     },
     /// Push → "ok ✓ <branch>"
-    Push,
+    Push {
+        /// Git push arguments (supports -u, remote, branch, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Pull → "ok ✓ <stats>"
-    Pull,
+    Pull {
+        /// Git pull arguments (supports --rebase, remote, branch, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Compact branch listing (current/local/remote)
     Branch {
         /// Git branch arguments (supports -d, -D, -m, etc.)
@@ -681,11 +689,11 @@ fn main() -> Result<()> {
             GitCommands::Commit { message } => {
                 git::run(git::GitCommand::Commit { message }, &[], None, cli.verbose)?;
             }
-            GitCommands::Push => {
-                git::run(git::GitCommand::Push, &[], None, cli.verbose)?;
+            GitCommands::Push { args } => {
+                git::run(git::GitCommand::Push, &args, None, cli.verbose)?;
             }
-            GitCommands::Pull => {
-                git::run(git::GitCommand::Pull, &[], None, cli.verbose)?;
+            GitCommands::Pull { args } => {
+                git::run(git::GitCommand::Pull, &args, None, cli.verbose)?;
             }
             GitCommands::Branch { args } => {
                 git::run(git::GitCommand::Branch, &args, None, cli.verbose)?;
