@@ -1,7 +1,42 @@
 use anyhow::{Context, Result};
 use regex::Regex;
+use serde::Deserialize;
 use std::process::Command;
 use crate::tracking;
+
+/// Vitest JSON output structures
+#[derive(Debug, Deserialize)]
+struct VitestJsonOutput {
+    #[serde(rename = "testResults")]
+    test_results: Vec<VitestTestFile>,
+    #[serde(rename = "numTotalTests")]
+    num_total_tests: usize,
+    #[serde(rename = "numPassedTests")]
+    num_passed_tests: usize,
+    #[serde(rename = "numFailedTests")]
+    num_failed_tests: usize,
+    #[serde(rename = "startTime")]
+    _start_time: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VitestTestFile {
+    name: String,
+    status: String,
+    #[serde(rename = "assertionResults")]
+    assertion_results: Vec<VitestTest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VitestTest {
+    #[serde(rename = "ancestorTitles")]
+    _ancestor_titles: Vec<String>,
+    #[serde(rename = "fullName")]
+    full_name: String,
+    status: String,
+    #[serde(rename = "failureMessages")]
+    failure_messages: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub enum VitestCommand {
@@ -19,6 +54,9 @@ fn run_vitest(args: &[String], verbose: u8) -> Result<()> {
     cmd.arg("vitest");
     cmd.arg("run"); // Force non-watch mode
 
+    // Add JSON reporter for structured output
+    cmd.arg("--reporter=json");
+
     for arg in args {
         cmd.arg(arg);
     }
@@ -30,7 +68,17 @@ fn run_vitest(args: &[String], verbose: u8) -> Result<()> {
     // Vitest returns non-zero exit code when tests fail
     // This is expected behavior for test runners
     let combined = format!("{}{}", stdout, stderr);
-    let filtered = filter_vitest_output(&combined);
+
+    // Try JSON parsing first, fallback to regex
+    let filtered = match parse_vitest_json(&stdout) {
+        Ok(formatted) => formatted,
+        Err(e) => {
+            if verbose > 0 {
+                eprintln!("[RTK:DEGRADED] JSON parse failed ({}), using regex fallback", e);
+            }
+            filter_vitest_output(&combined)
+        }
+    };
 
     if verbose > 0 {
         eprintln!("vitest run (filtered):");
@@ -54,6 +102,46 @@ fn strip_ansi(text: &str) -> String {
     // Match ANSI escape sequences: \x1b[...m
     let ansi_regex = Regex::new(r"\x1b\[[0-9;]*m").unwrap();
     ansi_regex.replace_all(text, "").to_string()
+}
+
+/// Parse Vitest JSON output and format compactly
+fn parse_vitest_json(json_str: &str) -> Result<String> {
+    let data: VitestJsonOutput = serde_json::from_str(json_str)
+        .context("Failed to parse Vitest JSON output")?;
+
+    let mut result = Vec::new();
+
+    // Summary line
+    result.push(format!(
+        "PASS ({}) FAIL ({})",
+        data.num_passed_tests, data.num_failed_tests
+    ));
+
+    // Failure details
+    if data.num_failed_tests > 0 {
+        result.push(String::new()); // Blank line
+        let mut failure_idx = 1;
+
+        for file in &data.test_results {
+            for test in &file.assertion_results {
+                if test.status == "failed" {
+                    result.push(format!("{}. ✗ {}", failure_idx, test.full_name));
+
+                    // Add first failure message only (compact)
+                    if let Some(msg) = test.failure_messages.first() {
+                        let lines: Vec<&str> = msg.lines().take(3).collect();
+                        for line in lines {
+                            result.push(format!("   {}", line.trim()));
+                        }
+                    }
+
+                    failure_idx += 1;
+                }
+            }
+        }
+    }
+
+    Ok(result.join("\n"))
 }
 
 /// Extract test statistics from Vitest output

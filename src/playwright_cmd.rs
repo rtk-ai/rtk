@@ -2,8 +2,59 @@ use crate::tracking;
 use crate::utils::strip_ansi;
 use anyhow::{Context, Result};
 use regex::Regex;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::process::Command;
+
+/// Playwright JSON output structures
+#[derive(Debug, Deserialize)]
+struct PlaywrightJsonOutput {
+    #[serde(rename = "stats")]
+    stats: PlaywrightStats,
+    #[serde(rename = "suites")]
+    suites: Vec<PlaywrightSuite>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaywrightStats {
+    #[serde(rename = "expected")]
+    _expected: usize,
+    #[serde(rename = "unexpected")]
+    unexpected: usize,
+    #[serde(rename = "skipped")]
+    _skipped: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaywrightSuite {
+    title: String,
+    #[serde(rename = "tests")]
+    tests: Vec<PlaywrightTest>,
+    #[serde(rename = "suites", default)]
+    suites: Vec<PlaywrightSuite>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaywrightTest {
+    title: String,
+    #[serde(rename = "status")]
+    status: String,
+    #[serde(rename = "results")]
+    results: Vec<PlaywrightTestResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaywrightTestResult {
+    #[serde(rename = "status")]
+    status: String,
+    #[serde(rename = "error")]
+    error: Option<PlaywrightError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaywrightError {
+    message: String,
+}
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     // Try playwright directly first, fallback to package manager exec
@@ -42,6 +93,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         c
     };
 
+    // Add JSON reporter for structured output
+    cmd.arg("--reporter=json");
+
     // Add user arguments
     for arg in args {
         cmd.arg(arg);
@@ -68,7 +122,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    let filtered = filter_playwright_output(&raw);
+    // Try JSON parsing first, fallback to regex
+    let filtered = match parse_playwright_json(&stdout) {
+        Ok(formatted) => formatted,
+        Err(e) => {
+            if verbose > 0 {
+                eprintln!("[RTK:DEGRADED] JSON parse failed ({}), using regex fallback", e);
+            }
+            filter_playwright_output(&raw)
+        }
+    };
 
     println!("{}", filtered);
 
@@ -85,6 +148,67 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse Playwright JSON output and format compactly
+fn parse_playwright_json(json_str: &str) -> Result<String> {
+    let data: PlaywrightJsonOutput = serde_json::from_str(json_str)
+        .context("Failed to parse Playwright JSON output")?;
+
+    let mut result = Vec::new();
+    let mut failures = Vec::new();
+
+    // Recursively collect test results
+    fn collect_tests(suite: &PlaywrightSuite, failures: &mut Vec<(String, String)>) {
+        for test in &suite.tests {
+            if test.status == "failed" || test.status == "timedOut" {
+                let error_msg = test
+                    .results
+                    .first()
+                    .and_then(|r| r.error.as_ref())
+                    .map(|e| {
+                        e.message
+                            .lines()
+                            .take(2)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_else(|| "Unknown error".to_string());
+
+                failures.push((format!("{} › {}", suite.title, test.title), error_msg));
+            }
+        }
+        for subsuite in &suite.suites {
+            collect_tests(subsuite, failures);
+        }
+    }
+
+    for suite in &data.suites {
+        collect_tests(suite, &mut failures);
+    }
+
+    // Summary
+    if failures.is_empty() {
+        result.push("✓ Playwright: All tests passed".to_string());
+    } else {
+        result.push(format!(
+            "Playwright: {} failed",
+            failures.len()
+        ));
+        result.push("═══════════════════════════════════════".to_string());
+        result.push(format!("❌ {} test(s) failed:", failures.len()));
+
+        for (idx, (title, error)) in failures.iter().enumerate().take(10) {
+            result.push(format!("  {}. {}", idx + 1, title));
+            result.push(format!("     {}", error));
+        }
+
+        if failures.len() > 10 {
+            result.push(format!("\n... +{} more failures", failures.len() - 10));
+        }
+    }
+
+    Ok(result.join("\n"))
 }
 
 #[derive(Debug)]

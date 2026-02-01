@@ -1,6 +1,36 @@
 use crate::tracking;
 use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::process::Command;
+
+/// pnpm list JSON output structure
+#[derive(Debug, Deserialize)]
+struct PnpmListOutput {
+    #[serde(flatten)]
+    packages: HashMap<String, PnpmPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PnpmPackage {
+    version: Option<String>,
+    #[serde(rename = "dependencies", default)]
+    dependencies: HashMap<String, PnpmPackage>,
+}
+
+/// pnpm outdated JSON output structure
+#[derive(Debug, Deserialize)]
+struct PnpmOutdatedOutput {
+    #[serde(flatten)]
+    packages: HashMap<String, PnpmOutdatedPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PnpmOutdatedPackage {
+    current: String,
+    latest: String,
+    wanted: Option<String>,
+}
 
 /// Validates npm package name according to official rules
 /// https://docs.npmjs.com/cli/v9/configuring-npm/package-json#name
@@ -40,6 +70,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
     let mut cmd = Command::new("pnpm");
     cmd.arg("list");
     cmd.arg(format!("--depth={}", depth));
+    cmd.arg("--json"); // Use JSON format for structured output
 
     for arg in args {
         cmd.arg(arg);
@@ -53,7 +84,17 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let filtered = filter_pnpm_list(&stdout);
+
+    // Try JSON parsing first, fallback to text filtering
+    let filtered = match parse_pnpm_list_json(&stdout) {
+        Ok(formatted) => formatted,
+        Err(e) => {
+            if verbose > 0 {
+                eprintln!("[RTK:DEGRADED] JSON parse failed ({}), using text fallback", e);
+            }
+            filter_pnpm_list(&stdout)
+        }
+    };
 
     if verbose > 0 {
         eprintln!("pnpm list (filtered):");
@@ -74,6 +115,8 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
 fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
     let mut cmd = Command::new("pnpm");
     cmd.arg("outdated");
+    cmd.arg("--format");
+    cmd.arg("json"); // Use JSON format for structured output
 
     for arg in args {
         cmd.arg(arg);
@@ -86,7 +129,17 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
     // pnpm outdated returns exit code 1 when there are outdated packages
     // This is expected behavior, not an error
     let combined = format!("{}{}", stdout, stderr);
-    let filtered = filter_pnpm_outdated(&combined);
+
+    // Try JSON parsing first, fallback to text filtering
+    let filtered = match parse_pnpm_outdated_json(&stdout) {
+        Ok(formatted) => formatted,
+        Err(e) => {
+            if verbose > 0 {
+                eprintln!("[RTK:DEGRADED] JSON parse failed ({}), using text fallback", e);
+            }
+            filter_pnpm_outdated(&combined)
+        }
+    };
 
     if verbose > 0 {
         eprintln!("pnpm outdated (filtered):");
@@ -150,6 +203,60 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<()> 
     );
 
     Ok(())
+}
+
+/// Parse pnpm list JSON output and format compactly
+fn parse_pnpm_list_json(json_str: &str) -> Result<String> {
+    let data: PnpmListOutput = serde_json::from_str(json_str)
+        .context("Failed to parse pnpm list JSON output")?;
+
+    let mut result = Vec::new();
+    let mut count = 0;
+
+    fn collect_deps(
+        pkg: &PnpmPackage,
+        name: &str,
+        depth: usize,
+        result: &mut Vec<String>,
+        count: &mut usize,
+    ) {
+        let indent = "  ".repeat(depth);
+        if let Some(version) = &pkg.version {
+            result.push(format!("{}{} {}", indent, name, version));
+            *count += 1;
+        }
+
+        for (dep_name, dep_pkg) in &pkg.dependencies {
+            collect_deps(dep_pkg, dep_name, depth + 1, result, count);
+        }
+    }
+
+    for (name, pkg) in &data.packages {
+        collect_deps(pkg, name, 0, &mut result, &mut count);
+    }
+
+    result.push(format!("\nTotal: {} packages", count));
+    Ok(result.join("\n"))
+}
+
+/// Parse pnpm outdated JSON output and format compactly
+fn parse_pnpm_outdated_json(json_str: &str) -> Result<String> {
+    let data: PnpmOutdatedOutput = serde_json::from_str(json_str)
+        .context("Failed to parse pnpm outdated JSON output")?;
+
+    let mut upgrades = Vec::new();
+
+    for (name, pkg) in &data.packages {
+        if pkg.current != pkg.latest {
+            upgrades.push(format!("{}: {} → {}", name, pkg.current, pkg.latest));
+        }
+    }
+
+    if upgrades.is_empty() {
+        Ok("All packages up-to-date ✓".to_string())
+    } else {
+        Ok(upgrades.join("\n"))
+    }
 }
 
 /// Filter pnpm list output - remove box drawing, keep package tree
