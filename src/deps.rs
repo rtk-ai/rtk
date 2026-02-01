@@ -1,12 +1,18 @@
+use crate::tracking;
 use anyhow::Result;
+use regex::Regex;
 use std::fs;
 use std::path::Path;
-use regex::Regex;
-use crate::tracking;
 
 /// Summarize project dependencies
 pub fn run(path: &Path, verbose: u8) -> Result<()> {
-    let dir = if path.is_file() { path.parent().unwrap_or(Path::new(".")) } else { path };
+    let timer = tracking::TimedExecution::start();
+
+    let dir = if path.is_file() {
+        path.parent().unwrap_or(Path::new("."))
+    } else {
+        path
+    };
 
     if verbose > 0 {
         eprintln!("Scanning dependencies in: {}", dir.display());
@@ -61,13 +67,14 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
     }
 
     print!("{}", rtk);
-    tracking::track("cat */deps", "rtk deps", &raw, &rtk);
+    timer.track("cat */deps", "rtk deps", &raw, &rtk);
     Ok(())
 }
 
 fn summarize_cargo_str(path: &Path) -> Result<String> {
     let content = fs::read_to_string(path)?;
-    let dep_re = Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap();
+    let dep_re =
+        Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap();
     let section_re = Regex::new(r"^\[([^\]]+)\]").unwrap();
     let mut current_section = String::new();
     let mut deps = Vec::new();
@@ -76,10 +83,17 @@ fn summarize_cargo_str(path: &Path) -> Result<String> {
 
     for line in content.lines() {
         if let Some(caps) = section_re.captures(line) {
-            current_section = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+            current_section = caps
+                .get(1)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
         } else if let Some(caps) = dep_re.captures(line) {
             let name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-            let version = caps.get(2).or(caps.get(3)).map(|m| m.as_str()).unwrap_or("*");
+            let version = caps
+                .get(2)
+                .or(caps.get(3))
+                .map(|m| m.as_str())
+                .unwrap_or("*");
             let dep = format!("{} ({})", name, version);
             match current_section.as_str() {
                 "dependencies" => deps.push(dep),
@@ -91,13 +105,21 @@ fn summarize_cargo_str(path: &Path) -> Result<String> {
 
     if !deps.is_empty() {
         out.push_str(&format!("  Dependencies ({}):\n", deps.len()));
-        for d in deps.iter().take(10) { out.push_str(&format!("    {}\n", d)); }
-        if deps.len() > 10 { out.push_str(&format!("    ... +{} more\n", deps.len() - 10)); }
+        for d in deps.iter().take(10) {
+            out.push_str(&format!("    {}\n", d));
+        }
+        if deps.len() > 10 {
+            out.push_str(&format!("    ... +{} more\n", deps.len() - 10));
+        }
     }
     if !dev_deps.is_empty() {
         out.push_str(&format!("  Dev ({}):\n", dev_deps.len()));
-        for d in dev_deps.iter().take(5) { out.push_str(&format!("    {}\n", d)); }
-        if dev_deps.len() > 5 { out.push_str(&format!("    ... +{} more\n", dev_deps.len() - 5)); }
+        for d in dev_deps.iter().take(5) {
+            out.push_str(&format!("    {}\n", d));
+        }
+        if dev_deps.len() > 5 {
+            out.push_str(&format!("    ... +{} more\n", dev_deps.len() - 5));
+        }
     }
     Ok(out)
 }
@@ -114,14 +136,24 @@ fn summarize_package_json_str(path: &Path) -> Result<String> {
     if let Some(deps) = json.get("dependencies").and_then(|v| v.as_object()) {
         out.push_str(&format!("  Dependencies ({}):\n", deps.len()));
         for (i, (name, version)) in deps.iter().enumerate() {
-            if i >= 10 { out.push_str(&format!("    ... +{} more\n", deps.len() - 10)); break; }
-            out.push_str(&format!("    {} ({})\n", name, version.as_str().unwrap_or("*")));
+            if i >= 10 {
+                out.push_str(&format!("    ... +{} more\n", deps.len() - 10));
+                break;
+            }
+            out.push_str(&format!(
+                "    {} ({})\n",
+                name,
+                version.as_str().unwrap_or("*")
+            ));
         }
     }
     if let Some(dev_deps) = json.get("devDependencies").and_then(|v| v.as_object()) {
         out.push_str(&format!("  Dev Dependencies ({}):\n", dev_deps.len()));
         for (i, (name, _)) in dev_deps.iter().enumerate() {
-            if i >= 5 { out.push_str(&format!("    ... +{} more\n", dev_deps.len() - 5)); break; }
+            if i >= 5 {
+                out.push_str(&format!("    ... +{} more\n", dev_deps.len() - 5));
+                break;
+            }
             out.push_str(&format!("    {}\n", name));
         }
     }
@@ -136,7 +168,9 @@ fn summarize_requirements_str(path: &Path) -> Result<String> {
 
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         if let Some(caps) = dep_re.captures(line) {
             let name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let version = caps.get(2).map(|m| m.as_str()).unwrap_or("");
@@ -145,8 +179,12 @@ fn summarize_requirements_str(path: &Path) -> Result<String> {
     }
 
     out.push_str(&format!("  Packages ({}):\n", deps.len()));
-    for d in deps.iter().take(15) { out.push_str(&format!("    {}\n", d)); }
-    if deps.len() > 15 { out.push_str(&format!("    ... +{} more\n", deps.len() - 15)); }
+    for d in deps.iter().take(15) {
+        out.push_str(&format!("    {}\n", d));
+    }
+    if deps.len() > 15 {
+        out.push_str(&format!("    ... +{} more\n", deps.len() - 15));
+    }
     Ok(out)
 }
 
@@ -157,18 +195,31 @@ fn summarize_pyproject_str(path: &Path) -> Result<String> {
     let mut out = String::new();
 
     for line in content.lines() {
-        if line.contains("dependencies") && line.contains("[") { in_deps = true; continue; }
+        if line.contains("dependencies") && line.contains("[") {
+            in_deps = true;
+            continue;
+        }
         if in_deps {
-            if line.trim() == "]" { break; }
-            let line = line.trim().trim_matches(|c| c == '"' || c == '\'' || c == ',');
-            if !line.is_empty() { deps.push(line.to_string()); }
+            if line.trim() == "]" {
+                break;
+            }
+            let line = line
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'' || c == ',');
+            if !line.is_empty() {
+                deps.push(line.to_string());
+            }
         }
     }
 
     if !deps.is_empty() {
         out.push_str(&format!("  Dependencies ({}):\n", deps.len()));
-        for d in deps.iter().take(10) { out.push_str(&format!("    {}\n", d)); }
-        if deps.len() > 10 { out.push_str(&format!("    ... +{} more\n", deps.len() - 10)); }
+        for d in deps.iter().take(10) {
+            out.push_str(&format!("    {}\n", d));
+        }
+        if deps.len() > 10 {
+            out.push_str(&format!("    ... +{} more\n", deps.len() - 10));
+        }
     }
     Ok(out)
 }
@@ -183,23 +234,35 @@ fn summarize_gomod_str(path: &Path) -> Result<String> {
 
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with("module ") { module_name = line.trim_start_matches("module ").to_string(); }
-        else if line.starts_with("go ") { go_version = line.trim_start_matches("go ").to_string(); }
-        else if line == "require (" { in_require = true; }
-        else if line == ")" { in_require = false; }
-        else if in_require && !line.starts_with("//") {
+        if line.starts_with("module ") {
+            module_name = line.trim_start_matches("module ").to_string();
+        } else if line.starts_with("go ") {
+            go_version = line.trim_start_matches("go ").to_string();
+        } else if line == "require (" {
+            in_require = true;
+        } else if line == ")" {
+            in_require = false;
+        } else if in_require && !line.starts_with("//") {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 { deps.push(format!("{} {}", parts[0], parts[1])); }
+            if parts.len() >= 2 {
+                deps.push(format!("{} {}", parts[0], parts[1]));
+            }
         } else if line.starts_with("require ") && !line.contains("(") {
             deps.push(line.trim_start_matches("require ").to_string());
         }
     }
 
-    if !module_name.is_empty() { out.push_str(&format!("  {} (go {})\n", module_name, go_version)); }
+    if !module_name.is_empty() {
+        out.push_str(&format!("  {} (go {})\n", module_name, go_version));
+    }
     if !deps.is_empty() {
         out.push_str(&format!("  Dependencies ({}):\n", deps.len()));
-        for d in deps.iter().take(10) { out.push_str(&format!("    {}\n", d)); }
-        if deps.len() > 10 { out.push_str(&format!("    ... +{} more\n", deps.len() - 10)); }
+        for d in deps.iter().take(10) {
+            out.push_str(&format!("    {}\n", d));
+        }
+        if deps.len() > 10 {
+            out.push_str(&format!("    ... +{} more\n", deps.len() - 10));
+        }
     }
     Ok(out)
 }

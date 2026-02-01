@@ -1,19 +1,30 @@
+use crate::tracking;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::{Command, Stdio};
-use crate::tracking;
 
 /// Run a command and filter output to show only errors/warnings
 pub fn run_err(command: &str, verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("Running: {}", command);
     }
 
     let output = if cfg!(target_os = "windows") {
-        Command::new("cmd").args(["/C", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+        Command::new("cmd")
+            .args(["/C", command])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
     } else {
-        Command::new("sh").args(["-c", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-    }.context("Failed to execute command")?;
+        Command::new("sh")
+            .args(["-c", command])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    }
+    .context("Failed to execute command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -25,30 +36,46 @@ pub fn run_err(command: &str, verbose: u8) -> Result<()> {
         if output.status.success() {
             rtk.push_str("✅ Command completed successfully (no errors)");
         } else {
-            rtk.push_str(&format!("❌ Command failed (exit code: {:?})\n", output.status.code()));
+            rtk.push_str(&format!(
+                "❌ Command failed (exit code: {:?})\n",
+                output.status.code()
+            ));
             let lines: Vec<&str> = raw.lines().collect();
-            for line in lines.iter().rev().take(10).rev() { rtk.push_str(&format!("  {}\n", line)); }
+            for line in lines.iter().rev().take(10).rev() {
+                rtk.push_str(&format!("  {}\n", line));
+            }
         }
     } else {
         rtk.push_str(&filtered);
     }
 
     println!("{}", rtk);
-    tracking::track(command, "rtk run-err", &raw, &rtk);
+    timer.track(command, "rtk run-err", &raw, &rtk);
     Ok(())
 }
 
 /// Run tests and show only failures
 pub fn run_test(command: &str, verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("Running tests: {}", command);
     }
 
     let output = if cfg!(target_os = "windows") {
-        Command::new("cmd").args(["/C", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+        Command::new("cmd")
+            .args(["/C", command])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
     } else {
-        Command::new("sh").args(["-c", command]).stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-    }.context("Failed to execute test command")?;
+        Command::new("sh")
+            .args(["-c", command])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    }
+    .context("Failed to execute test command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -56,7 +83,7 @@ pub fn run_test(command: &str, verbose: u8) -> Result<()> {
 
     let summary = extract_test_summary(&raw, command);
     println!("{}", summary);
-    tracking::track(command, "rtk run-test", &raw, &summary);
+    timer.track(command, "rtk run-test", &raw, &summary);
     Ok(())
 }
 
@@ -124,7 +151,8 @@ fn extract_test_summary(output: &str, command: &str) -> String {
     // Detect test framework
     let is_cargo = command.contains("cargo test");
     let is_pytest = command.contains("pytest");
-    let is_jest = command.contains("jest") || command.contains("npm test") || command.contains("yarn test");
+    let is_jest =
+        command.contains("jest") || command.contains("npm test") || command.contains("yarn test");
     let is_go = command.contains("go test");
 
     // Collect failures

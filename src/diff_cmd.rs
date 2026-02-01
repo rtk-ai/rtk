@@ -1,10 +1,12 @@
+use crate::tracking;
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
-use crate::tracking;
 
 /// Ultra-condensed diff - only changed lines, no context
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
@@ -21,24 +23,44 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
     if diff.added == 0 && diff.removed == 0 {
         rtk.push_str("✅ Files are identical");
         println!("{}", rtk);
-        tracking::track(&format!("diff {} {}", file1.display(), file2.display()), "rtk diff", &raw, &rtk);
+        timer.track(
+            &format!("diff {} {}", file1.display(), file2.display()),
+            "rtk diff",
+            &raw,
+            &rtk,
+        );
         return Ok(());
     }
 
     rtk.push_str(&format!("📊 {} → {}\n", file1.display(), file2.display()));
-    rtk.push_str(&format!("   +{} added, -{} removed, ~{} modified\n\n", diff.added, diff.removed, diff.modified));
+    rtk.push_str(&format!(
+        "   +{} added, -{} removed, ~{} modified\n\n",
+        diff.added, diff.removed, diff.modified
+    ));
 
     for change in diff.changes.iter().take(50) {
         match change {
             DiffChange::Added(ln, c) => rtk.push_str(&format!("+{:4} {}\n", ln, truncate(c, 80))),
             DiffChange::Removed(ln, c) => rtk.push_str(&format!("-{:4} {}\n", ln, truncate(c, 80))),
-            DiffChange::Modified(ln, old, new) => rtk.push_str(&format!("~{:4} {} → {}\n", ln, truncate(old, 35), truncate(new, 35))),
+            DiffChange::Modified(ln, old, new) => rtk.push_str(&format!(
+                "~{:4} {} → {}\n",
+                ln,
+                truncate(old, 35),
+                truncate(new, 35)
+            )),
         }
     }
-    if diff.changes.len() > 50 { rtk.push_str(&format!("... +{} more changes", diff.changes.len() - 50)); }
+    if diff.changes.len() > 50 {
+        rtk.push_str(&format!("... +{} more changes", diff.changes.len() - 50));
+    }
 
     print!("{}", rtk);
-    tracking::track(&format!("diff {} {}", file1.display(), file2.display()), "rtk diff", &raw, &rtk);
+    timer.track(
+        &format!("diff {} {}", file1.display(), file2.display()),
+        "rtk diff",
+        &raw,
+        &rtk,
+    );
     Ok(())
 }
 
@@ -108,7 +130,12 @@ fn compute_diff(lines1: &[&str], lines2: &[&str]) -> DiffResult {
         }
     }
 
-    DiffResult { added, removed, modified, changes }
+    DiffResult {
+        added,
+        removed,
+        modified,
+        changes,
+    }
 }
 
 fn similarity(a: &str, b: &str) -> f64 {
@@ -153,7 +180,10 @@ fn condense_unified_diff(diff: &str) -> String {
                         result.push(format!("  ... +{} more", changes.len() - 10));
                     }
                 }
-                current_file = line.trim_start_matches("+++ ").trim_start_matches("b/").to_string();
+                current_file = line
+                    .trim_start_matches("+++ ")
+                    .trim_start_matches("b/")
+                    .to_string();
                 added = 0;
                 removed = 0;
                 changes.clear();

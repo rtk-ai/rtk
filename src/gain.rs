@@ -1,4 +1,4 @@
-use crate::display_helpers::print_period_table;
+use crate::display_helpers::{format_duration, print_period_table};
 use crate::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::utils::format_tokens;
 use anyhow::{Context, Result};
@@ -49,27 +49,33 @@ pub fn run(
             format_tokens(summary.total_saved),
             summary.avg_savings_pct
         );
+        println!(
+            "Total exec time:   {} (avg {})",
+            format_duration(summary.total_time_ms),
+            format_duration(summary.avg_time_ms)
+        );
         println!();
 
         if !summary.by_command.is_empty() {
             println!("By Command:");
             println!("────────────────────────────────────────");
             println!(
-                "{:<20} {:>6} {:>10} {:>8}",
-                "Command", "Count", "Saved", "Avg%"
+                "{:<20} {:>6} {:>10} {:>8} {:>8}",
+                "Command", "Count", "Saved", "Avg%", "Time"
             );
-            for (cmd, count, saved, pct) in &summary.by_command {
+            for (cmd, count, saved, pct, avg_time) in &summary.by_command {
                 let cmd_short = if cmd.len() > 18 {
                     format!("{}...", &cmd[..15])
                 } else {
                     cmd.clone()
                 };
                 println!(
-                    "{:<20} {:>6} {:>10} {:>7.1}%",
+                    "{:<20} {:>6} {:>10} {:>7.1}% {:>8}",
                     cmd_short,
                     count,
                     format_tokens(*saved),
-                    pct
+                    pct,
+                    format_duration(*avg_time)
                 );
             }
             println!();
@@ -217,6 +223,8 @@ struct ExportSummary {
     total_output: usize,
     total_saved: usize,
     avg_savings_pct: f64,
+    total_time_ms: u64,
+    avg_time_ms: u64,
 }
 
 fn export_json(
@@ -237,6 +245,8 @@ fn export_json(
             total_output: summary.total_output,
             total_saved: summary.total_saved,
             avg_savings_pct: summary.avg_savings_pct,
+            total_time_ms: summary.total_time_ms,
+            avg_time_ms: summary.avg_time_ms,
         },
         daily: if all || daily {
             Some(tracker.get_all_days()?)
@@ -271,16 +281,18 @@ fn export_csv(
     if all || daily {
         let days = tracker.get_all_days()?;
         println!("# Daily Data");
-        println!("date,commands,input_tokens,output_tokens,saved_tokens,savings_pct");
+        println!("date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
         for day in days {
             println!(
-                "{},{},{},{},{},{:.2}",
+                "{},{},{},{},{},{:.2},{},{}",
                 day.date,
                 day.commands,
                 day.input_tokens,
                 day.output_tokens,
                 day.saved_tokens,
-                day.savings_pct
+                day.savings_pct,
+                day.total_time_ms,
+                day.avg_time_ms
             );
         }
         println!();
@@ -290,18 +302,20 @@ fn export_csv(
         let weeks = tracker.get_by_week()?;
         println!("# Weekly Data");
         println!(
-            "week_start,week_end,commands,input_tokens,output_tokens,saved_tokens,savings_pct"
+            "week_start,week_end,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
         );
         for week in weeks {
             println!(
-                "{},{},{},{},{},{},{:.2}",
+                "{},{},{},{},{},{},{:.2},{},{}",
                 week.week_start,
                 week.week_end,
                 week.commands,
                 week.input_tokens,
                 week.output_tokens,
                 week.saved_tokens,
-                week.savings_pct
+                week.savings_pct,
+                week.total_time_ms,
+                week.avg_time_ms
             );
         }
         println!();
@@ -310,16 +324,18 @@ fn export_csv(
     if all || monthly {
         let months = tracker.get_by_month()?;
         println!("# Monthly Data");
-        println!("month,commands,input_tokens,output_tokens,saved_tokens,savings_pct");
+        println!("month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
         for month in months {
             println!(
-                "{},{},{},{},{},{:.2}",
+                "{},{},{},{},{},{:.2},{},{}",
                 month.month,
                 month.commands,
                 month.input_tokens,
                 month.output_tokens,
                 month.saved_tokens,
-                month.savings_pct
+                month.savings_pct,
+                month.total_time_ms,
+                month.avg_time_ms
             );
         }
     }
