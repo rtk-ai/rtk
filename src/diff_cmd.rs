@@ -184,3 +184,158 @@ fn condense_unified_diff(diff: &str) -> String {
 
     result.join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- similarity ---
+
+    #[test]
+    fn test_similarity_identical() {
+        assert_eq!(similarity("hello", "hello"), 1.0);
+    }
+
+    #[test]
+    fn test_similarity_completely_different() {
+        assert_eq!(similarity("abc", "xyz"), 0.0);
+    }
+
+    #[test]
+    fn test_similarity_empty_strings() {
+        // Both empty: union is 0, returns 1.0 by convention
+        assert_eq!(similarity("", ""), 1.0);
+    }
+
+    #[test]
+    fn test_similarity_partial_overlap() {
+        let s = similarity("abcd", "abef");
+        // Shared: a, b. Union: a, b, c, d, e, f = 6. Jaccard = 2/6
+        assert!((s - 2.0 / 6.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_similarity_threshold_for_modified() {
+        // "let x = 1;" vs "let x = 2;" should be > 0.5 (treated as modification)
+        assert!(similarity("let x = 1;", "let x = 2;") > 0.5);
+    }
+
+    // --- truncate ---
+
+    #[test]
+    fn test_truncate_short_string() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact_length() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_long_string() {
+        assert_eq!(truncate("hello world!", 8), "hello...");
+    }
+
+    // --- compute_diff ---
+
+    #[test]
+    fn test_compute_diff_identical() {
+        let a = vec!["line1", "line2", "line3"];
+        let b = vec!["line1", "line2", "line3"];
+        let result = compute_diff(&a, &b);
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 0);
+        assert_eq!(result.modified, 0);
+        assert!(result.changes.is_empty());
+    }
+
+    #[test]
+    fn test_compute_diff_added_lines() {
+        let a = vec!["line1"];
+        let b = vec!["line1", "line2", "line3"];
+        let result = compute_diff(&a, &b);
+        assert_eq!(result.added, 2);
+        assert_eq!(result.removed, 0);
+    }
+
+    #[test]
+    fn test_compute_diff_removed_lines() {
+        let a = vec!["line1", "line2", "line3"];
+        let b = vec!["line1"];
+        let result = compute_diff(&a, &b);
+        assert_eq!(result.removed, 2);
+        assert_eq!(result.added, 0);
+    }
+
+    #[test]
+    fn test_compute_diff_modified_line() {
+        // Similar lines (>0.5 similarity) are classified as modified
+        let a = vec!["let x = 1;"];
+        let b = vec!["let x = 2;"];
+        let result = compute_diff(&a, &b);
+        assert_eq!(result.modified, 1);
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 0);
+    }
+
+    #[test]
+    fn test_compute_diff_completely_different_line() {
+        // Dissimilar lines (<= 0.5 similarity) are added+removed, not modified
+        let a = vec!["aaaa"];
+        let b = vec!["zzzz"];
+        let result = compute_diff(&a, &b);
+        assert_eq!(result.modified, 0);
+        assert_eq!(result.added, 1);
+        assert_eq!(result.removed, 1);
+    }
+
+    #[test]
+    fn test_compute_diff_empty_inputs() {
+        let result = compute_diff(&[], &[]);
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 0);
+        assert!(result.changes.is_empty());
+    }
+
+    // --- condense_unified_diff ---
+
+    #[test]
+    fn test_condense_unified_diff_single_file() {
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
+ fn main() {
++    println!("hello");
+     println!("world");
+ }
+"#;
+        let result = condense_unified_diff(diff);
+        assert!(result.contains("src/main.rs"));
+        assert!(result.contains("+1"));
+        assert!(result.contains("println"));
+    }
+
+    #[test]
+    fn test_condense_unified_diff_multiple_files() {
+        let diff = r#"diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
++added line
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+-removed line
+"#;
+        let result = condense_unified_diff(diff);
+        assert!(result.contains("a.rs"));
+        assert!(result.contains("b.rs"));
+    }
+
+    #[test]
+    fn test_condense_unified_diff_empty() {
+        let result = condense_unified_diff("");
+        assert!(result.is_empty());
+    }
+}

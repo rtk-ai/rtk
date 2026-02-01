@@ -187,16 +187,25 @@ main.rs:Commands enum
 
 ## Testing Strategy
 
-Tests are embedded in modules using `#[cfg(test)] mod tests`:
-- Unit tests validate filtering logic (filter.rs, grep_cmd.rs, etc.)
-- Integration tests verify command output transformations (git.rs, runner.rs)
-- Security tests ensure proper command sanitization (pnpm validation)
+### TDD Workflow (mandatory)
+All code follows Red-Green-Refactor. See `.claude/skills/rtk-tdd/` for the full workflow and Rust-idiomatic patterns. See `.claude/skills/rtk-tdd/references/testing-patterns.md` for RTK-specific patterns and untested module backlog.
 
-Run module-specific tests:
+### Test Architecture
+- **Unit tests**: Embedded `#[cfg(test)] mod tests` in each module (105+ tests, 25+ files)
+- **Smoke tests**: `scripts/test-all.sh` (69 assertions on all commands)
+- **Dominant pattern**: raw string input -> filter function -> assert output contains/excludes
+
+### Pre-commit gate
 ```bash
-cargo test filter::tests::
-cargo test git::tests::
-cargo test runner::tests::
+cargo fmt --all --check && cargo clippy --all-targets && cargo test
+```
+
+### Test commands
+```bash
+cargo test                    # All tests
+cargo test filter::tests::    # Module-specific
+cargo test -- --nocapture     # With stdout
+bash scripts/test-all.sh      # Smoke tests (installed binary required)
 ```
 
 ## Dependencies

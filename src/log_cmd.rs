@@ -172,9 +172,9 @@ mod tests {
     #[test]
     fn test_analyze_logs() {
         let logs = r#"
-2024-01-01 10:00:00 ERROR: Connection failed to server 192.168.1.1
-2024-01-01 10:00:01 ERROR: Connection failed to server 192.168.1.2
-2024-01-01 10:00:02 ERROR: Connection failed to server 192.168.1.3
+2024-01-01 10:00:00 ERROR: Connection failed to /api/server
+2024-01-01 10:00:01 ERROR: Connection failed to /api/server
+2024-01-01 10:00:02 ERROR: Connection failed to /api/server
 2024-01-01 10:00:03 WARN: Retrying connection
 2024-01-01 10:00:04 INFO: Connected
 "#;
