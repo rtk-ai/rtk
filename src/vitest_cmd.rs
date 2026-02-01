@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_filter_ansi_colors() {
-        let output = "\x1b[32m✓\x1b[0m \x1b[1mTests passed\x1b[22m\nTest Files  1 passed (1)\n Duration  100ms";
+        let output = "\x1b[32m✓\x1b[0m \x1b[1mTests passed\x1b[22m\nTest Files  1 passed (1)\n     Tests  5 passed (5)\n  Duration  100ms";
         let result = filter_vitest_output(output);
         assert!(!result.contains("\x1b["));
         assert!(result.contains("PASS (1) FAIL (0)"));
