@@ -368,6 +368,58 @@ Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass th
 - **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Complete guide to token savings analytics, temporal breakdowns, and data export
 - **[CLAUDE.md](CLAUDE.md)** - Claude Code integration instructions and project context
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture and development guide
+- **[SECURITY.md](SECURITY.md)** - Security policy, vulnerability reporting, and PR review process
+
+## For Maintainers
+
+### Security Review Workflow
+
+RTK implements a comprehensive 3-layer security review process for external PRs:
+
+#### Layer 1: Automated GitHub Action
+Every PR triggers `.github/workflows/security-check.yml`:
+- **Cargo audit**: CVE detection in dependencies
+- **Critical files alert**: Flags modifications to high-risk files (runner.rs, tracking.rs, Cargo.toml, workflows)
+- **Dangerous pattern scanning**: Shell injection, network operations, unsafe code, panic risks
+- **Dependency auditing**: Supply chain verification for new crates
+- **Clippy security lints**: Enforces Rust safety best practices
+
+Results appear in the PR's GitHub Actions summary.
+
+#### Layer 2: Claude Code Skill
+For comprehensive manual review, maintainers with [Claude Code](https://claude.ai/code) can use:
+
+```bash
+/rtk-pr-security <PR_NUMBER>
+```
+
+The skill performs:
+- **Critical files analysis**: Detects modifications to shell execution, validation, or CI/CD files
+- **Dangerous pattern detection**: Identifies shell injection, environment manipulation, exfiltration vectors
+- **Supply chain audit**: Verifies new dependencies on crates.io (downloads, maintainer, license)
+- **Semantic analysis**: Checks intent vs reality, logic bombs, code quality red flags
+- **Structured report generation**: Produces security assessment with risk level and verdict
+
+**Skill installation** (maintainers only):
+```bash
+# The skill is bundled in the rtk-pr-security directory
+# Copy to your Claude skills directory:
+cp -r ~/.claude/skills/rtk-pr-security ~/.claude/skills/
+```
+
+The skill includes:
+- `SKILL.md` - Workflow automation and usage guide
+- `critical-files.md` - RTK-specific file risk tiers with attack scenarios
+- `dangerous-patterns.md` - Regex patterns with exploitation examples
+- `checklist.md` - Manual review template
+
+#### Layer 3: Manual Review
+For PRs touching critical files or adding dependencies:
+- **2 maintainers required** for Cargo.toml, workflows, or Tier 1 files
+- **Isolated testing** recommended for high-risk changes
+- Follow the checklist in SECURITY.md
+
+See **[SECURITY.md](SECURITY.md)** for complete security policy and review guidelines.
 
 ## License
 
@@ -376,3 +428,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 ## Contributing
 
 Contributions welcome! Please open an issue or PR on GitHub.
+
+**For external contributors**: Your PR will undergo automated security review (see [SECURITY.md](SECURITY.md)). This protects RTK's shell execution capabilities against injection attacks and supply chain vulnerabilities.
