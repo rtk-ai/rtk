@@ -2,9 +2,14 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
 use std::process::Command;
+
+use crate::parser::{
+    emit_degradation_warning, emit_passthrough_warning, truncate_output, FormatMode,
+    OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+};
 use crate::tracking;
 
-/// Vitest JSON output structures
+/// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
 struct VitestJsonOutput {
     #[serde(rename = "testResults")]
@@ -15,27 +20,192 @@ struct VitestJsonOutput {
     num_passed_tests: usize,
     #[serde(rename = "numFailedTests")]
     num_failed_tests: usize,
+    #[serde(rename = "numPendingTests", default)]
+    num_pending_tests: usize,
     #[serde(rename = "startTime")]
-    _start_time: Option<u64>,
+    start_time: Option<u64>,
+    #[serde(rename = "endTime")]
+    end_time: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct VitestTestFile {
     name: String,
-    status: String,
     #[serde(rename = "assertionResults")]
     assertion_results: Vec<VitestTest>,
 }
 
 #[derive(Debug, Deserialize)]
 struct VitestTest {
-    #[serde(rename = "ancestorTitles")]
-    _ancestor_titles: Vec<String>,
     #[serde(rename = "fullName")]
     full_name: String,
     status: String,
     #[serde(rename = "failureMessages")]
     failure_messages: Vec<String>,
+}
+
+/// Parser for Vitest JSON output
+pub struct VitestParser;
+
+impl OutputParser for VitestParser {
+    type Output = TestResult;
+
+    fn parse(input: &str) -> ParseResult<TestResult> {
+        // Tier 1: Try JSON parsing
+        match serde_json::from_str::<VitestJsonOutput>(input) {
+            Ok(json) => {
+                let failures = extract_failures_from_json(&json);
+                let duration_ms = match (json.start_time, json.end_time) {
+                    (Some(start), Some(end)) => Some(end.saturating_sub(start)),
+                    _ => None,
+                };
+
+                let result = TestResult {
+                    total: json.num_total_tests,
+                    passed: json.num_passed_tests,
+                    failed: json.num_failed_tests,
+                    skipped: json.num_pending_tests,
+                    duration_ms,
+                    failures,
+                };
+
+                ParseResult::Full(result)
+            }
+            Err(e) => {
+                // Tier 2: Try regex extraction
+                match extract_stats_regex(input) {
+                    Some(result) => ParseResult::Degraded(
+                        result,
+                        vec![format!("JSON parse failed: {}", e)],
+                    ),
+                    None => {
+                        // Tier 3: Passthrough
+                        ParseResult::Passthrough(truncate_output(input, 500))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Extract failures from JSON structure
+fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
+    let mut failures = Vec::new();
+
+    for file in &json.test_results {
+        for test in &file.assertion_results {
+            if test.status == "failed" {
+                let error_message = test.failure_messages.join("\n");
+                failures.push(TestFailure {
+                    test_name: test.full_name.clone(),
+                    file_path: file.name.clone(),
+                    error_message,
+                    stack_trace: None,
+                });
+            }
+        }
+    }
+
+    failures
+}
+
+/// Tier 2: Extract test statistics using regex (degraded mode)
+fn extract_stats_regex(output: &str) -> Option<TestResult> {
+    lazy_static::lazy_static! {
+        static ref TEST_FILES_RE: Regex = Regex::new(
+            r"Test Files\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed"
+        ).unwrap();
+        static ref TESTS_RE: Regex = Regex::new(
+            r"Tests\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed"
+        ).unwrap();
+        static ref DURATION_RE: Regex = Regex::new(
+            r"Duration\s+([\d.]+)(ms|s)"
+        ).unwrap();
+    }
+
+    let clean_output = strip_ansi(output);
+
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut total = 0;
+
+    // Parse test counts
+    if let Some(caps) = TESTS_RE.captures(&clean_output) {
+        if let Some(fail_str) = caps.get(1) {
+            failed = fail_str.as_str().parse().unwrap_or(0);
+        }
+        if let Some(pass_str) = caps.get(2) {
+            passed = pass_str.as_str().parse().unwrap_or(0);
+        }
+        total = passed + failed;
+    }
+
+    // Parse duration
+    let duration_ms = DURATION_RE.captures(&clean_output).and_then(|caps| {
+        let value: f64 = caps[1].parse().ok()?;
+        let unit = &caps[2];
+        Some(if unit == "ms" {
+            value as u64
+        } else {
+            (value * 1000.0) as u64
+        })
+    });
+
+    // Only return if we found valid data
+    if total > 0 {
+        Some(TestResult {
+            total,
+            passed,
+            failed,
+            skipped: 0,
+            duration_ms,
+            failures: extract_failures_regex(&clean_output),
+        })
+    } else {
+        None
+    }
+}
+
+/// Extract failures using regex
+fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
+    let mut failures = Vec::new();
+    let lines: Vec<&str> = output.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+        if line.contains('✗') || line.contains("FAIL") {
+            let mut error_lines = vec![line.to_string()];
+            i += 1;
+
+            // Collect subsequent indented lines
+            while i < lines.len() && lines[i].starts_with("  ") {
+                error_lines.push(lines[i].trim().to_string());
+                i += 1;
+            }
+
+            if !error_lines.is_empty() {
+                failures.push(TestFailure {
+                    test_name: error_lines[0].clone(),
+                    file_path: String::new(),
+                    error_message: error_lines[1..].join("\n"),
+                    stack_trace: None,
+                });
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    failures
+}
+
+/// Strip ANSI escape sequences
+fn strip_ansi(text: &str) -> String {
+    lazy_static::lazy_static! {
+        static ref ANSI_RE: Regex = Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    }
+    ANSI_RE.replace_all(text, "").to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -64,217 +234,37 @@ fn run_vitest(args: &[String], verbose: u8) -> Result<()> {
     let output = cmd.output().context("Failed to run vitest")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-
-    // Vitest returns non-zero exit code when tests fail
-    // This is expected behavior for test runners
     let combined = format!("{}{}", stdout, stderr);
 
-    // Try JSON parsing first, fallback to regex
-    let filtered = match parse_vitest_json(&stdout) {
-        Ok(formatted) => formatted,
-        Err(e) => {
+    // Parse output using VitestParser
+    let parse_result = VitestParser::parse(&stdout);
+    let mode = FormatMode::from_verbosity(verbose);
+
+    let filtered = match parse_result {
+        ParseResult::Full(data) => {
             if verbose > 0 {
-                eprintln!("[RTK:DEGRADED] JSON parse failed ({}), using regex fallback", e);
+                eprintln!("vitest run (Tier 1: Full JSON parse)");
             }
-            filter_vitest_output(&combined)
+            data.format(mode)
+        }
+        ParseResult::Degraded(data, warnings) => {
+            if verbose > 0 {
+                emit_degradation_warning("vitest", &warnings.join(", "));
+            }
+            data.format(mode)
+        }
+        ParseResult::Passthrough(raw) => {
+            emit_passthrough_warning("vitest", "All parsing tiers failed");
+            raw
         }
     };
 
-    if verbose > 0 {
-        eprintln!("vitest run (filtered):");
-    }
-
     println!("{}", filtered);
 
-    tracking::track(
-        "vitest run",
-        "rtk vitest run",
-        &combined,
-        &filtered,
-    );
+    tracking::track("vitest run", "rtk vitest run", &combined, &filtered);
 
     // Propagate original exit code
     std::process::exit(output.status.code().unwrap_or(1))
-}
-
-/// Strip ANSI escape sequences from terminal output
-fn strip_ansi(text: &str) -> String {
-    // Match ANSI escape sequences: \x1b[...m
-    let ansi_regex = Regex::new(r"\x1b\[[0-9;]*m").unwrap();
-    ansi_regex.replace_all(text, "").to_string()
-}
-
-/// Parse Vitest JSON output and format compactly
-fn parse_vitest_json(json_str: &str) -> Result<String> {
-    let data: VitestJsonOutput = serde_json::from_str(json_str)
-        .context("Failed to parse Vitest JSON output")?;
-
-    let mut result = Vec::new();
-
-    // Summary line
-    result.push(format!(
-        "PASS ({}) FAIL ({})",
-        data.num_passed_tests, data.num_failed_tests
-    ));
-
-    // Failure details
-    if data.num_failed_tests > 0 {
-        result.push(String::new()); // Blank line
-        let mut failure_idx = 1;
-
-        for file in &data.test_results {
-            for test in &file.assertion_results {
-                if test.status == "failed" {
-                    result.push(format!("{}. ✗ {}", failure_idx, test.full_name));
-
-                    // Add first failure message only (compact)
-                    if let Some(msg) = test.failure_messages.first() {
-                        let lines: Vec<&str> = msg.lines().take(3).collect();
-                        for line in lines {
-                            result.push(format!("   {}", line.trim()));
-                        }
-                    }
-
-                    failure_idx += 1;
-                }
-            }
-        }
-    }
-
-    Ok(result.join("\n"))
-}
-
-/// Extract test statistics from Vitest output
-#[derive(Debug, Default)]
-struct TestStats {
-    pass: usize,
-    fail: usize,
-    total: usize,
-    duration: String,
-}
-
-fn parse_test_stats(output: &str) -> TestStats {
-    let mut stats = TestStats::default();
-
-    // Strip ANSI first for easier parsing
-    let clean_output = strip_ansi(output);
-
-    // Pattern: "Test Files  X failed | Y passed | Z skipped (T)"
-    // Or: "Test Files  Y passed (T)" when no failures
-    if let Some(caps) = Regex::new(r"Test Files\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed").unwrap().captures(&clean_output) {
-        if let Some(fail_str) = caps.get(1) {
-            stats.fail = fail_str.as_str().parse().unwrap_or(0);
-        }
-        if let Some(pass_str) = caps.get(2) {
-            stats.pass = pass_str.as_str().parse().unwrap_or(0);
-        }
-    }
-
-    // Pattern: "Tests  X failed | Y passed (T)"
-    // Capture total passed count from Tests line
-    if let Some(caps) = Regex::new(r"Tests\s+(?:\d+\s+failed\s+\|\s+)?(\d+)\s+passed").unwrap().captures(&clean_output) {
-        if let Some(total_str) = caps.get(1) {
-            stats.total = total_str.as_str().parse().unwrap_or(0);
-        }
-    }
-
-    // Pattern: "Duration  3.05s" (with optional details in parens)
-    if let Some(caps) = Regex::new(r"Duration\s+([\d.]+[ms]+)").unwrap().captures(&clean_output) {
-        if let Some(duration_str) = caps.get(1) {
-            stats.duration = duration_str.as_str().to_string();
-        }
-    }
-
-    stats
-}
-
-/// Extract failure details from Vitest output
-fn extract_failures(output: &str) -> Vec<String> {
-    let mut failures = Vec::new();
-    let clean_output = strip_ansi(output);
-
-    // Look for FAIL markers and extract test names + error messages
-    let lines: Vec<&str> = clean_output.lines().collect();
-    let mut in_failure = false;
-    let mut current_failure = String::new();
-
-    for line in lines {
-        // Start of failure block: "✗ test_name"
-        if line.contains('✗') || line.contains("FAIL") {
-            if !current_failure.is_empty() {
-                failures.push(current_failure.trim().to_string());
-            }
-            current_failure = line.to_string();
-            in_failure = true;
-            continue;
-        }
-
-        // Collect error details (indented lines after ✗)
-        if in_failure {
-            if line.trim().is_empty() || line.starts_with(" Test Files") || line.starts_with(" Tests") {
-                in_failure = false;
-                if !current_failure.is_empty() {
-                    failures.push(current_failure.trim().to_string());
-                    current_failure.clear();
-                }
-            } else if line.starts_with("  ") {
-                current_failure.push('\n');
-                current_failure.push_str(line.trim());
-            }
-        }
-    }
-
-    // Push last failure if exists
-    if !current_failure.is_empty() {
-        failures.push(current_failure.trim().to_string());
-    }
-
-    failures
-}
-
-/// Filter Vitest output - show summary + failures only
-fn filter_vitest_output(output: &str) -> String {
-    let stats = parse_test_stats(output);
-    let failures = extract_failures(output);
-
-    let mut result = Vec::new();
-
-    // Summary line
-    if stats.total > 0 {
-        result.push(format!("PASS ({}) FAIL ({})", stats.pass, stats.fail));
-    }
-
-    // Failure details
-    if !failures.is_empty() {
-        result.push(String::new()); // Blank line
-        for (idx, failure) in failures.iter().enumerate() {
-            result.push(format!("{}. {}", idx + 1, failure));
-        }
-    }
-
-    // Timing
-    if !stats.duration.is_empty() {
-        result.push(String::new());
-        result.push(format!("Time: {}", stats.duration));
-    }
-
-    // If parsing failed, return cleaned output (fallback)
-    if result.len() <= 1 {
-        return strip_ansi(output)
-            .lines()
-            .filter(|line| {
-                // Keep only meaningful lines
-                let trimmed = line.trim();
-                !trimmed.is_empty()
-                    && !trimmed.starts_with("│")
-                    && !trimmed.starts_with("├")
-                    && !trimmed.starts_with("└")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-
-    result.join("\n")
 }
 
 #[cfg(test)]
@@ -282,103 +272,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_vitest_parser_json() {
+        let json = r#"{
+            "numTotalTests": 13,
+            "numPassedTests": 13,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "testResults": [],
+            "startTime": 1000,
+            "endTime": 1450
+        }"#;
+
+        let result = VitestParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.total, 13);
+        assert_eq!(data.passed, 13);
+        assert_eq!(data.failed, 0);
+        assert_eq!(data.duration_ms, Some(450));
+    }
+
+    #[test]
+    fn test_vitest_parser_regex_fallback() {
+        let text = r#"
+ Test Files  2 passed (2)
+      Tests  13 passed (13)
+   Duration  450ms
+        "#;
+
+        let result = VitestParser::parse(text);
+        assert_eq!(result.tier(), 2); // Degraded
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.passed, 13);
+        assert_eq!(data.failed, 0);
+    }
+
+    #[test]
+    fn test_vitest_parser_passthrough() {
+        let invalid = "random output with no structure";
+        let result = VitestParser::parse(invalid);
+        assert_eq!(result.tier(), 3); // Passthrough
+        assert!(!result.is_ok());
+    }
+
+    #[test]
     fn test_strip_ansi() {
         let input = "\x1b[32m✓\x1b[0m test passed";
         let output = strip_ansi(input);
         assert_eq!(output, "✓ test passed");
         assert!(!output.contains("\x1b"));
-    }
-
-    #[test]
-    fn test_parse_test_stats_success() {
-        let output = r#"
- ✓ src/auth.test.ts (5)
- ✓ src/utils.test.ts (8)
-
- Test Files  2 passed (2)
-      Tests  13 passed (13)
-   Duration  450ms
-"#;
-        let stats = parse_test_stats(output);
-        assert_eq!(stats.pass, 2);
-        assert_eq!(stats.fail, 0);
-        assert_eq!(stats.total, 13);
-        assert_eq!(stats.duration, "450ms");
-    }
-
-    #[test]
-    fn test_parse_test_stats_failures() {
-        let output = r#"
- ✓ src/auth.test.ts (5)
- ✗ src/utils.test.ts (8) 2 failed
-
- Test Files  1 failed | 1 passed (2)
-      Tests  2 failed | 11 passed (13)
-   Duration  520ms
-"#;
-        let stats = parse_test_stats(output);
-        assert_eq!(stats.pass, 1);
-        assert_eq!(stats.fail, 1);
-        assert_eq!(stats.total, 11); // Only passed count in this pattern
-    }
-
-    #[test]
-    fn test_extract_failures() {
-        let output = r#"
- ✗ test_edge_case
-   AssertionError: expected 10 to equal 5
-     at src/lib.rs:42
-
- ✗ test_overflow
-   Panic: overflow at src/utils.rs:18
-"#;
-        let failures = extract_failures(output);
-        assert_eq!(failures.len(), 2);
-        assert!(failures[0].contains("test_edge_case"));
-        assert!(failures[0].contains("AssertionError"));
-        assert!(failures[1].contains("test_overflow"));
-        assert!(failures[1].contains("Panic"));
-    }
-
-    #[test]
-    fn test_filter_vitest_output_all_pass() {
-        let output = r#"
- ✓ src/auth.test.ts (5)
- ✓ src/utils.test.ts (8)
-
- Test Files  2 passed (2)
-      Tests  13 passed (13)
-   Duration  450ms
-"#;
-        let result = filter_vitest_output(output);
-        assert!(result.contains("PASS (2) FAIL (0)"));
-        assert!(result.contains("Time: 450ms"));
-        assert!(!result.contains("✓")); // Stripped
-    }
-
-    #[test]
-    fn test_filter_vitest_output_with_failures() {
-        let output = r#"
- ✓ src/auth.test.ts (5)
- ✗ src/utils.test.ts (8)
-   ✗ test_parse_invalid
-     Expected: valid | Received: invalid
-
- Test Files  1 failed | 1 passed (2)
-      Tests  1 failed | 12 passed (13)
-   Duration  520ms
-"#;
-        let result = filter_vitest_output(output);
-        assert!(result.contains("PASS (1) FAIL (1)"));
-        assert!(result.contains("test_parse_invalid"));
-        assert!(result.contains("Time: 520ms"));
-    }
-
-    #[test]
-    fn test_filter_ansi_colors() {
-        let output = "\x1b[32m✓\x1b[0m \x1b[1mTests passed\x1b[22m\nTest Files  1 passed (1)\n     Tests  5 passed (5)\n  Duration  100ms";
-        let result = filter_vitest_output(output);
-        assert!(!result.contains("\x1b["));
-        assert!(result.contains("PASS (1) FAIL (0)"));
     }
 }

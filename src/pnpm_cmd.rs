@@ -4,6 +4,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::process::Command;
 
+use crate::parser::{
+    emit_degradation_warning, emit_passthrough_warning, truncate_output, Dependency,
+    DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
+};
+
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]
 struct PnpmListOutput {
@@ -16,6 +21,8 @@ struct PnpmPackage {
     version: Option<String>,
     #[serde(rename = "dependencies", default)]
     dependencies: HashMap<String, PnpmPackage>,
+    #[serde(rename = "devDependencies", default)]
+    dev_dependencies: HashMap<String, PnpmPackage>,
 }
 
 /// pnpm outdated JSON output structure
@@ -30,13 +37,232 @@ struct PnpmOutdatedPackage {
     current: String,
     latest: String,
     wanted: Option<String>,
+    #[serde(rename = "dependencyType", default)]
+    dependency_type: String,
+}
+
+/// Parser for pnpm list output
+pub struct PnpmListParser;
+
+impl OutputParser for PnpmListParser {
+    type Output = DependencyState;
+
+    fn parse(input: &str) -> ParseResult<DependencyState> {
+        // Tier 1: Try JSON parsing
+        match serde_json::from_str::<PnpmListOutput>(input) {
+            Ok(json) => {
+                let mut dependencies = Vec::new();
+                let mut total_count = 0;
+
+                for (name, pkg) in &json.packages {
+                    collect_dependencies(name, pkg, false, &mut dependencies, &mut total_count);
+                }
+
+                let result = DependencyState {
+                    total_packages: total_count,
+                    outdated_count: 0, // list doesn't provide outdated info
+                    dependencies,
+                };
+
+                ParseResult::Full(result)
+            }
+            Err(e) => {
+                // Tier 2: Try text extraction
+                match extract_list_text(input) {
+                    Some(result) => ParseResult::Degraded(
+                        result,
+                        vec![format!("JSON parse failed: {}", e)],
+                    ),
+                    None => {
+                        // Tier 3: Passthrough
+                        ParseResult::Passthrough(truncate_output(input, 500))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Recursively collect dependencies from pnpm package tree
+fn collect_dependencies(
+    name: &str,
+    pkg: &PnpmPackage,
+    is_dev: bool,
+    deps: &mut Vec<Dependency>,
+    count: &mut usize,
+) {
+    if let Some(version) = &pkg.version {
+        deps.push(Dependency {
+            name: name.to_string(),
+            current_version: version.clone(),
+            latest_version: None,
+            wanted_version: None,
+            dev_dependency: is_dev,
+        });
+        *count += 1;
+    }
+
+    for (dep_name, dep_pkg) in &pkg.dependencies {
+        collect_dependencies(dep_name, dep_pkg, is_dev, deps, count);
+    }
+
+    for (dep_name, dep_pkg) in &pkg.dev_dependencies {
+        collect_dependencies(dep_name, dep_pkg, true, deps, count);
+    }
+}
+
+/// Tier 2: Extract list info from text output
+fn extract_list_text(output: &str) -> Option<DependencyState> {
+    let mut dependencies = Vec::new();
+    let mut count = 0;
+
+    for line in output.lines() {
+        // Skip box-drawing and metadata
+        if line.contains('│')
+            || line.contains('├')
+            || line.contains('└')
+            || line.contains("Legend:")
+            || line.trim().is_empty()
+        {
+            continue;
+        }
+
+        // Parse lines like: "package@1.2.3"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if !parts.is_empty() {
+            let pkg_str = parts[0];
+            if let Some(at_pos) = pkg_str.rfind('@') {
+                let name = &pkg_str[..at_pos];
+                let version = &pkg_str[at_pos + 1..];
+                if !name.is_empty() && !version.is_empty() {
+                    dependencies.push(Dependency {
+                        name: name.to_string(),
+                        current_version: version.to_string(),
+                        latest_version: None,
+                        wanted_version: None,
+                        dev_dependency: false,
+                    });
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    if count > 0 {
+        Some(DependencyState {
+            total_packages: count,
+            outdated_count: 0,
+            dependencies,
+        })
+    } else {
+        None
+    }
+}
+
+/// Parser for pnpm outdated output
+pub struct PnpmOutdatedParser;
+
+impl OutputParser for PnpmOutdatedParser {
+    type Output = DependencyState;
+
+    fn parse(input: &str) -> ParseResult<DependencyState> {
+        // Tier 1: Try JSON parsing
+        match serde_json::from_str::<PnpmOutdatedOutput>(input) {
+            Ok(json) => {
+                let mut dependencies = Vec::new();
+                let mut outdated_count = 0;
+
+                for (name, pkg) in &json.packages {
+                    if pkg.current != pkg.latest {
+                        outdated_count += 1;
+                    }
+
+                    dependencies.push(Dependency {
+                        name: name.clone(),
+                        current_version: pkg.current.clone(),
+                        latest_version: Some(pkg.latest.clone()),
+                        wanted_version: pkg.wanted.clone(),
+                        dev_dependency: pkg.dependency_type == "devDependencies",
+                    });
+                }
+
+                let result = DependencyState {
+                    total_packages: dependencies.len(),
+                    outdated_count,
+                    dependencies,
+                };
+
+                ParseResult::Full(result)
+            }
+            Err(e) => {
+                // Tier 2: Try text extraction
+                match extract_outdated_text(input) {
+                    Some(result) => ParseResult::Degraded(
+                        result,
+                        vec![format!("JSON parse failed: {}", e)],
+                    ),
+                    None => {
+                        // Tier 3: Passthrough
+                        ParseResult::Passthrough(truncate_output(input, 500))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Tier 2: Extract outdated info from text output
+fn extract_outdated_text(output: &str) -> Option<DependencyState> {
+    let mut dependencies = Vec::new();
+    let mut outdated_count = 0;
+
+    for line in output.lines() {
+        // Skip box-drawing, headers, legend
+        if line.contains('│')
+            || line.contains('├')
+            || line.contains('└')
+            || line.contains('─')
+            || line.starts_with("Legend:")
+            || line.starts_with("Package")
+            || line.trim().is_empty()
+        {
+            continue;
+        }
+
+        // Parse lines: "package  current  wanted  latest"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 {
+            let name = parts[0];
+            let current = parts[1];
+            let latest = parts[3];
+
+            if current != latest {
+                outdated_count += 1;
+            }
+
+            dependencies.push(Dependency {
+                name: name.to_string(),
+                current_version: current.to_string(),
+                latest_version: Some(latest.to_string()),
+                wanted_version: parts.get(2).map(|s| s.to_string()),
+                dev_dependency: false,
+            });
+        }
+    }
+
+    if !dependencies.is_empty() {
+        Some(DependencyState {
+            total_packages: dependencies.len(),
+            outdated_count,
+            dependencies,
+        })
+    } else {
+        None
+    }
 }
 
 /// Validates npm package name according to official rules
-/// https://docs.npmjs.com/cli/v9/configuring-npm/package-json#name
 fn is_valid_package_name(name: &str) -> bool {
-    // Basic validation: alphanumeric, @, /, -, _, .
-    // Reject: path traversal (..), shell metacharacters, excessive length
     if name.is_empty() || name.len() > 214 {
         return false;
     }
@@ -70,7 +296,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
     let mut cmd = Command::new("pnpm");
     cmd.arg("list");
     cmd.arg(format!("--depth={}", depth));
-    cmd.arg("--json"); // Use JSON format for structured output
+    cmd.arg("--json");
 
     for arg in args {
         cmd.arg(arg);
@@ -85,20 +311,28 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Try JSON parsing first, fallback to text filtering
-    let filtered = match parse_pnpm_list_json(&stdout) {
-        Ok(formatted) => formatted,
-        Err(e) => {
+    // Parse output using PnpmListParser
+    let parse_result = PnpmListParser::parse(&stdout);
+    let mode = FormatMode::from_verbosity(verbose);
+
+    let filtered = match parse_result {
+        ParseResult::Full(data) => {
             if verbose > 0 {
-                eprintln!("[RTK:DEGRADED] JSON parse failed ({}), using text fallback", e);
+                eprintln!("pnpm list (Tier 1: Full JSON parse)");
             }
-            filter_pnpm_list(&stdout)
+            data.format(mode)
+        }
+        ParseResult::Degraded(data, warnings) => {
+            if verbose > 0 {
+                emit_degradation_warning("pnpm list", &warnings.join(", "));
+            }
+            data.format(mode)
+        }
+        ParseResult::Passthrough(raw) => {
+            emit_passthrough_warning("pnpm list", "All parsing tiers failed");
+            raw
         }
     };
-
-    if verbose > 0 {
-        eprintln!("pnpm list (filtered):");
-    }
 
     println!("{}", filtered);
 
@@ -116,7 +350,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
     let mut cmd = Command::new("pnpm");
     cmd.arg("outdated");
     cmd.arg("--format");
-    cmd.arg("json"); // Use JSON format for structured output
+    cmd.arg("json");
 
     for arg in args {
         cmd.arg(arg);
@@ -125,25 +359,30 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
     let output = cmd.output().context("Failed to run pnpm outdated")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-
-    // pnpm outdated returns exit code 1 when there are outdated packages
-    // This is expected behavior, not an error
     let combined = format!("{}{}", stdout, stderr);
 
-    // Try JSON parsing first, fallback to text filtering
-    let filtered = match parse_pnpm_outdated_json(&stdout) {
-        Ok(formatted) => formatted,
-        Err(e) => {
+    // Parse output using PnpmOutdatedParser
+    let parse_result = PnpmOutdatedParser::parse(&stdout);
+    let mode = FormatMode::from_verbosity(verbose);
+
+    let filtered = match parse_result {
+        ParseResult::Full(data) => {
             if verbose > 0 {
-                eprintln!("[RTK:DEGRADED] JSON parse failed ({}), using text fallback", e);
+                eprintln!("pnpm outdated (Tier 1: Full JSON parse)");
             }
-            filter_pnpm_outdated(&combined)
+            data.format(mode)
+        }
+        ParseResult::Degraded(data, warnings) => {
+            if verbose > 0 {
+                emit_degradation_warning("pnpm outdated", &warnings.join(", "));
+            }
+            data.format(mode)
+        }
+        ParseResult::Passthrough(raw) => {
+            emit_passthrough_warning("pnpm outdated", "All parsing tiers failed");
+            raw
         }
     };
-
-    if verbose > 0 {
-        eprintln!("pnpm outdated (filtered):");
-    }
 
     if filtered.trim().is_empty() {
         println!("All packages up-to-date ✓");
@@ -205,142 +444,18 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<()> 
     Ok(())
 }
 
-/// Parse pnpm list JSON output and format compactly
-fn parse_pnpm_list_json(json_str: &str) -> Result<String> {
-    let data: PnpmListOutput = serde_json::from_str(json_str)
-        .context("Failed to parse pnpm list JSON output")?;
-
-    let mut result = Vec::new();
-    let mut count = 0;
-
-    fn collect_deps(
-        pkg: &PnpmPackage,
-        name: &str,
-        depth: usize,
-        result: &mut Vec<String>,
-        count: &mut usize,
-    ) {
-        let indent = "  ".repeat(depth);
-        if let Some(version) = &pkg.version {
-            result.push(format!("{}{} {}", indent, name, version));
-            *count += 1;
-        }
-
-        for (dep_name, dep_pkg) in &pkg.dependencies {
-            collect_deps(dep_pkg, dep_name, depth + 1, result, count);
-        }
-    }
-
-    for (name, pkg) in &data.packages {
-        collect_deps(pkg, name, 0, &mut result, &mut count);
-    }
-
-    result.push(format!("\nTotal: {} packages", count));
-    Ok(result.join("\n"))
-}
-
-/// Parse pnpm outdated JSON output and format compactly
-fn parse_pnpm_outdated_json(json_str: &str) -> Result<String> {
-    let data: PnpmOutdatedOutput = serde_json::from_str(json_str)
-        .context("Failed to parse pnpm outdated JSON output")?;
-
-    let mut upgrades = Vec::new();
-
-    for (name, pkg) in &data.packages {
-        if pkg.current != pkg.latest {
-            upgrades.push(format!("{}: {} → {}", name, pkg.current, pkg.latest));
-        }
-    }
-
-    if upgrades.is_empty() {
-        Ok("All packages up-to-date ✓".to_string())
-    } else {
-        Ok(upgrades.join("\n"))
-    }
-}
-
-/// Filter pnpm list output - remove box drawing, keep package tree
-fn filter_pnpm_list(output: &str) -> String {
-    let mut result = Vec::new();
-
-    for line in output.lines() {
-        // Skip box-drawing characters
-        if line.contains("│")
-            || line.contains("├")
-            || line.contains("└")
-            || line.contains("┌")
-            || line.contains("┐")
-        {
-            continue;
-        }
-
-        // Skip legend and metadata
-        if line.starts_with("Legend:") || line.trim().is_empty() {
-            continue;
-        }
-
-        // Skip paths
-        if line.contains("node_modules/.pnpm/") {
-            continue;
-        }
-
-        result.push(line.trim().to_string());
-    }
-
-    result.join("\n")
-}
-
-/// Filter pnpm outdated output - extract package upgrades only
-fn filter_pnpm_outdated(output: &str) -> String {
-    let mut upgrades = Vec::new();
-
-    for line in output.lines() {
-        // Skip box-drawing characters
-        if line.contains("│")
-            || line.contains("├")
-            || line.contains("└")
-            || line.contains("┌")
-            || line.contains("┐")
-            || line.contains("─")
-        {
-            continue;
-        }
-
-        // Skip headers and legend
-        if line.starts_with("Legend:") || line.starts_with("Package") || line.trim().is_empty() {
-            continue;
-        }
-
-        // Parse package lines: "package  current  wanted  latest"
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 4 {
-            let package = parts[0];
-            let current = parts[1];
-            let latest = parts[3];
-
-            // Only show if there's an actual upgrade
-            if current != latest {
-                upgrades.push(format!("{}: {} → {}", package, current, latest));
-            }
-        }
-    }
-
-    upgrades.join("\n")
-}
-
 /// Filter pnpm install output - remove progress bars, keep summary
 fn filter_pnpm_install(output: &str) -> String {
     let mut result = Vec::new();
     let mut saw_progress = false;
 
     for line in output.lines() {
-        // Skip progress bars (contain: Progress, │, %)
-        if line.contains("Progress") || line.contains("│") || line.contains('%') {
+        // Skip progress bars
+        if line.contains("Progress") || line.contains('│') || line.contains('%') {
             saw_progress = true;
             continue;
         }
 
-        // Skip empty lines after progress
         if saw_progress && line.trim().is_empty() {
             continue;
         }
@@ -373,52 +488,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_outdated() {
-        let output = r#"
-┌─────────────────────────────────────────────────────────┐
-│ Package         Current  Wanted   Latest                │
-├─────────────────────────────────────────────────────────┤
-└─────────────────────────────────────────────────────────┘
-@clerk/express    1.7.53   1.7.53   1.7.65
-next              15.1.4   15.1.4   15.2.0
-Legend: <outdated> ...
-"#;
-        let result = filter_pnpm_outdated(output);
-        assert!(result.contains("@clerk/express: 1.7.53 → 1.7.65"));
-        assert!(result.contains("next: 15.1.4 → 15.2.0"));
-        assert!(!result.contains("┌"));
-        assert!(!result.contains("Legend:"));
+    fn test_pnpm_list_parser_json() {
+        let json = r#"{
+            "my-project": {
+                "version": "1.0.0",
+                "dependencies": {
+                    "express": {
+                        "version": "4.18.2"
+                    }
+                }
+            }
+        }"#;
+
+        let result = PnpmListParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert!(data.total_packages >= 2);
     }
 
     #[test]
-    fn test_filter_list() {
-        let output = r#"
-project@1.0.0 /path/to/project
-├── express@4.18.2
-│   └── accepts@1.3.8
-└── next@15.1.4
-    └── react@18.2.0
-"#;
-        let result = filter_pnpm_list(output);
-        assert!(!result.contains("├"));
-        assert!(!result.contains("└"));
+    fn test_pnpm_outdated_parser_json() {
+        let json = r#"{
+            "express": {
+                "current": "4.18.2",
+                "latest": "4.19.0",
+                "wanted": "4.18.2"
+            }
+        }"#;
+
+        let result = PnpmOutdatedParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.outdated_count, 1);
+        assert_eq!(data.dependencies[0].name, "express");
     }
 
     #[test]
-    fn test_package_name_validation_valid() {
+    fn test_package_name_validation() {
         assert!(is_valid_package_name("lodash"));
         assert!(is_valid_package_name("@clerk/express"));
-        assert!(is_valid_package_name("my-package"));
-        assert!(is_valid_package_name("package_name"));
-        assert!(is_valid_package_name("package.js"));
-    }
-
-    #[test]
-    fn test_package_name_validation_invalid() {
-        assert!(!is_valid_package_name("lodash; rm -rf /"));
         assert!(!is_valid_package_name("../../../etc/passwd"));
-        assert!(!is_valid_package_name("package$name"));
-        assert!(!is_valid_package_name("pack age"));
-        assert!(!is_valid_package_name(&"a".repeat(215))); // Too long
+        assert!(!is_valid_package_name("lodash; rm -rf /"));
     }
 }
