@@ -138,6 +138,9 @@ assert_ok      "rtk read --max-lines 5 Cargo.toml" rtk read --max-lines 5 Cargo.
 section "Git (existing)"
 
 assert_ok      "rtk git status"               rtk git status
+assert_ok      "rtk git status --short"       rtk git status --short
+assert_ok      "rtk git status -s"            rtk git status -s
+assert_ok      "rtk git status --porcelain"   rtk git status --porcelain
 assert_ok      "rtk git log"                  rtk git log
 assert_ok      "rtk git log -5"               rtk git log -- -5
 assert_ok      "rtk git diff"                 rtk git diff

@@ -22,7 +22,7 @@ pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: 
     match cmd {
         GitCommand::Diff => run_diff(args, max_lines, verbose),
         GitCommand::Log => run_log(args, max_lines, verbose),
-        GitCommand::Status => run_status(verbose),
+        GitCommand::Status => run_status(args, verbose),
         GitCommand::Show => run_show(args, max_lines, verbose),
         GitCommand::Add { files } => run_add(&files, verbose),
         GitCommand::Commit { message } => run_commit(&message, verbose),
@@ -313,40 +313,21 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
     Ok(())
 }
 
-fn run_status(_verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    // Get raw git status for tracking
-    let raw_output = Command::new("git")
-        .args(["status"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-
-    let output = Command::new("git")
-        .args(["status", "--porcelain", "-b"])
-        .output()
-        .context("Failed to run git status")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
+/// Format porcelain output into compact RTK status display
+fn format_status_output(porcelain: &str) -> String {
+    let lines: Vec<&str> = porcelain.lines().collect();
 
     if lines.is_empty() {
-        println!("Clean working tree");
-        timer.track(
-            "git status",
-            "rtk git status",
-            &raw_output,
-            "Clean working tree",
-        );
-        return Ok(());
+        return "Clean working tree".to_string();
     }
+
+    let mut output = String::new();
 
     // Parse branch info
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
-            println!("📌 {}", branch);
+            output.push_str(&format!("📌 {}\n", branch));
         }
     }
 
@@ -390,47 +371,95 @@ fn run_status(_verbose: u8) -> Result<()> {
         }
     }
 
-    // Print summary
+    // Build summary
     if staged > 0 {
-        println!("✅ Staged: {} files", staged);
+        output.push_str(&format!("✅ Staged: {} files\n", staged));
         for f in staged_files.iter().take(5) {
-            println!("   {}", f);
+            output.push_str(&format!("   {}\n", f));
         }
         if staged_files.len() > 5 {
-            println!("   ... +{} more", staged_files.len() - 5);
+            output.push_str(&format!("   ... +{} more\n", staged_files.len() - 5));
         }
     }
 
     if modified > 0 {
-        println!("📝 Modified: {} files", modified);
+        output.push_str(&format!("📝 Modified: {} files\n", modified));
         for f in modified_files.iter().take(5) {
-            println!("   {}", f);
+            output.push_str(&format!("   {}\n", f));
         }
         if modified_files.len() > 5 {
-            println!("   ... +{} more", modified_files.len() - 5);
+            output.push_str(&format!("   ... +{} more\n", modified_files.len() - 5));
         }
     }
 
     if untracked > 0 {
-        println!("❓ Untracked: {} files", untracked);
+        output.push_str(&format!("❓ Untracked: {} files\n", untracked));
         for f in untracked_files.iter().take(3) {
-            println!("   {}", f);
+            output.push_str(&format!("   {}\n", f));
         }
         if untracked_files.len() > 3 {
-            println!("   ... +{} more", untracked_files.len() - 3);
+            output.push_str(&format!("   ... +{} more\n", untracked_files.len() - 3));
         }
     }
 
     if conflicts > 0 {
-        println!("⚠️  Conflicts: {} files", conflicts);
+        output.push_str(&format!("⚠️  Conflicts: {} files\n", conflicts));
     }
 
-    // Estimate output size for tracking
-    let rtk_output = format!(
-        "branch + {} staged + {} modified + {} untracked",
-        staged, modified, untracked
-    );
-    timer.track("git status", "rtk git status", &raw_output, &rtk_output);
+    output.trim_end().to_string()
+}
+
+fn run_status(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    // If user provided flags, pass through to git without RTK formatting
+    if !args.is_empty() {
+        let output = Command::new("git")
+            .arg("status")
+            .args(args)
+            .output()
+            .context("Failed to run git status")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if verbose > 0 || !stderr.is_empty() {
+            eprint!("{}", stderr);
+        }
+
+        print!("{}", stdout);
+
+        // Track passthrough mode
+        timer.track(
+            &format!("git status {}", args.join(" ")),
+            &format!("rtk git status {} (passthrough)", args.join(" ")),
+            &stdout,
+            &stdout,
+        );
+
+        return Ok(());
+    }
+
+    // Default RTK compact mode (no args provided)
+    // Get raw git status for tracking
+    let raw_output = Command::new("git")
+        .args(["status"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "-b"])
+        .output()
+        .context("Failed to run git status")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let formatted = format_status_output(&stdout);
+
+    println!("{}", formatted);
+
+    // Track for statistics
+    timer.track("git status", "rtk git status", &raw_output, &formatted);
 
     Ok(())
 }
@@ -1035,5 +1064,76 @@ mod tests {
         assert!(result.contains("abc1234"));
         assert!(result.contains("[main]"));
         assert!(result.contains("[feature]"));
+    }
+
+    #[test]
+    fn test_format_status_output_clean() {
+        let porcelain = "";
+        let result = format_status_output(porcelain);
+        assert_eq!(result, "Clean working tree");
+    }
+
+    #[test]
+    fn test_format_status_output_modified_files() {
+        let porcelain = "## main...origin/main\n M src/main.rs\n M src/lib.rs\n";
+        let result = format_status_output(porcelain);
+        assert!(result.contains("📌 main...origin/main"));
+        assert!(result.contains("📝 Modified: 2 files"));
+        assert!(result.contains("src/main.rs"));
+        assert!(result.contains("src/lib.rs"));
+        assert!(!result.contains("Staged"));
+        assert!(!result.contains("Untracked"));
+    }
+
+    #[test]
+    fn test_format_status_output_untracked_files() {
+        let porcelain = "## feature/new\n?? temp.txt\n?? debug.log\n?? test.sh\n";
+        let result = format_status_output(porcelain);
+        assert!(result.contains("📌 feature/new"));
+        assert!(result.contains("❓ Untracked: 3 files"));
+        assert!(result.contains("temp.txt"));
+        assert!(result.contains("debug.log"));
+        assert!(result.contains("test.sh"));
+        assert!(!result.contains("Modified"));
+    }
+
+    #[test]
+    fn test_format_status_output_mixed_changes() {
+        let porcelain = r#"## main
+M  staged.rs
+ M modified.rs
+A  added.rs
+?? untracked.txt
+"#;
+        let result = format_status_output(porcelain);
+        assert!(result.contains("📌 main"));
+        assert!(result.contains("✅ Staged: 2 files"));
+        assert!(result.contains("staged.rs"));
+        assert!(result.contains("added.rs"));
+        assert!(result.contains("📝 Modified: 1 files"));
+        assert!(result.contains("modified.rs"));
+        assert!(result.contains("❓ Untracked: 1 files"));
+        assert!(result.contains("untracked.txt"));
+    }
+
+    #[test]
+    fn test_format_status_output_truncation() {
+        // Test that >5 staged files show "... +N more"
+        let porcelain = r#"## main
+M  file1.rs
+M  file2.rs
+M  file3.rs
+M  file4.rs
+M  file5.rs
+M  file6.rs
+M  file7.rs
+"#;
+        let result = format_status_output(porcelain);
+        assert!(result.contains("✅ Staged: 7 files"));
+        assert!(result.contains("file1.rs"));
+        assert!(result.contains("file5.rs"));
+        assert!(result.contains("... +2 more"));
+        assert!(!result.contains("file6.rs"));
+        assert!(!result.contains("file7.rs"));
     }
 }

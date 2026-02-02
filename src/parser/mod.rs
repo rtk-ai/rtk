@@ -103,7 +103,8 @@ pub fn truncate_output(output: &str, max_chars: usize) -> String {
     }
 
     let truncated = &output[..max_chars];
-    format!("{}\n\n[RTK:PASSTHROUGH] Output truncated ({} chars → {} chars)",
+    format!(
+        "{}\n\n[RTK:PASSTHROUGH] Output truncated ({} chars → {} chars)",
         truncated,
         output.len(),
         max_chars
