@@ -6,7 +6,12 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::process::Command;
 
-/// Playwright JSON output structures
+use crate::parser::{
+    emit_degradation_warning, emit_passthrough_warning, truncate_output, FormatMode,
+    OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+};
+
+/// Playwright JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
 struct PlaywrightJsonOutput {
     #[serde(rename = "stats")]
@@ -18,11 +23,13 @@ struct PlaywrightJsonOutput {
 #[derive(Debug, Deserialize)]
 struct PlaywrightStats {
     #[serde(rename = "expected")]
-    _expected: usize,
+    expected: usize,
     #[serde(rename = "unexpected")]
     unexpected: usize,
     #[serde(rename = "skipped")]
-    _skipped: usize,
+    skipped: usize,
+    #[serde(rename = "duration", default)]
+    duration: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,11 +56,167 @@ struct PlaywrightTestResult {
     status: String,
     #[serde(rename = "error")]
     error: Option<PlaywrightError>,
+    #[serde(rename = "duration", default)]
+    duration: u64,
 }
 
 #[derive(Debug, Deserialize)]
 struct PlaywrightError {
     message: String,
+}
+
+/// Parser for Playwright JSON output
+pub struct PlaywrightParser;
+
+impl OutputParser for PlaywrightParser {
+    type Output = TestResult;
+
+    fn parse(input: &str) -> ParseResult<TestResult> {
+        // Tier 1: Try JSON parsing
+        match serde_json::from_str::<PlaywrightJsonOutput>(input) {
+            Ok(json) => {
+                let mut failures = Vec::new();
+                let mut total = 0;
+                collect_test_results(&json.suites, &mut total, &mut failures);
+
+                let result = TestResult {
+                    total,
+                    passed: json.stats.expected,
+                    failed: json.stats.unexpected,
+                    skipped: json.stats.skipped,
+                    duration_ms: Some(json.stats.duration),
+                    failures,
+                };
+
+                ParseResult::Full(result)
+            }
+            Err(e) => {
+                // Tier 2: Try regex extraction
+                match extract_playwright_regex(input) {
+                    Some(result) => ParseResult::Degraded(
+                        result,
+                        vec![format!("JSON parse failed: {}", e)],
+                    ),
+                    None => {
+                        // Tier 3: Passthrough
+                        ParseResult::Passthrough(truncate_output(input, 500))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Recursively collect test results from suites
+fn collect_test_results(
+    suites: &[PlaywrightSuite],
+    total: &mut usize,
+    failures: &mut Vec<TestFailure>,
+) {
+    for suite in suites {
+        for test in &suite.tests {
+            *total += 1;
+
+            if test.status == "failed" || test.status == "timedOut" {
+                let error_msg = test
+                    .results
+                    .first()
+                    .and_then(|r| r.error.as_ref())
+                    .map(|e| e.message.clone())
+                    .unwrap_or_else(|| "Unknown error".to_string());
+
+                failures.push(TestFailure {
+                    test_name: test.title.clone(),
+                    file_path: suite.title.clone(),
+                    error_message: error_msg,
+                    stack_trace: None,
+                });
+            }
+        }
+
+        // Recurse into nested suites
+        collect_test_results(&suite.suites, total, failures);
+    }
+}
+
+/// Tier 2: Extract test statistics using regex (degraded mode)
+fn extract_playwright_regex(output: &str) -> Option<TestResult> {
+    lazy_static::lazy_static! {
+        static ref SUMMARY_RE: Regex = Regex::new(
+            r"(\d+)\s+(passed|failed|flaky|skipped)"
+        ).unwrap();
+        static ref DURATION_RE: Regex = Regex::new(
+            r"\((\d+(?:\.\d+)?)(ms|s|m)\)"
+        ).unwrap();
+    }
+
+    let clean_output = strip_ansi(output);
+
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+
+    // Parse summary counts
+    for caps in SUMMARY_RE.captures_iter(&clean_output) {
+        let count: usize = caps[1].parse().unwrap_or(0);
+        match &caps[2] {
+            "passed" => passed = count,
+            "failed" => failed = count,
+            "skipped" => skipped = count,
+            _ => {}
+        }
+    }
+
+    // Parse duration
+    let duration_ms = DURATION_RE.captures(&clean_output).and_then(|caps| {
+        let value: f64 = caps[1].parse().ok()?;
+        let unit = &caps[2];
+        Some(match unit {
+            "ms" => value as u64,
+            "s" => (value * 1000.0) as u64,
+            "m" => (value * 60000.0) as u64,
+            _ => value as u64,
+        })
+    });
+
+    // Only return if we found valid data
+    let total = passed + failed + skipped;
+    if total > 0 {
+        Some(TestResult {
+            total,
+            passed,
+            failed,
+            skipped,
+            duration_ms,
+            failures: extract_failures_regex(&clean_output),
+        })
+    } else {
+        None
+    }
+}
+
+/// Extract failures using regex
+fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
+    lazy_static::lazy_static! {
+        static ref TEST_PATTERN: Regex = Regex::new(
+            r"[×✗]\s+.*?›\s+([^›]+\.spec\.[tj]sx?)"
+        ).unwrap();
+    }
+
+    let mut failures = Vec::new();
+
+    for caps in TEST_PATTERN.captures_iter(output) {
+        if let Some(spec) = caps.get(1) {
+            failures.push(TestFailure {
+                test_name: caps[0].to_string(),
+                file_path: spec.as_str().to_string(),
+                error_message: String::new(),
+                stack_trace: None,
+            });
+        }
+    }
+
+    failures
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
@@ -71,24 +234,21 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let mut cmd = if playwright_exists {
         Command::new("playwright")
     } else if is_pnpm {
-        // Use pnpm exec - preserves CWD correctly
         let mut c = Command::new("pnpm");
         c.arg("exec");
-        c.arg("--"); // Separator to prevent pnpm from interpreting tool args
+        c.arg("--");
         c.arg("playwright");
         c
     } else if is_yarn {
-        // Use yarn exec - preserves CWD correctly
         let mut c = Command::new("yarn");
         c.arg("exec");
-        c.arg("--"); // Separator
+        c.arg("--");
         c.arg("playwright");
         c
     } else {
-        // Fallback to npx
         let mut c = Command::new("npx");
         c.arg("--no-install");
-        c.arg("--"); // Separator
+        c.arg("--");
         c.arg("playwright");
         c
     };
@@ -96,7 +256,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     // Add JSON reporter for structured output
     cmd.arg("--reporter=json");
 
-    // Add user arguments
     for arg in args {
         cmd.arg(arg);
     }
@@ -122,14 +281,26 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    // Try JSON parsing first, fallback to regex
-    let filtered = match parse_playwright_json(&stdout) {
-        Ok(formatted) => formatted,
-        Err(e) => {
+    // Parse output using PlaywrightParser
+    let parse_result = PlaywrightParser::parse(&stdout);
+    let mode = FormatMode::from_verbosity(verbose);
+
+    let filtered = match parse_result {
+        ParseResult::Full(data) => {
             if verbose > 0 {
-                eprintln!("[RTK:DEGRADED] JSON parse failed ({}), using regex fallback", e);
+                eprintln!("playwright test (Tier 1: Full JSON parse)");
             }
-            filter_playwright_output(&raw)
+            data.format(mode)
+        }
+        ParseResult::Degraded(data, warnings) => {
+            if verbose > 0 {
+                emit_degradation_warning("playwright", &warnings.join(", "));
+            }
+            data.format(mode)
+        }
+        ParseResult::Passthrough(raw) => {
+            emit_passthrough_warning("playwright", "All parsing tiers failed");
+            raw
         }
     };
 
@@ -150,331 +321,61 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Parse Playwright JSON output and format compactly
-fn parse_playwright_json(json_str: &str) -> Result<String> {
-    let data: PlaywrightJsonOutput = serde_json::from_str(json_str)
-        .context("Failed to parse Playwright JSON output")?;
-
-    let mut result = Vec::new();
-    let mut failures = Vec::new();
-
-    // Recursively collect test results
-    fn collect_tests(suite: &PlaywrightSuite, failures: &mut Vec<(String, String)>) {
-        for test in &suite.tests {
-            if test.status == "failed" || test.status == "timedOut" {
-                let error_msg = test
-                    .results
-                    .first()
-                    .and_then(|r| r.error.as_ref())
-                    .map(|e| {
-                        e.message
-                            .lines()
-                            .take(2)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                    .unwrap_or_else(|| "Unknown error".to_string());
-
-                failures.push((format!("{} › {}", suite.title, test.title), error_msg));
-            }
-        }
-        for subsuite in &suite.suites {
-            collect_tests(subsuite, failures);
-        }
-    }
-
-    for suite in &data.suites {
-        collect_tests(suite, &mut failures);
-    }
-
-    // Summary
-    if failures.is_empty() {
-        result.push("✓ Playwright: All tests passed".to_string());
-    } else {
-        result.push(format!(
-            "Playwright: {} failed",
-            failures.len()
-        ));
-        result.push("═══════════════════════════════════════".to_string());
-        result.push(format!("❌ {} test(s) failed:", failures.len()));
-
-        for (idx, (title, error)) in failures.iter().enumerate().take(10) {
-            result.push(format!("  {}. {}", idx + 1, title));
-            result.push(format!("     {}", error));
-        }
-
-        if failures.len() > 10 {
-            result.push(format!("\n... +{} more failures", failures.len() - 10));
-        }
-    }
-
-    Ok(result.join("\n"))
-}
-
-#[derive(Debug)]
-struct TestResult {
-    spec: String,
-    passed: bool,
-    // TODO: Use duration in detailed reports (token-efficient summary doesn't need it)
-    #[allow(dead_code)]
-    duration: Option<f64>,
-}
-
-/// Filter Playwright output - show only failures and summary stats
-fn filter_playwright_output(output: &str) -> String {
-    lazy_static::lazy_static! {
-        // EXCEPTION: Static regex patterns, validated at compile time
-        // Unwrap is safe here - panic indicates programming error caught during development
-
-        // Pattern: ✓ [chromium] › auth/login.spec.ts:5:1 › should login (2.3s)
-        static ref TEST_PATTERN: Regex = Regex::new(
-            r"[✓✗×].*›\s+([^›]+\.spec\.[tj]sx?).*?(?:\((\d+(?:\.\d+)?)(ms|s)\))?"
-        ).unwrap();
-
-        // Pattern: Slow test file [chromium] › sessions/video.spec.ts (8.5s)
-        static ref SLOW_TEST: Regex = Regex::new(
-            r"Slow test.*?›\s+([^›]+\.spec\.[tj]sx?)\s+\((\d+(?:\.\d+)?)(ms|s)\)"
-        ).unwrap();
-
-        // Pattern: 45 passed (45.2s) or 2 failed, 43 passed
-        static ref SUMMARY: Regex = Regex::new(
-            r"(\d+)\s+(passed|failed|flaky|skipped)"
-        ).unwrap();
-    }
-
-    let clean_output = strip_ansi(output);
-
-    let mut tests: Vec<TestResult> = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
-    let mut slow_tests: Vec<(String, f64)> = Vec::new();
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut _skipped = 0;
-    let mut total_duration = String::new();
-
-    // Parse test results
-    for line in clean_output.lines() {
-        // Detect failures (lines starting with × or ✗)
-        if line.trim_start().starts_with('×') || line.trim_start().starts_with('✗') {
-            if let Some(caps) = TEST_PATTERN.captures(line) {
-                let spec = caps[1].to_string();
-                failures.push(spec.clone());
-                tests.push(TestResult {
-                    spec,
-                    passed: false,
-                    duration: None,
-                });
-            }
-        }
-
-        // Detect successes
-        if line.trim_start().starts_with('✓') {
-            if let Some(caps) = TEST_PATTERN.captures(line) {
-                let spec = caps[1].to_string();
-                let duration = if caps.get(2).is_some() {
-                    let time: f64 = caps[2].parse().unwrap_or(0.0);
-                    let unit = &caps[3];
-                    Some(if unit == "ms" { time / 1000.0 } else { time })
-                } else {
-                    None
-                };
-
-                tests.push(TestResult {
-                    spec,
-                    passed: true,
-                    duration,
-                });
-            }
-        }
-
-        // Detect slow tests
-        if let Some(caps) = SLOW_TEST.captures(line) {
-            let spec = caps[1].to_string();
-            let time: f64 = caps[2].parse().unwrap_or(0.0);
-            let unit = &caps[3];
-            let duration = if unit == "ms" { time / 1000.0 } else { time };
-            slow_tests.push((spec, duration));
-        }
-
-        // Parse summary
-        if line.contains("passed") || line.contains("failed") || line.contains("skipped") {
-            for caps in SUMMARY.captures_iter(line) {
-                let count: usize = caps[1].parse().unwrap_or(0);
-                match &caps[2] {
-                    "passed" => passed = count,
-                    "failed" => failed = count,
-                    "skipped" => _skipped = count,
-                    _ => {}
-                }
-            }
-
-            // Extract total duration
-            if let Some(time_match) = extract_duration(line) {
-                total_duration = time_match;
-            }
-        }
-    }
-
-    // Build filtered output
-    let mut result = String::new();
-
-    if failed == 0 && passed > 0 {
-        result.push_str(&format!(
-            "✓ Playwright: {} passed, {} failed",
-            passed, failed
-        ));
-        if !total_duration.is_empty() {
-            result.push_str(&format!(" ({})", total_duration));
-        }
-        result.push_str("\n═══════════════════════════════════════\n");
-        result.push_str("All tests passed\n");
-    } else if failed > 0 {
-        result.push_str(&format!(
-            "Playwright: {} passed, {} failed",
-            passed, failed
-        ));
-        if !total_duration.is_empty() {
-            result.push_str(&format!(" ({})", total_duration));
-        }
-        result.push_str("\n═══════════════════════════════════════\n");
-
-        result.push_str(&format!("❌ {} test(s) failed:\n", failed));
-        for failure in failures.iter().take(10) {
-            result.push_str(&format!("  {}\n", failure));
-        }
-
-        if failures.len() > 10 {
-            result.push_str(&format!("\n... +{} more failures\n", failures.len() - 10));
-        }
-    } else {
-        // No test results found, return raw summary
-        return clean_output
-            .lines()
-            .filter(|l| l.contains("passed") || l.contains("failed") || l.contains("Running"))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-
-    // Add slow tests section
-    if !slow_tests.is_empty() {
-        result.push_str("\nSlow tests (>5s):\n");
-        for (spec, duration) in slow_tests.iter().take(5) {
-            result.push_str(&format!("  {} ({:.1}s)\n", spec, duration));
-        }
-    }
-
-    // Group tests by spec directory
-    let mut by_spec: HashMap<String, (usize, usize)> = HashMap::new();
-    for test in &tests {
-        let dir = extract_spec_dir(&test.spec);
-        let entry = by_spec.entry(dir).or_insert((0, 0));
-        if test.passed {
-            entry.0 += 1;
-        } else {
-            entry.1 += 1;
-        }
-    }
-
-    if by_spec.len() > 1 {
-        result.push_str("\nTests by spec:\n");
-        let mut specs: Vec<_> = by_spec.iter().collect();
-        specs.sort_by(|a, b| (b.1 .0 + b.1 .1).cmp(&(a.1 .0 + a.1 .1)));
-
-        for (dir, (pass, fail)) in specs.iter().take(5) {
-            let total = pass + fail;
-            let pass_rate = if total > 0 {
-                (*pass as f64 / total as f64) * 100.0
-            } else {
-                0.0
-            };
-            result.push_str(&format!(
-                "  {}* ({} tests, {:.0}% pass)\n",
-                dir, total, pass_rate
-            ));
-        }
-    }
-
-    result.trim().to_string()
-}
-
-/// Extract duration from line (e.g., "(45.2s)" or "(1.2m)")
-fn extract_duration(line: &str) -> Option<String> {
-    lazy_static::lazy_static! {
-        static ref DURATION_RE: Regex = Regex::new(r"\((\d+(?:\.\d+)?[smh])\)").unwrap();
-    }
-
-    DURATION_RE
-        .captures(line)
-        .map(|caps| caps[1].to_string())
-}
-
-/// Extract spec directory from full spec path
-fn extract_spec_dir(spec: &str) -> String {
-    if let Some(slash_pos) = spec.rfind('/') {
-        spec[..slash_pos].to_string()
-    } else {
-        "root".to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_all_passed() {
-        let output = r#"
-Running 3 tests using 1 worker
+    fn test_playwright_parser_json() {
+        let json = r#"{
+            "stats": {
+                "expected": 3,
+                "unexpected": 0,
+                "skipped": 0,
+                "duration": 7300
+            },
+            "suites": [
+                {
+                    "title": "auth/login.spec.ts",
+                    "tests": [
+                        {
+                            "title": "should login",
+                            "status": "passed",
+                            "results": [{"status": "passed", "duration": 2300}]
+                        }
+                    ],
+                    "suites": []
+                }
+            ]
+        }"#;
 
-  ✓ [chromium] › auth/login.spec.ts:5:1 › should login (2.3s)
-  ✓ [chromium] › auth/logout.spec.ts:8:1 › should logout (1.8s)
-  ✓ [chromium] › dashboard.spec.ts:10:1 › should show dashboard (3.2s)
+        let result = PlaywrightParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        assert!(result.is_ok());
 
-  3 passed (7.3s)
-        "#;
-        let result = filter_playwright_output(output);
-        assert!(result.contains("✓ Playwright"));
-        assert!(result.contains("3 passed, 0 failed"));
-        assert!(result.contains("All tests passed"));
+        let data = result.unwrap();
+        assert_eq!(data.passed, 3);
+        assert_eq!(data.failed, 0);
+        assert_eq!(data.duration_ms, Some(7300));
     }
 
     #[test]
-    fn test_filter_with_failures() {
-        let output = r#"
-Running 5 tests using 2 workers
+    fn test_playwright_parser_regex_fallback() {
+        let text = "3 passed (7.3s)";
+        let result = PlaywrightParser::parse(text);
+        assert_eq!(result.tier(), 2); // Degraded
+        assert!(result.is_ok());
 
-  ✓ [chromium] › auth/login.spec.ts:5:1 › should login (2.3s)
-  × [chromium] › auth/logout.spec.ts:8:1 › should logout (1.8s)
-  ✓ [chromium] › dashboard.spec.ts:10:1 › should show dashboard (3.2s)
-  × [chromium] › profile.spec.ts:12:1 › should update profile (2.1s)
-  ✓ [chromium] › settings.spec.ts:15:1 › should save settings (1.5s)
-
-  3 passed, 2 failed (10.9s)
-        "#;
-        let result = filter_playwright_output(output);
-        assert!(result.contains("3 passed, 2 failed"));
-        assert!(result.contains("❌ 2 test(s) failed"));
-        assert!(result.contains("logout.spec.ts"));
-        assert!(result.contains("profile.spec.ts"));
+        let data = result.unwrap();
+        assert_eq!(data.passed, 3);
+        assert_eq!(data.failed, 0);
     }
 
     #[test]
-    fn test_extract_duration() {
-        assert_eq!(extract_duration("3 passed (7.3s)"), Some("7.3s".to_string()));
-        assert_eq!(
-            extract_duration("10 passed (1.2m)"),
-            Some("1.2m".to_string())
-        );
-        assert_eq!(extract_duration("no duration here"), None);
-    }
-
-    #[test]
-    fn test_extract_spec_dir() {
-        assert_eq!(extract_spec_dir("auth/login.spec.ts"), "auth");
-        assert_eq!(
-            extract_spec_dir("features/dashboard/home.spec.ts"),
-            "features/dashboard"
-        );
-        assert_eq!(extract_spec_dir("simple.spec.ts"), "root");
+    fn test_playwright_parser_passthrough() {
+        let invalid = "random output";
+        let result = PlaywrightParser::parse(invalid);
+        assert_eq!(result.tier(), 3); // Passthrough
+        assert!(!result.is_ok());
     }
 }
