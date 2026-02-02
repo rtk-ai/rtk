@@ -419,8 +419,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Compact status
-    Status,
+    /// Compact status (supports all git status flags)
+    Status {
+        /// Git arguments (supports all git status flags like --porcelain, --short, -s)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Compact show (commit summary + stat + compacted diff)
     Show {
         /// Git arguments (supports all git show flags)
@@ -664,8 +668,8 @@ fn main() -> Result<()> {
             GitCommands::Log { args } => {
                 git::run(git::GitCommand::Log, &args, None, cli.verbose)?;
             }
-            GitCommands::Status => {
-                git::run(git::GitCommand::Status, &[], None, cli.verbose)?;
+            GitCommands::Status { args } => {
+                git::run(git::GitCommand::Status, &args, None, cli.verbose)?;
             }
             GitCommands::Show { args } => {
                 git::run(git::GitCommand::Show, &args, None, cli.verbose)?;

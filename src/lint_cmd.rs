@@ -37,7 +37,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     let linter = if is_path_or_flag { "eslint" } else { &args[0] };
 
-
     // Try linter directly first, then use package manager exec
     let linter_exists = Command::new("which")
         .arg(linter)
