@@ -5,6 +5,31 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0](https://github.com/pszymkowiak/rtk/compare/v0.7.0...v1.0.0) (2026-02-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* Removes --depth, --format (tree/flat/json) flags
+
+### Features
+
+* add execution time tracking to rtk gain analytics ([a3bfbf7](https://github.com/pszymkowiak/rtk/commit/a3bfbf747c00979636f9bbe82d973b6ab43dfbca))
+* add execution time tracking to rtk gain analytics ([2a1e1a8](https://github.com/pszymkowiak/rtk/commit/2a1e1a8ef3afb97080e9e51d7927ea3b5199ddc7))
+* add JSON parsing with safe fallbacks for vitest, playwright, pnpm ([50ba21e](https://github.com/pszymkowiak/rtk/commit/50ba21e2e5fcc2ad5a5f3792f323900d9d5dffe4))
+* add local LLM analysis, filter improvements, and testing scripts ([1d85791](https://github.com/pszymkowiak/rtk/commit/1d857914d61d569028e3b7b5a90b287fa5260f9f))
+* add parser infrastructure with three-tier fallback system ([6493bc9](https://github.com/pszymkowiak/rtk/commit/6493bc92d8c4155cd3b2a5f39fdae846fee2ca81))
+* add parser infrastructure with three-tier fallback system ([edab4e1](https://github.com/pszymkowiak/rtk/commit/edab4e142eecd81682006ad44c39809e7aae9011))
+* migrate vitest, playwright, pnpm to OutputParser trait ([cf26ad4](https://github.com/pszymkowiak/rtk/commit/cf26ad477bdbff448d7eb06725c86cf2805dcdef))
+
+
+### Bug Fixes
+
+* convert rtk ls from reimplementation to native proxy ([fe4e0f9](https://github.com/pszymkowiak/rtk/commit/fe4e0f9976d10957ba3fbd7b221a4db5950a2f3b))
+* convert rtk ls from reimplementation to native proxy ([2176369](https://github.com/pszymkowiak/rtk/commit/2176369467e00091dfd25f4fef57036e760842f2))
+* trigger release build after release-please creates tag ([3ddffdd](https://github.com/pszymkowiak/rtk/commit/3ddffddc6dc34dacbf5f9dd32dd71bacaa8b0881))
+* trigger release build after release-please creates tag ([3b44ef9](https://github.com/pszymkowiak/rtk/commit/3b44ef98651906ccc44cdaa77c5434c3f033f462))
+
 ## [0.7.0](https://github.com/pszymkowiak/rtk/compare/v0.6.0...v0.7.0) (2026-02-01)
 
 
