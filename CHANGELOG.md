@@ -188,6 +188,5 @@ See upstream: https://github.com/pszymkowiak/rtk
 
 ## Links
 
-- **Repository**: https://github.com/FlorianBruniaux/rtk (fork)
-- **Upstream**: https://github.com/pszymkowiak/rtk
-- **Issues**: https://github.com/FlorianBruniaux/rtk/issues
+- **Repository**: https://github.com/rtk-ai/rtk (maintained by pszymkowiak)
+- **Issues**: https://github.com/rtk-ai/rtk/issues
