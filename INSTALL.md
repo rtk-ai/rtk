@@ -1,5 +1,17 @@
 # RTK Installation Guide - For AI Coding Assistants
 
+## ⚠️ Name Collision Warning
+
+**There are TWO completely different projects named "rtk":**
+
+1. ✅ **Rust Token Killer** (this project) - LLM token optimizer
+   - Repos: `rtk-ai/rtk`, `pszymkowiak/rtk`, `FlorianBruniaux/rtk` (fork)
+   - Has `rtk gain` command for token savings stats
+
+2. ❌ **Rust Type Kit** (reachingforthejack/rtk) - DIFFERENT PROJECT
+   - Rust codebase query tool and type generator
+   - **DO NOT install if you want token optimization**
+
 ## Pre-Installation Check (REQUIRED)
 
 **AI assistants should ALWAYS verify if RTK is already installed before attempting installation.**
@@ -8,38 +20,61 @@
 # Check if RTK is installed
 rtk --version
 
+# CRITICAL: Verify it's the Token Killer (not Type Kit)
+rtk gain    # Should show token savings stats, NOT "command not found"
+
 # Check installation path
 which rtk
 ```
 
-If RTK is already installed and working, **DO NOT reinstall**. Skip directly to "Project Initialization" section.
+If `rtk gain` works, you have the **correct** RTK installed. **DO NOT reinstall**. Skip to "Project Initialization".
 
-## Installation (only if RTK not available)
+If `rtk gain` fails but `rtk --version` succeeds, you have the **wrong** RTK (Type Kit). Uninstall and reinstall the correct one (see below).
 
-### Option 1: Install from fork (RECOMMENDED currently)
+## Installation (only if RTK not available or wrong RTK installed)
 
-This fork includes critical fixes and pnpm/Vitest support not yet merged upstream.
+### Step 0: Uninstall Wrong RTK (if needed)
+
+If you accidentally installed Rust Type Kit:
+
+```bash
+cargo uninstall rtk
+```
+
+### Option 1: Install from fork (RECOMMENDED)
+
+This fork includes critical fixes and modern JavaScript stack support (pnpm, vitest, Next.js, TypeScript, Playwright, Prisma):
 
 ```bash
 # Clone the fork
 git clone https://github.com/FlorianBruniaux/rtk.git
 cd rtk
 
-# Check branch (should be master or feat/vitest-support)
-git branch
+# Checkout the all-features branch
+git checkout feat/all-features
 
 # Compile and install
 cargo install --path . --force
 
-# Verify installation
+# VERIFY you have the correct RTK
 rtk --version
+rtk gain  # MUST work (shows token stats, not error)
 ```
 
-### Option 2: Install from upstream (when PRs are merged)
+### Option 2: Install from upstream (basic features)
 
 ```bash
+# From rtk-ai repository (NOT reachingforthejack!)
+cargo install --git https://github.com/rtk-ai/rtk
+
+# OR (if published and correct on crates.io)
 cargo install rtk
+
+# ALWAYS VERIFY after installation
+rtk gain  # MUST show token savings, not "command not found"
 ```
+
+⚠️ **WARNING**: `cargo install rtk` from crates.io might install the wrong package. Always verify with `rtk gain`.
 
 ## Project Initialization
 
@@ -166,9 +201,12 @@ cargo install --path . --force
 
 ## Support and Contributing
 
-- **Issues**: https://github.com/pszymkowiak/rtk/issues (upstream)
+- **Troubleshooting**: See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues
 - **Fork issues**: https://github.com/FlorianBruniaux/rtk/issues
+- **Upstream issues**: https://github.com/rtk-ai/rtk/issues (maintained by pszymkowiak)
 - **Pull Requests**: Create on fork then propose upstream
+
+⚠️ **If you installed the wrong rtk (Type Kit)**, see [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#problem-rtk-gain-command-not-found)
 
 ## AI Assistant Checklist
 
