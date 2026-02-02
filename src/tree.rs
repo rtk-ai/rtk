@@ -2,10 +2,43 @@
 //!
 //! This module proxies to the native `tree` command and filters the output
 //! to reduce token usage while preserving structure visibility.
+//!
+//! Token optimization: automatically excludes noise directories via -I pattern
+//! unless -a flag is present (respecting user intent).
 
 use crate::tracking;
 use anyhow::{Context, Result};
 use std::process::Command;
+
+/// Noise directories commonly excluded from LLM context
+const NOISE_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    "target",
+    "__pycache__",
+    ".next",
+    "dist",
+    "build",
+    ".cache",
+    ".turbo",
+    ".vercel",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "env",
+    ".env",
+    "coverage",
+    ".nyc_output",
+    ".DS_Store",
+    "Thumbs.db",
+    ".idea",
+    ".vscode",
+    ".vs",
+    "*.egg-info",
+    ".eggs",
+];
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -24,7 +57,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     let mut cmd = Command::new("tree");
 
-    // Pass all args to tree (supports all native flags)
+    // Determine if user wants all files or default behavior
+    let show_all = args.iter().any(|a| a == "-a" || a == "--all");
+    let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
+
+    // Auto-inject -I pattern unless user wants all or already specified -I
+    if !show_all && !has_ignore {
+        let ignore_pattern = NOISE_DIRS.join("|");
+        cmd.arg("-I").arg(&ignore_pattern);
+    }
+
+    // Pass all user args
     for arg in args {
         cmd.arg(arg);
     }
@@ -143,5 +186,17 @@ mod tests {
             assert!(!output.contains(summary_fragment), "Should remove summary '{}' from output", summary_fragment);
             assert!(output.contains("file.txt"), "Should preserve file.txt in output");
         }
+    }
+
+    #[test]
+    fn test_noise_dirs_constant() {
+        // Verify NOISE_DIRS contains expected patterns
+        assert!(NOISE_DIRS.contains(&"node_modules"));
+        assert!(NOISE_DIRS.contains(&".git"));
+        assert!(NOISE_DIRS.contains(&"target"));
+        assert!(NOISE_DIRS.contains(&"__pycache__"));
+        assert!(NOISE_DIRS.contains(&".next"));
+        assert!(NOISE_DIRS.contains(&"dist"));
+        assert!(NOISE_DIRS.contains(&"build"));
     }
 }

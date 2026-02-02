@@ -40,6 +40,7 @@ mod wget_cmd;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -489,6 +490,9 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Passthrough: runs any unsupported git subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
 }
 
 #[derive(Subcommand)]
@@ -714,6 +718,9 @@ fn main() -> Result<()> {
             }
             GitCommands::Worktree { args } => {
                 git::run(git::GitCommand::Worktree, &args, None, cli.verbose)?;
+            }
+            GitCommands::Other(args) => {
+                git::run_passthrough(&args, cli.verbose)?;
             }
         },
 

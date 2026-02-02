@@ -3,18 +3,61 @@
 //! This module proxies to the native `ls` command instead of reimplementing
 //! directory traversal. This ensures full compatibility with all ls flags
 //! like -l, -a, -h, -R, etc.
+//!
+//! Token optimization: filters noise directories (node_modules, .git, target, etc.)
+//! unless -a flag is present (respecting user intent).
 
 use crate::tracking;
 use anyhow::{Context, Result};
 use std::process::Command;
 
+/// Noise directories commonly excluded from LLM context
+const NOISE_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    "target",
+    "__pycache__",
+    ".next",
+    "dist",
+    "build",
+    ".cache",
+    ".turbo",
+    ".vercel",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "env",
+    ".env",
+    "coverage",
+    ".nyc_output",
+    ".DS_Store",
+    "Thumbs.db",
+    ".idea",
+    ".vscode",
+    ".vs",
+    "*.egg-info",
+    ".eggs",
+];
+
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("ls");
-    // Pass all args to ls (no forced defaults)
-    for arg in args {
-        cmd.arg(arg);
+
+    // Determine if user wants all files or default behavior
+    let show_all = args.iter().any(|a| a == "-a" || a == "--all");
+    let has_args = !args.is_empty();
+
+    // Default to -la if no args (upstream behavior)
+    if !has_args {
+        cmd.arg("-la");
+    } else {
+        // Pass all user args
+        for arg in args {
+            cmd.arg(arg);
+        }
     }
 
     let output = cmd.output().context("Failed to run ls")?;
@@ -26,7 +69,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let filtered = filter_ls_output(&raw);
+    let filtered = filter_ls_output(&raw, show_all);
 
     if verbose > 0 {
         eprintln!(
@@ -47,15 +90,34 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn filter_ls_output(raw: &str) -> String {
-    raw.lines()
+fn filter_ls_output(raw: &str, show_all: bool) -> String {
+    let lines: Vec<&str> = raw
+        .lines()
         .filter(|line| {
-            // Skip "total X" line (adds no value for LLM context)
-            !line.starts_with("total ")
+            // Always skip "total X" line (adds no value for LLM context)
+            if line.starts_with("total ") {
+                return false;
+            }
+
+            // If -a flag present, show everything (user intent)
+            if show_all {
+                return true;
+            }
+
+            // Filter noise directories
+            let trimmed = line.trim();
+            !NOISE_DIRS.iter().any(|noise| {
+                // Check if line ends with noise dir (handles various ls formats)
+                trimmed.ends_with(noise) || trimmed.contains(&format!(" {}", noise))
+            })
         })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
+        .collect();
+
+    if lines.is_empty() {
+        "\n".to_string()
+    } else {
+        lines.join("\n") + "\n"
+    }
 }
 
 #[cfg(test)]
@@ -65,7 +127,7 @@ mod tests {
     #[test]
     fn test_filter_removes_total_line() {
         let input = "total 48\n-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.txt\n";
-        let output = filter_ls_output(input);
+        let output = filter_ls_output(input, false);
         assert!(!output.contains("total "));
         assert!(output.contains("file.txt"));
     }
@@ -73,7 +135,7 @@ mod tests {
     #[test]
     fn test_filter_preserves_files() {
         let input = "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.txt\ndrwxr-xr-x  2 user  staff  64 Jan  1 12:00 dir\n";
-        let output = filter_ls_output(input);
+        let output = filter_ls_output(input, false);
         assert!(output.contains("file.txt"));
         assert!(output.contains("dir"));
     }
@@ -81,7 +143,55 @@ mod tests {
     #[test]
     fn test_filter_handles_empty() {
         let input = "";
-        let output = filter_ls_output(input);
+        let output = filter_ls_output(input, false);
         assert_eq!(output, "\n");
+    }
+
+    #[test]
+    fn test_filter_removes_noise_dirs() {
+        let input = "drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.txt\n";
+        let output = filter_ls_output(input, false);
+        assert!(!output.contains("node_modules"));
+        assert!(!output.contains(".git"));
+        assert!(!output.contains("target"));
+        assert!(output.contains("src"));
+        assert!(output.contains("file.txt"));
+    }
+
+    #[test]
+    fn test_filter_shows_all_with_a_flag() {
+        let input = "drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
+        let output = filter_ls_output(input, true);
+        assert!(output.contains("node_modules"));
+        assert!(output.contains(".git"));
+        assert!(output.contains("src"));
+    }
+
+    #[test]
+    fn test_filter_removes_pycache() {
+        let input = "drwxr-xr-x  2 user  staff  64 Jan  1 12:00 __pycache__\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.py\n";
+        let output = filter_ls_output(input, false);
+        assert!(!output.contains("__pycache__"));
+        assert!(output.contains("main.py"));
+    }
+
+    #[test]
+    fn test_filter_removes_next_and_build_dirs() {
+        let input = "drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .next\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 dist\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 build\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
+        let output = filter_ls_output(input, false);
+        assert!(!output.contains(".next"));
+        assert!(!output.contains("dist"));
+        assert!(!output.contains("build"));
+        assert!(output.contains("src"));
     }
 }
