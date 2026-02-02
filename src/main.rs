@@ -32,6 +32,7 @@ mod read;
 mod runner;
 mod summary;
 mod tracking;
+mod tree;
 mod tsc_cmd;
 mod utils;
 mod vitest_cmd;
@@ -70,6 +71,13 @@ enum Commands {
     /// List directory contents with token-optimized output (proxy to native ls)
     Ls {
         /// Arguments passed to ls (supports all native ls flags like -l, -a, -h, -R)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Directory tree with token-optimized output (proxy to native tree)
+    Tree {
+        /// Arguments passed to tree (supports all native tree flags like -L, -d, -a)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -642,6 +650,10 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Ls { args } => {
             ls::run(&args, cli.verbose)?;
+        }
+
+        Commands::Tree { args } => {
+            tree::run(&args, cli.verbose)?;
         }
 
         Commands::Read {

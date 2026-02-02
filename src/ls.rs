@@ -12,13 +12,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("ls");
-    // Default to -la if no args (common case for LLM context)
-    if args.is_empty() {
-        cmd.args(["-la"]);
-    } else {
-        for arg in args {
-            cmd.arg(arg);
-        }
+    // Pass all args to ls (no forced defaults)
+    for arg in args {
+        cmd.arg(arg);
     }
 
     let output = cmd.output().context("Failed to run ls")?;
