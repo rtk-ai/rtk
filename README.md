@@ -123,19 +123,19 @@ rtk json config.json            # Structure without values
 rtk deps                        # Dependencies summary
 rtk env -f AWS                  # Filtered env vars
 
-# Token Savings Analytics
-rtk gain                        # Summary stats (default view)
+# Token Savings Analytics (includes execution time metrics)
+rtk gain                        # Summary stats with total exec time
 rtk gain --graph                # With ASCII graph of last 30 days
 rtk gain --history              # With recent command history (10)
 rtk gain --quota --tier 20x     # Monthly quota analysis (pro/5x/20x)
 
-# Temporal Breakdowns
-rtk gain --daily                # Day-by-day breakdown (all days)
+# Temporal Breakdowns (includes time metrics per period)
+rtk gain --daily                # Day-by-day with avg execution time
 rtk gain --weekly               # Week-by-week breakdown
 rtk gain --monthly              # Month-by-month breakdown
 rtk gain --all                  # All breakdowns combined
 
-# Export Formats
+# Export Formats (includes total_time_ms and avg_time_ms fields)
 rtk gain --all --format json    # JSON export for APIs/dashboards
 rtk gain --all --format csv     # CSV export for Excel/analysis
 ```

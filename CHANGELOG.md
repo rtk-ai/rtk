@@ -5,6 +5,45 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1](https://github.com/pszymkowiak/rtk/compare/v0.7.0...v0.7.1) (2026-02-02)
+
+
+### Features
+
+* **execution time tracking**: Add command execution time metrics to `rtk gain` analytics
+  - Total execution time and average time per command displayed in summary
+  - Time column in "By Command" breakdown showing average execution duration
+  - Daily breakdown (`--daily`) includes time metrics per day
+  - JSON export includes `total_time_ms` and `avg_time_ms` fields
+  - CSV export includes execution time columns
+  - Backward compatible: historical data shows 0ms (pre-tracking)
+  - Negligible overhead: <0.1ms per command
+  - New SQLite column: `exec_time_ms` in commands table
+* **parser infrastructure**: Three-tier fallback system for robust output parsing
+  - Tier 1: Full JSON parsing with complete structured data
+  - Tier 2: Degraded parsing with regex fallback and warnings
+  - Tier 3: Passthrough with truncated raw output and error markers
+  - Guarantees RTK never returns false data silently
+* **migrate commands to OutputParser**: vitest, playwright, pnpm now use robust parsing
+  - JSON parsing with safe fallbacks for all modern JS tooling
+  - Improved error handling and debugging visibility
+* **local LLM analysis**: Add economics analysis and comprehensive test scripts
+  - `scripts/rtk-economics.sh` for token savings ROI analysis
+  - `scripts/test-all.sh` with 69 assertions covering all commands
+  - `scripts/test-aristote.sh` for T3 Stack project validation
+
+
+### Bug Fixes
+
+* convert rtk ls from reimplementation to native proxy for better reliability
+* trigger release build after release-please creates tag
+
+
+### Documentation
+
+* add execution time tracking test guide (TEST_EXEC_TIME.md)
+* comprehensive parser infrastructure documentation (src/parser/README.md)
+
 ## [0.7.0](https://github.com/pszymkowiak/rtk/compare/v0.6.0...v0.7.0) (2026-02-01)
 
 

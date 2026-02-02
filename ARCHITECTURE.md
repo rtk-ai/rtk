@@ -461,8 +461,9 @@ Flow:
        input_tokens,   -- 125
        output_tokens,  -- 5
        saved_tokens,   -- 120
-       savings_pct     -- 96.0
-   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       savings_pct,    -- 96.0
+       exec_time_ms    -- 15 (execution duration in milliseconds)
+   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 
          ↓
 
@@ -482,7 +483,11 @@ Flow:
    │ output_tokens   INTEGER NOT NULL        │
    │ saved_tokens    INTEGER NOT NULL        │
    │ savings_pct     REAL NOT NULL           │
+   │ exec_time_ms    INTEGER DEFAULT 0       │
    └─────────────────────────────────────────┘
+
+   Note: exec_time_ms tracks command execution duration
+   (added in v0.7.1, historical records default to 0)
 
          ↓
 
@@ -504,7 +509,9 @@ Flow:
    SELECT
        COUNT(*) as total_commands,
        SUM(saved_tokens) as total_saved,
-       AVG(savings_pct) as avg_savings
+       AVG(savings_pct) as avg_savings,
+       SUM(exec_time_ms) as total_time_ms,
+       AVG(exec_time_ms) as avg_time_ms
    FROM commands
    WHERE timestamp > datetime('now', '-90 days')
 
@@ -515,11 +522,16 @@ Flow:
    │ Commands executed:  1,234           │
    │ Average savings:    78.5%           │
    │ Total tokens saved: 45,678          │
+   │ Total exec time:    8m50s (573ms)   │
+   │                                      │
    │ Top commands:                       │
    │   • rtk git status    (234 uses)    │
    │   • rtk lint          (156 uses)    │
    │   • rtk test          (89 uses)     │
    └──────────────────────────────────────┘
+
+   Note: Time column shows average execution
+   duration per command (added in v0.7.1)
 ```
 
 ### Thread Safety
