@@ -227,6 +227,10 @@ assert_help    "rtk pnpm"                     rtk pnpm
 assert_help    "rtk pnpm build"               rtk pnpm build
 assert_help    "rtk pnpm typecheck"           rtk pnpm typecheck
 
+if command -v pnpm >/dev/null 2>&1; then
+    assert_ok  "rtk pnpm help"                rtk pnpm help
+fi
+
 # ── 10. Grep ─────────────────────────────────────────
 
 section "Grep"

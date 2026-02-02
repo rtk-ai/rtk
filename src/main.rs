@@ -532,6 +532,9 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Passthrough: runs any unsupported pnpm subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
 }
 
 #[derive(Subcommand)]
@@ -747,6 +750,9 @@ fn main() -> Result<()> {
             }
             PnpmCommands::Typecheck { args } => {
                 tsc_cmd::run(&args, cli.verbose)?;
+            }
+            PnpmCommands::Other(args) => {
+                pnpm_cmd::run_passthrough(&args, cli.verbose)?;
             }
         },
 
