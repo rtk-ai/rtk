@@ -11,7 +11,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 **There are TWO different projects named "rtk":**
 
 1. ✅ **This project (Rust Token Killer)** - LLM token optimizer
-   - Repos: `rtk-ai/rtk`, `pszymkowiak/rtk`
+   - Repos: `rtk-ai/rtk`
    - Purpose: Reduce Claude Code token consumption
 
 2. ❌ **reachingforthejack/rtk** - Rust Type Kit (DIFFERENT PROJECT)
@@ -63,7 +63,7 @@ If already installed and `rtk gain` works, **DO NOT reinstall**. Skip to Quick S
 ### Quick Install (Linux/macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pszymkowiak/rtk/master/install.sh | sh
+curl -fsSL https://github.com/rtk-ai/rtk/blob/master/install.sh | sh
 ```
 
 After installation, **verify you have the correct rtk**:
