@@ -1,9 +1,17 @@
+use crate::tracking;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::process::Command;
-use crate::tracking;
 
-pub fn run(pattern: &str, path: &str, max_results: usize, file_type: &str, verbose: u8) -> Result<()> {
+pub fn run(
+    pattern: &str,
+    path: &str,
+    max_results: usize,
+    file_type: &str,
+    verbose: u8,
+) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("find: {} in {}", pattern, path);
     }
@@ -25,7 +33,12 @@ pub fn run(pattern: &str, path: &str, max_results: usize, file_type: &str, verbo
     if files.is_empty() {
         let msg = format!("0 for '{}'", pattern);
         println!("{}", msg);
-        tracking::track(&format!("find {} -name '{}'", path, pattern), "rtk find", &raw_output, &msg);
+        timer.track(
+            &format!("find {} -name '{}'", path, pattern),
+            "rtk find",
+            &raw_output,
+            &msg,
+        );
         return Ok(());
     }
 
@@ -57,7 +70,7 @@ pub fn run(pattern: &str, path: &str, max_results: usize, file_type: &str, verbo
 
         let files_in_dir = &by_dir[dir];
         let dir_display = if dir.len() > 50 {
-            format!("...{}", &dir[dir.len()-47..])
+            format!("...{}", &dir[dir.len() - 47..])
         } else {
             dir.clone()
         };
@@ -77,13 +90,22 @@ pub fn run(pattern: &str, path: &str, max_results: usize, file_type: &str, verbo
         println!();
         let mut exts: Vec<_> = by_ext.iter().collect();
         exts.sort_by(|a, b| b.1.cmp(a.1));
-        let ext_str: Vec<String> = exts.iter().take(5).map(|(e, c)| format!(".{}({})", e, c)).collect();
+        let ext_str: Vec<String> = exts
+            .iter()
+            .take(5)
+            .map(|(e, c)| format!(".{}({})", e, c))
+            .collect();
         ext_line = format!("ext: {}", ext_str.join(" "));
         println!("{}", ext_line);
     }
 
     let rtk_output = format!("{}F {}D + {}", files.len(), dirs_count, ext_line);
-    tracking::track(&format!("find {} -name '{}'", path, pattern), "rtk find", &raw_output, &rtk_output);
+    timer.track(
+        &format!("find {} -name '{}'", path, pattern),
+        "rtk find",
+        &raw_output,
+        &rtk_output,
+    );
 
     Ok(())
 }

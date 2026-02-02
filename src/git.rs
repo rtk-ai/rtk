@@ -314,6 +314,8 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
 }
 
 fn run_status(_verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     // Get raw git status for tracking
     let raw_output = Command::new("git")
         .args(["status"])
@@ -331,7 +333,7 @@ fn run_status(_verbose: u8) -> Result<()> {
 
     if lines.is_empty() {
         println!("Clean working tree");
-        tracking::track(
+        timer.track(
             "git status",
             "rtk git status",
             &raw_output,
@@ -428,7 +430,7 @@ fn run_status(_verbose: u8) -> Result<()> {
         "branch + {} staged + {} modified + {} untracked",
         staged, modified, untracked
     );
-    tracking::track("git status", "rtk git status", &raw_output, &rtk_output);
+    timer.track("git status", "rtk git status", &raw_output, &rtk_output);
 
     Ok(())
 }

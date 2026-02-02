@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
     let mut cmd = Command::new("curl");
     cmd.arg("-s"); // Silent mode (no progress bar)
 
@@ -36,7 +37,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let filtered = filter_curl_output(&stdout);
     println!("{}", filtered);
 
-    tracking::track(
+    timer.track(
         &format!("curl {}", args.join(" ")),
         &format!("rtk curl {}", args.join(" ")),
         &raw,

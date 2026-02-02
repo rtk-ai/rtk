@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let mut cmd = Command::new("ls");
+    let timer = tracking::TimedExecution::start();
 
+    let mut cmd = Command::new("ls");
     // Default to -la if no args (common case for LLM context)
     if args.is_empty() {
         cmd.args(["-la"]);
@@ -45,7 +46,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     print!("{}", filtered);
-    tracking::track("ls", "rtk ls", &raw, &filtered);
+    timer.track("ls", "rtk ls", &raw, &filtered);
 
     Ok(())
 }

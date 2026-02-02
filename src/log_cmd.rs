@@ -1,13 +1,15 @@
+use crate::tracking;
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead};
 use std::path::Path;
-use crate::tracking;
 
 /// Filter and deduplicate log output
 pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("Analyzing log: {}", file.display());
     }
@@ -15,7 +17,12 @@ pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
     let content = fs::read_to_string(file)?;
     let result = analyze_logs(&content);
     println!("{}", result);
-    tracking::track(&format!("cat {}", file.display()), "rtk log", &content, &result);
+    timer.track(
+        &format!("cat {}", file.display()),
+        "rtk log",
+        &content,
+        &result,
+    );
     Ok(())
 }
 
@@ -47,8 +54,11 @@ fn analyze_logs(content: &str) -> String {
     let mut unique_warnings: Vec<String> = Vec::new();
 
     // Patterns to normalize log messages
-    let timestamp_re = Regex::new(r"^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}[.,]?\d*\s*").unwrap();
-    let uuid_re = Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}").unwrap();
+    let timestamp_re =
+        Regex::new(r"^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}[.,]?\d*\s*").unwrap();
+    let uuid_re =
+        Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+            .unwrap();
     let hex_re = Regex::new(r"0x[0-9a-fA-F]+").unwrap();
     let num_re = Regex::new(r"\b\d{4,}\b").unwrap();
     let path_re = Regex::new(r"/[\w./\-]+").unwrap();
@@ -57,10 +67,14 @@ fn analyze_logs(content: &str) -> String {
         let line_lower = line.to_lowercase();
 
         // Normalize for deduplication
-        let normalized = normalize_log_line(line, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re);
+        let normalized =
+            normalize_log_line(line, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re);
 
         // Categorize
-        if line_lower.contains("error") || line_lower.contains("fatal") || line_lower.contains("panic") {
+        if line_lower.contains("error")
+            || line_lower.contains("fatal")
+            || line_lower.contains("panic")
+        {
             let count = error_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
                 unique_errors.push(line.to_string());
@@ -83,8 +97,16 @@ fn analyze_logs(content: &str) -> String {
     let total_info: usize = info_counts.values().sum();
 
     result.push(format!("📊 Log Summary"));
-    result.push(format!("   ❌ {} errors ({} unique)", total_errors, error_counts.len()));
-    result.push(format!("   ⚠️  {} warnings ({} unique)", total_warnings, warn_counts.len()));
+    result.push(format!(
+        "   ❌ {} errors ({} unique)",
+        total_errors,
+        error_counts.len()
+    ));
+    result.push(format!(
+        "   ⚠️  {} warnings ({} unique)",
+        total_warnings,
+        warn_counts.len()
+    ));
     result.push(format!("   ℹ️  {} info messages", total_info));
     result.push(String::new());
 
@@ -98,8 +120,12 @@ fn analyze_logs(content: &str) -> String {
 
         for (normalized, count) in error_list.iter().take(10) {
             // Find original message
-            let original = unique_errors.iter()
-                .find(|e| &normalize_log_line(e, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re) == *normalized)
+            let original = unique_errors
+                .iter()
+                .find(|e| {
+                    &normalize_log_line(e, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re)
+                        == *normalized
+                })
                 .map(|s| s.as_str())
                 .unwrap_or(normalized);
 
@@ -117,7 +143,10 @@ fn analyze_logs(content: &str) -> String {
         }
 
         if error_list.len() > 10 {
-            result.push(format!("   ... +{} more unique errors", error_list.len() - 10));
+            result.push(format!(
+                "   ... +{} more unique errors",
+                error_list.len() - 10
+            ));
         }
         result.push(String::new());
     }
@@ -130,8 +159,12 @@ fn analyze_logs(content: &str) -> String {
         warn_list.sort_by(|a, b| b.1.cmp(a.1));
 
         for (normalized, count) in warn_list.iter().take(5) {
-            let original = unique_warnings.iter()
-                .find(|w| &normalize_log_line(w, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re) == *normalized)
+            let original = unique_warnings
+                .iter()
+                .find(|w| {
+                    &normalize_log_line(w, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re)
+                        == *normalized
+                })
                 .map(|s| s.as_str())
                 .unwrap_or(normalized);
 
@@ -149,14 +182,24 @@ fn analyze_logs(content: &str) -> String {
         }
 
         if warn_list.len() > 5 {
-            result.push(format!("   ... +{} more unique warnings", warn_list.len() - 5));
+            result.push(format!(
+                "   ... +{} more unique warnings",
+                warn_list.len() - 5
+            ));
         }
     }
 
     result.join("\n")
 }
 
-fn normalize_log_line(line: &str, timestamp_re: &Regex, uuid_re: &Regex, hex_re: &Regex, num_re: &Regex, path_re: &Regex) -> String {
+fn normalize_log_line(
+    line: &str,
+    timestamp_re: &Regex,
+    uuid_re: &Regex,
+    hex_re: &Regex,
+    num_re: &Regex,
+    path_re: &Regex,
+) -> String {
     let mut normalized = timestamp_re.replace_all(line, "").to_string();
     normalized = uuid_re.replace_all(&normalized, "<UUID>").to_string();
     normalized = hex_re.replace_all(&normalized, "<HEX>").to_string();

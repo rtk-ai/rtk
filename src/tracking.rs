@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::time::Instant;
 
 const HISTORY_DAYS: i64 = 90;
 
@@ -25,7 +26,9 @@ pub struct GainSummary {
     pub total_output: usize,
     pub total_saved: usize,
     pub avg_savings_pct: f64,
-    pub by_command: Vec<(String, usize, usize, f64)>,
+    pub total_time_ms: u64,
+    pub avg_time_ms: u64,
+    pub by_command: Vec<(String, usize, usize, f64, u64)>,
     pub by_day: Vec<(String, usize)>,
 }
 
@@ -37,6 +40,8 @@ pub struct DayStats {
     pub output_tokens: usize,
     pub saved_tokens: usize,
     pub savings_pct: f64,
+    pub total_time_ms: u64,
+    pub avg_time_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +53,8 @@ pub struct WeekStats {
     pub output_tokens: usize,
     pub saved_tokens: usize,
     pub savings_pct: f64,
+    pub total_time_ms: u64,
+    pub avg_time_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +65,8 @@ pub struct MonthStats {
     pub output_tokens: usize,
     pub saved_tokens: usize,
     pub savings_pct: f64,
+    pub total_time_ms: u64,
+    pub avg_time_ms: u64,
 }
 
 impl Tracker {
@@ -87,6 +96,12 @@ impl Tracker {
             [],
         )?;
 
+        // Migration: add exec_time_ms column if it doesn't exist
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN exec_time_ms INTEGER DEFAULT 0",
+            [],
+        );
+
         Ok(Self { conn })
     }
 
@@ -96,6 +111,7 @@ impl Tracker {
         rtk_cmd: &str,
         input_tokens: usize,
         output_tokens: usize,
+        exec_time_ms: u64,
     ) -> Result<()> {
         let saved = input_tokens.saturating_sub(output_tokens);
         let pct = if input_tokens > 0 {
@@ -105,8 +121,8 @@ impl Tracker {
         };
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
@@ -114,7 +130,8 @@ impl Tracker {
                 input_tokens as i64,
                 output_tokens as i64,
                 saved as i64,
-                pct
+                pct,
+                exec_time_ms as i64
             ],
         )?;
 
@@ -136,31 +153,40 @@ impl Tracker {
         let mut total_input = 0usize;
         let mut total_output = 0usize;
         let mut total_saved = 0usize;
+        let mut total_time_ms = 0u64;
 
         let mut stmt = self
             .conn
-            .prepare("SELECT input_tokens, output_tokens, saved_tokens FROM commands")?;
+            .prepare("SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms FROM commands")?;
 
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
                 row.get::<_, i64>(2)? as usize,
+                row.get::<_, i64>(3)? as u64,
             ))
         })?;
 
         for row in rows {
-            let (input, output, saved) = row?;
+            let (input, output, saved, time_ms) = row?;
             total_commands += 1;
             total_input += input;
             total_output += output;
             total_saved += saved;
+            total_time_ms += time_ms;
         }
 
         let avg_savings_pct = if total_input > 0 {
             (total_saved as f64 / total_input as f64) * 100.0
         } else {
             0.0
+        };
+
+        let avg_time_ms = if total_commands > 0 {
+            total_time_ms / total_commands as u64
+        } else {
+            0
         };
 
         let by_command = self.get_by_command()?;
@@ -172,14 +198,16 @@ impl Tracker {
             total_output,
             total_saved,
             avg_savings_pct,
+            total_time_ms,
+            avg_time_ms,
             by_command,
             by_day,
         })
     }
 
-    fn get_by_command(&self) -> Result<Vec<(String, usize, usize, f64)>> {
+    fn get_by_command(&self) -> Result<Vec<(String, usize, usize, f64, u64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct)
+            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
@@ -192,6 +220,7 @@ impl Tracker {
                 row.get::<_, i64>(1)? as usize,
                 row.get::<_, i64>(2)? as usize,
                 row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)? as u64,
             ))
         })?;
 
@@ -223,7 +252,8 @@ impl Tracker {
                 COUNT(*) as commands,
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
-                SUM(saved_tokens) as saved
+                SUM(saved_tokens) as saved,
+                SUM(exec_time_ms) as total_time
              FROM commands
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC",
@@ -232,19 +262,28 @@ impl Tracker {
         let rows = stmt.query_map([], |row| {
             let input = row.get::<_, i64>(2)? as usize;
             let saved = row.get::<_, i64>(4)? as usize;
+            let commands = row.get::<_, i64>(1)? as usize;
+            let total_time = row.get::<_, i64>(5)? as u64;
             let savings_pct = if input > 0 {
                 (saved as f64 / input as f64) * 100.0
             } else {
                 0.0
             };
+            let avg_time_ms = if commands > 0 {
+                total_time / commands as u64
+            } else {
+                0
+            };
 
             Ok(DayStats {
                 date: row.get(0)?,
-                commands: row.get::<_, i64>(1)? as usize,
+                commands,
                 input_tokens: input,
                 output_tokens: row.get::<_, i64>(3)? as usize,
                 saved_tokens: saved,
                 savings_pct,
+                total_time_ms: total_time,
+                avg_time_ms,
             })
         })?;
 
@@ -261,7 +300,8 @@ impl Tracker {
                 COUNT(*) as commands,
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
-                SUM(saved_tokens) as saved
+                SUM(saved_tokens) as saved,
+                SUM(exec_time_ms) as total_time
              FROM commands
              GROUP BY week_start
              ORDER BY week_start DESC",
@@ -270,20 +310,29 @@ impl Tracker {
         let rows = stmt.query_map([], |row| {
             let input = row.get::<_, i64>(3)? as usize;
             let saved = row.get::<_, i64>(5)? as usize;
+            let commands = row.get::<_, i64>(2)? as usize;
+            let total_time = row.get::<_, i64>(6)? as u64;
             let savings_pct = if input > 0 {
                 (saved as f64 / input as f64) * 100.0
             } else {
                 0.0
             };
+            let avg_time_ms = if commands > 0 {
+                total_time / commands as u64
+            } else {
+                0
+            };
 
             Ok(WeekStats {
                 week_start: row.get(0)?,
                 week_end: row.get(1)?,
-                commands: row.get::<_, i64>(2)? as usize,
+                commands,
                 input_tokens: input,
                 output_tokens: row.get::<_, i64>(4)? as usize,
                 saved_tokens: saved,
                 savings_pct,
+                total_time_ms: total_time,
+                avg_time_ms,
             })
         })?;
 
@@ -299,7 +348,8 @@ impl Tracker {
                 COUNT(*) as commands,
                 SUM(input_tokens) as input,
                 SUM(output_tokens) as output,
-                SUM(saved_tokens) as saved
+                SUM(saved_tokens) as saved,
+                SUM(exec_time_ms) as total_time
              FROM commands
              GROUP BY month
              ORDER BY month DESC",
@@ -308,19 +358,28 @@ impl Tracker {
         let rows = stmt.query_map([], |row| {
             let input = row.get::<_, i64>(2)? as usize;
             let saved = row.get::<_, i64>(4)? as usize;
+            let commands = row.get::<_, i64>(1)? as usize;
+            let total_time = row.get::<_, i64>(5)? as u64;
             let savings_pct = if input > 0 {
                 (saved as f64 / input as f64) * 100.0
             } else {
                 0.0
             };
+            let avg_time_ms = if commands > 0 {
+                total_time / commands as u64
+            } else {
+                0
+            };
 
             Ok(MonthStats {
                 month: row.get(0)?,
-                commands: row.get::<_, i64>(1)? as usize,
+                commands,
                 input_tokens: input,
                 output_tokens: row.get::<_, i64>(3)? as usize,
                 saved_tokens: saved,
                 savings_pct,
+                total_time_ms: total_time,
+                avg_time_ms,
             })
         })?;
 
@@ -362,7 +421,38 @@ pub fn estimate_tokens(text: &str) -> usize {
     (text.len() as f64 / 4.0).ceil() as usize
 }
 
-/// Track a command execution
+/// Helper struct for timing command execution
+pub struct TimedExecution {
+    start: Instant,
+}
+
+impl TimedExecution {
+    /// Start timing a command execution
+    pub fn start() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+
+    /// Track the command with elapsed time
+    pub fn track(self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        let input_tokens = estimate_tokens(input);
+        let output_tokens = estimate_tokens(output);
+
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record(
+                original_cmd,
+                rtk_cmd,
+                input_tokens,
+                output_tokens,
+                elapsed_ms,
+            );
+        }
+    }
+}
+
+/// Track a command execution (legacy function, use TimedExecution for new code)
 /// original_cmd: the equivalent standard command (e.g., "ls -la")
 /// rtk_cmd: the rtk command used (e.g., "rtk ls")
 /// input: estimated raw output that would have been produced
@@ -372,6 +462,6 @@ pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
     let output_tokens = estimate_tokens(output);
 
     if let Ok(tracker) = Tracker::new() {
-        let _ = tracker.record(original_cmd, rtk_cmd, input_tokens, output_tokens);
+        let _ = tracker.record(original_cmd, rtk_cmd, input_tokens, output_tokens, 0);
     }
 }

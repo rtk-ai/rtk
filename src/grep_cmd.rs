@@ -1,8 +1,8 @@
+use crate::tracking;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::process::Command;
-use crate::tracking;
 
 pub fn run(
     pattern: &str,
@@ -13,6 +13,8 @@ pub fn run(
     file_type: Option<&str>,
     verbose: u8,
 ) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern, path);
     }
@@ -26,11 +28,7 @@ pub fn run(
 
     let output = rg_cmd
         .output()
-        .or_else(|_| {
-            Command::new("grep")
-                .args(["-rn", pattern, path])
-                .output()
-        })
+        .or_else(|_| Command::new("grep").args(["-rn", pattern, path]).output())
         .context("grep/rg failed")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -40,7 +38,12 @@ pub fn run(
     if stdout.trim().is_empty() {
         let msg = format!("🔍 0 for '{}'", pattern);
         println!("{}", msg);
-        tracking::track(&format!("grep -rn '{}' {}", pattern, path), "rtk grep", &raw_output, &msg);
+        timer.track(
+            &format!("grep -rn '{}' {}", pattern, path),
+            "rtk grep",
+            &raw_output,
+            &msg,
+        );
         return Ok(());
     }
 
@@ -99,7 +102,12 @@ pub fn run(
     }
 
     print!("{}", rtk_output);
-    tracking::track(&format!("grep -rn '{}' {}", pattern, path), "rtk grep", &raw_output, &rtk_output);
+    timer.track(
+        &format!("grep -rn '{}' {}", pattern, path),
+        "rtk grep",
+        &raw_output,
+        &rtk_output,
+    );
 
     Ok(())
 }

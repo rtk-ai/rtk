@@ -1,10 +1,12 @@
-use anyhow::Result;
-use std::env;
-use std::collections::HashSet;
 use crate::tracking;
+use anyhow::Result;
+use std::collections::HashSet;
+use std::env;
 
 /// Show filtered environment variables (hide sensitive data)
 pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("Environment variables:");
     }
@@ -29,9 +31,9 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         }
 
         // Check if sensitive
-        let is_sensitive = sensitive_patterns.iter().any(|p| {
-            key.to_lowercase().contains(p)
-        });
+        let is_sensitive = sensitive_patterns
+            .iter()
+            .any(|p| key.to_lowercase().contains(p));
 
         let display_value = if is_sensitive && !show_all {
             mask_value(value)
@@ -109,14 +111,18 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
     }
 
     let total = vars.len();
-    let shown = path_vars.len() + lang_vars.len() + cloud_vars.len() + tool_vars.len() + other_vars.len().min(20);
+    let shown = path_vars.len()
+        + lang_vars.len()
+        + cloud_vars.len()
+        + tool_vars.len()
+        + other_vars.len().min(20);
     if filter.is_none() {
         println!("\n📊 Total: {} vars (showing {} relevant)", total, shown);
     }
 
     let raw: String = vars.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
     let rtk = format!("{} vars -> {} shown", total, shown);
-    tracking::track("env", "rtk env", &raw, &rtk);
+    timer.track("env", "rtk env", &raw, &rtk);
     Ok(())
 }
 
@@ -140,38 +146,55 @@ fn mask_value(value: &str) -> String {
     if value.len() <= 4 {
         "****".to_string()
     } else {
-        format!("{}****{}", &value[..2], &value[value.len()-2..])
+        format!("{}****{}", &value[..2], &value[value.len() - 2..])
     }
 }
 
 fn is_lang_var(key: &str) -> bool {
     let patterns = [
-        "RUST", "CARGO", "PYTHON", "PIP", "NODE", "NPM", "YARN", "DENO", "BUN",
-        "JAVA", "MAVEN", "GRADLE", "GO", "GOPATH", "GOROOT", "RUBY", "GEM",
-        "PERL", "PHP", "DOTNET", "NUGET",
+        "RUST", "CARGO", "PYTHON", "PIP", "NODE", "NPM", "YARN", "DENO", "BUN", "JAVA", "MAVEN",
+        "GRADLE", "GO", "GOPATH", "GOROOT", "RUBY", "GEM", "PERL", "PHP", "DOTNET", "NUGET",
     ];
     patterns.iter().any(|p| key.to_uppercase().contains(p))
 }
 
 fn is_cloud_var(key: &str) -> bool {
     let patterns = [
-        "AWS", "AZURE", "GCP", "GOOGLE_CLOUD", "DOCKER", "KUBERNETES", "K8S",
-        "HELM", "TERRAFORM", "VAULT", "CONSUL", "NOMAD",
+        "AWS",
+        "AZURE",
+        "GCP",
+        "GOOGLE_CLOUD",
+        "DOCKER",
+        "KUBERNETES",
+        "K8S",
+        "HELM",
+        "TERRAFORM",
+        "VAULT",
+        "CONSUL",
+        "NOMAD",
     ];
     patterns.iter().any(|p| key.to_uppercase().contains(p))
 }
 
 fn is_tool_var(key: &str) -> bool {
     let patterns = [
-        "EDITOR", "VISUAL", "SHELL", "TERM", "GIT", "SSH", "GPG", "BREW",
-        "HOMEBREW", "XDG", "CLAUDE", "ANTHROPIC",
+        "EDITOR",
+        "VISUAL",
+        "SHELL",
+        "TERM",
+        "GIT",
+        "SSH",
+        "GPG",
+        "BREW",
+        "HOMEBREW",
+        "XDG",
+        "CLAUDE",
+        "ANTHROPIC",
     ];
     patterns.iter().any(|p| key.to_uppercase().contains(p))
 }
 
 fn is_interesting_var(key: &str) -> bool {
-    let patterns = [
-        "HOME", "USER", "LANG", "LC_", "TZ", "PWD", "OLDPWD",
-    ];
+    let patterns = ["HOME", "USER", "LANG", "LC_", "TZ", "PWD", "OLDPWD"];
     patterns.iter().any(|p| key.to_uppercase().starts_with(p))
 }

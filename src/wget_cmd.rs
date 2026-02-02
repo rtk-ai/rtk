@@ -1,9 +1,11 @@
+use crate::tracking;
 use anyhow::{Context, Result};
 use std::process::Command;
-use crate::tracking;
 
 /// Compact wget - strips progress bars, shows only result
 pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("wget: {}", url);
     }
@@ -30,14 +32,19 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
     if output.status.success() {
         let filename = extract_filename_from_output(&stderr, url, args);
         let size = get_file_size(&filename);
-        let msg = format!("⬇️ {} ok | {} | {}", compact_url(url), filename, format_size(size));
+        let msg = format!(
+            "⬇️ {} ok | {} | {}",
+            compact_url(url),
+            filename,
+            format_size(size)
+        );
         println!("{}", msg);
-        tracking::track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
+        timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
     } else {
         let error = parse_error(&stderr, &stdout);
         let msg = format!("⬇️ {} FAILED: {}", compact_url(url), error);
         println!("{}", msg);
-        tracking::track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
+        timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
     }
 
     Ok(())
@@ -45,6 +52,8 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
 
 /// Run wget and output to stdout (for piping)
 pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("wget: {} -> stdout", url);
     }
@@ -68,7 +77,12 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
 
         let mut rtk_output = String::new();
         if total > 20 {
-            rtk_output.push_str(&format!("⬇️ {} ok | {} lines | {}\n", compact_url(url), total, format_size(output.stdout.len() as u64)));
+            rtk_output.push_str(&format!(
+                "⬇️ {} ok | {} lines | {}\n",
+                compact_url(url),
+                total,
+                format_size(output.stdout.len() as u64)
+            ));
             rtk_output.push_str("--- first 10 lines ---\n");
             for line in lines.iter().take(10) {
                 rtk_output.push_str(&format!("{}\n", truncate_line(line, 100)));
@@ -81,13 +95,18 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
             }
         }
         print!("{}", rtk_output);
-        tracking::track(&format!("wget -O - {}", url), "rtk wget -o", &raw_output, &rtk_output);
+        timer.track(
+            &format!("wget -O - {}", url),
+            "rtk wget -o",
+            &raw_output,
+            &rtk_output,
+        );
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let error = parse_error(&stderr, "");
         let msg = format!("⬇️ {} FAILED: {}", compact_url(url), error);
         println!("{}", msg);
-        tracking::track(&format!("wget -O - {}", url), "rtk wget -o", &stderr, &msg);
+        timer.track(&format!("wget -O - {}", url), "rtk wget -o", &stderr, &msg);
     }
 
     Ok(())
@@ -135,7 +154,8 @@ fn extract_filename_from_output(stderr: &str, url: &str, args: &[String]) -> Str
 
     // Fallback: extract from URL
     let path = url.rsplit("://").next().unwrap_or(url);
-    let filename = path.rsplit('/')
+    let filename = path
+        .rsplit('/')
         .next()
         .unwrap_or("index.html")
         .split('?')
@@ -150,9 +170,7 @@ fn extract_filename_from_output(stderr: &str, url: &str, args: &[String]) -> Str
 }
 
 fn get_file_size(filename: &str) -> u64 {
-    std::fs::metadata(filename)
-        .map(|m| m.len())
-        .unwrap_or(0)
+    std::fs::metadata(filename).map(|m| m.len()).unwrap_or(0)
 }
 
 fn format_size(bytes: u64) -> String {
@@ -181,7 +199,11 @@ fn compact_url(url: &str) -> String {
     if without_proto.len() <= 50 {
         without_proto.to_string()
     } else {
-        format!("{}...{}", &without_proto[..25], &without_proto[without_proto.len()-20..])
+        format!(
+            "{}...{}",
+            &without_proto[..25],
+            &without_proto[without_proto.len() - 20..]
+        )
     }
 }
 
@@ -232,6 +254,6 @@ fn truncate_line(line: &str, max: usize) -> String {
     if line.len() <= max {
         line.to_string()
     } else {
-        format!("{}...", &line[..max-3])
+        format!("{}...", &line[..max - 3])
     }
 }
