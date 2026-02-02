@@ -11,7 +11,7 @@ This is a fork with critical fixes for git argument parsing and modern JavaScrip
 ### ⚠️ Name Collision Warning
 
 **Two different "rtk" projects exist:**
-- ✅ **This project**: Rust Token Killer (rtk-ai/rtk, pszymkowiak/rtk, FlorianBruniaux/rtk fork)
+- ✅ **This project**: Rust Token Killer (rtk-ai/rtk)
 - ❌ **reachingforthejack/rtk**: Rust Type Kit (DIFFERENT - generates Rust types)
 
 **Verify correct installation:**
