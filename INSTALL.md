@@ -5,7 +5,7 @@
 **There are TWO completely different projects named "rtk":**
 
 1. ✅ **Rust Token Killer** (this project) - LLM token optimizer
-   - Repos: `rtk-ai/rtk`, `pszymkowiak/rtk`, `FlorianBruniaux/rtk` (fork)
+   - Repos: `rtk-ai/rtk`
    - Has `rtk gain` command for token savings stats
 
 2. ❌ **Rust Type Kit** (reachingforthejack/rtk) - DIFFERENT PROJECT
@@ -41,27 +41,18 @@ If you accidentally installed Rust Type Kit:
 cargo uninstall rtk
 ```
 
-### Option 1: Install from fork (RECOMMENDED)
-
-This fork includes critical fixes and modern JavaScript stack support (pnpm, vitest, Next.js, TypeScript, Playwright, Prisma):
+### Quick Install (Linux/macOS)
 
 ```bash
-# Clone the fork
-git clone https://github.com/FlorianBruniaux/rtk.git
-cd rtk
-
-# Checkout the all-features branch
-git checkout feat/all-features
-
-# Compile and install
-cargo install --path . --force
-
-# VERIFY you have the correct RTK
-rtk --version
-rtk gain  # MUST work (shows token stats, not error)
+curl -fsSL https://github.com/rtk-ai/rtk/blob/master/install.sh | sh
 ```
 
-### Option 2: Install from upstream (basic features)
+After installation, **verify you have the correct rtk**:
+```bash
+rtk gain  # Must show token savings stats (not "command not found")
+```
+
+### Alternative: Manual Installation
 
 ```bash
 # From rtk-ai repository (NOT reachingforthejack!)
@@ -202,9 +193,8 @@ cargo install --path . --force
 ## Support and Contributing
 
 - **Troubleshooting**: See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues
-- **Fork issues**: https://github.com/FlorianBruniaux/rtk/issues
-- **Upstream issues**: https://github.com/rtk-ai/rtk/issues (maintained by pszymkowiak)
-- **Pull Requests**: Create on fork then propose upstream
+- **GitHub issues**: https://github.com/rtk-ai/rtk/issues
+- **Pull Requests**: https://github.com/rtk-ai/rtk/pulls
 
 ⚠️ **If you installed the wrong rtk (Type Kit)**, see [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#problem-rtk-gain-command-not-found)
 

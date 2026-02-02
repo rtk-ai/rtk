@@ -11,7 +11,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 **There are TWO different projects named "rtk":**
 
 1. ✅ **This project (Rust Token Killer)** - LLM token optimizer
-   - Repos: `rtk-ai/rtk`, `pszymkowiak/rtk`, `FlorianBruniaux/rtk` (fork)
+   - Repos: `rtk-ai/rtk`
    - Purpose: Reduce Claude Code token consumption
 
 2. ❌ **reachingforthejack/rtk** - Rust Type Kit (DIFFERENT PROJECT)
@@ -60,25 +60,18 @@ which rtk            # Check installation path
 
 If already installed and `rtk gain` works, **DO NOT reinstall**. Skip to Quick Start.
 
-### Option 1: Fork with All Features (RECOMMENDED)
-
-This fork includes critical fixes and modern JavaScript stack support (pnpm, vitest, Next.js, TypeScript, Playwright, Prisma):
+### Quick Install (Linux/macOS)
 
 ```bash
-# Uninstall wrong rtk if needed
-cargo uninstall rtk
-
-# Install the correct one from fork
-git clone https://github.com/FlorianBruniaux/rtk.git
-cd rtk && git checkout feat/all-features
-cargo install --path . --force
-
-# Verify installation
-rtk --version
-rtk gain  # Should show token savings stats
+curl -fsSL https://github.com/rtk-ai/rtk/blob/master/install.sh | sh
 ```
 
-### Option 2: Upstream (Basic Features)
+After installation, **verify you have the correct rtk**:
+```bash
+rtk gain  # Must show token savings stats (not "command not found")
+```
+
+### Alternative: Manual Installation
 
 ```bash
 # From rtk-ai upstream (maintained by pszymkowiak)
@@ -90,9 +83,9 @@ cargo install rtk
 
 ⚠️ **WARNING**: `cargo install rtk` from crates.io might install the wrong package (Type Kit instead of Token Killer). Always verify with `rtk gain` after installation.
 
-### Option 3: Pre-built Binaries
+### Alternative: Pre-built Binaries
 
-Download from [Releases](https://github.com/FlorianBruniaux/rtk/releases) (fork) or [rtk-ai/releases](https://github.com/rtk-ai/rtk/releases) (upstream):
+Download from [rtk-ai/releases](https://github.com/rtk-ai/rtk/releases):
 - macOS: `rtk-x86_64-apple-darwin.tar.gz` / `rtk-aarch64-apple-darwin.tar.gz`
 - Linux: `rtk-x86_64-unknown-linux-gnu.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
@@ -221,7 +214,7 @@ Command              Count    Example
 git checkout            84    git checkout feature/my-branch
 cargo run               32    cargo run -- gain --help
 ----------------------------------------------------
--> github.com/FlorianBruniaux/rtk/issues
+-> github.com/rtk-ai/rtk/issues
 ```
 
 ### Containers
