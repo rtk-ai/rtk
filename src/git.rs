@@ -305,7 +305,9 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
     } else {
         // Extract limit from args if provided
         args.iter()
-            .find(|arg| arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()))
+            .find(|arg| {
+                arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+            })
             .and_then(|arg| arg[1..].parse::<usize>().ok())
             .unwrap_or(10)
     };
@@ -478,15 +480,18 @@ fn filter_status_with_args(output: &str) -> String {
             continue;
         }
 
-        // Skip common git hints
-        if trimmed.starts_with("(use \"git") {
+        // Skip git hints - can appear at start or within line
+        if trimmed.starts_with("(use \"git")
+            || trimmed.starts_with("(create/copy files")
+            || trimmed.contains("(use \"git add")
+            || trimmed.contains("(use \"git restore")
+        {
             continue;
         }
-        if trimmed.starts_with("(create/copy files") {
-            continue;
-        }
+
+        // Special case: clean working tree
         if trimmed.contains("nothing to commit") && trimmed.contains("working tree clean") {
-            result.push(line.to_string());
+            result.push(trimmed.to_string());
             break;
         }
 
@@ -758,48 +763,49 @@ fn run_pull(args: &[String], verbose: u8) -> Result<()> {
     let raw_output = format!("{}\n{}", stdout, stderr);
 
     if output.status.success() {
-        let compact = if stdout.contains("Already up to date") || stdout.contains("Already up-to-date") {
-            "ok (up-to-date)".to_string()
-        } else {
-            // Count files changed
-            let mut files = 0;
-            let mut insertions = 0;
-            let mut deletions = 0;
+        let compact =
+            if stdout.contains("Already up to date") || stdout.contains("Already up-to-date") {
+                "ok (up-to-date)".to_string()
+            } else {
+                // Count files changed
+                let mut files = 0;
+                let mut insertions = 0;
+                let mut deletions = 0;
 
-            for line in stdout.lines() {
-                if line.contains("file") && line.contains("changed") {
-                    // Parse "3 files changed, 10 insertions(+), 2 deletions(-)"
-                    for part in line.split(',') {
-                        let part = part.trim();
-                        if part.contains("file") {
-                            files = part
-                                .split_whitespace()
-                                .next()
-                                .and_then(|n| n.parse().ok())
-                                .unwrap_or(0);
-                        } else if part.contains("insertion") {
-                            insertions = part
-                                .split_whitespace()
-                                .next()
-                                .and_then(|n| n.parse().ok())
-                                .unwrap_or(0);
-                        } else if part.contains("deletion") {
-                            deletions = part
-                                .split_whitespace()
-                                .next()
-                                .and_then(|n| n.parse().ok())
-                                .unwrap_or(0);
+                for line in stdout.lines() {
+                    if line.contains("file") && line.contains("changed") {
+                        // Parse "3 files changed, 10 insertions(+), 2 deletions(-)"
+                        for part in line.split(',') {
+                            let part = part.trim();
+                            if part.contains("file") {
+                                files = part
+                                    .split_whitespace()
+                                    .next()
+                                    .and_then(|n| n.parse().ok())
+                                    .unwrap_or(0);
+                            } else if part.contains("insertion") {
+                                insertions = part
+                                    .split_whitespace()
+                                    .next()
+                                    .and_then(|n| n.parse().ok())
+                                    .unwrap_or(0);
+                            } else if part.contains("deletion") {
+                                deletions = part
+                                    .split_whitespace()
+                                    .next()
+                                    .and_then(|n| n.parse().ok())
+                                    .unwrap_or(0);
+                            }
                         }
                     }
                 }
-            }
 
-            if files > 0 {
-                format!("ok ✓ {} files +{} -{}", files, insertions, deletions)
-            } else {
-                "ok ✓".to_string()
-            }
-        };
+                if files > 0 {
+                    format!("ok ✓ {} files +{} -{}", files, insertions, deletions)
+                } else {
+                    "ok ✓".to_string()
+                }
+            };
 
         println!("{}", compact);
 
@@ -1298,10 +1304,7 @@ M  file7.rs
     #[test]
     fn test_run_passthrough_accepts_args() {
         // Test that run_passthrough compiles and has correct signature
-        let args: Vec<OsString> = vec![
-            OsString::from("tag"),
-            OsString::from("--list"),
-        ];
+        let args: Vec<OsString> = vec![OsString::from("tag"), OsString::from("--list")];
         // We can't actually run git in tests without proper setup,
         // but we can verify the function signature compiles
         let _ = std::panic::catch_unwind(|| {
@@ -1311,5 +1314,62 @@ M  file7.rs
                 Ok(())
             })();
         });
+    }
+
+    #[test]
+    fn test_filter_log_output() {
+        let output = "abc1234 This is a commit message (2 days ago) <author>\ndef5678 Another commit (1 week ago) <other>\n";
+        let result = filter_log_output(output, 10);
+        assert!(result.contains("abc1234"));
+        assert!(result.contains("def5678"));
+        assert_eq!(result.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_filter_log_output_truncate_long() {
+        let long_line = "abc1234 ".to_string() + &"x".repeat(100) + " (2 days ago) <author>";
+        let result = filter_log_output(&long_line, 10);
+        assert!(result.len() < long_line.len());
+        assert!(result.contains("..."));
+        assert!(result.len() <= 80);
+    }
+
+    #[test]
+    fn test_filter_log_output_cap_lines() {
+        let output = (0..20)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 5);
+        assert_eq!(result.lines().count(), 5);
+    }
+
+    #[test]
+    fn test_filter_status_with_args() {
+        let output = r#"On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/main.rs
+
+no changes added to commit (use "git add" and/or "git commit -a")
+"#;
+        let result = filter_status_with_args(output);
+        eprintln!("Result:\n{}", result);
+        assert!(result.contains("On branch main"));
+        assert!(result.contains("modified:   src/main.rs"));
+        assert!(
+            !result.contains("(use \"git"),
+            "Result should not contain git hints"
+        );
+    }
+
+    #[test]
+    fn test_filter_status_with_args_clean() {
+        let output = "nothing to commit, working tree clean\n";
+        let result = filter_status_with_args(output);
+        assert!(result.contains("nothing to commit"));
     }
 }

@@ -135,6 +135,35 @@ main.rs:Commands enum
   → Result<()> propagates errors
 ```
 
+### Proxy Mode
+
+**Purpose**: Execute commands without filtering but track usage for metrics.
+
+**Usage**: `rtk proxy <command> [args...]`
+
+**Benefits**:
+- **Bypass RTK filtering**: Workaround bugs or get full unfiltered output
+- **Track usage metrics**: Measure which commands Claude uses most (visible in `rtk gain --history`)
+- **Guaranteed compatibility**: Always works even if RTK doesn't implement the command
+- **Prototyping**: Test new commands before implementing optimized filtering
+
+**Examples**:
+```bash
+# Full git log output (no truncation)
+rtk proxy git log --oneline -20
+
+# Raw npm output (no filtering)
+rtk proxy npm install express
+
+# Any command works
+rtk proxy curl https://api.example.com/data
+
+# Tracking shows 0% savings (expected)
+rtk gain --history | grep proxy
+```
+
+**Tracking**: All proxy commands appear in `rtk gain --history` with 0% savings (input = output) but preserve usage statistics.
+
 ### Critical Implementation Details
 
 **Git Argument Handling** (src/git.rs)

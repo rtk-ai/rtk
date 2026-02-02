@@ -239,6 +239,11 @@ assert_ok      "rtk grep pattern"             rtk grep "pub fn" src/
 assert_contains "rtk grep finds results"      "pub fn" rtk grep "pub fn" src/
 assert_ok      "rtk grep with file type"      rtk grep "pub fn" src/ -t rust
 
+section "Grep (extra args passthrough)"
+
+assert_ok      "rtk grep -i case insensitive" rtk grep "fn" src/ -i
+assert_ok      "rtk grep -A context lines"    rtk grep "fn run" src/ -A 2
+
 # ── 11. Find ─────────────────────────────────────────
 
 section "Find"

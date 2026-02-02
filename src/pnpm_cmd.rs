@@ -552,9 +552,7 @@ mod tests {
     #[test]
     fn test_run_passthrough_accepts_args() {
         // Test that run_passthrough compiles and has correct signature
-        let args: Vec<OsString> = vec![
-            OsString::from("help"),
-        ];
+        let args: Vec<OsString> = vec![OsString::from("help")];
         // We can't actually run pnpm in tests without proper setup,
         // but we can verify the function signature compiles
         let _ = std::panic::catch_unwind(|| {

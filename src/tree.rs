@@ -183,8 +183,15 @@ mod tests {
 
         for (input, summary_fragment) in inputs {
             let output = filter_tree_output(input);
-            assert!(!output.contains(summary_fragment), "Should remove summary '{}' from output", summary_fragment);
-            assert!(output.contains("file.txt"), "Should preserve file.txt in output");
+            assert!(
+                !output.contains(summary_fragment),
+                "Should remove summary '{}' from output",
+                summary_fragment
+            );
+            assert!(
+                output.contains("file.txt"),
+                "Should preserve file.txt in output"
+            );
         }
     }
 
