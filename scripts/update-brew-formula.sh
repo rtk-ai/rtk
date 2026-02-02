@@ -4,7 +4,7 @@
 #
 set -euo pipefail
 
-REPO_OWNER="pszymkowiak"
+REPO_OWNER="rtk-ai"
 REPO_NAME="rtk"
 FORMULA_FILE="Formula/rtk.rb"
 

@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/pszymkowiak/rtk/master/install.sh |
 
 ### Homebrew (macOS/Linux)
 ```bash
-brew tap pszymkowiak/rtk
+brew tap rtk-ai/tap
 brew install rtk
 ```
 
