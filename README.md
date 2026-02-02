@@ -6,6 +6,26 @@
 
 rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens on common operations.
 
+## ⚠️ Important: Name Collision Warning
+
+**There are TWO different projects named "rtk":**
+
+1. ✅ **This project (Rust Token Killer)** - LLM token optimizer
+   - Repos: `rtk-ai/rtk`, `pszymkowiak/rtk`, `FlorianBruniaux/rtk` (fork)
+   - Purpose: Reduce Claude Code token consumption
+
+2. ❌ **reachingforthejack/rtk** - Rust Type Kit (DIFFERENT PROJECT)
+   - Purpose: Query Rust codebase and generate types
+   - **DO NOT install this one if you want token optimization**
+
+**How to verify you have the correct rtk:**
+```bash
+rtk --version   # Should show "rtk X.Y.Z"
+rtk gain        # Should show token savings stats
+```
+
+If `rtk gain` doesn't exist, you installed the wrong package. See installation instructions below.
+
 ## Token Savings (30-min Claude Code Session)
 
 Typical session without rtk: **~150,000 tokens**
@@ -28,38 +48,51 @@ With rtk: **~45,000 tokens** → **70% reduction**
 
 ## Installation
 
-### Quick Install (Linux/macOS)
+### ⚠️ Pre-Installation Check (REQUIRED)
+
+**ALWAYS verify if rtk is already installed before installing:**
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pszymkowiak/rtk/master/install.sh | sh
+rtk --version        # Check if installed
+rtk gain             # Verify it's the Token Killer (not Type Kit)
+which rtk            # Check installation path
 ```
 
-### Homebrew (macOS) - Coming Soon
-<!--
-```bash
-brew tap pszymkowiak/rtk
-brew install rtk
-```
--->
+If already installed and `rtk gain` works, **DO NOT reinstall**. Skip to Quick Start.
 
-### Cargo
+### Option 1: Fork with All Features (RECOMMENDED)
+
+This fork includes critical fixes and modern JavaScript stack support (pnpm, vitest, Next.js, TypeScript, Playwright, Prisma):
+
 ```bash
+# Uninstall wrong rtk if needed
+cargo uninstall rtk
+
+# Install the correct one from fork
+git clone https://github.com/FlorianBruniaux/rtk.git
+cd rtk && git checkout feat/all-features
+cargo install --path . --force
+
+# Verify installation
+rtk --version
+rtk gain  # Should show token savings stats
+```
+
+### Option 2: Upstream (Basic Features)
+
+```bash
+# From rtk-ai upstream (maintained by pszymkowiak)
+cargo install --git https://github.com/rtk-ai/rtk
+
+# OR if published to crates.io
 cargo install rtk
 ```
 
-### Debian/Ubuntu
-```bash
-curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk_amd64.deb
-sudo dpkg -i rtk_amd64.deb
-```
+⚠️ **WARNING**: `cargo install rtk` from crates.io might install the wrong package (Type Kit instead of Token Killer). Always verify with `rtk gain` after installation.
 
-### Fedora/RHEL
-```bash
-curl -LO https://github.com/pszymkowiak/rtk/releases/latest/download/rtk.x86_64.rpm
-sudo rpm -i rtk.x86_64.rpm
-```
+### Option 3: Pre-built Binaries
 
-### Manual Download
-Download binaries from [Releases](https://github.com/pszymkowiak/rtk/releases):
+Download from [Releases](https://github.com/FlorianBruniaux/rtk/releases) (fork) or [rtk-ai/releases](https://github.com/rtk-ai/rtk/releases) (upstream):
 - macOS: `rtk-x86_64-apple-darwin.tar.gz` / `rtk-aarch64-apple-darwin.tar.gz`
 - Linux: `rtk-x86_64-unknown-linux-gnu.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
@@ -67,9 +100,19 @@ Download binaries from [Releases](https://github.com/pszymkowiak/rtk/releases):
 ## Quick Start
 
 ```bash
+# Run installation check script (recommended first step)
+bash scripts/check-installation.sh
+
+# OR manually verify correct installation
+rtk gain  # Must show token stats, not error
+
 # Initialize rtk for Claude Code
-rtk init --global    # Add to ~/CLAUDE.md (all projects)
+rtk init --global    # Add to ~/.claude/CLAUDE.md (all projects)
 rtk init             # Add to ./CLAUDE.md (this project)
+
+# Test basic commands
+rtk ls .
+rtk git status
 ```
 
 ## Global Flags
@@ -365,6 +408,8 @@ Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass th
 
 ## Documentation
 
+- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - ⚠️ Fix common issues (wrong rtk installed, missing commands, PATH issues)
+- **[INSTALL.md](INSTALL.md)** - Detailed installation guide with verification steps
 - **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Complete guide to token savings analytics, temporal breakdowns, and data export
 - **[CLAUDE.md](CLAUDE.md)** - Claude Code integration instructions and project context
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture and development guide

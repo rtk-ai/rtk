@@ -6,7 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **rtk (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption by filtering and compressing command outputs. It achieves 60-90% token savings on common development operations through smart filtering, grouping, truncation, and deduplication.
 
-This is a fork with critical fixes for git argument parsing and modern JavaScript stack support (pnpm).
+This is a fork with critical fixes for git argument parsing and modern JavaScript stack support (pnpm, vitest, Next.js, TypeScript, Playwright, Prisma).
+
+### ⚠️ Name Collision Warning
+
+**Two different "rtk" projects exist:**
+- ✅ **This project**: Rust Token Killer (rtk-ai/rtk, pszymkowiak/rtk, FlorianBruniaux/rtk fork)
+- ❌ **reachingforthejack/rtk**: Rust Type Kit (DIFFERENT - generates Rust types)
+
+**Verify correct installation:**
+```bash
+rtk --version  # Should show "rtk X.Y.Z"
+rtk gain       # Should show token savings stats (NOT "command not found")
+```
+
+If `rtk gain` fails, you have the wrong package installed.
 
 ## Development Commands
 
