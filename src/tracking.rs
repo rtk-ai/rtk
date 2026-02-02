@@ -155,9 +155,9 @@ impl Tracker {
         let mut total_saved = 0usize;
         let mut total_time_ms = 0u64;
 
-        let mut stmt = self
-            .conn
-            .prepare("SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms FROM commands")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms FROM commands",
+        )?;
 
         let rows = stmt.query_map([], |row| {
             Ok((

@@ -45,10 +45,7 @@ pub trait TokenFormatter {
 
 impl TokenFormatter for TestResult {
     fn format_compact(&self) -> String {
-        let mut lines = vec![format!(
-            "PASS ({}) FAIL ({})",
-            self.passed, self.failed
-        )];
+        let mut lines = vec![format!("PASS ({}) FAIL ({})", self.passed, self.failed)];
 
         if !self.failures.is_empty() {
             lines.push(String::new());
@@ -84,10 +81,16 @@ impl TokenFormatter for TestResult {
         if !self.failures.is_empty() {
             lines.push("\nFailures:".to_string());
             for (idx, failure) in self.failures.iter().enumerate() {
-                lines.push(format!("\n{}. {} ({})", idx + 1, failure.test_name, failure.file_path));
+                lines.push(format!(
+                    "\n{}. {} ({})",
+                    idx + 1,
+                    failure.test_name,
+                    failure.file_path
+                ));
                 lines.push(format!("   {}", failure.error_message));
                 if let Some(stack) = &failure.stack_trace {
-                    let stack_preview: String = stack.lines().take(3).collect::<Vec<_>>().join("\n   ");
+                    let stack_preview: String =
+                        stack.lines().take(3).collect::<Vec<_>>().join("\n   ");
                     lines.push(format!("   {}", stack_preview));
                 }
             }
@@ -123,7 +126,10 @@ impl TokenFormatter for LintResult {
             let mut by_rule: std::collections::HashMap<String, Vec<&LintIssue>> =
                 std::collections::HashMap::new();
             for issue in &self.issues {
-                by_rule.entry(issue.rule_id.clone()).or_default().push(issue);
+                by_rule
+                    .entry(issue.rule_id.clone())
+                    .or_default()
+                    .push(issue);
             }
 
             let mut rules: Vec<_> = by_rule.iter().collect();
@@ -179,7 +185,10 @@ impl TokenFormatter for LintResult {
     }
 
     fn format_ultra(&self) -> String {
-        format!("✗{} ⚠{} 📁{}", self.errors, self.warnings, self.files_with_issues)
+        format!(
+            "✗{} ⚠{} 📁{}",
+            self.errors, self.warnings, self.files_with_issues
+        )
     }
 }
 
@@ -256,7 +265,11 @@ impl TokenFormatter for BuildOutput {
 
         if !self.bundles.is_empty() {
             let total_size: u64 = self.bundles.iter().map(|b| b.size_bytes).sum();
-            lines.push(format!("Bundles: {} ({:.1} KB)", self.bundles.len(), total_size as f64 / 1024.0));
+            lines.push(format!(
+                "Bundles: {} ({:.1} KB)",
+                self.bundles.len(),
+                total_size as f64 / 1024.0
+            ));
         }
 
         if !self.routes.is_empty() {
