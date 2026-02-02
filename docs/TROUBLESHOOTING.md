@@ -25,7 +25,7 @@ cargo uninstall rtk
 
 #### Quick Install (Linux/macOS)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pszymkowiak/rtk/master/install.sh | sh
+curl -fsSL https://github.com/rtk-ai/rtk/blob/master/install.sh | sh
 ```
 
 #### Alternative: Manual Installation
@@ -49,7 +49,7 @@ If `rtk gain` now works, installation is correct.
 
 | Project | Repository | Purpose | Key Command |
 |---------|-----------|---------|-------------|
-| **Rust Token Killer** ✅ | rtk-ai/rtk, pszymkowiak/rtk | LLM token optimizer for Claude Code | `rtk gain` |
+| **Rust Token Killer** ✅ | rtk-ai/rtk | LLM token optimizer for Claude Code | `rtk gain` |
 | **Rust Type Kit** ❌ | reachingforthejack/rtk | Rust codebase query and type generator | `rtk query` |
 
 ### How to Identify Which One You Have
@@ -236,54 +236,6 @@ rustc --version  # Should be 1.70+ for most features
 
 **4. If still fails, report issue:**
 - GitHub: https://github.com/rtk-ai/rtk/issues
-
----
-
-## Problem: Missing commands (vitest, pnpm, next, etc.)
-
-### Symptom
-```bash
-$ rtk vitest run
-error: 'vitest' is not a rtk command
-```
-
-### Root Cause
-You installed the upstream version, which doesn't have all features yet.
-
-### Solution
-Install the **fork with all features**:
-
-```bash
-# Uninstall current version
-cargo uninstall rtk
-
-# Install fork
-git clone https://github.com/rtk-ai/rtk.git
-cd rtk && git checkout feat/all-features
-cargo install --path . --force
-
-# Verify all commands available
-rtk --help | grep vitest
-rtk --help | grep pnpm
-rtk --help | grep next
-```
-
-### Available Commands by Version
-
-| Command | Upstream (rtk-ai) | Fork (feat/all-features) |
-|---------|-------------------|--------------------------|
-| `rtk gain` | ✅ | ✅ |
-| `rtk git` | ✅ | ✅ |
-| `rtk gh` | ✅ | ✅ |
-| `rtk pnpm` | ❌ | ✅ |
-| `rtk vitest` | ❌ | ✅ |
-| `rtk lint` | ❌ | ✅ |
-| `rtk tsc` | ❌ | ✅ |
-| `rtk next` | ❌ | ✅ |
-| `rtk prettier` | ❌ | ✅ |
-| `rtk playwright` | ❌ | ✅ |
-| `rtk prisma` | ❌ | ✅ |
-| `rtk discover` | ❌ | ✅ |
 
 ---
 
