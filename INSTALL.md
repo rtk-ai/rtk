@@ -5,7 +5,7 @@
 **There are TWO completely different projects named "rtk":**
 
 1. ✅ **Rust Token Killer** (this project) - LLM token optimizer
-   - Repos: `rtk-ai/rtk`, `pszymkowiak/rtk`
+   - Repos: `rtk-ai/rtk`
    - Has `rtk gain` command for token savings stats
 
 2. ❌ **Rust Type Kit** (reachingforthejack/rtk) - DIFFERENT PROJECT
@@ -44,7 +44,7 @@ cargo uninstall rtk
 ### Quick Install (Linux/macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pszymkowiak/rtk/master/install.sh | sh
+curl -fsSL https://github.com/rtk-ai/rtk/blob/master/install.sh | sh
 ```
 
 After installation, **verify you have the correct rtk**:
