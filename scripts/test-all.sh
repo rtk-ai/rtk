@@ -145,6 +145,10 @@ assert_ok      "rtk read --level aggressive Cargo.toml" rtk read --level aggress
 assert_ok      "rtk read -n Cargo.toml"       rtk read -n Cargo.toml
 assert_ok      "rtk read --max-lines 5 Cargo.toml" rtk read --max-lines 5 Cargo.toml
 
+section "Read (stdin support)"
+
+assert_ok      "rtk read stdin pipe"          bash -c 'echo "fn main() {}" | rtk read -'
+
 # ── 4. Git ───────────────────────────────────────────
 
 section "Git (existing)"

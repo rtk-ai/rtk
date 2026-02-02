@@ -41,7 +41,7 @@ mod wget_cmd;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -679,7 +679,11 @@ fn main() -> Result<()> {
             max_lines,
             line_numbers,
         } => {
-            read::run(&file, level, max_lines, line_numbers, cli.verbose)?;
+            if file == Path::new("-") {
+                read::run_stdin(level, max_lines, line_numbers, cli.verbose)?;
+            } else {
+                read::run(&file, level, max_lines, line_numbers, cli.verbose)?;
+            }
         }
 
         Commands::Smart {
@@ -1106,13 +1110,18 @@ fn main() -> Result<()> {
             use std::process::Command;
 
             if args.is_empty() {
-                anyhow::bail!("proxy requires a command to execute\nUsage: rtk proxy <command> [args...]");
+                anyhow::bail!(
+                    "proxy requires a command to execute\nUsage: rtk proxy <command> [args...]"
+                );
             }
 
             let timer = tracking::TimedExecution::start();
 
             let cmd_name = args[0].to_string_lossy();
-            let cmd_args: Vec<String> = args[1..].iter().map(|s| s.to_string_lossy().into_owned()).collect();
+            let cmd_args: Vec<String> = args[1..]
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
 
             if cli.verbose > 0 {
                 eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));

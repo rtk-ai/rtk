@@ -116,8 +116,94 @@ fn filter_ls_output(raw: &str, show_all: bool) -> String {
     if lines.is_empty() {
         "\n".to_string()
     } else {
-        lines.join("\n") + "\n"
+        let mut output = lines.join("\n");
+
+        // Add summary with file type grouping
+        let summary = generate_summary(&lines);
+        if !summary.is_empty() {
+            output.push_str("\n\n");
+            output.push_str(&summary);
+        }
+
+        output.push('\n');
+        output
     }
+}
+
+/// Generate summary of files by extension
+fn generate_summary(lines: &[&str]) -> String {
+    use std::collections::HashMap;
+
+    let mut by_ext: HashMap<String, usize> = HashMap::new();
+    let mut total_files = 0;
+    let mut total_dirs = 0;
+
+    for line in lines {
+        // Parse ls -la format: permissions user group size date time filename
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        // Check if it's a directory (starts with 'd')
+        if parts[0].starts_with('d') {
+            total_dirs += 1;
+            continue;
+        }
+
+        // Check if it's a regular file (starts with '-')
+        if !parts[0].starts_with('-') {
+            continue;
+        }
+
+        // Get filename (last part, handle spaces in filenames)
+        if parts.len() < 9 {
+            continue;
+        }
+
+        let filename = parts[8..].join(" ");
+
+        // Extract extension
+        let ext = if let Some(pos) = filename.rfind('.') {
+            filename[pos..].to_string()
+        } else {
+            "no ext".to_string()
+        };
+
+        *by_ext.entry(ext).or_insert(0) += 1;
+        total_files += 1;
+    }
+
+    if total_files == 0 && total_dirs == 0 {
+        return String::new();
+    }
+
+    // Sort by count descending
+    let mut ext_counts: Vec<_> = by_ext.iter().collect();
+    ext_counts.sort_by(|a, b| b.1.cmp(a.1));
+
+    // Build summary
+    let mut summary = format!("📊 {} files", total_files);
+    if total_dirs > 0 {
+        summary.push_str(&format!(", {} dirs", total_dirs));
+    }
+
+    if !ext_counts.is_empty() {
+        summary.push_str(" (");
+        let ext_parts: Vec<String> = ext_counts
+            .iter()
+            .take(5) // Top 5 extensions
+            .map(|(ext, count)| format!("{} {}", count, ext))
+            .collect();
+        summary.push_str(&ext_parts.join(", "));
+
+        if ext_counts.len() > 5 {
+            summary.push_str(&format!(", +{} more", ext_counts.len() - 5));
+        }
+        summary.push(')');
+    }
+
+    summary
 }
 
 #[cfg(test)]
@@ -145,6 +231,33 @@ mod tests {
         let input = "";
         let output = filter_ls_output(input, false);
         assert_eq!(output, "\n");
+    }
+
+    #[test]
+    fn test_summary_generation() {
+        let lines = vec![
+            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.rs",
+            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs",
+            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 lib.rs",
+            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml",
+            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 README.md",
+            "drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src",
+        ];
+        let summary = generate_summary(&lines);
+        assert!(summary.contains("5 files"));
+        assert!(summary.contains("1 dirs"));
+        assert!(summary.contains(".rs"));
+    }
+
+    #[test]
+    fn test_filter_with_summary() {
+        let input = "total 48\n-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.rs\n-rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
+        let output = filter_ls_output(input, false);
+        assert!(!output.contains("total "));
+        assert!(output.contains("file.rs"));
+        assert!(output.contains("main.rs"));
+        assert!(output.contains("📊"));
+        assert!(output.contains("2 files"));
     }
 
     #[test]
