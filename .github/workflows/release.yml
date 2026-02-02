@@ -3,6 +3,12 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -149,6 +155,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_call" ]; then
+            echo "version=${{ inputs.tag }}" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "release" ]; then
             echo "version=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
           fi
@@ -174,7 +182,7 @@ jobs:
           sha256sum * > checksums.txt
 
       - name: Upload Release Assets
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_call'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
