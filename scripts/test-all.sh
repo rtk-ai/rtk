@@ -118,10 +118,22 @@ assert_contains "rtk --help" "Usage:" rtk --help
 section "Ls"
 
 assert_ok      "rtk ls ."                     rtk ls .
-assert_ok      "rtk ls -a ."                  rtk ls -a .
-assert_ok      "rtk ls --depth 2 ."           rtk ls --depth 2 .
-assert_ok      "rtk ls -f tree ."             rtk ls -f tree .
-assert_contains "rtk ls shows src/"           "src/" rtk ls .
+assert_ok      "rtk ls -la ."                 rtk ls -la .
+assert_ok      "rtk ls -lh ."                 rtk ls -lh .
+assert_contains "rtk ls -a shows hidden"      ".git" rtk ls -a .
+
+# ── 2b. Tree ─────────────────────────────────────────
+
+section "Tree"
+
+if command -v tree >/dev/null 2>&1; then
+    assert_ok      "rtk tree ."                rtk tree .
+    assert_ok      "rtk tree -L 2 ."           rtk tree -L 2 .
+    assert_ok      "rtk tree -d -L 1 ."        rtk tree -d -L 1 .
+    assert_contains "rtk tree shows src/"      "src" rtk tree -L 1 .
+else
+    skip_test "rtk tree" "tree not installed"
+fi
 
 # ── 3. Read ──────────────────────────────────────────
 
