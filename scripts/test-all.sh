@@ -165,6 +165,12 @@ assert_ok      "rtk git fetch"                rtk git fetch
 assert_ok      "rtk git stash list"           rtk git stash list
 assert_ok      "rtk git worktree"             rtk git worktree
 
+section "Git (passthrough: unsupported subcommands)"
+
+assert_ok      "rtk git tag --list"           rtk git tag --list
+assert_ok      "rtk git remote -v"            rtk git remote -v
+assert_ok      "rtk git rev-parse HEAD"       rtk git rev-parse HEAD
+
 # ── 5. GitHub CLI ────────────────────────────────────
 
 section "GitHub CLI"
