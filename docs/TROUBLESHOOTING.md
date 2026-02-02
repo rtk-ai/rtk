@@ -23,14 +23,12 @@ cargo uninstall rtk
 
 **2. Install the correct one (Token Killer):**
 
-#### Option A: Fork with all features (RECOMMENDED)
+#### Quick Install (Linux/macOS)
 ```bash
-git clone https://github.com/FlorianBruniaux/rtk.git
-cd rtk && git checkout feat/all-features
-cargo install --path . --force
+curl -fsSL https://raw.githubusercontent.com/pszymkowiak/rtk/master/install.sh | sh
 ```
 
-#### Option B: Upstream (basic features)
+#### Alternative: Manual Installation
 ```bash
 cargo install --git https://github.com/rtk-ai/rtk
 ```
@@ -51,7 +49,7 @@ If `rtk gain` now works, installation is correct.
 
 | Project | Repository | Purpose | Key Command |
 |---------|-----------|---------|-------------|
-| **Rust Token Killer** ✅ | rtk-ai/rtk, pszymkowiak/rtk, FlorianBruniaux/rtk | LLM token optimizer for Claude Code | `rtk gain` |
+| **Rust Token Killer** ✅ | rtk-ai/rtk, pszymkowiak/rtk | LLM token optimizer for Claude Code | `rtk gain` |
 | **Rust Type Kit** ❌ | reachingforthejack/rtk | Rust codebase query and type generator | `rtk query` |
 
 ### How to Identify Which One You Have
@@ -81,7 +79,7 @@ If **Rust Type Kit** is published to crates.io under the name `rtk`, running `ca
 cargo install --git https://github.com/rtk-ai/rtk
 
 # OR install from fork
-git clone https://github.com/FlorianBruniaux/rtk.git
+git clone https://github.com/rtk-ai/rtk.git
 cd rtk && git checkout feat/all-features
 cargo install --path . --force
 ```
@@ -237,7 +235,7 @@ rustc --version  # Should be 1.70+ for most features
 ```
 
 **4. If still fails, report issue:**
-- GitHub: https://github.com/FlorianBruniaux/rtk/issues
+- GitHub: https://github.com/rtk-ai/rtk/issues
 
 ---
 
@@ -260,7 +258,7 @@ Install the **fork with all features**:
 cargo uninstall rtk
 
 # Install fork
-git clone https://github.com/FlorianBruniaux/rtk.git
+git clone https://github.com/rtk-ai/rtk.git
 cd rtk && git checkout feat/all-features
 cargo install --path . --force
 
@@ -292,7 +290,7 @@ rtk --help | grep next
 ## Need More Help?
 
 **Report issues:**
-- Fork-specific: https://github.com/FlorianBruniaux/rtk/issues
+- Fork-specific: https://github.com/rtk-ai/rtk/issues
 - Upstream: https://github.com/rtk-ai/rtk/issues
 
 **Run the diagnostic script:**
