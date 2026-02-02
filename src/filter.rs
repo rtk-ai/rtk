@@ -86,15 +86,18 @@ impl Language {
                 doc_line: None,
                 doc_block_start: Some("\"\"\""),
             },
-            Language::JavaScript | Language::TypeScript | Language::Go | Language::C | Language::Cpp | Language::Java => {
-                CommentPatterns {
-                    line: Some("//"),
-                    block_start: Some("/*"),
-                    block_end: Some("*/"),
-                    doc_line: None,
-                    doc_block_start: Some("/**"),
-                }
-            }
+            Language::JavaScript
+            | Language::TypeScript
+            | Language::Go
+            | Language::C
+            | Language::Cpp
+            | Language::Java => CommentPatterns {
+                line: Some("//"),
+                block_start: Some("/*"),
+                block_end: Some("*/"),
+                doc_line: None,
+                doc_block_start: Some("/**"),
+            },
             Language::Ruby => CommentPatterns {
                 line: Some("#"),
                 block_start: Some("=begin"),
@@ -160,7 +163,10 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle block comments
             if let (Some(start), Some(end)) = (patterns.block_start, patterns.block_end) {
-                if !in_docstring && trimmed.contains(start) && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###")) {
+                if !in_docstring
+                    && trimmed.contains(start)
+                    && !trimmed.starts_with(patterns.doc_block_start.unwrap_or("###"))
+                {
                     in_block_comment = true;
                 }
                 if in_block_comment {
@@ -222,8 +228,12 @@ impl FilterStrategy for MinimalFilter {
 pub struct AggressiveFilter;
 
 lazy_static! {
-    static ref IMPORT_PATTERN: Regex = Regex::new(r"^(use |import |from |require\(|#include)").unwrap();
-    static ref FUNC_SIGNATURE: Regex = Regex::new(r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+").unwrap();
+    static ref IMPORT_PATTERN: Regex =
+        Regex::new(r"^(use |import |from |require\(|#include)").unwrap();
+    static ref FUNC_SIGNATURE: Regex = Regex::new(
+        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+"
+    )
+    .unwrap();
 }
 
 impl FilterStrategy for AggressiveFilter {
@@ -261,7 +271,8 @@ impl FilterStrategy for AggressiveFilter {
                 brace_depth -= close_braces as i32;
 
                 // Only keep the opening and closing braces
-                if brace_depth <= 1 && (trimmed == "{" || trimmed == "}" || trimmed.ends_with('{')) {
+                if brace_depth <= 1 && (trimmed == "{" || trimmed == "}" || trimmed.ends_with('{'))
+                {
                     result.push_str(line);
                     result.push('\n');
                 }
@@ -326,7 +337,10 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
 
         if is_important || kept_lines < max_lines / 2 {
             if skipped_section {
-                result.push(format!("    // ... {} lines omitted", lines.len() - kept_lines));
+                result.push(format!(
+                    "    // ... {} lines omitted",
+                    lines.len() - kept_lines
+                ));
                 skipped_section = false;
             }
             result.push((*line).to_string());
@@ -358,8 +372,14 @@ mod tests {
     #[test]
     fn test_filter_level_parsing() {
         assert_eq!(FilterLevel::from_str("none").unwrap(), FilterLevel::None);
-        assert_eq!(FilterLevel::from_str("minimal").unwrap(), FilterLevel::Minimal);
-        assert_eq!(FilterLevel::from_str("aggressive").unwrap(), FilterLevel::Aggressive);
+        assert_eq!(
+            FilterLevel::from_str("minimal").unwrap(),
+            FilterLevel::Minimal
+        );
+        assert_eq!(
+            FilterLevel::from_str("aggressive").unwrap(),
+            FilterLevel::Aggressive
+        );
     }
 
     #[test]

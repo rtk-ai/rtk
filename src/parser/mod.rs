@@ -1,0 +1,167 @@
+//! Parser infrastructure for tool output transformation
+//!
+//! This module provides a unified interface for parsing tool outputs with graceful degradation:
+//! - Tier 1 (Full): Complete JSON parsing with all fields
+//! - Tier 2 (Degraded): Partial parsing with warnings
+//! - Tier 3 (Passthrough): Raw output truncation with error marker
+//!
+//! The three-tier system ensures RTK never returns false data silently.
+
+pub mod error;
+pub mod formatter;
+pub mod types;
+
+pub use error::ParseError;
+pub use formatter::{FormatMode, TokenFormatter};
+pub use types::*;
+
+/// Parse result with degradation tier
+#[derive(Debug)]
+pub enum ParseResult<T> {
+    /// Tier 1: Full parse with complete structured data
+    Full(T),
+
+    /// Tier 2: Degraded parse with partial data and warnings
+    Degraded(T, Vec<String>),
+
+    /// Tier 3: Passthrough - parsing failed, returning truncated raw output
+    Passthrough(String),
+}
+
+impl<T> ParseResult<T> {
+    /// Unwrap the parsed data, panicking on Passthrough
+    pub fn unwrap(self) -> T {
+        match self {
+            ParseResult::Full(data) => data,
+            ParseResult::Degraded(data, _) => data,
+            ParseResult::Passthrough(_) => panic!("Called unwrap on Passthrough result"),
+        }
+    }
+
+    /// Get the tier level (1 = Full, 2 = Degraded, 3 = Passthrough)
+    pub fn tier(&self) -> u8 {
+        match self {
+            ParseResult::Full(_) => 1,
+            ParseResult::Degraded(_, _) => 2,
+            ParseResult::Passthrough(_) => 3,
+        }
+    }
+
+    /// Check if parsing succeeded (Full or Degraded)
+    pub fn is_ok(&self) -> bool {
+        !matches!(self, ParseResult::Passthrough(_))
+    }
+
+    /// Map the parsed data while preserving tier
+    pub fn map<U, F>(self, f: F) -> ParseResult<U>
+    where
+        F: FnOnce(T) -> U,
+    {
+        match self {
+            ParseResult::Full(data) => ParseResult::Full(f(data)),
+            ParseResult::Degraded(data, warnings) => ParseResult::Degraded(f(data), warnings),
+            ParseResult::Passthrough(raw) => ParseResult::Passthrough(raw),
+        }
+    }
+
+    /// Get warnings if Degraded tier
+    pub fn warnings(&self) -> Vec<String> {
+        match self {
+            ParseResult::Degraded(_, warnings) => warnings.clone(),
+            _ => vec![],
+        }
+    }
+}
+
+/// Unified parser trait for tool outputs
+pub trait OutputParser: Sized {
+    type Output;
+
+    /// Parse raw output into structured format
+    ///
+    /// Implementation should follow three-tier fallback:
+    /// 1. Try JSON parsing (if tool supports --json/--format json)
+    /// 2. Try regex/text extraction with partial data
+    /// 3. Return truncated passthrough with [RTK:PASSTHROUGH] marker
+    fn parse(input: &str) -> ParseResult<Self::Output>;
+
+    /// Parse with explicit tier preference (for testing/debugging)
+    fn parse_with_tier(input: &str, max_tier: u8) -> ParseResult<Self::Output> {
+        let result = Self::parse(input);
+        if result.tier() > max_tier {
+            // Force degradation to passthrough if exceeds max tier
+            return ParseResult::Passthrough(truncate_output(input, 500));
+        }
+        result
+    }
+}
+
+/// Truncate output to max length with ellipsis
+pub fn truncate_output(output: &str, max_chars: usize) -> String {
+    if output.len() <= max_chars {
+        return output.to_string();
+    }
+
+    let truncated = &output[..max_chars];
+    format!("{}\n\n[RTK:PASSTHROUGH] Output truncated ({} chars → {} chars)",
+        truncated,
+        output.len(),
+        max_chars
+    )
+}
+
+/// Helper to emit degradation warning
+pub fn emit_degradation_warning(tool: &str, reason: &str) {
+    eprintln!("[RTK:DEGRADED] {} parser: {}", tool, reason);
+}
+
+/// Helper to emit passthrough warning
+pub fn emit_passthrough_warning(tool: &str, reason: &str) {
+    eprintln!("[RTK:PASSTHROUGH] {} parser: {}", tool, reason);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_result_tier() {
+        let full: ParseResult<i32> = ParseResult::Full(42);
+        assert_eq!(full.tier(), 1);
+        assert!(full.is_ok());
+
+        let degraded: ParseResult<i32> = ParseResult::Degraded(42, vec!["warning".to_string()]);
+        assert_eq!(degraded.tier(), 2);
+        assert!(degraded.is_ok());
+        assert_eq!(degraded.warnings().len(), 1);
+
+        let passthrough: ParseResult<i32> = ParseResult::Passthrough("raw".to_string());
+        assert_eq!(passthrough.tier(), 3);
+        assert!(!passthrough.is_ok());
+    }
+
+    #[test]
+    fn test_parse_result_map() {
+        let full: ParseResult<i32> = ParseResult::Full(42);
+        let mapped = full.map(|x| x * 2);
+        assert_eq!(mapped.tier(), 1);
+        assert_eq!(mapped.unwrap(), 84);
+
+        let degraded: ParseResult<i32> = ParseResult::Degraded(42, vec!["warn".to_string()]);
+        let mapped = degraded.map(|x| x * 2);
+        assert_eq!(mapped.tier(), 2);
+        assert_eq!(mapped.warnings().len(), 1);
+        assert_eq!(mapped.unwrap(), 84);
+    }
+
+    #[test]
+    fn test_truncate_output() {
+        let short = "hello";
+        assert_eq!(truncate_output(short, 10), "hello");
+
+        let long = "a".repeat(1000);
+        let truncated = truncate_output(&long, 100);
+        assert!(truncated.contains("[RTK:PASSTHROUGH]"));
+        assert!(truncated.contains("1000 chars → 100 chars"));
+    }
+}
