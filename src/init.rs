@@ -90,11 +90,17 @@ rtk kubectl logs <pod>          # Logs dédupliqués
 pub fn run(global: bool, verbose: u8) -> Result<()> {
     let path = if global {
         dirs::home_dir()
-            .map(|h| h.join("CLAUDE.md"))
-            .unwrap_or_else(|| PathBuf::from("~/CLAUDE.md"))
+            .map(|h| h.join(".claude").join("CLAUDE.md"))
+            .unwrap_or_else(|| PathBuf::from("~/.claude/CLAUDE.md"))
     } else {
         PathBuf::from("CLAUDE.md")
     };
+
+    if global {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
 
     if verbose > 0 {
         eprintln!("Writing rtk instructions to: {}", path.display());
@@ -131,7 +137,7 @@ pub fn run(global: bool, verbose: u8) -> Result<()> {
 
 /// Show current rtk configuration
 pub fn show_config() -> Result<()> {
-    let home_path = dirs::home_dir().map(|h| h.join("CLAUDE.md"));
+    let home_path = dirs::home_dir().map(|h| h.join(".claude").join("CLAUDE.md"));
     let local_path = PathBuf::from("CLAUDE.md");
 
     println!("📋 rtk Configuration:\n");
@@ -141,12 +147,12 @@ pub fn show_config() -> Result<()> {
         if hp.exists() {
             let content = fs::read_to_string(hp)?;
             if content.contains("rtk") {
-                println!("✅ Global (~/.CLAUDE.md): rtk enabled");
+                println!("✅ Global (~/.claude/CLAUDE.md): rtk enabled");
             } else {
-                println!("⚪ Global (~/.CLAUDE.md): exists but rtk not configured");
+                println!("⚪ Global (~/.claude/CLAUDE.md): exists but rtk not configured");
             }
         } else {
-            println!("⚪ Global (~/.CLAUDE.md): not found");
+            println!("⚪ Global (~/.claude/CLAUDE.md): not found");
         }
     }
 
@@ -164,7 +170,7 @@ pub fn show_config() -> Result<()> {
 
     println!("\nUsage:");
     println!("  rtk init          # Add rtk to local CLAUDE.md");
-    println!("  rtk init --global # Add rtk to global ~/CLAUDE.md");
+    println!("  rtk init --global # Add rtk to global ~/.claude/CLAUDE.md");
 
     Ok(())
 }
