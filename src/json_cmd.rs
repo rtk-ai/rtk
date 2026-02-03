@@ -2,6 +2,7 @@ use crate::tracking;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
 
 /// Show JSON structure without values
@@ -23,6 +24,26 @@ pub fn run(file: &Path, max_depth: usize, verbose: u8) -> Result<()> {
         &content,
         &schema,
     );
+    Ok(())
+}
+
+/// Show JSON structure from stdin
+pub fn run_stdin(max_depth: usize, verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("Analyzing JSON from stdin");
+    }
+
+    let mut content = String::new();
+    io::stdin()
+        .lock()
+        .read_to_string(&mut content)
+        .context("Failed to read from stdin")?;
+
+    let schema = filter_json_string(&content, max_depth)?;
+    println!("{}", schema);
+    timer.track("cat - (stdin)", "rtk json -", &content, &schema);
     Ok(())
 }
 

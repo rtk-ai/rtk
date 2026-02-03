@@ -807,7 +807,11 @@ fn main() -> Result<()> {
         }
 
         Commands::Json { file, depth } => {
-            json_cmd::run(&file, depth, cli.verbose)?;
+            if file == Path::new("-") {
+                json_cmd::run_stdin(depth, cli.verbose)?;
+            } else {
+                json_cmd::run(&file, depth, cli.verbose)?;
+            }
         }
 
         Commands::Deps { path } => {
