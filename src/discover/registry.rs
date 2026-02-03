@@ -68,7 +68,6 @@ const PATTERNS: &[&str] = &[
     r"^kubectl\s+(get|logs)",
     r"^curl\s+",
     r"^wget\s+",
-    r"^diff\s+",
 ];
 
 const RULES: &[RtkRule] = &[
