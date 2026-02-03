@@ -1,12 +1,3 @@
-//! ls command - proxy to native ls with token-optimized output
-//!
-//! This module proxies to the native `ls` command instead of reimplementing
-//! directory traversal. This ensures full compatibility with all ls flags
-//! like -l, -a, -h, -R, etc.
-//!
-//! Token optimization: filters noise directories (node_modules, .git, target, etc.)
-//! unless -a flag is present (respecting user intent).
-
 use crate::tracking;
 use anyhow::{Context, Result};
 use std::process::Command;
@@ -28,8 +19,6 @@ const NOISE_DIRS: &[&str] = &[
     ".tox",
     ".venv",
     "venv",
-    "env",
-    ".env",
     "coverage",
     ".nyc_output",
     ".DS_Store",
@@ -44,19 +33,50 @@ const NOISE_DIRS: &[&str] = &[
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
+    // Separate flags from paths
+    let show_all = args.iter().any(|a| {
+        (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all"
+    });
+
+    let flags: Vec<&str> = args
+        .iter()
+        .filter(|a| a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+    let paths: Vec<&str> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+
+    // Build ls -la + any extra flags the user passed (e.g. -R)
+    // Strip -l, -a, -h (we handle all of these ourselves)
     let mut cmd = Command::new("ls");
+    cmd.arg("-la");
+    for flag in &flags {
+        if flag.starts_with("--") {
+            // Long flags: skip --all (already handled)
+            if *flag != "--all" {
+                cmd.arg(flag);
+            }
+        } else {
+            let stripped = flag.trim_start_matches('-');
+            let extra: String = stripped
+                .chars()
+                .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
+                .collect();
+            if !extra.is_empty() {
+                cmd.arg(format!("-{}", extra));
+            }
+        }
+    }
 
-    // Determine if user wants all files or default behavior
-    let show_all = args.iter().any(|a| a == "-a" || a == "--all");
-    let has_args = !args.is_empty();
-
-    // Default to -la if no args (upstream behavior)
-    if !has_args {
-        cmd.arg("-la");
+    // Add paths (default to "." if none)
+    if paths.is_empty() {
+        cmd.arg(".");
     } else {
-        // Pass all user args
-        for arg in args {
-            cmd.arg(arg);
+        for p in &paths {
+            cmd.arg(p);
         }
     }
 
@@ -69,141 +89,140 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let filtered = filter_ls_output(&raw, show_all);
+    let filtered = compact_ls(&raw, show_all);
 
     if verbose > 0 {
         eprintln!(
-            "Lines: {} → {} ({}% reduction)",
-            raw.lines().count(),
-            filtered.lines().count(),
-            if raw.lines().count() > 0 {
-                100 - (filtered.lines().count() * 100 / raw.lines().count())
+            "Chars: {} → {} ({}% reduction)",
+            raw.len(),
+            filtered.len(),
+            if !raw.is_empty() {
+                100 - (filtered.len() * 100 / raw.len())
             } else {
                 0
             }
         );
     }
 
+    let target_display = if paths.is_empty() {
+        ".".to_string()
+    } else {
+        paths.join(" ")
+    };
     print!("{}", filtered);
-    timer.track("ls", "rtk ls", &raw, &filtered);
+    timer.track(
+        &format!("ls -la {}", target_display),
+        "rtk ls",
+        &raw,
+        &filtered,
+    );
 
     Ok(())
 }
 
-fn filter_ls_output(raw: &str, show_all: bool) -> String {
-    let lines: Vec<&str> = raw
-        .lines()
-        .filter(|line| {
-            // Always skip "total X" line (adds no value for LLM context)
-            if line.starts_with("total ") {
-                return false;
-            }
-
-            // If -a flag present, show everything (user intent)
-            if show_all {
-                return true;
-            }
-
-            // Filter noise directories
-            let trimmed = line.trim();
-            !NOISE_DIRS.iter().any(|noise| {
-                // Check if line ends with noise dir (handles various ls formats)
-                trimmed.ends_with(noise) || trimmed.contains(&format!(" {}", noise))
-            })
-        })
-        .collect();
-
-    if lines.is_empty() {
-        "\n".to_string()
+/// Format bytes into human-readable size
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1}M", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1}K", bytes as f64 / 1024.0)
     } else {
-        let mut output = lines.join("\n");
-
-        // Add summary with file type grouping
-        let summary = generate_summary(&lines);
-        if !summary.is_empty() {
-            output.push_str("\n\n");
-            output.push_str(&summary);
-        }
-
-        output.push('\n');
-        output
+        format!("{}B", bytes)
     }
 }
 
-/// Generate summary of files by extension
-fn generate_summary(lines: &[&str]) -> String {
+/// Parse ls -la output into compact format:
+///   name/  (dirs)
+///   name  size  (files)
+fn compact_ls(raw: &str, show_all: bool) -> String {
     use std::collections::HashMap;
 
+    let mut dirs: Vec<String> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new(); // (name, size)
     let mut by_ext: HashMap<String, usize> = HashMap::new();
-    let mut total_files = 0;
-    let mut total_dirs = 0;
 
-    for line in lines {
-        // Parse ls -la format: permissions user group size date time filename
+    for line in raw.lines() {
+        // Skip total, empty, . and ..
+        if line.starts_with("total ") || line.is_empty() {
+            continue;
+        }
+
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-
-        // Check if it's a directory (starts with 'd')
-        if parts[0].starts_with('d') {
-            total_dirs += 1;
-            continue;
-        }
-
-        // Check if it's a regular file (starts with '-')
-        if !parts[0].starts_with('-') {
-            continue;
-        }
-
-        // Get filename (last part, handle spaces in filenames)
         if parts.len() < 9 {
             continue;
         }
 
-        let filename = parts[8..].join(" ");
+        // Filename is everything from column 9 onward (handles spaces)
+        let name = parts[8..].join(" ");
 
-        // Extract extension
-        let ext = if let Some(pos) = filename.rfind('.') {
-            filename[pos..].to_string()
-        } else {
-            "no ext".to_string()
-        };
+        // Skip . and ..
+        if name == "." || name == ".." {
+            continue;
+        }
 
-        *by_ext.entry(ext).or_insert(0) += 1;
-        total_files += 1;
+        // Filter noise dirs unless -a
+        if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
+            continue;
+        }
+
+        let is_dir = parts[0].starts_with('d');
+
+        if is_dir {
+            dirs.push(name);
+        } else if parts[0].starts_with('-') || parts[0].starts_with('l') {
+            let size: u64 = parts[4].parse().unwrap_or(0);
+            let ext = if let Some(pos) = name.rfind('.') {
+                name[pos..].to_string()
+            } else {
+                "no ext".to_string()
+            };
+            *by_ext.entry(ext).or_insert(0) += 1;
+            files.push((name, human_size(size)));
+        }
     }
 
-    if total_files == 0 && total_dirs == 0 {
-        return String::new();
+    if dirs.is_empty() && files.is_empty() {
+        return "(empty)\n".to_string();
     }
 
-    // Sort by count descending
-    let mut ext_counts: Vec<_> = by_ext.iter().collect();
-    ext_counts.sort_by(|a, b| b.1.cmp(a.1));
+    let mut out = String::new();
 
-    // Build summary
-    let mut summary = format!("📊 {} files", total_files);
-    if total_dirs > 0 {
-        summary.push_str(&format!(", {} dirs", total_dirs));
+    // Dirs first, compact
+    for d in &dirs {
+        out.push_str(d);
+        out.push_str("/\n");
     }
 
-    if !ext_counts.is_empty() {
-        summary.push_str(" (");
+    // Files with size
+    for (name, size) in &files {
+        out.push_str(name);
+        out.push_str("  ");
+        out.push_str(size);
+        out.push('\n');
+    }
+
+    // Summary line
+    out.push('\n');
+    let mut summary = format!("📊 {} files, {} dirs", files.len(), dirs.len());
+    if !by_ext.is_empty() {
+        let mut ext_counts: Vec<_> = by_ext.iter().collect();
+        ext_counts.sort_by(|a, b| b.1.cmp(a.1));
         let ext_parts: Vec<String> = ext_counts
             .iter()
-            .take(5) // Top 5 extensions
+            .take(5)
             .map(|(ext, count)| format!("{} {}", count, ext))
             .collect();
+        summary.push_str(" (");
         summary.push_str(&ext_parts.join(", "));
-
         if ext_counts.len() > 5 {
             summary.push_str(&format!(", +{} more", ext_counts.len() - 5));
         }
         summary.push(')');
     }
+    out.push_str(&summary);
+    out.push('\n');
 
-    summary
+    out
 }
 
 #[cfg(test)]
@@ -211,100 +230,95 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_removes_total_line() {
-        let input = "total 48\n-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.txt\n";
-        let output = filter_ls_output(input, false);
-        assert!(!output.contains("total "));
-        assert!(output.contains("file.txt"));
+    fn test_compact_basic() {
+        let input = "total 48\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 ..\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
+                     -rw-r--r--  1 user  staff  5678 Jan  1 12:00 README.md\n";
+        let output = compact_ls(input, false);
+        assert!(output.contains("src/"));
+        assert!(output.contains("Cargo.toml"));
+        assert!(output.contains("README.md"));
+        assert!(output.contains("1.2K")); // 1234 bytes
+        assert!(output.contains("5.5K")); // 5678 bytes
+        assert!(!output.contains("drwx")); // no permissions
+        assert!(!output.contains("staff")); // no group
+        assert!(!output.contains("total")); // no total
+        assert!(!output.contains("\n.\n")); // no . entry
+        assert!(!output.contains("\n..\n")); // no .. entry
     }
 
     #[test]
-    fn test_filter_preserves_files() {
-        let input = "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.txt\ndrwxr-xr-x  2 user  staff  64 Jan  1 12:00 dir\n";
-        let output = filter_ls_output(input, false);
-        assert!(output.contains("file.txt"));
-        assert!(output.contains("dir"));
-    }
-
-    #[test]
-    fn test_filter_handles_empty() {
-        let input = "";
-        let output = filter_ls_output(input, false);
-        assert_eq!(output, "\n");
-    }
-
-    #[test]
-    fn test_summary_generation() {
-        let lines = vec![
-            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.rs",
-            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs",
-            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 lib.rs",
-            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml",
-            "-rw-r--r--  1 user  staff  1234 Jan  1 12:00 README.md",
-            "drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src",
-        ];
-        let summary = generate_summary(&lines);
-        assert!(summary.contains("5 files"));
-        assert!(summary.contains("1 dirs"));
-        assert!(summary.contains(".rs"));
-    }
-
-    #[test]
-    fn test_filter_with_summary() {
-        let input = "total 48\n-rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.rs\n-rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
-        let output = filter_ls_output(input, false);
-        assert!(!output.contains("total "));
-        assert!(output.contains("file.rs"));
-        assert!(output.contains("main.rs"));
-        assert!(output.contains("📊"));
-        assert!(output.contains("2 files"));
-    }
-
-    #[test]
-    fn test_filter_removes_noise_dirs() {
-        let input = "drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
+    fn test_compact_filters_noise() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
-                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.txt\n";
-        let output = filter_ls_output(input, false);
+                     -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
+        let output = compact_ls(input, false);
         assert!(!output.contains("node_modules"));
         assert!(!output.contains(".git"));
         assert!(!output.contains("target"));
-        assert!(output.contains("src"));
-        assert!(output.contains("file.txt"));
+        assert!(output.contains("src/"));
+        assert!(output.contains("main.rs"));
     }
 
     #[test]
-    fn test_filter_shows_all_with_a_flag() {
-        let input = "drwxr-xr-x  2 user  staff  64 Jan  1 12:00 node_modules\n\
+    fn test_compact_show_all() {
+        let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
-        let output = filter_ls_output(input, true);
-        assert!(output.contains("node_modules"));
-        assert!(output.contains(".git"));
-        assert!(output.contains("src"));
+        let output = compact_ls(input, true);
+        assert!(output.contains(".git/"));
+        assert!(output.contains("src/"));
     }
 
     #[test]
-    fn test_filter_removes_pycache() {
-        let input = "drwxr-xr-x  2 user  staff  64 Jan  1 12:00 __pycache__\n\
-                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.py\n";
-        let output = filter_ls_output(input, false);
-        assert!(!output.contains("__pycache__"));
-        assert!(output.contains("main.py"));
+    fn test_compact_empty() {
+        let input = "total 0\n";
+        let output = compact_ls(input, false);
+        assert_eq!(output, "(empty)\n");
     }
 
     #[test]
-    fn test_filter_removes_next_and_build_dirs() {
-        let input = "drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .next\n\
-                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 dist\n\
-                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 build\n\
-                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
-        let output = filter_ls_output(input, false);
-        assert!(!output.contains(".next"));
-        assert!(!output.contains("dist"));
-        assert!(!output.contains("build"));
-        assert!(output.contains("src"));
+    fn test_compact_summary() {
+        let input = "total 48\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
+                     -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n\
+                     -rw-r--r--  1 user  staff   100 Jan  1 12:00 Cargo.toml\n";
+        let output = compact_ls(input, false);
+        assert!(output.contains("📊 3 files, 1 dirs"));
+        assert!(output.contains(".rs"));
+        assert!(output.contains(".toml"));
+    }
+
+    #[test]
+    fn test_human_size() {
+        assert_eq!(human_size(0), "0B");
+        assert_eq!(human_size(500), "500B");
+        assert_eq!(human_size(1024), "1.0K");
+        assert_eq!(human_size(1234), "1.2K");
+        assert_eq!(human_size(1_048_576), "1.0M");
+        assert_eq!(human_size(2_500_000), "2.4M");
+    }
+
+    #[test]
+    fn test_compact_handles_filenames_with_spaces() {
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 my file.txt\n";
+        let output = compact_ls(input, false);
+        assert!(output.contains("my file.txt"));
+    }
+
+    #[test]
+    fn test_compact_symlinks() {
+        let input = "total 8\n\
+                     lrwxr-xr-x  1 user  staff  10 Jan  1 12:00 link -> target\n";
+        let output = compact_ls(input, false);
+        assert!(output.contains("link -> target"));
     }
 }
