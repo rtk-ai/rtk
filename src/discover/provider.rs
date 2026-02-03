@@ -13,6 +13,12 @@ pub struct ExtractedCommand {
     pub output_len: Option<usize>,
     #[allow(dead_code)]
     pub session_id: String,
+    /// Actual output content (first ~1000 chars for error detection)
+    pub output_content: Option<String>,
+    /// Whether the tool_result indicated an error
+    pub is_error: bool,
+    /// Chronological sequence index within the session
+    pub sequence_index: usize,
 }
 
 /// Trait for session providers (Claude Code, future: Cursor, Windsurf).
@@ -121,11 +127,12 @@ impl SessionProvider for ClaudeProvider {
             .unwrap_or("unknown")
             .to_string();
 
-        // First pass: collect all tool_use Bash commands with their IDs
-        // Second pass (same loop): collect tool_result output lengths
-        let mut pending_tool_uses: Vec<(String, String)> = Vec::new(); // (tool_use_id, command)
-        let mut tool_results: HashMap<String, usize> = HashMap::new();
+        // First pass: collect all tool_use Bash commands with their IDs and sequence
+        // Second pass (same loop): collect tool_result output lengths, content, and error status
+        let mut pending_tool_uses: Vec<(String, String, usize)> = Vec::new(); // (tool_use_id, command, sequence)
+        let mut tool_results: HashMap<String, (usize, String, bool)> = HashMap::new(); // (len, content, is_error)
         let mut commands = Vec::new();
+        let mut sequence_counter = 0;
 
         for line in reader.lines() {
             let line = match line {
@@ -159,7 +166,12 @@ impl SessionProvider for ClaudeProvider {
                                     block.get("id").and_then(|i| i.as_str()),
                                     block.pointer("/input/command").and_then(|c| c.as_str()),
                                 ) {
-                                    pending_tool_uses.push((id.to_string(), cmd.to_string()));
+                                    pending_tool_uses.push((
+                                        id.to_string(),
+                                        cmd.to_string(),
+                                        sequence_counter,
+                                    ));
+                                    sequence_counter += 1;
                                 }
                             }
                         }
@@ -174,14 +186,24 @@ impl SessionProvider for ClaudeProvider {
                             if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
                                 if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str())
                                 {
-                                    // Get content length
-                                    let output_len = block
-                                        .get("content")
-                                        .and_then(|c| c.as_str())
-                                        .map(|s| s.len());
-                                    if let Some(len) = output_len {
-                                        tool_results.insert(id.to_string(), len);
-                                    }
+                                    // Get content, length, and error status
+                                    let content =
+                                        block.get("content").and_then(|c| c.as_str()).unwrap_or("");
+
+                                    let output_len = content.len();
+                                    let is_error = block
+                                        .get("is_error")
+                                        .and_then(|e| e.as_bool())
+                                        .unwrap_or(false);
+
+                                    // Store first ~1000 chars of content for error detection
+                                    let content_preview: String =
+                                        content.chars().take(1000).collect();
+
+                                    tool_results.insert(
+                                        id.to_string(),
+                                        (output_len, content_preview, is_error),
+                                    );
                                 }
                             }
                         }
@@ -192,12 +214,19 @@ impl SessionProvider for ClaudeProvider {
         }
 
         // Match tool_uses with their results
-        for (tool_id, command) in pending_tool_uses {
-            let output_len = tool_results.get(&tool_id).copied();
+        for (tool_id, command, sequence_index) in pending_tool_uses {
+            let (output_len, output_content, is_error) = tool_results
+                .get(&tool_id)
+                .map(|(len, content, err)| (Some(*len), Some(content.clone()), *err))
+                .unwrap_or((None, None, false));
+
             commands.push(ExtractedCommand {
                 command,
                 output_len,
                 session_id: session_id.clone(),
+                output_content,
+                is_error,
+                sequence_index,
             });
         }
 
@@ -305,5 +334,55 @@ mod tests {
         let encoded = ClaudeProvider::encode_project_path("/Users/foo/Sites/rtk");
         assert!(encoded.contains("rtk"));
         assert!(encoded.contains("Sites"));
+    }
+
+    #[test]
+    fn test_extract_output_content() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc","name":"Bash","input":{"command":"git commit --ammend"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc","content":"error: unexpected argument '--ammend'","is_error":true}]}}"#,
+        ]);
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git commit --ammend");
+        assert_eq!(cmds[0].is_error, true);
+        assert!(cmds[0].output_content.is_some());
+        assert_eq!(
+            cmds[0].output_content.as_ref().unwrap(),
+            "error: unexpected argument '--ammend'"
+        );
+    }
+
+    #[test]
+    fn test_extract_is_error_flag() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}},{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"invalid_cmd"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"file1.txt","is_error":false},{"type":"tool_result","tool_use_id":"toolu_2","content":"command not found","is_error":true}]}}"#,
+        ]);
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].is_error, false);
+        assert_eq!(cmds[1].is_error, true);
+    }
+
+    #[test]
+    fn test_extract_sequence_ordering() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"first"}},{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"second"}},{"type":"tool_use","id":"toolu_3","name":"Bash","input":{"command":"third"}}]}}"#,
+        ]);
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(jsonl.path()).unwrap();
+        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds[0].sequence_index, 0);
+        assert_eq!(cmds[1].sequence_index, 1);
+        assert_eq!(cmds[2].sequence_index, 2);
+        assert_eq!(cmds[0].command, "first");
+        assert_eq!(cmds[1].command, "second");
+        assert_eq!(cmds[2].command, "third");
     }
 }

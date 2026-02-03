@@ -17,6 +17,7 @@ mod git;
 mod grep_cmd;
 mod init;
 mod json_cmd;
+mod learn;
 mod lint_cmd;
 mod local_llm;
 mod log_cmd;
@@ -414,6 +415,31 @@ enum Commands {
         /// Output format: text, json
         #[arg(short, long, default_value = "text")]
         format: String,
+    },
+
+    /// Learn CLI corrections from Claude Code error history
+    Learn {
+        /// Filter by project path (substring match)
+        #[arg(short, long)]
+        project: Option<String>,
+        /// Scan all projects (default: current project only)
+        #[arg(short, long)]
+        all: bool,
+        /// Limit to sessions from last N days
+        #[arg(short, long, default_value = "30")]
+        since: u64,
+        /// Output format: text, json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+        /// Generate .claude/rules/cli-corrections.md file
+        #[arg(short, long)]
+        write_rules: bool,
+        /// Minimum confidence threshold (0.0-1.0)
+        #[arg(long, default_value = "0.6")]
+        min_confidence: f64,
+        /// Minimum occurrences to include in report
+        #[arg(long, default_value = "1")]
+        min_occurrences: usize,
     },
 
     /// Execute command without filtering but track usage
@@ -1040,6 +1066,26 @@ fn main() -> Result<()> {
             discover::run(project.as_deref(), all, since, limit, &format, cli.verbose)?;
         }
 
+        Commands::Learn {
+            project,
+            all,
+            since,
+            format,
+            write_rules,
+            min_confidence,
+            min_occurrences,
+        } => {
+            learn::run(
+                project,
+                all,
+                since,
+                format,
+                write_rules,
+                min_confidence,
+                min_occurrences,
+            )?;
+        }
+
         Commands::Npx { args } => {
             if args.is_empty() {
                 anyhow::bail!("npx requires a command argument");
@@ -1074,20 +1120,32 @@ fn main() -> Result<()> {
                             }
                             _ => {
                                 // Passthrough other prisma subcommands
+                                let timer = tracking::TimedExecution::start();
                                 let mut cmd = std::process::Command::new("npx");
                                 for arg in &args {
                                     cmd.arg(arg);
                                 }
                                 let status = cmd.status().context("Failed to run npx prisma")?;
-                                std::process::exit(status.code().unwrap_or(1));
+                                let args_str = args.join(" ");
+                                timer.track_passthrough(
+                                    &format!("npx {}", args_str),
+                                    &format!("rtk npx {} (passthrough)", args_str),
+                                );
+                                if !status.success() {
+                                    std::process::exit(status.code().unwrap_or(1));
+                                }
                             }
                         }
                     } else {
+                        let timer = tracking::TimedExecution::start();
                         let status = std::process::Command::new("npx")
                             .arg("prisma")
                             .status()
                             .context("Failed to run npx prisma")?;
-                        std::process::exit(status.code().unwrap_or(1));
+                        timer.track_passthrough("npx prisma", "rtk npx prisma (passthrough)");
+                        if !status.success() {
+                            std::process::exit(status.code().unwrap_or(1));
+                        }
                     }
                 }
                 "next" => {

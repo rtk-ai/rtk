@@ -292,6 +292,8 @@ pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<()> {
 }
 
 fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     let mut cmd = Command::new("pnpm");
     cmd.arg("list");
     cmd.arg(format!("--depth={}", depth));
@@ -335,7 +337,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
 
     println!("{}", filtered);
 
-    tracking::track(
+    timer.track(
         &format!("pnpm list --depth={}", depth),
         &format!("rtk pnpm list --depth={}", depth),
         &stdout,
@@ -346,6 +348,8 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
 }
 
 fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     let mut cmd = Command::new("pnpm");
     cmd.arg("outdated");
     cmd.arg("--format");
@@ -389,12 +393,14 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
         println!("{}", filtered);
     }
 
-    tracking::track("pnpm outdated", "rtk pnpm outdated", &combined, &filtered);
+    timer.track("pnpm outdated", "rtk pnpm outdated", &combined, &filtered);
 
     Ok(())
 }
 
 fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     // Validate package names to prevent command injection
     for pkg in packages {
         if !is_valid_package_name(pkg) {
@@ -433,7 +439,7 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<()> 
 
     println!("{}", filtered);
 
-    tracking::track(
+    timer.track(
         &format!("pnpm install {}", packages.join(" ")),
         &format!("rtk pnpm install {}", packages.join(" ")),
         &combined,
@@ -484,6 +490,8 @@ fn filter_pnpm_install(output: &str) -> String {
 
 /// Runs an unsupported pnpm subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("pnpm passthrough: {:?}", args);
     }
@@ -491,6 +499,13 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
         .args(args)
         .status()
         .context("Failed to run pnpm")?;
+
+    let args_str = tracking::args_display(args);
+    timer.track_passthrough(
+        &format!("pnpm {}", args_str),
+        &format!("rtk pnpm {} (passthrough)", args_str),
+    );
+
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
