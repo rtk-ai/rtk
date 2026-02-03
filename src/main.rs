@@ -482,19 +482,19 @@ enum GitCommands {
         #[arg(trailing_var_arg = true)]
         files: Vec<String>,
     },
-    /// Commit → "ok ✓ <hash>"
+    /// Commit → "ok ✓ \<hash\>"
     Commit {
         /// Commit message
         #[arg(short, long)]
         message: String,
     },
-    /// Push → "ok ✓ <branch>"
+    /// Push → "ok ✓ \<branch\>"
     Push {
         /// Git push arguments (supports -u, remote, branch, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Pull → "ok ✓ <stats>"
+    /// Pull → "ok ✓ \<stats\>"
     Pull {
         /// Git pull arguments (supports --rebase, remote, branch, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
