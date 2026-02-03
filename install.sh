@@ -1,6 +1,6 @@
 #!/bin/sh
 # rtk installer - https://github.com/pszymkowiak/rtk
-# Usage: curl -fsSL https://raw.githubusercontent.com/pszymkowiak/rtk/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 
 set -e
 
