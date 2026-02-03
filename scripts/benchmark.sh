@@ -134,7 +134,12 @@ echo "────────────────────────�
 section "ls"
 bench "ls" "ls -la" "$RTK ls"
 bench "ls src/" "ls -la src/" "$RTK ls src/"
+bench "ls -l src/" "ls -l src/" "$RTK ls -l src/"
+bench "ls -la src/" "ls -la src/" "$RTK ls -la src/"
+bench "ls -lh src/" "ls -lh src/" "$RTK ls -lh src/"
+bench "ls src/ -l" "ls -l src/" "$RTK ls src/ -l"
 bench "ls -a" "ls -la" "$RTK ls -a"
+bench "ls multi" "ls -la src/ scripts/" "$RTK ls src/ scripts/"
 
 # ===================
 # read

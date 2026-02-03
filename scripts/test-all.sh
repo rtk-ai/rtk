@@ -120,7 +120,12 @@ section "Ls"
 assert_ok      "rtk ls ."                     rtk ls .
 assert_ok      "rtk ls -la ."                 rtk ls -la .
 assert_ok      "rtk ls -lh ."                 rtk ls -lh .
+assert_ok      "rtk ls -l src/"               rtk ls -l src/
+assert_ok      "rtk ls src/ -l (flag after)"  rtk ls src/ -l
+assert_ok      "rtk ls multi paths"           rtk ls src/ scripts/
 assert_contains "rtk ls -a shows hidden"      ".git" rtk ls -a .
+assert_contains "rtk ls shows sizes"          "K"  rtk ls src/
+assert_contains "rtk ls shows dirs with /"    "/" rtk ls .
 
 # ── 2b. Tree ─────────────────────────────────────────
 
