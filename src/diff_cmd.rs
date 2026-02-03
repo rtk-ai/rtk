@@ -45,8 +45,8 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
             DiffChange::Modified(ln, old, new) => rtk.push_str(&format!(
                 "~{:4} {} → {}\n",
                 ln,
-                truncate(old, 35),
-                truncate(new, 35)
+                truncate(old, 70),
+                truncate(new, 70)
             )),
         }
     }
@@ -67,6 +67,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
 /// Run diff from stdin (piped command output)
 pub fn run_stdin(_verbose: u8) -> Result<()> {
     use std::io::{self, Read};
+    let timer = tracking::TimedExecution::start();
 
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
@@ -74,6 +75,8 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
     // Parse unified diff format
     let condensed = condense_unified_diff(&input);
     println!("{}", condensed);
+
+    timer.track("diff (stdin)", "rtk diff (stdin)", &input, &condensed);
 
     Ok(())
 }

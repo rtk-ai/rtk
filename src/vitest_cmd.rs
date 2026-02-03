@@ -219,6 +219,8 @@ pub fn run(cmd: VitestCommand, args: &[String], verbose: u8) -> Result<()> {
 }
 
 fn run_vitest(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     let mut cmd = Command::new("pnpm");
     cmd.arg("vitest");
     cmd.arg("run"); // Force non-watch mode
@@ -260,7 +262,7 @@ fn run_vitest(args: &[String], verbose: u8) -> Result<()> {
 
     println!("{}", filtered);
 
-    tracking::track("vitest run", "rtk vitest run", &combined, &filtered);
+    timer.track("vitest run", "rtk vitest run", &combined, &filtered);
 
     // Propagate original exit code
     std::process::exit(output.status.code().unwrap_or(1))

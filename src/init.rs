@@ -24,7 +24,6 @@ rtk git add && rtk git commit -m "msg" && rtk git push
 | `cat`, `head`, `tail` | `rtk read <file>` |
 | `cat` pour comprendre du code | `rtk read <file> -l aggressive` |
 | `find`, `fd` | `rtk find <pattern>` |
-| `diff file1 file2` | `rtk diff <f1> <f2>` |
 | `git status` | `rtk git status` |
 | `git log` | `rtk git log` |
 | `git diff` | `rtk git diff` |
@@ -54,7 +53,6 @@ rtk ls .                        # Arbre filtré (-82% tokens)
 rtk read file.rs -l aggressive  # Signatures seules (-74% tokens)
 rtk smart file.rs               # Résumé 2 lignes
 rtk find "*.rs" .               # Find compact groupé par dossier
-rtk diff f1.txt f2.txt          # Diff ultra-condensé
 
 # Git
 rtk git status                  # Status compact

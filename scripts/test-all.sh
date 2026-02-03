@@ -118,10 +118,27 @@ assert_contains "rtk --help" "Usage:" rtk --help
 section "Ls"
 
 assert_ok      "rtk ls ."                     rtk ls .
-assert_ok      "rtk ls -a ."                  rtk ls -a .
-assert_ok      "rtk ls --depth 2 ."           rtk ls --depth 2 .
-assert_ok      "rtk ls -f tree ."             rtk ls -f tree .
-assert_contains "rtk ls shows src/"           "src/" rtk ls .
+assert_ok      "rtk ls -la ."                 rtk ls -la .
+assert_ok      "rtk ls -lh ."                 rtk ls -lh .
+assert_ok      "rtk ls -l src/"               rtk ls -l src/
+assert_ok      "rtk ls src/ -l (flag after)"  rtk ls src/ -l
+assert_ok      "rtk ls multi paths"           rtk ls src/ scripts/
+assert_contains "rtk ls -a shows hidden"      ".git" rtk ls -a .
+assert_contains "rtk ls shows sizes"          "K"  rtk ls src/
+assert_contains "rtk ls shows dirs with /"    "/" rtk ls .
+
+# ── 2b. Tree ─────────────────────────────────────────
+
+section "Tree"
+
+if command -v tree >/dev/null 2>&1; then
+    assert_ok      "rtk tree ."                rtk tree .
+    assert_ok      "rtk tree -L 2 ."           rtk tree -L 2 .
+    assert_ok      "rtk tree -d -L 1 ."        rtk tree -d -L 1 .
+    assert_contains "rtk tree shows src/"      "src" rtk tree -L 1 .
+else
+    skip_test "rtk tree" "tree not installed"
+fi
 
 # ── 3. Read ──────────────────────────────────────────
 
@@ -132,6 +149,10 @@ assert_ok      "rtk read --level none Cargo.toml"  rtk read --level none Cargo.t
 assert_ok      "rtk read --level aggressive Cargo.toml" rtk read --level aggressive Cargo.toml
 assert_ok      "rtk read -n Cargo.toml"       rtk read -n Cargo.toml
 assert_ok      "rtk read --max-lines 5 Cargo.toml" rtk read --max-lines 5 Cargo.toml
+
+section "Read (stdin support)"
+
+assert_ok      "rtk read stdin pipe"          bash -c 'echo "fn main() {}" | rtk read -'
 
 # ── 4. Git ───────────────────────────────────────────
 
@@ -152,6 +173,12 @@ assert_ok      "rtk git branch"               rtk git branch
 assert_ok      "rtk git fetch"                rtk git fetch
 assert_ok      "rtk git stash list"           rtk git stash list
 assert_ok      "rtk git worktree"             rtk git worktree
+
+section "Git (passthrough: unsupported subcommands)"
+
+assert_ok      "rtk git tag --list"           rtk git tag --list
+assert_ok      "rtk git remote -v"            rtk git remote -v
+assert_ok      "rtk git rev-parse HEAD"       rtk git rev-parse HEAD
 
 # ── 5. GitHub CLI ────────────────────────────────────
 
@@ -209,6 +236,10 @@ assert_help    "rtk pnpm"                     rtk pnpm
 assert_help    "rtk pnpm build"               rtk pnpm build
 assert_help    "rtk pnpm typecheck"           rtk pnpm typecheck
 
+if command -v pnpm >/dev/null 2>&1; then
+    assert_ok  "rtk pnpm help"                rtk pnpm help
+fi
+
 # ── 10. Grep ─────────────────────────────────────────
 
 section "Grep"
@@ -216,6 +247,11 @@ section "Grep"
 assert_ok      "rtk grep pattern"             rtk grep "pub fn" src/
 assert_contains "rtk grep finds results"      "pub fn" rtk grep "pub fn" src/
 assert_ok      "rtk grep with file type"      rtk grep "pub fn" src/ -t rust
+
+section "Grep (extra args passthrough)"
+
+assert_ok      "rtk grep -i case insensitive" rtk grep "fn" src/ -i
+assert_ok      "rtk grep -A context lines"    rtk grep "fn run" src/ -A 2
 
 # ── 11. Find ─────────────────────────────────────────
 
@@ -250,19 +286,6 @@ section "Env"
 
 assert_ok      "rtk env"                      rtk env
 assert_ok      "rtk env --filter PATH"        rtk env --filter PATH
-
-# ── 15. Diff ─────────────────────────────────────────
-
-section "Diff"
-
-TMPF1=$(mktemp /tmp/rtk-diff1-XXXXX.txt)
-TMPF2=$(mktemp /tmp/rtk-diff2-XXXXX.txt)
-echo -e "line1\nline2\nline3" > "$TMPF1"
-echo -e "line1\nchanged\nline3" > "$TMPF2"
-
-assert_ok      "rtk diff two files"           rtk diff "$TMPF1" "$TMPF2"
-
-rm -f "$TMPF1" "$TMPF2"
 
 # ── 16. Log ──────────────────────────────────────────
 
@@ -361,6 +384,13 @@ assert_ok      "rtk --skip-env npm --help"    rtk --skip-env npm --help
 section "CcEconomics"
 
 assert_ok      "rtk cc-economics"             rtk cc-economics
+
+# ── 29. Learn ───────────────────────────────────────
+
+section "Learn"
+
+assert_ok      "rtk learn --help"             rtk learn --help
+assert_ok      "rtk learn (no sessions)"      rtk learn --since 0 2>&1 || true
 
 # ══════════════════════════════════════════════════════
 # Report

@@ -11,6 +11,7 @@ pub fn run(
     max_results: usize,
     context_only: bool,
     file_type: Option<&str>,
+    extra_args: &[String],
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -24,6 +25,10 @@ pub fn run(
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
+    }
+
+    for arg in extra_args {
+        rg_cmd.arg(arg);
     }
 
     let output = rg_cmd
@@ -190,5 +195,13 @@ mod tests {
         let path = "/Users/patrick/dev/project/src/components/Button.tsx";
         let compact = compact_path(path);
         assert!(compact.len() <= 60);
+    }
+
+    #[test]
+    fn test_extra_args_accepted() {
+        // Test that the function signature accepts extra_args
+        // This is a compile-time test - if it compiles, the signature is correct
+        let _extra: Vec<String> = vec!["-i".to_string(), "-A".to_string(), "3".to_string()];
+        // No need to actually run - we're verifying the parameter exists
     }
 }

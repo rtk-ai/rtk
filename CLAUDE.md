@@ -97,7 +97,7 @@ main.rs (CLI entry)
 ### Key Architectural Components
 
 **1. Command Modules** (src/*_cmd.rs, src/git.rs, src/container.rs)
-- Each module handles a specific command type (git, grep, diff, etc.)
+- Each module handles a specific command type (git, grep, etc.)
 - Responsible for executing underlying commands and transforming output
 - Implement token-optimized formatting strategies
 
@@ -134,6 +134,35 @@ main.rs:Commands enum
   → tracking::track_command() records metrics
   → Result<()> propagates errors
 ```
+
+### Proxy Mode
+
+**Purpose**: Execute commands without filtering but track usage for metrics.
+
+**Usage**: `rtk proxy <command> [args...]`
+
+**Benefits**:
+- **Bypass RTK filtering**: Workaround bugs or get full unfiltered output
+- **Track usage metrics**: Measure which commands Claude uses most (visible in `rtk gain --history`)
+- **Guaranteed compatibility**: Always works even if RTK doesn't implement the command
+- **Prototyping**: Test new commands before implementing optimized filtering
+
+**Examples**:
+```bash
+# Full git log output (no truncation)
+rtk proxy git log --oneline -20
+
+# Raw npm output (no filtering)
+rtk proxy npm install express
+
+# Any command works
+rtk proxy curl https://api.example.com/data
+
+# Tracking shows 0% savings (expected)
+rtk gain --history | grep proxy
+```
+
+**Tracking**: All proxy commands appear in `rtk gain --history` with 0% savings (input = output) but preserve usage statistics.
 
 ### Critical Implementation Details
 
