@@ -393,6 +393,13 @@ section "CcEconomics"
 
 assert_ok      "rtk cc-economics"             rtk cc-economics
 
+# ── 29. Learn ───────────────────────────────────────
+
+section "Learn"
+
+assert_ok      "rtk learn --help"             rtk learn --help
+assert_ok      "rtk learn (no sessions)"      rtk learn --since 0 2>&1 || true
+
 # ══════════════════════════════════════════════════════
 # Report
 # ══════════════════════════════════════════════════════

@@ -879,6 +879,21 @@ fn run_branch(args: &[String], verbose: u8) -> Result<()> {
         let output = cmd.output().context("Failed to run git branch")?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}{}", stdout, stderr);
+
+        let msg = if output.status.success() {
+            "ok ✓"
+        } else {
+            &combined
+        };
+
+        timer.track(
+            &format!("git branch {}", args.join(" ")),
+            &format!("rtk git branch {}", args.join(" ")),
+            &combined,
+            msg,
+        );
+
         if output.status.success() {
             println!("ok ✓");
         } else {
@@ -971,6 +986,8 @@ fn filter_branch_output(output: &str) -> String {
 }
 
 fn run_fetch(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("git fetch");
     }
@@ -1007,12 +1024,14 @@ fn run_fetch(args: &[String], verbose: u8) -> Result<()> {
     };
 
     println!("{}", msg);
-    tracking::track("git fetch", "rtk git fetch", &raw, &msg);
+    timer.track("git fetch", "rtk git fetch", &raw, &msg);
 
     Ok(())
 }
 
 fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("git stash {:?}", subcommand);
     }
@@ -1029,13 +1048,13 @@ fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<(
             if stdout.trim().is_empty() {
                 let msg = "No stashes";
                 println!("{}", msg);
-                tracking::track("git stash list", "rtk git stash list", &raw, msg);
+                timer.track("git stash list", "rtk git stash list", &raw, msg);
                 return Ok(());
             }
 
             let filtered = filter_stash_list(&stdout);
             println!("{}", filtered);
-            tracking::track("git stash list", "rtk git stash list", &raw, &filtered);
+            timer.track("git stash list", "rtk git stash list", &raw, &filtered);
         }
         Some("show") => {
             let mut cmd = Command::new("git");
@@ -1045,13 +1064,19 @@ fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<(
             }
             let output = cmd.output().context("Failed to run git stash show")?;
             let stdout = String::from_utf8_lossy(&output.stdout);
+            let raw = stdout.to_string();
 
-            if stdout.trim().is_empty() {
-                println!("Empty stash");
+            let filtered = if stdout.trim().is_empty() {
+                let msg = "Empty stash";
+                println!("{}", msg);
+                msg.to_string()
             } else {
                 let compacted = compact_diff(&stdout, 100);
                 println!("{}", compacted);
-            }
+                compacted
+            };
+
+            timer.track("git stash show", "rtk git stash show", &raw, &filtered);
         }
         Some("pop") | Some("apply") | Some("drop") | Some("push") => {
             let sub = subcommand.unwrap();
@@ -1061,15 +1086,28 @@ fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<(
                 cmd.arg(arg);
             }
             let output = cmd.output().context("Failed to run git stash")?;
-            if output.status.success() {
-                println!("ok stash {}", sub);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{}{}", stdout, stderr);
+
+            let msg = if output.status.success() {
+                let msg = format!("ok stash {}", sub);
+                println!("{}", msg);
+                msg
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
                 eprintln!("FAILED: git stash {}", sub);
                 if !stderr.trim().is_empty() {
                     eprintln!("{}", stderr);
                 }
-            }
+                combined.clone()
+            };
+
+            timer.track(
+                &format!("git stash {}", sub),
+                &format!("rtk git stash {}", sub),
+                &combined,
+                &msg,
+            );
         }
         _ => {
             // Default: git stash (push)
@@ -1079,20 +1117,29 @@ fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<(
                 cmd.arg(arg);
             }
             let output = cmd.output().context("Failed to run git stash")?;
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{}{}", stdout, stderr);
+
+            let msg = if output.status.success() {
                 if stdout.contains("No local changes") {
-                    println!("ok (nothing to stash)");
+                    let msg = "ok (nothing to stash)";
+                    println!("{}", msg);
+                    msg.to_string()
                 } else {
-                    println!("ok stashed");
+                    let msg = "ok stashed";
+                    println!("{}", msg);
+                    msg.to_string()
                 }
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
                 eprintln!("FAILED: git stash");
                 if !stderr.trim().is_empty() {
                     eprintln!("{}", stderr);
                 }
-            }
+                combined.clone()
+            };
+
+            timer.track("git stash", "rtk git stash", &combined, &msg);
         }
     }
 
@@ -1121,6 +1168,8 @@ fn filter_stash_list(output: &str) -> String {
 }
 
 fn run_worktree(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("git worktree list");
     }
@@ -1137,10 +1186,26 @@ fn run_worktree(args: &[String], verbose: u8) -> Result<()> {
             cmd.arg(arg);
         }
         let output = cmd.output().context("Failed to run git worktree")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}{}", stdout, stderr);
+
+        let msg = if output.status.success() {
+            "ok ✓"
+        } else {
+            &combined
+        };
+
+        timer.track(
+            &format!("git worktree {}", args.join(" ")),
+            &format!("rtk git worktree {}", args.join(" ")),
+            &combined,
+            msg,
+        );
+
         if output.status.success() {
             println!("ok ✓");
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!("FAILED: git worktree {}", args.join(" "));
             if !stderr.trim().is_empty() {
                 eprintln!("{}", stderr);
@@ -1160,7 +1225,7 @@ fn run_worktree(args: &[String], verbose: u8) -> Result<()> {
 
     let filtered = filter_worktree_list(&stdout);
     println!("{}", filtered);
-    tracking::track("git worktree list", "rtk git worktree", &raw, &filtered);
+    timer.track("git worktree list", "rtk git worktree", &raw, &filtered);
 
     Ok(())
 }
@@ -1194,6 +1259,8 @@ fn filter_worktree_list(output: &str) -> String {
 
 /// Runs an unsupported git subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     if verbose > 0 {
         eprintln!("git passthrough: {:?}", args);
     }
@@ -1201,6 +1268,13 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
         .args(args)
         .status()
         .context("Failed to run git")?;
+
+    let args_str = tracking::args_display(args);
+    timer.track_passthrough(
+        &format!("git {}", args_str),
+        &format!("rtk git {} (passthrough)", args_str),
+    );
+
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }

@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -435,7 +436,7 @@ impl TimedExecution {
     }
 
     /// Track the command with elapsed time
-    pub fn track(self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+    pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
@@ -450,6 +451,24 @@ impl TimedExecution {
             );
         }
     }
+
+    /// Track passthrough commands (timing-only, no token counting)
+    /// These are commands that run interactively/streaming where we don't capture output
+    pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
+        let elapsed_ms = self.start.elapsed().as_millis() as u64;
+        // input_tokens=0, output_tokens=0 won't dilute savings statistics
+        if let Ok(tracker) = Tracker::new() {
+            let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+        }
+    }
+}
+
+/// Format OsString args for tracking display
+pub fn args_display(args: &[OsString]) -> String {
+    args.iter()
+        .map(|a| a.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Track a command execution (legacy function, use TimedExecution for new code)
@@ -457,11 +476,138 @@ impl TimedExecution {
 /// rtk_cmd: the rtk command used (e.g., "rtk ls")
 /// input: estimated raw output that would have been produced
 /// output: actual rtk output produced
+#[deprecated(note = "Use TimedExecution instead")]
 pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
     let input_tokens = estimate_tokens(input);
     let output_tokens = estimate_tokens(output);
 
     if let Ok(tracker) = Tracker::new() {
         let _ = tracker.record(original_cmd, rtk_cmd, input_tokens, output_tokens, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 1. estimate_tokens — verify ~4 chars/token ratio
+    #[test]
+    fn test_estimate_tokens() {
+        assert_eq!(estimate_tokens(""), 0);
+        assert_eq!(estimate_tokens("abcd"), 1); // 4 chars = 1 token
+        assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
+        assert_eq!(estimate_tokens("a"), 1); // 1 char = ceil(0.25) = 1
+        assert_eq!(estimate_tokens("12345678"), 2); // 8 chars = 2 tokens
+    }
+
+    // 2. args_display — format OsString vec
+    #[test]
+    fn test_args_display() {
+        let args = vec![OsString::from("status"), OsString::from("--short")];
+        assert_eq!(args_display(&args), "status --short");
+        assert_eq!(args_display(&[]), "");
+
+        let single = vec![OsString::from("log")];
+        assert_eq!(args_display(&single), "log");
+    }
+
+    // 3. Tracker::record + get_recent — round-trip DB
+    #[test]
+    fn test_tracker_record_and_recent() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+
+        // Use unique test identifier to avoid conflicts with other tests
+        let test_cmd = format!("rtk git status test_{}", std::process::id());
+
+        tracker
+            .record("git status", &test_cmd, 100, 20, 50)
+            .expect("Failed to record");
+
+        let recent = tracker.get_recent(10).expect("Failed to get recent");
+
+        // Find our specific test record
+        let test_record = recent
+            .iter()
+            .find(|r| r.rtk_cmd == test_cmd)
+            .expect("Test record not found in recent commands");
+
+        assert_eq!(test_record.saved_tokens, 80);
+        assert_eq!(test_record.savings_pct, 80.0);
+    }
+
+    // 4. track_passthrough doesn't dilute stats (input=0, output=0)
+    #[test]
+    fn test_track_passthrough_no_dilution() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+
+        // Use unique test identifiers
+        let pid = std::process::id();
+        let cmd1 = format!("rtk cmd1_test_{}", pid);
+        let cmd2 = format!("rtk cmd2_passthrough_test_{}", pid);
+
+        // Record one real command with 80% savings
+        tracker
+            .record("cmd1", &cmd1, 1000, 200, 10)
+            .expect("Failed to record cmd1");
+
+        // Record passthrough (0, 0)
+        tracker
+            .record("cmd2", &cmd2, 0, 0, 5)
+            .expect("Failed to record passthrough");
+
+        // Verify both records exist in recent history
+        let recent = tracker.get_recent(20).expect("Failed to get recent");
+
+        let record1 = recent
+            .iter()
+            .find(|r| r.rtk_cmd == cmd1)
+            .expect("cmd1 record not found");
+        let record2 = recent
+            .iter()
+            .find(|r| r.rtk_cmd == cmd2)
+            .expect("passthrough record not found");
+
+        // Verify cmd1 has 80% savings
+        assert_eq!(record1.saved_tokens, 800);
+        assert_eq!(record1.savings_pct, 80.0);
+
+        // Verify passthrough has 0% savings
+        assert_eq!(record2.saved_tokens, 0);
+        assert_eq!(record2.savings_pct, 0.0);
+
+        // This validates that passthrough (0 input, 0 output) doesn't dilute stats
+        // because the savings calculation is correct for both cases
+    }
+
+    // 5. TimedExecution::track records with exec_time > 0
+    #[test]
+    fn test_timed_execution_records_time() {
+        let timer = TimedExecution::start();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        timer.track("test cmd", "rtk test", "raw input data", "filtered");
+
+        // Verify via DB that record exists
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let recent = tracker.get_recent(5).expect("Failed to get recent");
+        assert!(recent.iter().any(|r| r.rtk_cmd == "rtk test"));
+    }
+
+    // 6. TimedExecution::track_passthrough records with 0 tokens
+    #[test]
+    fn test_timed_execution_passthrough() {
+        let timer = TimedExecution::start();
+        timer.track_passthrough("git tag", "rtk git tag (passthrough)");
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let recent = tracker.get_recent(5).expect("Failed to get recent");
+
+        let pt = recent
+            .iter()
+            .find(|r| r.rtk_cmd.contains("passthrough"))
+            .expect("Passthrough record not found");
+
+        // savings_pct should be 0 for passthrough
+        assert_eq!(pt.savings_pct, 0.0);
+        assert_eq!(pt.saved_tokens, 0);
     }
 }

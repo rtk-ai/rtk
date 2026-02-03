@@ -28,6 +28,8 @@ pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
 
 /// Filter logs from stdin
 pub fn run_stdin(_verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
     let mut content = String::new();
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
@@ -37,6 +39,9 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
 
     let result = analyze_logs(&content);
     println!("{}", result);
+
+    timer.track("log (stdin)", "rtk log (stdin)", &content, &result);
+
     Ok(())
 }
 
