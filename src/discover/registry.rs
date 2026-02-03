@@ -68,7 +68,6 @@ const PATTERNS: &[&str] = &[
     r"^kubectl\s+(get|logs)",
     r"^curl\s+",
     r"^wget\s+",
-    r"^diff\s+",
 ];
 
 const RULES: &[RtkRule] = &[
@@ -201,12 +200,6 @@ const RULES: &[RtkRule] = &[
         rtk_cmd: "rtk wget",
         category: "Network",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-    },
-    RtkRule {
-        rtk_cmd: "rtk diff",
-        category: "Files",
-        savings_pct: 75.0,
         subcmd_savings: &[],
     },
 ];
