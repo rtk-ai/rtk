@@ -36,7 +36,7 @@ fn docker_ps(_verbose: u8) -> Result<()> {
         .args([
             "ps",
             "--format",
-            "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
+            "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
         ])
         .output()
         .context("Failed to run docker ps")?;
@@ -56,14 +56,15 @@ fn docker_ps(_verbose: u8) -> Result<()> {
 
     for line in stdout.lines().take(15) {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 3 {
-            let name = parts[0];
-            let short_image = parts.get(2).unwrap_or(&"").split('/').last().unwrap_or("");
-            let ports = compact_ports(parts.get(3).unwrap_or(&""));
+        if parts.len() >= 4 {
+            let id = &parts[0][..12.min(parts[0].len())];
+            let name = parts[1];
+            let short_image = parts.get(3).unwrap_or(&"").split('/').last().unwrap_or("");
+            let ports = compact_ports(parts.get(4).unwrap_or(&""));
             if ports == "-" {
-                rtk.push_str(&format!("  {} ({})\n", name, short_image));
+                rtk.push_str(&format!("  {} {} ({})\n", id, name, short_image));
             } else {
-                rtk.push_str(&format!("  {} ({}) [{}]\n", name, short_image, ports));
+                rtk.push_str(&format!("  {} {} ({}) [{}]\n", id, name, short_image, ports));
             }
         }
     }

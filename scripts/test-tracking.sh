@@ -61,15 +61,6 @@ echo "── Stdin commands ──"
 echo -e "line1\nline2\nline1\nERROR: bad\nline1" | rtk log >/dev/null 2>&1
 check "rtk log stdin tracked" "rtk log" rtk gain --history
 
-# Create temp files for diff test
-tmpfile1=$(mktemp)
-tmpfile2=$(mktemp)
-echo "old content" > "$tmpfile1"
-echo "new content" > "$tmpfile2"
-rtk diff "$tmpfile1" "$tmpfile2" >/dev/null 2>&1
-rm -f "$tmpfile1" "$tmpfile2"
-check "rtk diff tracked" "rtk diff" rtk gain --history
-
 # Summary — verify passthrough doesn't dilute
 echo ""
 echo "── Summary integrity ──"

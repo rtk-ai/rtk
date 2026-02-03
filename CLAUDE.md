@@ -97,7 +97,7 @@ main.rs (CLI entry)
 ### Key Architectural Components
 
 **1. Command Modules** (src/*_cmd.rs, src/git.rs, src/container.rs)
-- Each module handles a specific command type (git, grep, diff, etc.)
+- Each module handles a specific command type (git, grep, etc.)
 - Responsible for executing underlying commands and transforming output
 - Implement token-optimized formatting strategies
 
