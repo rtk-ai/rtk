@@ -131,7 +131,7 @@ pub fn format_usd(amount: f64) -> String {
     }
 }
 
-/// Format a confirmation message: "ok <action> <detail>"
+/// Format a confirmation message: "ok \<action\> \<detail\>"
 /// Used for write operations (merge, create, comment, edit, etc.)
 ///
 /// # Examples
