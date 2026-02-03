@@ -282,19 +282,6 @@ section "Env"
 assert_ok      "rtk env"                      rtk env
 assert_ok      "rtk env --filter PATH"        rtk env --filter PATH
 
-# ── 15. Diff ─────────────────────────────────────────
-
-section "Diff"
-
-TMPF1=$(mktemp /tmp/rtk-diff1-XXXXX.txt)
-TMPF2=$(mktemp /tmp/rtk-diff2-XXXXX.txt)
-echo -e "line1\nline2\nline3" > "$TMPF1"
-echo -e "line1\nchanged\nline3" > "$TMPF2"
-
-assert_ok      "rtk diff two files"           rtk diff "$TMPF1" "$TMPF2"
-
-rm -f "$TMPF1" "$TMPF2"
-
 # ── 16. Log ──────────────────────────────────────────
 
 section "Log"

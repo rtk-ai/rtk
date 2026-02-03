@@ -203,12 +203,6 @@ const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         subcmd_savings: &[],
     },
-    RtkRule {
-        rtk_cmd: "rtk diff",
-        category: "Files",
-        savings_pct: 75.0,
-        subcmd_savings: &[],
-    },
 ];
 
 /// Commands to ignore (shell builtins, trivial, already rtk).

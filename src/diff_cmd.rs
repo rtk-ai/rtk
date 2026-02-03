@@ -45,8 +45,8 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
             DiffChange::Modified(ln, old, new) => rtk.push_str(&format!(
                 "~{:4} {} → {}\n",
                 ln,
-                truncate(old, 35),
-                truncate(new, 35)
+                truncate(old, 70),
+                truncate(new, 70)
             )),
         }
     }
