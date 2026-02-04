@@ -9,7 +9,7 @@ pub enum GitCommand {
     Log,
     Status,
     Show,
-    Add { files: Vec<String> },
+    Add,
     Commit { message: String },
     Push,
     Pull,
@@ -25,7 +25,7 @@ pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: 
         GitCommand::Log => run_log(args, max_lines, verbose),
         GitCommand::Status => run_status(args, verbose),
         GitCommand::Show => run_show(args, max_lines, verbose),
-        GitCommand::Add { files } => run_add(&files, verbose),
+        GitCommand::Add => run_add(args, verbose),
         GitCommand::Commit { message } => run_commit(&message, verbose),
         GitCommand::Push => run_push(args, verbose),
         GitCommand::Pull => run_pull(args, verbose),
@@ -578,17 +578,18 @@ fn run_status(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn run_add(files: &[String], verbose: u8) -> Result<()> {
+fn run_add(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("git");
     cmd.arg("add");
 
-    if files.is_empty() {
+    // Pass all arguments directly to git (flags like -A, -p, --all, etc.)
+    if args.is_empty() {
         cmd.arg(".");
     } else {
-        for f in files {
-            cmd.arg(f);
+        for arg in args {
+            cmd.arg(arg);
         }
     }
 
@@ -627,8 +628,8 @@ fn run_add(files: &[String], verbose: u8) -> Result<()> {
         println!("{}", compact);
 
         timer.track(
-            &format!("git add {}", files.join(" ")),
-            &format!("rtk git add {}", files.join(" ")),
+            &format!("git add {}", args.join(" ")),
+            &format!("rtk git add {}", args.join(" ")),
             &raw_output,
             &compact,
         );
@@ -642,6 +643,8 @@ fn run_add(files: &[String], verbose: u8) -> Result<()> {
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
+        // Propagate git's exit code
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     Ok(())
