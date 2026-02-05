@@ -478,9 +478,9 @@ enum GitCommands {
     },
     /// Add files → "ok ✓"
     Add {
-        /// Files to add
-        #[arg(trailing_var_arg = true)]
-        files: Vec<String>,
+        /// Files and flags to add (supports all git add flags like -A, -p, --all, etc)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Commit → "ok ✓ \<hash\>"
     Commit {
@@ -733,8 +733,8 @@ fn main() -> Result<()> {
             GitCommands::Show { args } => {
                 git::run(git::GitCommand::Show, &args, None, cli.verbose)?;
             }
-            GitCommands::Add { files } => {
-                git::run(git::GitCommand::Add { files }, &[], None, cli.verbose)?;
+            GitCommands::Add { args } => {
+                git::run(git::GitCommand::Add, &args, None, cli.verbose)?;
             }
             GitCommands::Commit { message } => {
                 git::run(git::GitCommand::Commit { message }, &[], None, cli.verbose)?;
