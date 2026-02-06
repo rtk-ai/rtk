@@ -116,11 +116,7 @@ pub fn run(
             .parent()
             .map(|d| d.to_string_lossy().to_string())
             .unwrap_or_else(|| ".".to_string());
-        let dir = if dir.is_empty() {
-            ".".to_string()
-        } else {
-            dir
-        };
+        let dir = if dir.is_empty() { ".".to_string() } else { dir };
         let filename = p
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
@@ -156,7 +152,11 @@ pub fn run(
             shown += files_in_dir.len();
         } else {
             // Partial display: show only what fits in budget
-            let partial: Vec<_> = files_in_dir.iter().take(remaining_budget).cloned().collect();
+            let partial: Vec<_> = files_in_dir
+                .iter()
+                .take(remaining_budget)
+                .cloned()
+                .collect();
             println!("{}/ {}", dir_display, partial.join(" "));
             shown += partial.len();
             break;

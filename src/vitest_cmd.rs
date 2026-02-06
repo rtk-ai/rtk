@@ -8,6 +8,7 @@ use crate::parser::{
     ParseResult, TestFailure, TestResult, TokenFormatter,
 };
 use crate::tracking;
+use crate::utils::strip_ansi;
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
@@ -200,12 +201,6 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
 }
 
 /// Strip ANSI escape sequences
-fn strip_ansi(text: &str) -> String {
-    lazy_static::lazy_static! {
-        static ref ANSI_RE: Regex = Regex::new(r"\x1b\[[0-9;]*m").unwrap();
-    }
-    ANSI_RE.replace_all(text, "").to_string()
-}
 
 #[derive(Debug, Clone)]
 pub enum VitestCommand {

@@ -581,6 +581,9 @@ enum DockerCommands {
     Images,
     /// Show container logs (deduplicated)
     Logs { container: String },
+    /// Passthrough: runs any unsupported docker subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
 }
 
 #[derive(Subcommand)]
@@ -607,6 +610,9 @@ enum KubectlCommands {
         #[arg(short, long)]
         container: Option<String>,
     },
+    /// Passthrough: runs any unsupported kubectl subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
 }
 
 #[derive(Subcommand)]
@@ -685,6 +691,15 @@ enum CargoCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Check with compact output (strip Checking lines, keep errors)
+    Check {
+        /// Additional cargo check arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported cargo subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
 }
 
 fn main() -> Result<()> {
@@ -857,6 +872,9 @@ fn main() -> Result<()> {
             DockerCommands::Logs { container: c } => {
                 container::run(container::ContainerCmd::DockerLogs, &[c], cli.verbose)?;
             }
+            DockerCommands::Other(args) => {
+                container::run_docker_passthrough(&args, cli.verbose)?;
+            }
         },
 
         Commands::Kubectl { command } => match command {
@@ -887,6 +905,9 @@ fn main() -> Result<()> {
                     args.push(cont);
                 }
                 container::run(container::ContainerCmd::KubectlLogs, &args, cli.verbose)?;
+            }
+            KubectlCommands::Other(args) => {
+                container::run_kubectl_passthrough(&args, cli.verbose)?;
             }
         },
 
@@ -1049,6 +1070,12 @@ fn main() -> Result<()> {
             }
             CargoCommands::Clippy { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Clippy, &args, cli.verbose)?;
+            }
+            CargoCommands::Check { args } => {
+                cargo_cmd::run(cargo_cmd::CargoCommand::Check, &args, cli.verbose)?;
+            }
+            CargoCommands::Other(args) => {
+                cargo_cmd::run_passthrough(&args, cli.verbose)?;
             }
         },
 

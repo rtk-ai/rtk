@@ -34,9 +34,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Separate flags from paths
-    let show_all = args.iter().any(|a| {
-        (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all"
-    });
+    let show_all = args
+        .iter()
+        .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
 
     let flags: Vec<&str> = args
         .iter()

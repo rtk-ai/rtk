@@ -1,9 +1,8 @@
 use crate::tracking;
-use crate::utils::truncate;
+use crate::utils::{package_manager_exec, truncate};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::process::Command;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EslintMessage {
@@ -37,42 +36,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     let linter = if is_path_or_flag { "eslint" } else { &args[0] };
 
-    // Try linter directly first, then use package manager exec
-    let linter_exists = Command::new("which")
-        .arg(linter)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    // Detect package manager (pnpm/yarn have better CWD handling than npx)
-    let is_pnpm = std::path::Path::new("pnpm-lock.yaml").exists();
-    let is_yarn = std::path::Path::new("yarn.lock").exists();
-    let uses_package_manager_exec = !linter_exists && (is_pnpm || is_yarn);
-
-    let mut cmd = if linter_exists {
-        Command::new(linter)
-    } else if is_pnpm {
-        // Use pnpm exec - preserves CWD correctly
-        let mut c = Command::new("pnpm");
-        c.arg("exec");
-        c.arg("--"); // Separator to prevent pnpm from interpreting tool args
-        c.arg(linter);
-        c
-    } else if is_yarn {
-        // Use yarn exec - preserves CWD correctly
-        let mut c = Command::new("yarn");
-        c.arg("exec");
-        c.arg("--"); // Separator
-        c.arg(linter);
-        c
-    } else {
-        // Fallback to npx
-        let mut c = Command::new("npx");
-        c.arg("--no-install");
-        c.arg("--"); // Separator
-        c.arg(linter);
-        c
-    };
+    let mut cmd = package_manager_exec(linter);
 
     // Force JSON output for ESLint
     if linter == "eslint" {
@@ -81,21 +45,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     // Add user arguments (skip first if it was the linter name)
     let start_idx = if is_path_or_flag { 0 } else { 1 };
-
-    // For pnpm/yarn exec, use relative paths (they preserve CWD)
-    // For others, convert to absolute paths to avoid CWD issues
     for arg in &args[start_idx..] {
-        if !uses_package_manager_exec && !arg.starts_with('-') {
-            // Convert to absolute path for npx/global commands
-            let path = std::path::Path::new(arg);
-            if path.is_relative() {
-                if let Ok(cwd) = std::env::current_dir() {
-                    cmd.arg(cwd.join(path));
-                    continue;
-                }
-            }
-        }
-        // Use argument as-is (for options or when using pnpm/yarn exec)
         cmd.arg(arg);
     }
 
