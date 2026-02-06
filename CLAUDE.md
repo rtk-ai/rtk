@@ -24,13 +24,18 @@ If `rtk gain` fails, you have the wrong package installed.
 
 ## Development Commands
 
+> **Note**: If rtk is installed, prefer `rtk <cmd>` over raw commands for token-optimized output.
+> All commands work with passthrough support even for subcommands rtk doesn't specifically handle.
+
 ### Build & Run
 ```bash
 # Development build
-cargo build
+cargo build                   # raw
+rtk cargo build               # preferred (token-optimized)
 
 # Release build (optimized)
 cargo build --release
+rtk cargo build --release
 
 # Run directly
 cargo run -- <command>
@@ -42,31 +47,38 @@ cargo install --path .
 ### Testing
 ```bash
 # Run all tests
-cargo test
+cargo test                    # raw
+rtk cargo test                # preferred (token-optimized)
 
 # Run specific test
 cargo test <test_name>
+rtk cargo test <test_name>
 
 # Run tests with output
 cargo test -- --nocapture
+rtk cargo test -- --nocapture
 
 # Run tests in specific module
 cargo test <module_name>::
+rtk cargo test <module_name>::
 ```
 
 ### Linting & Quality
 ```bash
 # Check without building
-cargo check
+cargo check                   # raw
+rtk cargo check               # preferred (token-optimized)
 
 # Format code
-cargo fmt
+cargo fmt                     # passthrough (0% savings, but works)
 
 # Run clippy lints
-cargo clippy
+cargo clippy                  # raw
+rtk cargo clippy              # preferred (token-optimized)
 
 # Check all targets
 cargo clippy --all-targets
+rtk cargo clippy --all-targets
 ```
 
 ### Package Building
@@ -241,7 +253,7 @@ All code follows Red-Green-Refactor. See `.claude/skills/rtk-tdd/` for the full 
 
 ### Pre-commit gate
 ```bash
-cargo fmt --all --check && cargo clippy --all-targets && cargo test
+cargo fmt --all --check && rtk cargo clippy --all-targets && rtk cargo test
 ```
 
 ### Test commands
