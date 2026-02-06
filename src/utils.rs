@@ -22,13 +22,14 @@ use std::process::Command;
 /// assert_eq!(truncate("hi", 10), "hi");
 /// ```
 pub fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s.to_string()
     } else if max_len < 3 {
         // If max_len is too small, just return "..."
         "...".to_string()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        format!("{}...", s.chars().take(max_len - 3).collect::<String>())
     }
 }
 
@@ -131,6 +132,29 @@ pub fn format_usd(amount: f64) -> String {
     }
 }
 
+/// Format cost-per-token as $/MTok (e.g., "$3.86/MTok")
+///
+/// # Arguments
+/// * `cpt` - Cost per token (not per million tokens)
+///
+/// # Returns
+/// Formatted string like "$3.86/MTok"
+///
+/// # Examples
+/// ```
+/// use rtk::utils::format_cpt;
+/// assert_eq!(format_cpt(0.000003), "$3.00/MTok");
+/// assert_eq!(format_cpt(0.0000038), "$3.80/MTok");
+/// assert_eq!(format_cpt(0.00000386), "$3.86/MTok");
+/// ```
+pub fn format_cpt(cpt: f64) -> String {
+    if !cpt.is_finite() || cpt <= 0.0 {
+        return "$0.00/MTok".to_string();
+    }
+    let cpt_per_million = cpt * 1_000_000.0;
+    format!("${:.2}/MTok", cpt_per_million)
+}
+
 /// Format a confirmation message: "ok \<action\> \<detail\>"
 /// Used for write operations (merge, create, comment, edit, etc.)
 ///
@@ -170,7 +194,6 @@ pub fn detect_package_manager() -> &'static str {
 
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
-#[allow(dead_code)]
 pub fn package_manager_exec(tool: &str) -> Command {
     let tool_exists = Command::new("which")
         .arg(tool)
@@ -324,6 +347,21 @@ mod tests {
     #[test]
     fn test_ok_confirmation_no_detail() {
         assert_eq!(ok_confirmation("commented", ""), "ok commented");
+    }
+
+    #[test]
+    fn test_format_cpt_normal() {
+        assert_eq!(format_cpt(0.000003), "$3.00/MTok");
+        assert_eq!(format_cpt(0.0000038), "$3.80/MTok");
+        assert_eq!(format_cpt(0.00000386), "$3.86/MTok");
+    }
+
+    #[test]
+    fn test_format_cpt_edge_cases() {
+        assert_eq!(format_cpt(0.0), "$0.00/MTok"); // zero
+        assert_eq!(format_cpt(-0.000001), "$0.00/MTok"); // negative
+        assert_eq!(format_cpt(f64::INFINITY), "$0.00/MTok"); // infinite
+        assert_eq!(format_cpt(f64::NAN), "$0.00/MTok"); // NaN
     }
 
     #[test]

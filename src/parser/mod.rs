@@ -11,7 +11,6 @@ pub mod error;
 pub mod formatter;
 pub mod types;
 
-pub use error::ParseError;
 pub use formatter::{FormatMode, TokenFormatter};
 pub use types::*;
 
