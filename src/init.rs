@@ -2,88 +2,139 @@ use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
 
-const RTK_INSTRUCTIONS: &str = r#"# Instructions: Utiliser rtk pour économiser des tokens
+const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
+# RTK (Rust Token Killer) - Token-Optimized Commands
 
-## Règle obligatoire
-Remplacer les commandes Unix standard par `rtk` pour minimiser la consommation de tokens.
+## Golden Rule
 
-**IMPORTANT:** Même lors du chaînage de commandes avec `&&`, utiliser `rtk`:
+**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+
+**Important**: Even in command chains with `&&`, use `rtk`:
 ```bash
-# ❌ Ne pas faire
+# ❌ Wrong
 git add . && git commit -m "msg" && git push
 
-# ✅ Faire
-rtk git add && rtk git commit -m "msg" && rtk git push
+# ✅ Correct
+rtk git add . && rtk git commit -m "msg" && rtk git push
 ```
 
-## Substitutions
+## RTK Commands by Workflow
 
-| ❌ Ne pas utiliser | ✅ Utiliser |
-|-------------------|-------------|
-| `ls`, `tree` | `rtk ls <path>` |
-| `cat`, `head`, `tail` | `rtk read <file>` |
-| `cat` pour comprendre du code | `rtk read <file> -l aggressive` |
-| `find`, `fd` | `rtk find <pattern>` |
-| `git status` | `rtk git status` |
-| `git log` | `rtk git log` |
-| `git diff` | `rtk git diff` |
-| `git add .` | `rtk git add` |
-| `git commit -m "msg"` | `rtk git commit -m "msg"` |
-| `git push` | `rtk git push` |
-| `git pull` | `rtk git pull` |
-| `cargo test`, `pytest`, `npm test` | `rtk test <cmd>` |
-| `<cmd> 2>&1 \| grep -i error` | `rtk err <cmd>` |
-| `cat file.log` | `rtk log <file>` |
-| `cat package.json` | `rtk json <file>` |
-| `cat Cargo.toml` (pour deps) | `rtk deps` |
-| `env`, `printenv` | `rtk env` |
-| `docker ps` | `rtk docker ps` |
-| `docker images` | `rtk docker images` |
-| `docker logs <c>` | `rtk docker logs <c>` |
-| `kubectl get pods` | `rtk kubectl pods` |
-| `kubectl logs <pod>` | `rtk kubectl logs <pod>` |
-| `grep -rn`, `rg` | `rtk grep <pattern>` |
-| `<longue commande>` | `rtk summary <cmd>` |
-
-## Commandes rtk (15 total)
-
+### Build & Compile (80-90% savings)
 ```bash
-# Fichiers
-rtk ls .                        # Arbre filtré (-82% tokens)
-rtk read file.rs -l aggressive  # Signatures seules (-74% tokens)
-rtk smart file.rs               # Résumé 2 lignes
-rtk find "*.rs" .               # Find compact groupé par dossier
-
-# Git
-rtk git status                  # Status compact
-rtk git log -n 10               # 10 commits compacts
-rtk git diff                    # Diff compact
-rtk git add                     # Add → "ok ✓"
-rtk git commit -m "msg"         # Commit → "ok ✓ abc1234"
-rtk git push                    # Push → "ok ✓ main"
-rtk git pull                    # Pull → "ok ✓ 3 files"
-rtk grep "pattern"              # Grep groupé par fichier
-
-# Commandes
-rtk test cargo test             # Échecs seuls (-90% tokens)
-rtk err npm run build           # Erreurs seules (-80% tokens)
-rtk summary <cmd>               # Résumé heuristique
-rtk log app.log                 # Logs dédupliqués (erreurs ×N)
-
-# Données
-rtk json config.json            # Structure sans valeurs
-rtk deps                        # Résumé dépendances
-rtk env -f AWS                  # Vars filtrées
-
-# Conteneurs
-rtk docker ps                   # Conteneurs compacts
-rtk docker images               # Images compactes
-rtk docker logs <container>     # Logs dédupliqués
-rtk kubectl pods                # Pods compacts
-rtk kubectl services            # Services compacts
-rtk kubectl logs <pod>          # Logs dédupliqués
+rtk cargo build         # Cargo build output
+rtk cargo check         # Cargo check output
+rtk cargo clippy        # Clippy warnings grouped by file (80%)
+rtk tsc                 # TypeScript errors grouped by file/code (83%)
+rtk lint                # ESLint/Biome violations grouped (84%)
+rtk prettier --check    # Files needing format only (70%)
+rtk next build          # Next.js build with route metrics (87%)
 ```
-"#;
+
+### Test (90-99% savings)
+```bash
+rtk cargo test          # Cargo test failures only (90%)
+rtk vitest run          # Vitest failures only (99.5%)
+rtk playwright test     # Playwright failures only (94%)
+rtk test <cmd>          # Generic test wrapper - failures only
+```
+
+### Git (59-80% savings)
+```bash
+rtk git status          # Compact status
+rtk git log             # Compact log (works with all git flags)
+rtk git diff            # Compact diff (80%)
+rtk git show            # Compact show (80%)
+rtk git add             # Ultra-compact confirmations (59%)
+rtk git commit          # Ultra-compact confirmations (59%)
+rtk git push            # Ultra-compact confirmations
+rtk git pull            # Ultra-compact confirmations
+rtk git branch          # Compact branch list
+rtk git fetch           # Compact fetch
+rtk git stash           # Compact stash
+rtk git worktree        # Compact worktree
+```
+
+Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
+
+### GitHub (26-87% savings)
+```bash
+rtk gh pr view <num>    # Compact PR view (87%)
+rtk gh pr checks        # Compact PR checks (79%)
+rtk gh run list         # Compact workflow runs (82%)
+rtk gh issue list       # Compact issue list (80%)
+rtk gh api              # Compact API responses (26%)
+```
+
+### JavaScript/TypeScript Tooling (70-90% savings)
+```bash
+rtk pnpm list           # Compact dependency tree (70%)
+rtk pnpm outdated       # Compact outdated packages (80%)
+rtk pnpm install        # Compact install output (90%)
+rtk npm run <script>    # Compact npm script output
+rtk npx <cmd>           # Compact npx command output
+rtk prisma              # Prisma without ASCII art (88%)
+```
+
+### Files & Search (60-75% savings)
+```bash
+rtk ls <path>           # Tree format, compact (65%)
+rtk read <file>         # Code reading with filtering (60%)
+rtk grep <pattern>      # Search grouped by file (75%)
+rtk find <pattern>      # Find grouped by directory (70%)
+```
+
+### Analysis & Debug (70-90% savings)
+```bash
+rtk err <cmd>           # Filter errors only from any command
+rtk log <file>          # Deduplicated logs with counts
+rtk json <file>         # JSON structure without values
+rtk deps                # Dependency overview
+rtk env                 # Environment variables compact
+rtk summary <cmd>       # Smart summary of command output
+rtk diff                # Ultra-compact diffs
+```
+
+### Infrastructure (85% savings)
+```bash
+rtk docker ps           # Compact container list
+rtk docker images       # Compact image list
+rtk docker logs <c>     # Deduplicated logs
+rtk kubectl get         # Compact resource list
+rtk kubectl logs        # Deduplicated pod logs
+```
+
+### Network (65-70% savings)
+```bash
+rtk curl <url>          # Compact HTTP responses (70%)
+rtk wget <url>          # Compact download output (65%)
+```
+
+### Meta Commands
+```bash
+rtk gain                # View token savings statistics
+rtk gain --history      # View command history with savings
+rtk discover            # Analyze Claude Code sessions for missed RTK usage
+rtk proxy <cmd>         # Run command without filtering (for debugging)
+rtk init                # Add RTK instructions to CLAUDE.md
+rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
+```
+
+## Token Savings Overview
+
+| Category | Commands | Typical Savings |
+|----------|----------|-----------------|
+| Tests | vitest, playwright, cargo test | 90-99% |
+| Build | next, tsc, lint, prettier | 70-87% |
+| Git | status, log, diff, add, commit | 59-80% |
+| GitHub | gh pr, gh run, gh issue | 26-87% |
+| Package Managers | pnpm, npm, npx | 70-90% |
+| Files | ls, read, grep, find | 60-75% |
+| Infrastructure | docker, kubectl | 85% |
+| Network | curl, wget | 65-70% |
+
+Overall average: **60-90% token reduction** on common development operations.
+"##;
 
 pub fn run(global: bool, verbose: u8) -> Result<()> {
     let path = if global {
@@ -108,8 +159,8 @@ pub fn run(global: bool, verbose: u8) -> Result<()> {
     if path.exists() {
         let existing = fs::read_to_string(&path)?;
 
-        // Check if rtk instructions already present
-        if existing.contains("rtk") && existing.contains("Utiliser rtk") {
+        // Check if rtk instructions already present using version marker
+        if existing.contains("<!-- rtk-instructions") {
             println!("✅ {} already contains rtk instructions", path.display());
             return Ok(());
         }
@@ -171,4 +222,44 @@ pub fn show_config() -> Result<()> {
     println!("  rtk init --global # Add rtk to global ~/.claude/CLAUDE.md");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init_mentions_all_top_level_commands() {
+        // Verify RTK_INSTRUCTIONS mentions key commands
+        for cmd in [
+            "rtk cargo",
+            "rtk gh",
+            "rtk vitest",
+            "rtk tsc",
+            "rtk lint",
+            "rtk prettier",
+            "rtk next",
+            "rtk playwright",
+            "rtk prisma",
+            "rtk pnpm",
+            "rtk npm",
+            "rtk curl",
+            "rtk git",
+            "rtk docker",
+            "rtk kubectl",
+        ] {
+            assert!(
+                RTK_INSTRUCTIONS.contains(cmd),
+                "Missing {cmd} in RTK_INSTRUCTIONS"
+            );
+        }
+    }
+
+    #[test]
+    fn test_init_has_version_marker() {
+        assert!(
+            RTK_INSTRUCTIONS.contains("<!-- rtk-instructions"),
+            "RTK_INSTRUCTIONS must have version marker for idempotency"
+        );
+    }
 }
