@@ -158,6 +158,7 @@ pub fn run(
                 category: bucket.category,
                 estimated_savings_tokens: bucket.total_output_tokens,
                 estimated_savings_pct: bucket.savings_pct,
+                rtk_status: report::RtkStatus::Existing,
             }
         })
         .collect();

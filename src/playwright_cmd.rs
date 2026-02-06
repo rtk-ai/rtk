@@ -1,10 +1,8 @@
 use crate::tracking;
-use crate::utils::strip_ansi;
+use crate::utils::{package_manager_exec, strip_ansi};
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::process::Command;
 
 use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, truncate_output, FormatMode, OutputParser,
@@ -221,38 +219,7 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    // Try playwright directly first, fallback to package manager exec
-    let playwright_exists = Command::new("which")
-        .arg("playwright")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    // Detect package manager (pnpm/yarn have better CWD handling than npx)
-    let is_pnpm = std::path::Path::new("pnpm-lock.yaml").exists();
-    let is_yarn = std::path::Path::new("yarn.lock").exists();
-
-    let mut cmd = if playwright_exists {
-        Command::new("playwright")
-    } else if is_pnpm {
-        let mut c = Command::new("pnpm");
-        c.arg("exec");
-        c.arg("--");
-        c.arg("playwright");
-        c
-    } else if is_yarn {
-        let mut c = Command::new("yarn");
-        c.arg("exec");
-        c.arg("--");
-        c.arg("playwright");
-        c
-    } else {
-        let mut c = Command::new("npx");
-        c.arg("--no-install");
-        c.arg("--");
-        c.arg("playwright");
-        c
-    };
+    let mut cmd = package_manager_exec("playwright");
 
     // Add JSON reporter for structured output
     cmd.arg("--reporter=json");
@@ -262,16 +229,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     if verbose > 0 {
-        let tool = if playwright_exists {
-            "playwright"
-        } else if is_pnpm {
-            "pnpm exec playwright"
-        } else if is_yarn {
-            "yarn exec playwright"
-        } else {
-            "npx playwright"
-        };
-        eprintln!("Running: {} {}", tool, args.join(" "));
+        eprintln!("Running: playwright {}", args.join(" "));
     }
 
     let output = cmd

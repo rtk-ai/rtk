@@ -1,45 +1,11 @@
 use crate::tracking;
+use crate::utils::package_manager_exec;
 use anyhow::{Context, Result};
-use std::process::Command;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    // Try prettier directly first, fallback to package manager exec
-    let prettier_exists = Command::new("which")
-        .arg("prettier")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    // Detect package manager (pnpm/yarn have better CWD handling than npx)
-    let is_pnpm = std::path::Path::new("pnpm-lock.yaml").exists();
-    let is_yarn = std::path::Path::new("yarn.lock").exists();
-
-    let mut cmd = if prettier_exists {
-        Command::new("prettier")
-    } else if is_pnpm {
-        // Use pnpm exec - preserves CWD correctly
-        let mut c = Command::new("pnpm");
-        c.arg("exec");
-        c.arg("--"); // Separator to prevent pnpm from interpreting tool args
-        c.arg("prettier");
-        c
-    } else if is_yarn {
-        // Use yarn exec - preserves CWD correctly
-        let mut c = Command::new("yarn");
-        c.arg("exec");
-        c.arg("--"); // Separator
-        c.arg("prettier");
-        c
-    } else {
-        // Fallback to npx
-        let mut c = Command::new("npx");
-        c.arg("--no-install");
-        c.arg("--"); // Separator
-        c.arg("prettier");
-        c
-    };
+    let mut cmd = package_manager_exec("prettier");
 
     // Add user arguments
     for arg in args {
@@ -47,16 +13,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     if verbose > 0 {
-        let tool = if prettier_exists {
-            "prettier"
-        } else if is_pnpm {
-            "pnpm exec prettier"
-        } else if is_yarn {
-            "yarn exec prettier"
-        } else {
-            "npx prettier"
-        };
-        eprintln!("Running: {} {}", tool, args.join(" "));
+        eprintln!("Running: prettier {}", args.join(" "));
     }
 
     let output = cmd
