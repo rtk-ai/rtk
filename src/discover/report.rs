@@ -174,6 +174,12 @@ fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}..", &s[..max.saturating_sub(2)])
+        // UTF-8 safe truncation: collect chars up to max-2, then add ".."
+        let truncated: String = s
+            .char_indices()
+            .take_while(|(i, _)| *i < max.saturating_sub(2))
+            .map(|(_, c)| c)
+            .collect();
+        format!("{}..", truncated)
     }
 }
