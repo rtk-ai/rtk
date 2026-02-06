@@ -1,5 +1,6 @@
 use crate::tracking;
 use anyhow::{Context, Result};
+use std::ffi::OsString;
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy)]
@@ -64,7 +65,10 @@ fn docker_ps(_verbose: u8) -> Result<()> {
             if ports == "-" {
                 rtk.push_str(&format!("  {} {} ({})\n", id, name, short_image));
             } else {
-                rtk.push_str(&format!("  {} {} ({}) [{}]\n", id, name, short_image, ports));
+                rtk.push_str(&format!(
+                    "  {} {} ({}) [{}]\n",
+                    id, name, short_image, ports
+                ));
             }
         }
     }
@@ -401,4 +405,52 @@ fn compact_ports(ports: &str) -> String {
             port_nums.len() - 2
         )
     }
+}
+
+/// Runs an unsupported docker subcommand by passing it through directly
+pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("docker passthrough: {:?}", args);
+    }
+    let status = Command::new("docker")
+        .args(args)
+        .status()
+        .context("Failed to run docker")?;
+
+    let args_str = tracking::args_display(args);
+    timer.track_passthrough(
+        &format!("docker {}", args_str),
+        &format!("rtk docker {} (passthrough)", args_str),
+    );
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// Runs an unsupported kubectl subcommand by passing it through directly
+pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("kubectl passthrough: {:?}", args);
+    }
+    let status = Command::new("kubectl")
+        .args(args)
+        .status()
+        .context("Failed to run kubectl")?;
+
+    let args_str = tracking::args_display(args);
+    timer.track_passthrough(
+        &format!("kubectl {}", args_str),
+        &format!("rtk kubectl {} (passthrough)", args_str),
+    );
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }

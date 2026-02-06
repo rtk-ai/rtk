@@ -2,6 +2,7 @@ use crate::tracking;
 use crate::utils::truncate;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -9,6 +10,7 @@ pub enum CargoCommand {
     Build,
     Test,
     Clippy,
+    Check,
 }
 
 pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
@@ -16,111 +18,68 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
         CargoCommand::Build => run_build(args, verbose),
         CargoCommand::Test => run_test(args, verbose),
         CargoCommand::Clippy => run_clippy(args, verbose),
+        CargoCommand::Check => run_check(args, verbose),
     }
+}
+
+/// Generic cargo command runner with filtering
+fn run_cargo_filtered<F>(subcommand: &str, args: &[String], verbose: u8, filter_fn: F) -> Result<()>
+where
+    F: Fn(&str) -> String,
+{
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg(subcommand);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: cargo {} {}", subcommand, args.join(" "));
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to run cargo {}", subcommand))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+
+    let filtered = filter_fn(&raw);
+    println!("{}", filtered);
+
+    timer.track(
+        &format!("cargo {} {}", subcommand, args.join(" ")),
+        &format!("rtk cargo {} {}", subcommand, args.join(" ")),
+        &raw,
+        &filtered,
+    );
+
+    if !output.status.success() {
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
+    Ok(())
 }
 
 fn run_build(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("cargo");
-    cmd.arg("build");
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: cargo build {}", args.join(" "));
-    }
-
-    let output = cmd.output().context("Failed to run cargo build")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let filtered = filter_cargo_build(&raw);
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("cargo build {}", args.join(" ")),
-        &format!("rtk cargo build {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    run_cargo_filtered("build", args, verbose, filter_cargo_build)
 }
 
 fn run_test(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("cargo");
-    cmd.arg("test");
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: cargo test {}", args.join(" "));
-    }
-
-    let output = cmd.output().context("Failed to run cargo test")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let filtered = filter_cargo_test(&raw);
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("cargo test {}", args.join(" ")),
-        &format!("rtk cargo test {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    std::process::exit(output.status.code().unwrap_or(1));
+    run_cargo_filtered("test", args, verbose, filter_cargo_test)
 }
 
 fn run_clippy(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("cargo");
-    cmd.arg("clippy");
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: cargo clippy {}", args.join(" "));
-    }
-
-    let output = cmd.output().context("Failed to run cargo clippy")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let filtered = filter_cargo_clippy(&raw);
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("cargo clippy {}", args.join(" ")),
-        &format!("rtk cargo clippy {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
 }
 
-/// Filter cargo build output - strip "Compiling" lines, keep errors + summary
+fn run_check(args: &[String], verbose: u8) -> Result<()> {
+    run_cargo_filtered("check", args, verbose, filter_cargo_build)
+}
+
+/// Filter cargo build/check output - strip "Compiling"/"Checking" lines, keep errors + summary
 fn filter_cargo_build(output: &str) -> String {
     let mut errors: Vec<String> = Vec::new();
     let mut warnings = 0;
@@ -130,7 +89,7 @@ fn filter_cargo_build(output: &str) -> String {
     let mut current_error = Vec::new();
 
     for line in output.lines() {
-        if line.trim_start().starts_with("Compiling") {
+        if line.trim_start().starts_with("Compiling") || line.trim_start().starts_with("Checking") {
             compiled += 1;
             continue;
         }
@@ -397,6 +356,30 @@ fn filter_cargo_clippy(output: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+/// Runs an unsupported cargo subcommand by passing it through directly
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("cargo passthrough: {:?}", args);
+    }
+    let status = Command::new("cargo")
+        .args(args)
+        .status()
+        .context("Failed to run cargo")?;
+
+    let args_str = tracking::args_display(args);
+    timer.track_passthrough(
+        &format!("cargo {}", args_str),
+        &format!("rtk cargo {} (passthrough)", args_str),
+    );
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
