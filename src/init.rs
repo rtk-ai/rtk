@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
@@ -147,23 +147,95 @@ Overall average: **60-90% token reduction** on common development operations.
 /// Main entry point for `rtk init`
 pub fn run(global: bool, claude_md: bool, hook_only: bool, verbose: u8) -> Result<()> {
     // Mode selection
-    if claude_md {
-        // Legacy mode: full injection into CLAUDE.md
-        run_claude_md_mode(global, verbose)
-    } else if hook_only {
-        // Hook-only mode: no RTK.md
-        run_hook_only_mode(global, verbose)
+    match (claude_md, hook_only) {
+        (true, _) => run_claude_md_mode(global, verbose),
+        (false, true) => run_hook_only_mode(global, verbose),
+        (false, false) => run_default_mode(global, verbose),
+    }
+}
+
+/// Prepare hook directory and return paths (hook_dir, hook_path)
+fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
+    let claude_dir = resolve_claude_dir()?;
+    let hook_dir = claude_dir.join("hooks");
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
+    let hook_path = hook_dir.join("rtk-rewrite.sh");
+    Ok((hook_dir, hook_path))
+}
+
+/// Write hook file if missing or outdated, return true if changed
+#[cfg(unix)]
+fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
+    let changed = if hook_path.exists() {
+        let existing = fs::read_to_string(hook_path)
+            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+
+        if existing == REWRITE_HOOK {
+            if verbose > 0 {
+                eprintln!("Hook already up to date: {}", hook_path.display());
+            }
+            false
+        } else {
+            fs::write(hook_path, REWRITE_HOOK)
+                .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Updated hook: {}", hook_path.display());
+            }
+            true
+        }
     } else {
-        // Default mode: hook + RTK.md (MVP)
-        run_default_mode(global, verbose)
+        fs::write(hook_path, REWRITE_HOOK)
+            .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Created hook: {}", hook_path.display());
+        }
+        true
+    };
+
+    // Set executable permissions
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+
+    Ok(changed)
+}
+
+/// Idempotent file write: create or update if content differs
+fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Result<bool> {
+    if path.exists() {
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}: {}", name, path.display()))?;
+
+        if existing == content {
+            if verbose > 0 {
+                eprintln!("{} already up to date: {}", name, path.display());
+            }
+            Ok(false)
+        } else {
+            fs::write(path, content)
+                .with_context(|| format!("Failed to write {}: {}", name, path.display()))?;
+            if verbose > 0 {
+                eprintln!("Updated {}: {}", name, path.display());
+            }
+            Ok(true)
+        }
+    } else {
+        fs::write(path, content)
+            .with_context(|| format!("Failed to write {}: {}", name, path.display()))?;
+        if verbose > 0 {
+            eprintln!("Created {}: {}", name, path.display());
+        }
+        Ok(true)
     }
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
 #[cfg(not(unix))]
 fn run_default_mode(_global: bool, _verbose: u8) -> Result<()> {
-    eprintln!("Warning: Hook install only supported on Unix (macOS, Linux).");
-    eprintln!("Falling back to --claude-md mode.");
+    eprintln!("⚠️  Hook-based mode requires Unix (macOS/Linux).");
+    eprintln!("    Windows: use --claude-md mode for full injection.");
+    eprintln!("    Falling back to --claude-md mode.");
     run_claude_md_mode(_global, _verbose)
 }
 
@@ -175,63 +247,17 @@ fn run_default_mode(global: bool, verbose: u8) -> Result<()> {
     }
 
     let claude_dir = resolve_claude_dir()?;
-    let hook_dir = claude_dir.join("hooks");
-    let hook_path = hook_dir.join("rtk-rewrite.sh");
     let rtk_md_path = claude_dir.join("RTK.md");
     let claude_md_path = claude_dir.join("CLAUDE.md");
 
-    // Ensure directories exist
-    fs::create_dir_all(&hook_dir).context("Failed to create ~/.claude/hooks")?;
+    // 1. Prepare hook directory and install hook
+    let (_hook_dir, hook_path) = prepare_hook_paths()?;
+    ensure_hook_installed(&hook_path, verbose)?;
 
-    // 1. Write hook file
-    if hook_path.exists() {
-        let existing = fs::read_to_string(&hook_path)?;
-        if existing == REWRITE_HOOK {
-            if verbose > 0 {
-                eprintln!("Hook already up to date: {}", hook_path.display());
-            }
-        } else {
-            fs::write(&hook_path, REWRITE_HOOK).context("Failed to write hook")?;
-            if verbose > 0 {
-                eprintln!("Updated hook: {}", hook_path.display());
-            }
-        }
-    } else {
-        fs::write(&hook_path, REWRITE_HOOK).context("Failed to write hook")?;
-        if verbose > 0 {
-            eprintln!("Created hook: {}", hook_path.display());
-        }
-    }
+    // 2. Write RTK.md
+    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
 
-    // 2. chmod +x (Unix only)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
-            .context("Failed to set hook permissions")?;
-    }
-
-    // 3. Write RTK.md
-    if rtk_md_path.exists() {
-        let existing = fs::read_to_string(&rtk_md_path)?;
-        if existing == RTK_SLIM {
-            if verbose > 0 {
-                eprintln!("RTK.md already up to date: {}", rtk_md_path.display());
-            }
-        } else {
-            fs::write(&rtk_md_path, RTK_SLIM).context("Failed to write RTK.md")?;
-            if verbose > 0 {
-                eprintln!("Updated RTK.md: {}", rtk_md_path.display());
-            }
-        }
-    } else {
-        fs::write(&rtk_md_path, RTK_SLIM).context("Failed to write RTK.md")?;
-        if verbose > 0 {
-            eprintln!("Created RTK.md: {}", rtk_md_path.display());
-        }
-    }
-
-    // 4. Patch CLAUDE.md (add @RTK.md, migrate if needed)
+    // 3. Patch CLAUDE.md (add @RTK.md, migrate if needed)
     let migrated = patch_claude_md(&claude_md_path, verbose)?;
 
     // 5. Print success message
@@ -262,32 +288,20 @@ fn run_default_mode(global: bool, verbose: u8) -> Result<()> {
 /// Hook-only mode: just the hook, no RTK.md
 #[cfg(not(unix))]
 fn run_hook_only_mode(_global: bool, _verbose: u8) -> Result<()> {
-    eprintln!("Warning: Hook install only supported on Unix (macOS, Linux).");
-    Ok(())
+    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
 }
 
 #[cfg(unix)]
-fn run_hook_only_mode(global: bool, _verbose: u8) -> Result<()> {
+fn run_hook_only_mode(global: bool, verbose: u8) -> Result<()> {
     if !global {
-        eprintln!("Warning: --hook-only only makes sense with --global");
-        eprintln!("For local projects, use default mode or --claude-md");
+        eprintln!("⚠️  Warning: --hook-only only makes sense with --global");
+        eprintln!("    For local projects, use default mode or --claude-md");
         return Ok(());
     }
 
-    let claude_dir = resolve_claude_dir()?;
-    let hook_dir = claude_dir.join("hooks");
-    let hook_path = hook_dir.join("rtk-rewrite.sh");
-
-    fs::create_dir_all(&hook_dir).context("Failed to create ~/.claude/hooks")?;
-
-    fs::write(&hook_path, REWRITE_HOOK).context("Failed to write hook")?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
-            .context("Failed to set hook permissions")?;
-    }
+    // Prepare and install hook
+    let (_hook_dir, hook_path) = prepare_hook_paths()?;
+    ensure_hook_installed(&hook_path, verbose)?;
 
     println!("\nRTK hook installed (hook-only mode).\n");
     println!("  Hook: {}", hook_path.display());
@@ -341,7 +355,7 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
 }
 
 /// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
-fn patch_claude_md(path: &PathBuf, verbose: u8) -> Result<bool> {
+fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
     let mut content = if path.exists() {
         fs::read_to_string(path)?
     } else {
@@ -407,8 +421,20 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
 
         (result, true) // migrated
     } else if content.contains("<!-- rtk-instructions") {
-        eprintln!("Warning: rtk-instructions marker found but no closing marker.");
-        eprintln!("Manual cleanup needed.");
+        eprintln!("⚠️  Warning: Found '<!-- rtk-instructions' without closing marker.");
+        eprintln!("    This can happen if CLAUDE.md was manually edited.");
+
+        // Find line number
+        if let Some((line_num, _)) = content
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains("<!-- rtk-instructions"))
+        {
+            eprintln!("    Location: line {}", line_num + 1);
+        }
+
+        eprintln!("    Action: Manually remove the incomplete block, then re-run:");
+        eprintln!("            rtk init -g");
         (content.to_string(), false)
     } else {
         (content.to_string(), false)
