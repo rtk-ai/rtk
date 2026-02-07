@@ -18,16 +18,16 @@ walkdir = "2"
 regex = "1"
 lazy_static = "1.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 colored = "2"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 chrono = "0.4"
 thiserror = "1.0"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 
 [profile.release]
 opt-level = 3

@@ -78,16 +78,27 @@ rtk init -g
 # → Installs hook to ~/.claude/hooks/rtk-rewrite.sh
 # → Creates ~/.claude/RTK.md (10 lines, meta commands only)
 # → Adds @RTK.md reference to ~/.claude/CLAUDE.md
-# → Prints settings.json instructions
+# → Prompts: "Patch settings.json? [y/N]"
+# → If yes: patches + creates backup (~/.claude/settings.json.bak)
 
-# Follow printed instructions to add hook to ~/.claude/settings.json
-# Then restart Claude Code
+# Automated alternatives:
+rtk init -g --auto-patch    # Patch without prompting
+rtk init -g --no-patch      # Print manual instructions instead
 
 # Verify installation
 rtk init --show  # Check hook is installed and executable
 ```
 
 **Token savings**: ~99.5% reduction (2000 tokens → 10 tokens in context)
+
+**What is settings.json?**
+Claude Code's hook registry. RTK adds a PreToolUse hook that rewrites commands transparently. Without this, Claude won't invoke the hook automatically.
+
+**Backup Safety**:
+RTK backs up existing settings.json before changes. Restore if needed:
+```bash
+cp ~/.claude/settings.json.bak ~/.claude/settings.json
+```
 
 ### Alternative: Local Project Setup
 
@@ -111,6 +122,54 @@ rtk init -g  # Automatically migrates to hook-first mode
 # → Adds @RTK.md reference
 ```
 
+## Common User Flows
+
+### First-Time User (Recommended)
+```bash
+# 1. Install RTK
+cargo install --git https://github.com/rtk-ai/rtk
+rtk gain  # Verify (must show token stats)
+
+# 2. Setup with prompts
+rtk init -g
+# → Answer 'y' when prompted to patch settings.json
+# → Creates backup automatically
+
+# 3. Restart Claude Code
+# 4. Test: git status (should use rtk)
+```
+
+### CI/CD or Automation
+```bash
+# Non-interactive setup (no prompts)
+rtk init -g --auto-patch
+
+# Verify in scripts
+rtk init --show | grep "Hook:"
+```
+
+### Conservative User (Manual Control)
+```bash
+# Get manual instructions without patching
+rtk init -g --no-patch
+
+# Review printed JSON snippet
+# Manually edit ~/.claude/settings.json
+# Restart Claude Code
+```
+
+### Temporary Trial
+```bash
+# Install hook
+rtk init -g --auto-patch
+
+# Later: remove everything
+rtk init -g --uninstall
+
+# Restore backup if needed
+cp ~/.claude/settings.json.bak ~/.claude/settings.json
+```
+
 ## Installation Verification
 
 ```bash
@@ -125,6 +184,43 @@ rtk pnpm list
 
 # Test with Vitest (feat/vitest-support branch only)
 rtk vitest run
+```
+
+## Uninstalling
+
+### Complete Removal (Global Installations Only)
+
+```bash
+# Complete removal (global installations only)
+rtk init -g --uninstall
+
+# What gets removed:
+#   - Hook: ~/.claude/hooks/rtk-rewrite.sh
+#   - Context: ~/.claude/RTK.md
+#   - Reference: @RTK.md line from ~/.claude/CLAUDE.md
+#   - Registration: RTK hook entry from settings.json
+
+# Restart Claude Code after uninstall
+```
+
+**For Local Projects**: Manually remove RTK block from `./CLAUDE.md`
+
+### Binary Removal
+
+```bash
+# If installed via cargo
+cargo uninstall rtk
+
+# If installed via package manager
+brew uninstall rtk          # macOS Homebrew
+sudo apt remove rtk         # Debian/Ubuntu
+sudo dnf remove rtk         # Fedora/RHEL
+```
+
+### Restore from Backup (if needed)
+
+```bash
+cp ~/.claude/settings.json.bak ~/.claude/settings.json
 ```
 
 ## Essential Commands
