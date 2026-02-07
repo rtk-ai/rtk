@@ -5,6 +5,28 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **settings.json auto-patch** for frictionless hook installation
+  - Default `rtk init -g` now prompts to patch settings.json [y/N]
+  - `--auto-patch`: Patch immediately without prompting (CI/CD workflows)
+  - `--no-patch`: Skip patching, print manual instructions instead
+  - Automatic backup: creates `settings.json.bak` before modification
+  - Idempotent: detects existing hook, skips modification if present
+  - `rtk init --show` now displays settings.json status
+- **Uninstall command** for complete RTK removal
+  - `rtk init -g --uninstall` removes hook, RTK.md, CLAUDE.md reference, and settings.json entry
+  - Restores clean state for fresh installation or testing
+- **Improved error handling** with detailed context messages
+  - All error messages now include file paths and actionable hints
+  - UTF-8 validation for hook paths
+  - Disk space hints on write failures
+
+### Changed
+- Refactored `insert_hook_entry()` to use idiomatic Rust `entry()` API
+- Simplified `hook_already_present()` logic with iterator chains
+- Improved atomic write error messages for better debugging
 ## [0.10.0](https://github.com/rtk-ai/rtk/compare/v0.9.4...v0.10.0) (2026-02-07)
 
 

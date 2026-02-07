@@ -261,6 +261,18 @@ enum Commands {
         /// Hook only, no RTK.md
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
+
+        /// Auto-patch settings.json without prompting
+        #[arg(long = "auto-patch", group = "patch")]
+        auto_patch: bool,
+
+        /// Skip settings.json patching (print manual instructions)
+        #[arg(long = "no-patch", group = "patch")]
+        no_patch: bool,
+
+        /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
+        #[arg(long)]
+        uninstall: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -950,11 +962,23 @@ fn main() -> Result<()> {
             show,
             claude_md,
             hook_only,
+            auto_patch,
+            no_patch,
+            uninstall,
         } => {
             if show {
                 init::show_config()?;
+            } else if uninstall {
+                init::uninstall(global, cli.verbose)?;
             } else {
-                init::run(global, claude_md, hook_only, cli.verbose)?;
+                let patch_mode = if auto_patch {
+                    init::PatchMode::Auto
+                } else if no_patch {
+                    init::PatchMode::Skip
+                } else {
+                    init::PatchMode::Ask
+                };
+                init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
             }
         }
 
