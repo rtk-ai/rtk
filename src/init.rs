@@ -1,7 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
+// Embedded hook script (guards before set -euo pipefail)
+const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
+
+// Embedded slim RTK awareness instructions
+const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
+
+// Legacy full instructions for backward compatibility (--claude-md mode)
 const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
 
@@ -134,13 +141,166 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 | Network | curl, wget | 65-70% |
 
 Overall average: **60-90% token reduction** on common development operations.
+<!-- /rtk-instructions -->
 "##;
 
-pub fn run(global: bool, verbose: u8) -> Result<()> {
+/// Main entry point for `rtk init`
+pub fn run(global: bool, claude_md: bool, hook_only: bool, verbose: u8) -> Result<()> {
+    // Mode selection
+    if claude_md {
+        // Legacy mode: full injection into CLAUDE.md
+        run_claude_md_mode(global, verbose)
+    } else if hook_only {
+        // Hook-only mode: no RTK.md
+        run_hook_only_mode(global, verbose)
+    } else {
+        // Default mode: hook + RTK.md (MVP)
+        run_default_mode(global, verbose)
+    }
+}
+
+/// Default mode: hook + slim RTK.md + @RTK.md reference
+#[cfg(not(unix))]
+fn run_default_mode(_global: bool, _verbose: u8) -> Result<()> {
+    eprintln!("Warning: Hook install only supported on Unix (macOS, Linux).");
+    eprintln!("Falling back to --claude-md mode.");
+    run_claude_md_mode(_global, _verbose)
+}
+
+#[cfg(unix)]
+fn run_default_mode(global: bool, verbose: u8) -> Result<()> {
+    if !global {
+        // Local init: unchanged behavior (full injection into ./CLAUDE.md)
+        return run_claude_md_mode(false, verbose);
+    }
+
+    let claude_dir = resolve_claude_dir()?;
+    let hook_dir = claude_dir.join("hooks");
+    let hook_path = hook_dir.join("rtk-rewrite.sh");
+    let rtk_md_path = claude_dir.join("RTK.md");
+    let claude_md_path = claude_dir.join("CLAUDE.md");
+
+    // Ensure directories exist
+    fs::create_dir_all(&hook_dir).context("Failed to create ~/.claude/hooks")?;
+
+    // 1. Write hook file
+    if hook_path.exists() {
+        let existing = fs::read_to_string(&hook_path)?;
+        if existing == REWRITE_HOOK {
+            if verbose > 0 {
+                eprintln!("Hook already up to date: {}", hook_path.display());
+            }
+        } else {
+            fs::write(&hook_path, REWRITE_HOOK).context("Failed to write hook")?;
+            if verbose > 0 {
+                eprintln!("Updated hook: {}", hook_path.display());
+            }
+        }
+    } else {
+        fs::write(&hook_path, REWRITE_HOOK).context("Failed to write hook")?;
+        if verbose > 0 {
+            eprintln!("Created hook: {}", hook_path.display());
+        }
+    }
+
+    // 2. chmod +x (Unix only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .context("Failed to set hook permissions")?;
+    }
+
+    // 3. Write RTK.md
+    if rtk_md_path.exists() {
+        let existing = fs::read_to_string(&rtk_md_path)?;
+        if existing == RTK_SLIM {
+            if verbose > 0 {
+                eprintln!("RTK.md already up to date: {}", rtk_md_path.display());
+            }
+        } else {
+            fs::write(&rtk_md_path, RTK_SLIM).context("Failed to write RTK.md")?;
+            if verbose > 0 {
+                eprintln!("Updated RTK.md: {}", rtk_md_path.display());
+            }
+        }
+    } else {
+        fs::write(&rtk_md_path, RTK_SLIM).context("Failed to write RTK.md")?;
+        if verbose > 0 {
+            eprintln!("Created RTK.md: {}", rtk_md_path.display());
+        }
+    }
+
+    // 4. Patch CLAUDE.md (add @RTK.md, migrate if needed)
+    let migrated = patch_claude_md(&claude_md_path, verbose)?;
+
+    // 5. Print success message
+    println!("\nRTK hook installed (global).\n");
+    println!("  Hook:      {}", hook_path.display());
+    println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+    println!("  CLAUDE.md: @RTK.md reference added");
+
+    if migrated {
+        println!("\n  ✅ Migrated: removed 137-line RTK block from CLAUDE.md");
+        println!("              replaced with @RTK.md (10 lines)");
+    }
+
+    println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
+    println!("  {{");
+    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
+    println!("      \"matcher\": \"Bash\",");
+    println!("      \"hooks\": [{{ \"type\": \"command\",");
+    println!("        \"command\": \"{}\"", hook_path.display());
+    println!("      }}]");
+    println!("    }}]}}");
+    println!("  }}");
+    println!("\n  Then restart Claude Code. Test with: git status\n");
+
+    Ok(())
+}
+
+/// Hook-only mode: just the hook, no RTK.md
+#[cfg(not(unix))]
+fn run_hook_only_mode(_global: bool, _verbose: u8) -> Result<()> {
+    eprintln!("Warning: Hook install only supported on Unix (macOS, Linux).");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_hook_only_mode(global: bool, _verbose: u8) -> Result<()> {
+    if !global {
+        eprintln!("Warning: --hook-only only makes sense with --global");
+        eprintln!("For local projects, use default mode or --claude-md");
+        return Ok(());
+    }
+
+    let claude_dir = resolve_claude_dir()?;
+    let hook_dir = claude_dir.join("hooks");
+    let hook_path = hook_dir.join("rtk-rewrite.sh");
+
+    fs::create_dir_all(&hook_dir).context("Failed to create ~/.claude/hooks")?;
+
+    fs::write(&hook_path, REWRITE_HOOK).context("Failed to write hook")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .context("Failed to set hook permissions")?;
+    }
+
+    println!("\nRTK hook installed (hook-only mode).\n");
+    println!("  Hook: {}", hook_path.display());
+    println!("\n  MANUAL STEP: Add hook to ~/.claude/settings.json (see --global output)");
+    println!("  Note: No RTK.md created. Claude won't know about meta commands (gain, discover, proxy).\n");
+
+    Ok(())
+}
+
+/// Legacy mode: full 137-line injection into CLAUDE.md
+fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
     let path = if global {
-        dirs::home_dir()
-            .map(|h| h.join(".claude").join("CLAUDE.md"))
-            .unwrap_or_else(|| PathBuf::from("~/.claude/CLAUDE.md"))
+        resolve_claude_dir()?.join("CLAUDE.md")
     } else {
         PathBuf::from("CLAUDE.md")
     };
@@ -155,22 +315,18 @@ pub fn run(global: bool, verbose: u8) -> Result<()> {
         eprintln!("Writing rtk instructions to: {}", path.display());
     }
 
-    // Check if file exists
     if path.exists() {
         let existing = fs::read_to_string(&path)?;
 
-        // Check if rtk instructions already present using version marker
         if existing.contains("<!-- rtk-instructions") {
             println!("✅ {} already contains rtk instructions", path.display());
             return Ok(());
         }
 
-        // Append to existing file
         let new_content = format!("{}\n\n{}", existing.trim(), RTK_INSTRUCTIONS);
         fs::write(&path, new_content)?;
         println!("✅ Added rtk instructions to existing {}", path.display());
     } else {
-        // Create new file
         fs::write(&path, RTK_INSTRUCTIONS)?;
         println!("✅ Created {} with rtk instructions", path.display());
     }
@@ -184,30 +340,157 @@ pub fn run(global: bool, verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Show current rtk configuration
-pub fn show_config() -> Result<()> {
-    let home_path = dirs::home_dir().map(|h| h.join(".claude").join("CLAUDE.md"));
-    let local_path = PathBuf::from("CLAUDE.md");
+/// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
+fn patch_claude_md(path: &PathBuf, verbose: u8) -> Result<bool> {
+    let mut content = if path.exists() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
 
-    println!("📋 rtk Configuration:\n");
+    let mut migrated = false;
 
-    // Check global
-    if let Some(hp) = &home_path {
-        if hp.exists() {
-            let content = fs::read_to_string(hp)?;
-            if content.contains("rtk") {
-                println!("✅ Global (~/.claude/CLAUDE.md): rtk enabled");
-            } else {
-                println!("⚪ Global (~/.claude/CLAUDE.md): exists but rtk not configured");
+    // Check for old block and migrate
+    if content.contains("<!-- rtk-instructions") {
+        let (new_content, did_migrate) = remove_rtk_block(&content);
+        if did_migrate {
+            content = new_content;
+            migrated = true;
+            if verbose > 0 {
+                eprintln!("Migrated: removed old RTK block from CLAUDE.md");
             }
-        } else {
-            println!("⚪ Global (~/.claude/CLAUDE.md): not found");
         }
     }
 
-    // Check local
-    if local_path.exists() {
-        let content = fs::read_to_string(&local_path)?;
+    // Check if @RTK.md already present
+    if content.contains("@RTK.md") {
+        if verbose > 0 {
+            eprintln!("@RTK.md reference already present in CLAUDE.md");
+        }
+        if migrated {
+            fs::write(path, content)?;
+        }
+        return Ok(migrated);
+    }
+
+    // Add @RTK.md
+    let new_content = if content.is_empty() {
+        "@RTK.md\n".to_string()
+    } else {
+        format!("{}\n\n@RTK.md\n", content.trim())
+    };
+
+    fs::write(path, new_content)?;
+
+    if verbose > 0 {
+        eprintln!("Added @RTK.md reference to CLAUDE.md");
+    }
+
+    Ok(migrated)
+}
+
+/// Remove old RTK block from CLAUDE.md (migration helper)
+fn remove_rtk_block(content: &str) -> (String, bool) {
+    if let (Some(start), Some(end)) = (
+        content.find("<!-- rtk-instructions"),
+        content.find("<!-- /rtk-instructions -->"),
+    ) {
+        let end_pos = end + "<!-- /rtk-instructions -->".len();
+        let before = content[..start].trim_end();
+        let after = content[end_pos..].trim_start();
+
+        let result = if after.is_empty() {
+            before.to_string()
+        } else {
+            format!("{}\n\n{}", before, after)
+        };
+
+        (result, true) // migrated
+    } else if content.contains("<!-- rtk-instructions") {
+        eprintln!("Warning: rtk-instructions marker found but no closing marker.");
+        eprintln!("Manual cleanup needed.");
+        (content.to_string(), false)
+    } else {
+        (content.to_string(), false)
+    }
+}
+
+/// Resolve ~/.claude directory with proper home expansion
+fn resolve_claude_dir() -> Result<PathBuf> {
+    dirs::home_dir()
+        .map(|h| h.join(".claude"))
+        .context("Cannot determine home directory. Is $HOME set?")
+}
+
+/// Show current rtk configuration
+pub fn show_config() -> Result<()> {
+    let claude_dir = resolve_claude_dir()?;
+    let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
+    let rtk_md_path = claude_dir.join("RTK.md");
+    let global_claude_md = claude_dir.join("CLAUDE.md");
+    let local_claude_md = PathBuf::from("CLAUDE.md");
+
+    println!("📋 rtk Configuration:\n");
+
+    // Check hook
+    if hook_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&hook_path)?;
+            let perms = metadata.permissions();
+            let is_executable = perms.mode() & 0o111 != 0;
+
+            let hook_content = fs::read_to_string(&hook_path)?;
+            let has_guards =
+                hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
+
+            if is_executable && has_guards {
+                println!("✅ Hook: {} (executable, with guards)", hook_path.display());
+            } else if !is_executable {
+                println!(
+                    "⚠️  Hook: {} (NOT executable - run: chmod +x)",
+                    hook_path.display()
+                );
+            } else {
+                println!("⚠️  Hook: {} (no guards - outdated)", hook_path.display());
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            println!("✅ Hook: {} (exists)", hook_path.display());
+        }
+    } else {
+        println!("⚪ Hook: not found");
+    }
+
+    // Check RTK.md
+    if rtk_md_path.exists() {
+        println!("✅ RTK.md: {} (slim mode)", rtk_md_path.display());
+    } else {
+        println!("⚪ RTK.md: not found");
+    }
+
+    // Check global CLAUDE.md
+    if global_claude_md.exists() {
+        let content = fs::read_to_string(&global_claude_md)?;
+        if content.contains("@RTK.md") {
+            println!("✅ Global (~/.claude/CLAUDE.md): @RTK.md reference");
+        } else if content.contains("<!-- rtk-instructions") {
+            println!(
+                "⚠️  Global (~/.claude/CLAUDE.md): old RTK block (run: rtk init -g to migrate)"
+            );
+        } else {
+            println!("⚪ Global (~/.claude/CLAUDE.md): exists but rtk not configured");
+        }
+    } else {
+        println!("⚪ Global (~/.claude/CLAUDE.md): not found");
+    }
+
+    // Check local CLAUDE.md
+    if local_claude_md.exists() {
+        let content = fs::read_to_string(&local_claude_md)?;
         if content.contains("rtk") {
             println!("✅ Local (./CLAUDE.md): rtk enabled");
         } else {
@@ -218,8 +501,10 @@ pub fn show_config() -> Result<()> {
     }
 
     println!("\nUsage:");
-    println!("  rtk init          # Add rtk to local CLAUDE.md");
-    println!("  rtk init --global # Add rtk to global ~/.claude/CLAUDE.md");
+    println!("  rtk init              # Full injection into local CLAUDE.md");
+    println!("  rtk init -g           # Hook + RTK.md + @RTK.md (recommended)");
+    println!("  rtk init -g --claude-md    # Legacy: full injection into ~/.claude/CLAUDE.md");
+    println!("  rtk init -g --hook-only    # Hook only, no RTK.md");
 
     Ok(())
 }
@@ -227,10 +512,10 @@ pub fn show_config() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_init_mentions_all_top_level_commands() {
-        // Verify RTK_INSTRUCTIONS mentions key commands
         for cmd in [
             "rtk cargo",
             "rtk gh",
@@ -261,5 +546,96 @@ mod tests {
             RTK_INSTRUCTIONS.contains("<!-- rtk-instructions"),
             "RTK_INSTRUCTIONS must have version marker for idempotency"
         );
+    }
+
+    #[test]
+    fn test_hook_has_guards() {
+        assert!(REWRITE_HOOK.contains("command -v rtk"));
+        assert!(REWRITE_HOOK.contains("command -v jq"));
+        // Guards must be BEFORE set -euo pipefail
+        let guard_pos = REWRITE_HOOK.find("command -v rtk").unwrap();
+        let set_pos = REWRITE_HOOK.find("set -euo pipefail").unwrap();
+        assert!(
+            guard_pos < set_pos,
+            "Guards must come before set -euo pipefail"
+        );
+    }
+
+    #[test]
+    fn test_migration_removes_old_block() {
+        let input = r#"# My Config
+
+<!-- rtk-instructions v2 -->
+OLD RTK STUFF
+<!-- /rtk-instructions -->
+
+More content"#;
+
+        let (result, migrated) = remove_rtk_block(input);
+        assert!(migrated);
+        assert!(!result.contains("OLD RTK STUFF"));
+        assert!(result.contains("# My Config"));
+        assert!(result.contains("More content"));
+    }
+
+    #[test]
+    fn test_migration_warns_on_missing_end_marker() {
+        let input = "<!-- rtk-instructions v2 -->\nOLD STUFF\nNo end marker";
+        let (result, migrated) = remove_rtk_block(input);
+        assert!(!migrated);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_default_mode_creates_hook_and_rtk_md() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = temp.path().join("rtk-rewrite.sh");
+        let rtk_md_path = temp.path().join("RTK.md");
+
+        fs::write(&hook_path, REWRITE_HOOK).unwrap();
+        fs::write(&rtk_md_path, RTK_SLIM).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(hook_path.exists());
+        assert!(rtk_md_path.exists());
+
+        let metadata = fs::metadata(&hook_path).unwrap();
+        assert!(metadata.permissions().mode() & 0o111 != 0);
+    }
+
+    #[test]
+    fn test_claude_md_mode_creates_full_injection() {
+        // Just verify RTK_INSTRUCTIONS constant has the right content
+        assert!(RTK_INSTRUCTIONS.contains("<!-- rtk-instructions"));
+        assert!(RTK_INSTRUCTIONS.contains("rtk cargo test"));
+        assert!(RTK_INSTRUCTIONS.contains("<!-- /rtk-instructions -->"));
+        assert!(RTK_INSTRUCTIONS.len() > 4000);
+    }
+
+    #[test]
+    fn test_init_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let claude_md = temp.path().join("CLAUDE.md");
+
+        fs::write(&claude_md, "# My stuff\n\n@RTK.md\n").unwrap();
+
+        let content = fs::read_to_string(&claude_md).unwrap();
+        let count = content.matches("@RTK.md").count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_local_init_unchanged() {
+        // Local init should use claude-md mode
+        let temp = TempDir::new().unwrap();
+        let claude_md = temp.path().join("CLAUDE.md");
+
+        fs::write(&claude_md, RTK_INSTRUCTIONS).unwrap();
+        let content = fs::read_to_string(&claude_md).unwrap();
+
+        assert!(content.contains("<!-- rtk-instructions"));
     }
 }
