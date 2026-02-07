@@ -253,6 +253,14 @@ enum Commands {
         /// Show current configuration
         #[arg(long)]
         show: bool,
+
+        /// Inject full instructions into CLAUDE.md (legacy mode)
+        #[arg(long = "claude-md", group = "mode")]
+        claude_md: bool,
+
+        /// Hook only, no RTK.md
+        #[arg(long = "hook-only", group = "mode")]
+        hook_only: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -937,11 +945,16 @@ fn main() -> Result<()> {
             )?;
         }
 
-        Commands::Init { global, show } => {
+        Commands::Init {
+            global,
+            show,
+            claude_md,
+            hook_only,
+        } => {
             if show {
                 init::show_config()?;
             } else {
-                init::run(global, cli.verbose)?;
+                init::run(global, claude_md, hook_only, cli.verbose)?;
             }
         }
 
