@@ -123,7 +123,20 @@ cat ~/.claude/CLAUDE.md | grep rtk
 cat ./CLAUDE.md | grep rtk
 ```
 
-**4. Optional: Install auto-rewrite hook (recommended):**
+**4. Install auto-rewrite hook (recommended for automatic RTK usage):**
+
+**Option A: Automatic (recommended)**
+```bash
+rtk init -g
+# → Installs hook + RTK.md automatically
+# → Follow printed instructions to add hook to ~/.claude/settings.json
+# → Restart Claude Code
+
+# Verify installation
+rtk init --show  # Should show "✅ Hook: executable, with guards"
+```
+
+**Option B: Manual (fallback)**
 ```bash
 # Copy hook to Claude Code hooks directory
 mkdir -p ~/.claude/hooks
@@ -131,7 +144,7 @@ cp .claude/hooks/rtk-rewrite.sh ~/.claude/hooks/
 chmod +x ~/.claude/hooks/rtk-rewrite.sh
 ```
 
-Then add to `~/.claude/settings.json`:
+Then add to `~/.claude/settings.json` (replace `~` with full path):
 ```json
 {
   "hooks": {
@@ -141,7 +154,7 @@ Then add to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/rtk-rewrite.sh"
+            "command": "/Users/yourname/.claude/hooks/rtk-rewrite.sh"
           }
         ]
       }
@@ -149,6 +162,8 @@ Then add to `~/.claude/settings.json`:
   }
 }
 ```
+
+**Note**: Use absolute path in `settings.json`, not `~/.claude/...`
 
 ---
 
