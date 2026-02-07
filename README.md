@@ -318,6 +318,35 @@ rtk init -g --claude-md # Legacy: full injection into CLAUDE.md
 rtk init                # Local project: full injection into ./CLAUDE.md
 ```
 
+### Installation Flags
+
+**Settings.json Control**:
+```bash
+rtk init -g                 # Default: prompt to patch [y/N]
+rtk init -g --auto-patch    # Patch settings.json without prompting
+rtk init -g --no-patch      # Skip patching, show manual instructions
+```
+
+**Mode Control**:
+```bash
+rtk init -g --claude-md     # Legacy: full 137-line injection (no hook)
+rtk init -g --hook-only     # Hook only, no RTK.md
+```
+
+**Uninstall**:
+```bash
+rtk init -g --uninstall     # Remove all RTK artifacts
+```
+
+**What is settings.json?**
+Claude Code configuration file that registers the RTK hook. The hook transparently rewrites commands (e.g., `git status` → `rtk git status`) before execution. Without this registration, Claude won't use the hook.
+
+**Backup Behavior**:
+RTK creates `~/.claude/settings.json.bak` before making changes. If something breaks, restore with:
+```bash
+cp ~/.claude/settings.json.bak ~/.claude/settings.json
+```
+
 **Migration**: If you previously used `rtk init -g` with the old system (137-line injection), simply re-run `rtk init -g` to automatically migrate to the new hook-first approach.
 
 example of 3 days session:
@@ -352,6 +381,17 @@ The most effective way to use rtk is with the **auto-rewrite hook** for Claude C
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead in Claude's context.
 
+### What Are Hooks?
+
+**For Beginners**:
+Claude Code hooks are scripts that run before/after Claude executes commands. RTK uses a **PreToolUse** hook that intercepts Bash commands and rewrites them (e.g., `git status` → `rtk git status`) before execution. This is **transparent** - Claude never sees the rewrite, it just gets optimized output.
+
+**Why settings.json?**
+Claude Code reads `~/.claude/settings.json` to find registered hooks. Without this file, Claude doesn't know the RTK hook exists. Think of it as the hook registry.
+
+**Is it safe?**
+Yes. RTK creates a backup (`settings.json.bak`) before changes. The hook is read-only (it only modifies command strings, never deletes files or accesses secrets). Review the hook script at `~/.claude/hooks/rtk-rewrite.sh` anytime.
+
 ### How It Works
 
 The hook runs as a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks). When Claude Code is about to execute a Bash command like `git status`, the hook rewrites it to `rtk git status` before the command reaches the shell. Claude Code never sees the rewrite — it's transparent.
@@ -363,14 +403,39 @@ rtk init -g
 # → Installs hook to ~/.claude/hooks/rtk-rewrite.sh (with executable permissions)
 # → Creates ~/.claude/RTK.md (10 lines, minimal context footprint)
 # → Adds @RTK.md reference to ~/.claude/CLAUDE.md
-# → Prints settings.json instructions (manual step required)
+# → Prompts: "Patch settings.json? [y/N]"
+# → If yes: creates backup (~/.claude/settings.json.bak), patches file
 
-# Follow the printed instructions to add hook to ~/.claude/settings.json
+# Verify installation
+rtk init --show  # Shows hook status, settings.json registration
 ```
+
+**Settings.json Patching Options**:
+```bash
+rtk init -g                 # Default: prompts for consent [y/N]
+rtk init -g --auto-patch    # Patch immediately without prompting (CI/CD)
+rtk init -g --no-patch      # Skip patching, print manual JSON snippet
+```
+
+**What is settings.json?**
+Claude Code's configuration file that registers the RTK hook. Without this, Claude won't use the hook. RTK backs up the file before changes (`settings.json.bak`).
+
+**Restart Required**: After installation, restart Claude Code, then test with `git status`.
 
 ### Manual Install (Fallback)
 
-If `rtk init -g` doesn't work for your setup:
+If automatic patching fails or you prefer manual control:
+
+```bash
+# 1. Install hook and RTK.md
+rtk init -g --no-patch  # Prints JSON snippet
+
+# 2. Manually edit ~/.claude/settings.json (add the printed snippet)
+
+# 3. Restart Claude Code
+```
+
+**Alternative: Full manual setup**
 
 ```bash
 # 1. Copy the hook script
@@ -480,6 +545,39 @@ chmod +x ~/.claude/hooks/rtk-suggest.sh
 
 The suggest hook detects the same commands as the rewrite hook but outputs a `systemMessage` instead of `updatedInput`, informing Claude Code that an rtk alternative exists.
 
+## Uninstalling RTK
+
+**Complete Removal (Global Only)**:
+```bash
+rtk init -g --uninstall
+
+# Removes:
+#   - ~/.claude/hooks/rtk-rewrite.sh
+#   - ~/.claude/RTK.md
+#   - @RTK.md reference from ~/.claude/CLAUDE.md
+#   - RTK hook entry from ~/.claude/settings.json
+
+# Restart Claude Code after uninstall
+```
+
+**Restore from Backup** (if needed):
+```bash
+cp ~/.claude/settings.json.bak ~/.claude/settings.json
+```
+
+**Local Projects**: Manually remove RTK instructions from `./CLAUDE.md`
+
+**Binary Removal**:
+```bash
+# If installed via cargo
+cargo uninstall rtk
+
+# If installed via package manager
+brew uninstall rtk          # macOS Homebrew
+sudo apt remove rtk         # Debian/Ubuntu
+sudo dnf remove rtk         # Fedora/RHEL
+```
+
 ## Documentation
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - ⚠️ Fix common issues (wrong rtk installed, missing commands, PATH issues)
@@ -488,6 +586,70 @@ The suggest hook detects the same commands as the rewrite hook but outputs a `sy
 - **[CLAUDE.md](CLAUDE.md)** - Claude Code integration instructions and project context
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture and development guide
 - **[SECURITY.md](SECURITY.md)** - Security policy, vulnerability reporting, and PR review process
+
+## Troubleshooting
+
+### Settings.json Patching Failed
+
+**Problem**: `rtk init -g` fails to patch settings.json
+
+**Solutions**:
+```bash
+# Check if settings.json is valid JSON
+cat ~/.claude/settings.json | python3 -m json.tool
+
+# Use manual patching
+rtk init -g --no-patch  # Prints JSON snippet
+
+# Restore from backup
+cp ~/.claude/settings.json.bak ~/.claude/settings.json
+
+# Check permissions
+ls -la ~/.claude/settings.json
+chmod 644 ~/.claude/settings.json
+```
+
+### Hook Not Working After Install
+
+**Problem**: Commands still not using RTK after `rtk init -g`
+
+**Solutions**:
+```bash
+# Verify hook is registered
+rtk init --show
+
+# Check settings.json manually
+cat ~/.claude/settings.json | grep rtk-rewrite
+
+# Restart Claude Code (critical step!)
+
+# Test with a command
+git status  # Should use rtk automatically
+```
+
+### Uninstall Didn't Remove Everything
+
+**Problem**: RTK traces remain after `rtk init -g --uninstall`
+
+**Manual Cleanup**:
+```bash
+# Remove hook
+rm ~/.claude/hooks/rtk-rewrite.sh
+
+# Remove RTK.md
+rm ~/.claude/RTK.md
+
+# Remove @RTK.md reference
+nano ~/.claude/CLAUDE.md  # Delete @RTK.md line
+
+# Remove from settings.json
+nano ~/.claude/settings.json  # Remove RTK hook entry
+
+# Restore from backup
+cp ~/.claude/settings.json.bak ~/.claude/settings.json
+```
+
+See **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** for more issues and solutions.
 
 ## For Maintainers
 
