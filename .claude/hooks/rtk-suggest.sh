@@ -62,6 +62,12 @@ elif echo "$FIRST_CMD" | grep -qE '^cargo\s+build(\s|$)'; then
   SUGGESTION="rtk cargo build"
 elif echo "$FIRST_CMD" | grep -qE '^cargo\s+clippy(\s|$)'; then
   SUGGESTION="rtk cargo clippy"
+elif echo "$FIRST_CMD" | grep -qE '^cargo\s+check(\s|$)'; then
+  SUGGESTION="rtk cargo check"
+elif echo "$FIRST_CMD" | grep -qE '^cargo\s+install(\s|$)'; then
+  SUGGESTION="rtk cargo install"
+elif echo "$FIRST_CMD" | grep -qE '^cargo\s+fmt(\s|$)'; then
+  SUGGESTION="rtk cargo fmt"
 
 # --- File operations ---
 elif echo "$FIRST_CMD" | grep -qE '^cat\s+'; then
@@ -70,6 +76,23 @@ elif echo "$FIRST_CMD" | grep -qE '^(rg|grep)\s+'; then
   SUGGESTION=$(echo "$CMD" | sed -E 's/^(rg|grep) /rtk grep /')
 elif echo "$FIRST_CMD" | grep -qE '^ls(\s|$)'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^ls/rtk ls/')
+elif echo "$FIRST_CMD" | grep -qE '^tree(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^tree/rtk tree/')
+elif echo "$FIRST_CMD" | grep -qE '^find\s+'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^find /rtk find /')
+elif echo "$FIRST_CMD" | grep -qE '^diff\s+'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^diff /rtk diff /')
+elif echo "$FIRST_CMD" | grep -qE '^head\s+'; then
+  # Suggest rtk read with --max-lines transformation
+  if echo "$FIRST_CMD" | grep -qE '^head\s+-[0-9]+\s+'; then
+    LINES=$(echo "$FIRST_CMD" | sed -E 's/^head +-([0-9]+) +.+$/\1/')
+    FILE=$(echo "$FIRST_CMD" | sed -E 's/^head +-[0-9]+ +(.+)$/\1/')
+    SUGGESTION="rtk read $FILE --max-lines $LINES"
+  elif echo "$FIRST_CMD" | grep -qE '^head\s+--lines=[0-9]+\s+'; then
+    LINES=$(echo "$FIRST_CMD" | sed -E 's/^head +--lines=([0-9]+) +.+$/\1/')
+    FILE=$(echo "$FIRST_CMD" | sed -E 's/^head +--lines=[0-9]+ +(.+)$/\1/')
+    SUGGESTION="rtk read $FILE --max-lines $LINES"
+  fi
 
 # --- JS/TS tooling ---
 elif echo "$FIRST_CMD" | grep -qE '^(pnpm\s+)?vitest(\s|$)'; then
@@ -102,6 +125,8 @@ elif echo "$FIRST_CMD" | grep -qE '^kubectl\s+(get|logs)(\s|$)'; then
 # --- Network ---
 elif echo "$FIRST_CMD" | grep -qE '^curl\s+'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^curl /rtk curl /')
+elif echo "$FIRST_CMD" | grep -qE '^wget\s+'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^wget /rtk wget /')
 
 # --- pnpm package management ---
 elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+(list|ls|outdated)(\s|$)'; then
