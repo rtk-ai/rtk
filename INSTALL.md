@@ -44,7 +44,7 @@ cargo uninstall rtk
 ### Quick Install (Linux/macOS)
 
 ```bash
-curl -fsSL https://github.com/rtk-ai/rtk/blob/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 ```
 
 After installation, **verify you have the correct rtk**:
