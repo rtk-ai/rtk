@@ -4,6 +4,8 @@
 
 **High-performance CLI proxy to minimize LLM token consumption.**
 
+[Website](https://www.rtk-ai.app) | [GitHub](https://github.com/rtk-ai/rtk) | [Install](INSTALL.md)
+
 rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens on common operations.
 
 ## ⚠️ Important: Name Collision Warning
@@ -728,3 +730,9 @@ MIT License - see [LICENSE](LICENSE) for details.
 Contributions welcome! Please open an issue or PR on GitHub.
 
 **For external contributors**: Your PR will undergo automated security review (see [SECURITY.md](SECURITY.md)). This protects RTK's shell execution capabilities against injection attacks and supply chain vulnerabilities.
+
+## Contact
+
+- Website: https://www.rtk-ai.app
+- Email: contact@rtk-ai.app
+- Issues: https://github.com/rtk-ai/rtk/issues

@@ -5,7 +5,7 @@
 # To install: brew tap rtk-ai/tap && brew install rtk
 class Rtk < Formula
   desc "High-performance CLI proxy to minimize LLM token consumption"
-  homepage "https://github.com/rtk-ai/rtk"
+  homepage "https://www.rtk-ai.app"
   version "0.1.0"
   license "MIT"
 
