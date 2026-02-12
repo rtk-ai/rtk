@@ -217,6 +217,11 @@ rtk gain --history | grep proxy
 | gh_cmd.rs | GitHub CLI | Compact PR/issue/run views (26-87% reduction) |
 | vitest_cmd.rs | Vitest test runner | Failures only with ANSI stripping (99.5% reduction) |
 | pnpm_cmd.rs | pnpm package manager | Compact dependency trees (70-90% reduction) |
+| ruff_cmd.rs | Ruff linter/formatter | JSON for check, text for format (80%+ reduction) |
+| pytest_cmd.rs | Pytest test runner | State machine text parser (90%+ reduction) |
+| pip_cmd.rs | pip/uv package manager | JSON parsing, auto-detect uv (70-85% reduction) |
+| go_cmd.rs | Go commands | NDJSON for test, text for build/vet (80-90% reduction) |
+| golangci_cmd.rs | golangci-lint | JSON parsing, group by rule (85% reduction) |
 | utils.rs | Shared utilities | Package manager detection, common formatting |
 | discover/ | Claude Code history analysis | Scan JSONL sessions, classify commands, report missed savings |
 
@@ -243,6 +248,19 @@ rtk gain --history | grep proxy
 - **Shared Infrastructure**: utils.rs module for package manager auto-detection
 - **Features**: Exit code preservation, error grouping, consistent formatting
 - **Testing**: Validated on production T3 Stack project (methode-aristote/app)
+
+### Python & Go Support (2026-02-12)
+- **Python Commands**: 3 commands for Python development workflows
+  - `rtk ruff check/format`: Ruff linter/formatter with JSON (check) and text (format) parsing (80%+ reduction)
+  - `rtk pytest`: Pytest test runner with state machine text parser (90%+ reduction)
+  - `rtk pip list/outdated/install`: pip package manager with auto-detect uv (70-85% reduction)
+- **Go Commands**: 4 commands via sub-enum for Go ecosystem
+  - `rtk go test`: NDJSON line-by-line parser for interleaved events (90%+ reduction)
+  - `rtk go build`: Text filter showing errors only (80% reduction)
+  - `rtk go vet`: Text filter for issues (75% reduction)
+  - `rtk golangci-lint`: JSON parsing grouped by rule (85% reduction)
+- **Architecture**: Standalone Python commands (mirror lint/prettier), Go sub-enum (mirror git/cargo)
+- **Patterns**: JSON for structured output (ruff check, golangci-lint, pip), NDJSON streaming (go test), text state machine (pytest), text filters (go build/vet, ruff format)
 
 ## Testing Strategy
 
