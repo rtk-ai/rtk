@@ -146,16 +146,27 @@ fn clean_line(line: &str, max_len: usize, context_only: bool, pattern: &str) -> 
                 start
             };
 
-            let slice = &trimmed[start..end];
-            if start > 0 && end < trimmed.len() {
+            // Snap to valid char boundaries
+            let mut safe_start = start;
+            while safe_start > 0 && !trimmed.is_char_boundary(safe_start) {
+                safe_start -= 1;
+            }
+            let mut safe_end = end;
+            while safe_end < trimmed.len() && !trimmed.is_char_boundary(safe_end) {
+                safe_end += 1;
+            }
+
+            let slice = &trimmed[safe_start..safe_end];
+            if safe_start > 0 && safe_end < trimmed.len() {
                 format!("...{}...", slice)
-            } else if start > 0 {
+            } else if safe_start > 0 {
                 format!("...{}", slice)
             } else {
                 format!("{}...", slice)
             }
         } else {
-            format!("{}...", &trimmed[..max_len - 3])
+            let t: String = trimmed.chars().take(max_len - 3).collect();
+            format!("{}...", t)
         }
     }
 }
@@ -203,5 +214,21 @@ mod tests {
         // This is a compile-time test - if it compiles, the signature is correct
         let _extra: Vec<String> = vec!["-i".to_string(), "-A".to_string(), "3".to_string()];
         // No need to actually run - we're verifying the parameter exists
+    }
+
+    #[test]
+    fn test_clean_line_multibyte() {
+        // Thai text that exceeds max_len in bytes
+        let line = "  สวัสดีครับ นี่คือข้อความที่ยาวมากสำหรับทดสอบ  ";
+        let cleaned = clean_line(line, 20, false, "ครับ");
+        // Should not panic
+        assert!(!cleaned.is_empty());
+    }
+
+    #[test]
+    fn test_clean_line_emoji() {
+        let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
+        let cleaned = clean_line(line, 15, false, "text");
+        assert!(!cleaned.is_empty());
     }
 }

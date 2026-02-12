@@ -33,6 +33,28 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Find the nearest valid UTF-8 char boundary at or before the given byte index.
+///
+/// This is useful when you need to slice a string at approximately a byte position
+/// without risking a panic on multi-byte characters.
+///
+/// # Examples
+/// ```
+/// use rtk::utils::safe_char_boundary;
+/// let s = "hello";
+/// assert_eq!(safe_char_boundary(s, 3), 3);
+/// ```
+pub fn safe_char_boundary(s: &str, byte_idx: usize) -> usize {
+    if byte_idx >= s.len() {
+        return s.len();
+    }
+    let mut idx = byte_idx;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 /// Supprime les codes ANSI d'une chaîne (couleurs, styles).
 ///
 /// # Arguments
@@ -370,5 +392,67 @@ mod tests {
         // so it should default to "npm"
         let pm = detect_package_manager();
         assert!(["pnpm", "yarn", "npm"].contains(&pm));
+    }
+
+    #[test]
+    fn test_truncate_multibyte_thai() {
+        // Thai characters are 3 bytes each
+        let thai = "สวัสดีครับ";
+        let result = truncate(thai, 5);
+        // Should not panic, should produce valid UTF-8
+        assert!(result.len() <= thai.len());
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_multibyte_emoji() {
+        let emoji = "🎉🎊🎈🎁🎂🎄🎃🎆🎇✨";
+        let result = truncate(emoji, 5);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_multibyte_cjk() {
+        let cjk = "你好世界测试字符串";
+        let result = truncate(cjk, 6);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_safe_char_boundary_ascii() {
+        let s = "hello world";
+        assert_eq!(safe_char_boundary(s, 5), 5);
+        assert_eq!(safe_char_boundary(s, 0), 0);
+        assert_eq!(safe_char_boundary(s, 100), s.len());
+    }
+
+    #[test]
+    fn test_safe_char_boundary_thai() {
+        // Thai 'ส' is 3 bytes (0xE0 0xB8 0xAA)
+        let s = "สวัสดี";
+        // Byte index 1 is mid-character, should snap back to 0
+        assert_eq!(safe_char_boundary(s, 1), 0);
+        // Byte index 3 is start of next char
+        assert_eq!(safe_char_boundary(s, 3), 3);
+        // Byte index 4 is mid-character, should snap to 3
+        assert_eq!(safe_char_boundary(s, 4), 3);
+    }
+
+    #[test]
+    fn test_safe_char_boundary_emoji() {
+        // '🎉' is 4 bytes
+        let s = "🎉hello";
+        assert_eq!(safe_char_boundary(s, 0), 0);
+        assert_eq!(safe_char_boundary(s, 1), 0);
+        assert_eq!(safe_char_boundary(s, 2), 0);
+        assert_eq!(safe_char_boundary(s, 3), 0);
+        assert_eq!(safe_char_boundary(s, 4), 4); // start of 'h'
+    }
+
+    #[test]
+    fn test_safe_char_boundary_empty() {
+        let s = "";
+        assert_eq!(safe_char_boundary(s, 0), 0);
+        assert_eq!(safe_char_boundary(s, 5), 0);
     }
 }
