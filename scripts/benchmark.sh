@@ -314,6 +314,44 @@ if command -v kubectl &> /dev/null; then
 fi
 
 # ===================
+# Python (skip si pas de projet Python)
+# ===================
+if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ] || [ -f "setup.py" ]; then
+  section "Python stack"
+
+  if command -v ruff &> /dev/null; then
+    bench "ruff check" "ruff check . 2>&1 || true" "$RTK ruff check ."
+    bench "ruff format --check" "ruff format --check . 2>&1 || true" "$RTK ruff format --check ."
+  fi
+
+  if command -v pytest &> /dev/null; then
+    bench "pytest" "pytest --tb=short -q 2>&1 || true" "$RTK pytest"
+  fi
+
+  if command -v pip &> /dev/null; then
+    bench "pip list" "pip list 2>&1 || true" "$RTK pip list"
+    bench "pip outdated" "pip list --outdated 2>&1 || true" "$RTK pip outdated"
+  fi
+fi
+
+# ===================
+# Go (skip si pas de go.mod)
+# ===================
+if [ -f "go.mod" ]; then
+  section "Go stack"
+
+  if command -v go &> /dev/null; then
+    bench "go test" "go test ./... 2>&1 || true" "$RTK go test ./..."
+    bench "go build" "go build ./... 2>&1 || true" "$RTK go build ./..."
+    bench "go vet" "go vet ./... 2>&1 || true" "$RTK go vet ./..."
+  fi
+
+  if command -v golangci-lint &> /dev/null; then
+    bench "golangci-lint" "golangci-lint run 2>&1 || true" "$RTK golangci-lint run"
+  fi
+fi
+
+# ===================
 # Résumé global
 # ===================
 echo ""
