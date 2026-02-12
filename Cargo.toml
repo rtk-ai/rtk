@@ -5,6 +5,7 @@ edition = "2021"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
 license = "MIT"
+homepage = "https://www.rtk-ai.app"
 repository = "https://github.com/rtk-ai/rtk"
 readme = "README.md"
 keywords = ["cli", "llm", "token", "filter", "productivity"]
