@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-RTK="./target/release/rtk"
+RTK="$(cd "$(dirname ./target/release/rtk)" && pwd)/$(basename ./target/release/rtk)"
 BENCH_DIR="./scripts/benchmark"
 
 # Mode local : générer les fichiers debug
@@ -332,41 +332,124 @@ if command -v kubectl &> /dev/null; then
 fi
 
 # ===================
-# Python (skip si pas de projet Python)
+# Python (avec fixtures temporaires)
 # ===================
-if [ -f "pyproject.toml" ] || [ -f "requirements.txt" ] || [ -f "setup.py" ]; then
-  section "Python stack"
+if command -v python3 &> /dev/null && command -v ruff &> /dev/null && command -v pytest &> /dev/null; then
+  section "python"
 
-  if command -v ruff &> /dev/null; then
-    bench "ruff check" "ruff check . 2>&1 || true" "$RTK ruff check ."
-    bench "ruff format --check" "ruff format --check . 2>&1 || true" "$RTK ruff format --check ."
-  fi
+  PYTHON_FIXTURE=$(mktemp -d)
+  cd "$PYTHON_FIXTURE"
 
-  if command -v pytest &> /dev/null; then
-    bench "pytest" "pytest --tb=short -q 2>&1 || true" "$RTK pytest"
-  fi
+  # pyproject.toml
+  cat > pyproject.toml << 'PYEOF'
+[project]
+name = "rtk-bench"
+version = "0.1.0"
 
-  if command -v pip &> /dev/null; then
-    bench "pip list" "pip list 2>&1 || true" "$RTK pip list"
-    bench "pip outdated" "pip list --outdated 2>&1 || true" "$RTK pip outdated"
-  fi
+[tool.ruff]
+line-length = 88
+PYEOF
+
+  # sample.py avec quelques issues ruff
+  cat > sample.py << 'PYEOF'
+import os
+import sys
+import json
+
+
+def process_data(x):
+    if x == None:  # E711: comparison to None
+        return []
+    result = []
+    for i in range(len(x)):  # C416: unnecessary list comprehension
+        result.append(x[i] * 2)
+    return result
+
+def unused_function():  # F841: local variable assigned but never used
+    temp = 42
+    return None
+PYEOF
+
+  # test_sample.py
+  cat > test_sample.py << 'PYEOF'
+from sample import process_data
+
+def test_process_data():
+    assert process_data([1, 2, 3]) == [2, 4, 6]
+
+def test_process_data_none():
+    assert process_data(None) == []
+PYEOF
+
+  bench "ruff check" "ruff check . 2>&1 || true" "$RTK test ruff check ."
+  bench "pytest" "pytest -v 2>&1 || true" "$RTK test pytest -v"
+
+  cd - > /dev/null
+  rm -rf "$PYTHON_FIXTURE"
 fi
 
 # ===================
-# Go (skip si pas de go.mod)
+# Go (avec fixtures temporaires)
 # ===================
-if [ -f "go.mod" ]; then
-  section "Go stack"
+if command -v go &> /dev/null && command -v golangci-lint &> /dev/null; then
+  section "go"
 
-  if command -v go &> /dev/null; then
-    bench "go test" "go test ./... 2>&1 || true" "$RTK go test ./..."
-    bench "go build" "go build ./... 2>&1 || true" "$RTK go build ./..."
-    bench "go vet" "go vet ./... 2>&1 || true" "$RTK go vet ./..."
-  fi
+  GO_FIXTURE=$(mktemp -d)
+  cd "$GO_FIXTURE"
 
-  if command -v golangci-lint &> /dev/null; then
-    bench "golangci-lint" "golangci-lint run 2>&1 || true" "$RTK golangci-lint run"
-  fi
+  # go.mod
+  cat > go.mod << 'GOEOF'
+module bench
+
+go 1.21
+GOEOF
+
+  # main.go
+  cat > main.go << 'GOEOF'
+package main
+
+import "fmt"
+
+func Add(a, b int) int {
+    return a + b
+}
+
+func Multiply(a, b int) int {
+    return a * b
+}
+
+func main() {
+    fmt.Println(Add(2, 3))
+    fmt.Println(Multiply(4, 5))
+}
+GOEOF
+
+  # main_test.go
+  cat > main_test.go << 'GOEOF'
+package main
+
+import "testing"
+
+func TestAdd(t *testing.T) {
+    result := Add(2, 3)
+    if result != 5 {
+        t.Errorf("Add(2, 3) = %d; want 5", result)
+    }
+}
+
+func TestMultiply(t *testing.T) {
+    result := Multiply(4, 5)
+    if result != 20 {
+        t.Errorf("Multiply(4, 5) = %d; want 20", result)
+    }
+}
+GOEOF
+
+  bench "golangci-lint" "golangci-lint run 2>&1 || true" "$RTK test golangci-lint run"
+  bench "go test" "go test -v 2>&1 || true" "$RTK test go test -v"
+
+  cd - > /dev/null
+  rm -rf "$GO_FIXTURE"
 fi
 
 # ===================
