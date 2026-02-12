@@ -17,5 +17,18 @@ jobs:
       - name: Build rtk
         run: cargo build --release
 
+      - name: Install Python tools
+        run: |
+          pip install ruff pytest
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install Go tools
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
       - name: Run benchmark
         run: ./scripts/benchmark.sh
