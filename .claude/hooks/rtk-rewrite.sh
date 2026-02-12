@@ -63,6 +63,12 @@ elif echo "$FIRST_CMD" | grep -qE '^cargo\s+build(\s|$)'; then
   REWRITTEN=$(echo "$CMD" | sed 's/^cargo build/rtk cargo build/')
 elif echo "$FIRST_CMD" | grep -qE '^cargo\s+clippy(\s|$)'; then
   REWRITTEN=$(echo "$CMD" | sed 's/^cargo clippy/rtk cargo clippy/')
+elif echo "$FIRST_CMD" | grep -qE '^cargo\s+check(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^cargo check/rtk cargo check/')
+elif echo "$FIRST_CMD" | grep -qE '^cargo\s+install(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^cargo install/rtk cargo install/')
+elif echo "$FIRST_CMD" | grep -qE '^cargo\s+fmt(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^cargo fmt/rtk cargo fmt/')
 
 # --- File operations ---
 elif echo "$FIRST_CMD" | grep -qE '^cat\s+'; then
@@ -71,6 +77,24 @@ elif echo "$FIRST_CMD" | grep -qE '^(rg|grep)\s+'; then
   REWRITTEN=$(echo "$CMD" | sed -E 's/^(rg|grep) /rtk grep /')
 elif echo "$FIRST_CMD" | grep -qE '^ls(\s|$)'; then
   REWRITTEN=$(echo "$CMD" | sed 's/^ls/rtk ls/')
+elif echo "$FIRST_CMD" | grep -qE '^tree(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^tree/rtk tree/')
+elif echo "$FIRST_CMD" | grep -qE '^find\s+'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^find /rtk find /')
+elif echo "$FIRST_CMD" | grep -qE '^diff\s+'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^diff /rtk diff /')
+elif echo "$FIRST_CMD" | grep -qE '^head\s+'; then
+  # Transform: head -N file → rtk read file --max-lines N
+  # Also handle: head --lines=N file
+  if echo "$FIRST_CMD" | grep -qE '^head\s+-[0-9]+\s+'; then
+    LINES=$(echo "$FIRST_CMD" | sed -E 's/^head +-([0-9]+) +.+$/\1/')
+    FILE=$(echo "$FIRST_CMD" | sed -E 's/^head +-[0-9]+ +(.+)$/\1/')
+    REWRITTEN="rtk read $FILE --max-lines $LINES"
+  elif echo "$FIRST_CMD" | grep -qE '^head\s+--lines=[0-9]+\s+'; then
+    LINES=$(echo "$FIRST_CMD" | sed -E 's/^head +--lines=([0-9]+) +.+$/\1/')
+    FILE=$(echo "$FIRST_CMD" | sed -E 's/^head +--lines=[0-9]+ +(.+)$/\1/')
+    REWRITTEN="rtk read $FILE --max-lines $LINES"
+  fi
 
 # --- JS/TS tooling ---
 elif echo "$FIRST_CMD" | grep -qE '^(pnpm\s+)?vitest(\s|$)'; then
@@ -103,6 +127,8 @@ elif echo "$FIRST_CMD" | grep -qE '^kubectl\s+(get|logs)(\s|$)'; then
 # --- Network ---
 elif echo "$FIRST_CMD" | grep -qE '^curl\s+'; then
   REWRITTEN=$(echo "$CMD" | sed 's/^curl /rtk curl /')
+elif echo "$FIRST_CMD" | grep -qE '^wget\s+'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^wget /rtk wget /')
 
 # --- pnpm package management ---
 elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+(list|ls|outdated)(\s|$)'; then
