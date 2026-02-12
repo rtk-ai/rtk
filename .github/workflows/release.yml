@@ -185,27 +185,110 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # TODO: Enable when HOMEBREW_TAP_TOKEN is configured
-  # homebrew:
-  #   name: Update Homebrew Tap
-  #   needs: release
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Get version
-  #       id: version
-  #       run: |
-  #         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-  #           echo "version=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-  #         else
-  #           echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-  #         fi
-  #
-  #     - name: Update Homebrew formula
-  #       uses: mislav/bump-homebrew-formula-action@v3
-  #       with:
-  #         formula-name: rtk
-  #         homebrew-tap: pszymkowiak/homebrew-tap
-  #         tag-name: ${{ steps.version.outputs.version }}
-  #         download-url: https://github.com/pszymkowiak/rtk/releases/download/${{ steps.version.outputs.version }}/rtk-x86_64-apple-darwin.tar.gz
-  #       env:
-  #         COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+  homebrew:
+    name: Update Homebrew formula
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download checksums
+        run: |
+          gh release download "${{ steps.version.outputs.tag }}" \
+            --repo rtk-ai/rtk \
+            --pattern checksums.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse checksums
+        id: sha
+        run: |
+          echo "mac_arm=$(grep aarch64-apple-darwin.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "mac_intel=$(grep x86_64-apple-darwin.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_arm=$(grep aarch64-unknown-linux-gnu.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_intel=$(grep x86_64-unknown-linux-gnu.tar.gz checksums.txt | head -1 | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Generate formula
+        run: |
+          cat > rtk.rb << 'FORMULA'
+          class Rtk < Formula
+            desc "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
+            homepage "https://github.com/rtk-ai/rtk"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            if OS.mac? && Hardware::CPU.arm?
+              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-apple-darwin.tar.gz"
+              sha256 "SHA_MAC_ARM_PLACEHOLDER"
+            elsif OS.mac? && Hardware::CPU.intel?
+              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-apple-darwin.tar.gz"
+              sha256 "SHA_MAC_INTEL_PLACEHOLDER"
+            elsif OS.linux? && Hardware::CPU.arm?
+              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-unknown-linux-gnu.tar.gz"
+              sha256 "SHA_LINUX_ARM_PLACEHOLDER"
+            elsif OS.linux? && Hardware::CPU.intel?
+              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-unknown-linux-gnu.tar.gz"
+              sha256 "SHA_LINUX_INTEL_PLACEHOLDER"
+            end
+
+            def install
+              bin.install "rtk"
+            end
+
+            def caveats
+              <<~EOS
+                rtk is installed! Get started:
+
+                  # Initialize for Claude Code
+                  rtk init -g          # Global hook-first setup (recommended)
+                  rtk init             # Add to ./CLAUDE.md (this project only)
+
+                  # See all commands
+                  rtk --help
+
+                  # Measure your token savings
+                  rtk gain
+
+                Full documentation: https://github.com/rtk-ai/rtk
+              EOS
+            end
+
+            test do
+              system "#{bin}/rtk", "--version"
+            end
+          end
+          FORMULA
+          sed -i "s/VERSION_PLACEHOLDER/${{ steps.version.outputs.version }}/g" rtk.rb
+          sed -i "s/TAG_PLACEHOLDER/${{ steps.version.outputs.tag }}/g" rtk.rb
+          sed -i "s/SHA_MAC_ARM_PLACEHOLDER/${{ steps.sha.outputs.mac_arm }}/g" rtk.rb
+          sed -i "s/SHA_MAC_INTEL_PLACEHOLDER/${{ steps.sha.outputs.mac_intel }}/g" rtk.rb
+          sed -i "s/SHA_LINUX_ARM_PLACEHOLDER/${{ steps.sha.outputs.linux_arm }}/g" rtk.rb
+          sed -i "s/SHA_LINUX_INTEL_PLACEHOLDER/${{ steps.sha.outputs.linux_intel }}/g" rtk.rb
+          # Remove leading spaces from heredoc
+          sed -i 's/^          //' rtk.rb
+
+      - name: Push to homebrew-tap
+        run: |
+          CONTENT=$(base64 -w 0 rtk.rb)
+          SHA=$(gh api repos/rtk-ai/homebrew-tap/contents/Formula/rtk.rb --jq '.sha' 2>/dev/null || echo "")
+          if [ -n "$SHA" ]; then
+            gh api -X PUT repos/rtk-ai/homebrew-tap/contents/Formula/rtk.rb \
+              -f message="rtk ${{ steps.version.outputs.version }}" \
+              -f content="$CONTENT" \
+              -f sha="$SHA"
+          else
+            gh api -X PUT repos/rtk-ai/homebrew-tap/contents/Formula/rtk.rb \
+              -f message="rtk ${{ steps.version.outputs.version }}" \
+              -f content="$CONTENT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
