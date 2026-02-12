@@ -372,20 +372,61 @@ section "Docker / Kubectl (help only)"
 assert_help    "rtk docker"                   rtk docker
 assert_help    "rtk kubectl"                  rtk kubectl
 
-# ── 27. Global flags ────────────────────────────────
+# ── 27. Python (conditional) ────────────────────────
+
+section "Python (conditional)"
+
+if command -v pytest &>/dev/null; then
+    assert_help    "rtk pytest"                    rtk pytest --help
+else
+    skip "pytest not installed"
+fi
+
+if command -v ruff &>/dev/null; then
+    assert_help    "rtk ruff"                      rtk ruff --help
+else
+    skip "ruff not installed"
+fi
+
+if command -v pip &>/dev/null; then
+    assert_help    "rtk pip"                       rtk pip --help
+else
+    skip "pip not installed"
+fi
+
+# ── 28. Go (conditional) ────────────────────────────
+
+section "Go (conditional)"
+
+if command -v go &>/dev/null; then
+    assert_help    "rtk go"                        rtk go --help
+    assert_help    "rtk go test"                   rtk go test -h
+    assert_help    "rtk go build"                  rtk go build -h
+    assert_help    "rtk go vet"                    rtk go vet -h
+else
+    skip "go not installed"
+fi
+
+if command -v golangci-lint &>/dev/null; then
+    assert_help    "rtk golangci-lint"             rtk golangci-lint --help
+else
+    skip "golangci-lint not installed"
+fi
+
+# ── 29. Global flags ────────────────────────────────
 
 section "Global flags"
 
 assert_ok      "rtk -u ls ."                  rtk -u ls .
 assert_ok      "rtk --skip-env npm --help"    rtk --skip-env npm --help
 
-# ── 28. CcEconomics ─────────────────────────────────
+# ── 30. CcEconomics ─────────────────────────────────
 
 section "CcEconomics"
 
 assert_ok      "rtk cc-economics"             rtk cc-economics
 
-# ── 29. Learn ───────────────────────────────────────
+# ── 31. Learn ───────────────────────────────────────
 
 section "Learn"
 
