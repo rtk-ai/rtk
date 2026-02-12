@@ -1,10 +1,10 @@
 #!/bin/sh
-# rtk installer - https://github.com/pszymkowiak/rtk
+# rtk installer - https://github.com/rtk-ai/rtk
 # Usage: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 
 set -e
 
-REPO="pszymkowiak/rtk"
+REPO="rtk-ai/rtk"
 BINARY_NAME="rtk"
 INSTALL_DIR="/usr/local/bin"
 
