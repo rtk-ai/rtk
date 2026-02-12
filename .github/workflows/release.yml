@@ -222,7 +222,7 @@ jobs:
           cat > rtk.rb << 'FORMULA'
           class Rtk < Formula
             desc "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
-            homepage "https://github.com/rtk-ai/rtk"
+            homepage "https://www.rtk-ai.app"
             version "VERSION_PLACEHOLDER"
             license "MIT"
 
@@ -258,7 +258,7 @@ jobs:
                   # Measure your token savings
                   rtk gain
 
-                Full documentation: https://github.com/rtk-ai/rtk
+                Full documentation: https://www.rtk-ai.app
               EOS
             end
 

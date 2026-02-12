@@ -317,6 +317,8 @@ cargo install --path . --force
 
 ## Support and Contributing
 
+- **Website**: https://www.rtk-ai.app
+- **Contact**: contact@rtk-ai.app
 - **Troubleshooting**: See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues
 - **GitHub issues**: https://github.com/rtk-ai/rtk/issues
 - **Pull Requests**: https://github.com/rtk-ai/rtk/pulls
