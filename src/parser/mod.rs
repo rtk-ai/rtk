@@ -120,6 +120,72 @@ pub fn emit_passthrough_warning(tool: &str, reason: &str) {
     eprintln!("[RTK:PASSTHROUGH] {} parser: {}", tool, reason);
 }
 
+/// Extract a complete JSON object from input that may have non-JSON prefix (pnpm banner, dotenv messages, etc.)
+///
+/// Strategy:
+/// 1. Find `"numTotalTests"` (vitest-specific marker) or first standalone `{`
+/// 2. Brace-balance forward to find matching `}`
+/// 3. Return slice containing complete JSON object
+///
+/// Handles: nested braces, string escapes, pnpm prefixes, dotenv banners
+///
+/// Returns `None` if no valid JSON object found.
+pub fn extract_json_object(input: &str) -> Option<&str> {
+    // Try vitest-specific marker first (most reliable)
+    let start_pos = if let Some(pos) = input.find("\"numTotalTests\"") {
+        // Walk backward to find opening brace of this object
+        input[..pos].rfind('{').unwrap_or(0)
+    } else {
+        // Fallback: find first `{` on its own line or after whitespace
+        let mut found_start = None;
+        for (idx, line) in input.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('{') {
+                // Calculate byte offset
+                found_start = Some(
+                    input[..]
+                        .lines()
+                        .take(idx)
+                        .map(|l| l.len() + 1)
+                        .sum::<usize>(),
+                );
+                break;
+            }
+        }
+        found_start?
+    };
+
+    // Brace-balance forward from start_pos
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+    let chars: Vec<char> = input[start_pos..].chars().collect();
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => escape_next = true,
+            '"' => in_string = !in_string,
+            '{' if !in_string => depth += 1,
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    // Found matching closing brace
+                    let end_pos = start_pos + i + 1; // +1 to include the `}`
+                    return Some(&input[start_pos..end_pos]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +229,64 @@ mod tests {
         let truncated = truncate_output(&long, 100);
         assert!(truncated.contains("[RTK:PASSTHROUGH]"));
         assert!(truncated.contains("1000 chars → 100 chars"));
+    }
+
+    #[test]
+    fn test_extract_json_object_clean() {
+        let input = r#"{"numTotalTests": 13, "numPassedTests": 13}"#;
+        let extracted = extract_json_object(input);
+        assert_eq!(extracted, Some(input));
+    }
+
+    #[test]
+    fn test_extract_json_object_with_pnpm_prefix() {
+        let input = r#"
+Scope: all 6 workspace projects
+ WARN  deprecated inflight@1.0.6: This module is not supported
+
+{"numTotalTests": 13, "numPassedTests": 13, "numFailedTests": 0}
+"#;
+        let extracted = extract_json_object(input).expect("Should extract JSON");
+        assert!(extracted.contains("numTotalTests"));
+        assert!(extracted.starts_with('{'));
+        assert!(extracted.ends_with('}'));
+    }
+
+    #[test]
+    fn test_extract_json_object_with_dotenv_prefix() {
+        let input = r#"[dotenv] Loading environment variables from .env
+[dotenv] Injected 5 variables
+
+{"numTotalTests": 5, "testResults": [{"name": "test.js"}]}
+"#;
+        let extracted = extract_json_object(input).expect("Should extract JSON");
+        assert!(extracted.contains("numTotalTests"));
+        assert!(extracted.contains("testResults"));
+    }
+
+    #[test]
+    fn test_extract_json_object_nested_braces() {
+        let input = r#"prefix text
+{"numTotalTests": 2, "testResults": [{"name": "test", "data": {"nested": true}}]}
+"#;
+        let extracted = extract_json_object(input).expect("Should extract JSON");
+        assert!(extracted.contains("\"nested\": true"));
+        assert!(extracted.starts_with('{'));
+        assert!(extracted.ends_with('}'));
+    }
+
+    #[test]
+    fn test_extract_json_object_no_json() {
+        let input = "Just plain text with no JSON";
+        let extracted = extract_json_object(input);
+        assert_eq!(extracted, None);
+    }
+
+    #[test]
+    fn test_extract_json_object_string_with_braces() {
+        let input = r#"{"numTotalTests": 1, "message": "test {should} not confuse parser"}"#;
+        let extracted = extract_json_object(input).expect("Should extract JSON");
+        assert!(extracted.contains("test {should} not confuse parser"));
+        assert_eq!(extracted, input);
     }
 }
