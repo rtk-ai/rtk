@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::process::Command;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 pub enum CargoCommand {
@@ -359,6 +360,104 @@ fn filter_cargo_build(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Aggregated test results for compact display
+#[derive(Debug, Default, Clone)]
+struct AggregatedTestResult {
+    passed: usize,
+    failed: usize,
+    ignored: usize,
+    measured: usize,
+    filtered_out: usize,
+    suites: usize,
+    duration_secs: f64,
+    has_duration: bool,
+}
+
+impl AggregatedTestResult {
+    /// Parse a test result summary line
+    /// Format: "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    fn parse_line(line: &str) -> Option<Self> {
+        static RE: OnceLock<regex::Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| {
+            regex::Regex::new(
+                r"test result: (\w+)\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;\s+(\d+) measured;\s+(\d+) filtered out(?:;\s+finished in ([\d.]+)s)?"
+            ).unwrap()
+        });
+
+        let caps = re.captures(line)?;
+        let status = caps.get(1)?.as_str();
+
+        // Only aggregate if status is "ok" (all tests passed)
+        if status != "ok" {
+            return None;
+        }
+
+        let passed = caps.get(2)?.as_str().parse().ok()?;
+        let failed = caps.get(3)?.as_str().parse().ok()?;
+        let ignored = caps.get(4)?.as_str().parse().ok()?;
+        let measured = caps.get(5)?.as_str().parse().ok()?;
+        let filtered_out = caps.get(6)?.as_str().parse().ok()?;
+
+        let (duration_secs, has_duration) = if let Some(duration_match) = caps.get(7) {
+            (duration_match.as_str().parse().unwrap_or(0.0), true)
+        } else {
+            (0.0, false)
+        };
+
+        Some(Self {
+            passed,
+            failed,
+            ignored,
+            measured,
+            filtered_out,
+            suites: 1,
+            duration_secs,
+            has_duration,
+        })
+    }
+
+    /// Merge another test result into this one
+    fn merge(&mut self, other: &Self) {
+        self.passed += other.passed;
+        self.failed += other.failed;
+        self.ignored += other.ignored;
+        self.measured += other.measured;
+        self.filtered_out += other.filtered_out;
+        self.suites += other.suites;
+        self.duration_secs += other.duration_secs;
+        self.has_duration = self.has_duration && other.has_duration;
+    }
+
+    /// Format as compact single line
+    fn format_compact(&self) -> String {
+        let mut parts = vec![format!("{} passed", self.passed)];
+
+        if self.ignored > 0 {
+            parts.push(format!("{} ignored", self.ignored));
+        }
+        if self.filtered_out > 0 {
+            parts.push(format!("{} filtered out", self.filtered_out));
+        }
+
+        let counts = parts.join(", ");
+
+        let suite_text = if self.suites == 1 {
+            "1 suite".to_string()
+        } else {
+            format!("{} suites", self.suites)
+        };
+
+        if self.has_duration {
+            format!(
+                "✓ cargo test: {} ({}, {:.2}s)",
+                counts, suite_text, self.duration_secs
+            )
+        } else {
+            format!("✓ cargo test: {} ({})", counts, suite_text)
+        }
+    }
+}
+
 /// Filter cargo test output - show failures + summary only
 fn filter_cargo_test(output: &str) -> String {
     let mut failures: Vec<String> = Vec::new();
@@ -414,7 +513,33 @@ fn filter_cargo_test(output: &str) -> String {
     let mut result = String::new();
 
     if failures.is_empty() && !summary_lines.is_empty() {
-        // All passed
+        // All passed - try to aggregate
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in &summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        // If all lines parsed successfully and we have at least one suite, return compact format
+        if all_parsed {
+            if let Some(agg) = aggregated {
+                if agg.suites > 0 {
+                    return agg.format_compact();
+                }
+            }
+        }
+
+        // Fallback: use original behavior if regex failed
         for line in &summary_lines {
             result.push_str(&format!("✓ {}\n", line));
         }
@@ -618,7 +743,11 @@ test utils::tests::test_strip_ansi_simple ... ok
 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 "#;
         let result = filter_cargo_test(output);
-        assert!(result.contains("✓ test result: ok. 15 passed"));
+        assert!(
+            result.contains("✓ cargo test: 15 passed (1 suite, 0.01s)"),
+            "Expected compact format, got: {}",
+            result
+        );
         assert!(!result.contains("Compiling"));
         assert!(!result.contains("test utils"));
     }
@@ -644,6 +773,153 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         assert!(result.contains("FAILURES"));
         assert!(result.contains("test_b"));
         assert!(result.contains("test result:"));
+    }
+
+    #[test]
+    fn test_filter_cargo_test_multi_suite_all_pass() {
+        let output = r#"   Compiling rtk v0.5.0
+    Finished test [unoptimized + debuginfo] target(s) in 2.53s
+     Running unittests src/lib.rs (target/debug/deps/rtk-abc123)
+
+running 50 tests
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running unittests src/main.rs (target/debug/deps/rtk-def456)
+
+running 30 tests
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/integration.rs (target/debug/deps/integration-ghi789)
+
+running 25 tests
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+   Doc-tests rtk
+
+running 32 tests
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+"#;
+        let result = filter_cargo_test(output);
+        assert!(
+            result.contains("✓ cargo test: 137 passed (4 suites, 1.45s)"),
+            "Expected aggregated format, got: {}",
+            result
+        );
+        assert!(!result.contains("running"));
+    }
+
+    #[test]
+    fn test_filter_cargo_test_multi_suite_with_failures() {
+        let output = r#"     Running unittests src/lib.rs
+
+running 20 tests
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests src/main.rs
+
+running 15 tests
+test foo::test_bad ... FAILED
+
+failures:
+
+---- foo::test_bad stdout ----
+thread panicked at 'assertion failed'
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/integration.rs
+
+running 10 tests
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+"#;
+        let result = filter_cargo_test(output);
+        // Should NOT aggregate when there are failures
+        assert!(result.contains("FAILURES"), "got: {}", result);
+        assert!(result.contains("test_bad"), "got: {}", result);
+        assert!(result.contains("test result:"), "got: {}", result);
+        // Should show individual summaries
+        assert!(result.contains("20 passed"), "got: {}", result);
+        assert!(result.contains("14 passed"), "got: {}", result);
+        assert!(result.contains("10 passed"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_test_all_suites_zero_tests() {
+        let output = r#"     Running unittests src/empty1.rs
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/empty2.rs
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/empty3.rs
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+"#;
+        let result = filter_cargo_test(output);
+        assert!(
+            result.contains("✓ cargo test: 0 passed (3 suites, 0.00s)"),
+            "Expected compact format for zero tests, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_test_with_ignored_and_filtered() {
+        let output = r#"     Running unittests src/lib.rs
+
+running 50 tests
+test result: ok. 45 passed; 0 failed; 3 ignored; 0 measured; 2 filtered out; finished in 0.50s
+
+     Running tests/integration.rs
+
+running 20 tests
+test result: ok. 18 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.20s
+"#;
+        let result = filter_cargo_test(output);
+        assert!(
+            result.contains("✓ cargo test: 63 passed, 5 ignored, 2 filtered out (2 suites, 0.70s)"),
+            "Expected compact format with ignored and filtered, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_test_single_suite_compact() {
+        let output = r#"     Running unittests src/main.rs
+
+running 15 tests
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+"#;
+        let result = filter_cargo_test(output);
+        assert!(
+            result.contains("✓ cargo test: 15 passed (1 suite, 0.01s)"),
+            "Expected singular 'suite', got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_test_regex_fallback() {
+        let output = r#"     Running unittests src/main.rs
+
+running 15 tests
+test result: MALFORMED LINE WITHOUT PROPER FORMAT
+"#;
+        let result = filter_cargo_test(output);
+        // Should fallback to original behavior (show line with checkmark)
+        assert!(
+            result.contains("✓ test result: MALFORMED"),
+            "Expected fallback format, got: {}",
+            result
+        );
     }
 
     #[test]
