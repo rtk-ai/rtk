@@ -24,6 +24,7 @@ mod lint_cmd;
 mod local_llm;
 mod log_cmd;
 mod ls;
+mod mypy_cmd;
 mod next_cmd;
 mod npm_cmd;
 mod parser;
@@ -484,6 +485,13 @@ enum Commands {
     /// Pytest test runner with compact output
     Pytest {
         /// Pytest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Mypy type checker with grouped error output
+    Mypy {
+        /// Mypy arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1312,6 +1320,10 @@ fn main() -> Result<()> {
 
         Commands::Pytest { args } => {
             pytest_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::Mypy { args } => {
+            mypy_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Pip { args } => {
