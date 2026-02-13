@@ -70,6 +70,7 @@ const PATTERNS: &[&str] = &[
     r"^kubectl\s+(get|logs)",
     r"^curl\s+",
     r"^wget\s+",
+    r"^(python3?\s+-m\s+)?mypy(\s|$)",
 ];
 
 const RULES: &[RtkRule] = &[
@@ -222,6 +223,13 @@ const RULES: &[RtkRule] = &[
         rtk_cmd: "rtk wget",
         category: "Network",
         savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk mypy",
+        category: "Build",
+        savings_pct: 80.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
@@ -731,5 +739,31 @@ mod tests {
     fn test_split_heredoc_no_split() {
         let cmd = "cat <<'EOF'\nhello && world\nEOF";
         assert_eq!(split_command_chain(cmd), vec![cmd]);
+    }
+
+    #[test]
+    fn test_classify_mypy() {
+        assert_eq!(
+            classify_command("mypy src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mypy",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_python_m_mypy() {
+        assert_eq!(
+            classify_command("python3 -m mypy --strict"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mypy",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
     }
 }
