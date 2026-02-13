@@ -138,28 +138,22 @@ fn clean_line(line: &str, max_len: usize, context_only: bool, pattern: &str) -> 
         let pattern_lower = pattern.to_lowercase();
 
         if let Some(pos) = lower.find(&pattern_lower) {
-            let start = pos.saturating_sub(max_len / 3);
-            let end = (start + max_len).min(trimmed.len());
-            let start = if end == trimmed.len() {
+            let char_pos = lower[..pos].chars().count();
+            let chars: Vec<char> = trimmed.chars().collect();
+            let char_len = chars.len();
+
+            let start = char_pos.saturating_sub(max_len / 3);
+            let end = (start + max_len).min(char_len);
+            let start = if end == char_len {
                 end.saturating_sub(max_len)
             } else {
                 start
             };
 
-            // Snap to valid char boundaries
-            let mut safe_start = start;
-            while safe_start > 0 && !trimmed.is_char_boundary(safe_start) {
-                safe_start -= 1;
-            }
-            let mut safe_end = end;
-            while safe_end < trimmed.len() && !trimmed.is_char_boundary(safe_end) {
-                safe_end += 1;
-            }
-
-            let slice = &trimmed[safe_start..safe_end];
-            if safe_start > 0 && safe_end < trimmed.len() {
+            let slice: String = chars[start..end].iter().collect();
+            if start > 0 && end < char_len {
                 format!("...{}...", slice)
-            } else if safe_start > 0 {
+            } else if start > 0 {
                 format!("...{}", slice)
             } else {
                 format!("{}...", slice)

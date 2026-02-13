@@ -97,21 +97,17 @@ pub trait OutputParser: Sized {
 
 /// Truncate output to max length with ellipsis
 pub fn truncate_output(output: &str, max_chars: usize) -> String {
-    if output.len() <= max_chars {
+    let chars: Vec<char> = output.chars().collect();
+    if chars.len() <= max_chars {
         return output.to_string();
     }
 
-    // Find nearest valid char boundary at or before max_chars
-    let mut end = max_chars;
-    while end > 0 && !output.is_char_boundary(end) {
-        end -= 1;
-    }
-    let truncated = &output[..end];
+    let truncated: String = chars[..max_chars].iter().collect();
     format!(
         "{}\n\n[RTK:PASSTHROUGH] Output truncated ({} chars → {} chars)",
         truncated,
-        output.len(),
-        end
+        chars.len(),
+        max_chars
     )
 }
 
