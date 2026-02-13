@@ -33,41 +33,44 @@ esac
 
 REWRITTEN=""
 
-# --- Git commands ---
-if echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+status([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git status/rtk git status/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+diff([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git diff/rtk git diff/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+log([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git log/rtk git log/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+add([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git add/rtk git add/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+commit([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git commit/rtk git commit/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+push([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git push/rtk git push/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+pull([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git pull/rtk git pull/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+branch([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git branch/rtk git branch/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+fetch([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git fetch/rtk git fetch/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+stash([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git stash/rtk git stash/')
-elif echo "$FIRST_CMD" | grep -qE '^git[[:space:]]+show([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^git show/rtk git show/')
+# --- Git commands (normalize past global options to find subcommand) ---
+GIT_SUBCMD=""
+if echo "$FIRST_CMD" | grep -qE '^git[[:space:]]'; then
+  GIT_SUBCMD=$(echo "$FIRST_CMD" | sed -E \
+    -e 's/^git[[:space:]]+//' \
+    -e 's/(-C|-c)[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
+    -e 's/--[a-z-]+=[^[:space:]]+[[:space:]]*//g' \
+    -e 's/--(no-pager|no-optional-locks|bare|literal-pathspecs)[[:space:]]*//g' \
+    -e 's/^[[:space:]]+//')
+fi
+
+if [ -n "$GIT_SUBCMD" ]; then
+  case "$GIT_SUBCMD" in
+    status|status\ *)  REWRITTEN="rtk $CMD" ;;
+    diff|diff\ *)      REWRITTEN="rtk $CMD" ;;
+    log|log\ *)        REWRITTEN="rtk $CMD" ;;
+    add|add\ *)        REWRITTEN="rtk $CMD" ;;
+    commit|commit\ *)  REWRITTEN="rtk $CMD" ;;
+    push|push\ *)      REWRITTEN="rtk $CMD" ;;
+    pull|pull\ *)      REWRITTEN="rtk $CMD" ;;
+    branch|branch\ *)  REWRITTEN="rtk $CMD" ;;
+    fetch|fetch\ *)    REWRITTEN="rtk $CMD" ;;
+    stash|stash\ *)    REWRITTEN="rtk $CMD" ;;
+    show|show\ *)      REWRITTEN="rtk $CMD" ;;
+  esac
 
 # --- GitHub CLI ---
 elif echo "$FIRST_CMD" | grep -qE '^gh[[:space:]]+(pr|issue|run)([[:space:]]|$)'; then
   REWRITTEN=$(echo "$CMD" | sed 's/^gh /rtk gh /')
 
-# --- Cargo ---
-elif echo "$FIRST_CMD" | grep -qE '^cargo[[:space:]]+test([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^cargo test/rtk cargo test/')
-elif echo "$FIRST_CMD" | grep -qE '^cargo[[:space:]]+build([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^cargo build/rtk cargo build/')
-elif echo "$FIRST_CMD" | grep -qE '^cargo[[:space:]]+clippy([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^cargo clippy/rtk cargo clippy/')
+# --- Cargo (normalize past +toolchain to find subcommand) ---
+elif echo "$FIRST_CMD" | grep -qE '^cargo[[:space:]]'; then
+  CARGO_SUBCMD=$(echo "$FIRST_CMD" | sed -E 's/^cargo[[:space:]]+(\+[^[:space:]]+[[:space:]]+)?//')
+  case "$CARGO_SUBCMD" in
+    test|test\ *)     REWRITTEN="rtk $CMD" ;;
+    build|build\ *)   REWRITTEN="rtk $CMD" ;;
+    clippy|clippy\ *) REWRITTEN="rtk $CMD" ;;
+  esac
 
 # --- File operations ---
 elif echo "$FIRST_CMD" | grep -qE '^cat[[:space:]]+'; then
@@ -99,11 +102,25 @@ elif echo "$FIRST_CMD" | grep -qE '^pnpm[[:space:]]+playwright([[:space:]]|$)'; 
 elif echo "$FIRST_CMD" | grep -qE '^(npx[[:space:]]+)?prisma([[:space:]]|$)'; then
   REWRITTEN=$(echo "$CMD" | sed -E 's/^(npx )?prisma/rtk prisma/')
 
-# --- Containers ---
-elif echo "$FIRST_CMD" | grep -qE '^docker[[:space:]]+(ps|images|logs)([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^docker /rtk docker /')
-elif echo "$FIRST_CMD" | grep -qE '^kubectl[[:space:]]+(get|logs)([[:space:]]|$)'; then
-  REWRITTEN=$(echo "$CMD" | sed 's/^kubectl /rtk kubectl /')
+# --- Containers (normalize past global options to find subcommand) ---
+elif echo "$FIRST_CMD" | grep -qE '^docker[[:space:]]'; then
+  DOCKER_SUBCMD=$(echo "$FIRST_CMD" | sed -E \
+    -e 's/^docker[[:space:]]+//' \
+    -e 's/(-H|--context|--config)[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
+    -e 's/--[a-z-]+=[^[:space:]]+[[:space:]]*//g' \
+    -e 's/^[[:space:]]+//')
+  case "$DOCKER_SUBCMD" in
+    ps|ps\ *|images|images\ *|logs|logs\ *) REWRITTEN="rtk $CMD" ;;
+  esac
+elif echo "$FIRST_CMD" | grep -qE '^kubectl[[:space:]]'; then
+  KUBE_SUBCMD=$(echo "$FIRST_CMD" | sed -E \
+    -e 's/^kubectl[[:space:]]+//' \
+    -e 's/(--context|--kubeconfig|--namespace|-n)[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
+    -e 's/--[a-z-]+=[^[:space:]]+[[:space:]]*//g' \
+    -e 's/^[[:space:]]+//')
+  case "$KUBE_SUBCMD" in
+    get|get\ *|logs|logs\ *) REWRITTEN="rtk $CMD" ;;
+  esac
 
 # --- Network ---
 elif echo "$FIRST_CMD" | grep -qE '^curl[[:space:]]+'; then
