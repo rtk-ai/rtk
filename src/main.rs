@@ -11,6 +11,7 @@ mod display_helpers;
 mod env_cmd;
 mod filter;
 mod find_cmd;
+mod format_cmd;
 mod gain;
 mod gh_cmd;
 mod git;
@@ -385,6 +386,13 @@ enum Commands {
     /// Prettier format checker with compact output
     Prettier {
         /// Prettier arguments (e.g., --check, --write)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Universal format checker (prettier, black, ruff format)
+    Format {
+        /// Formatter arguments (auto-detects formatter from project files)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1163,6 +1171,10 @@ fn main() -> Result<()> {
 
         Commands::Prettier { args } => {
             prettier_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::Format { args } => {
+            format_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Playwright { args } => {

@@ -6,26 +6,26 @@ use std::collections::HashMap;
 use std::process::Command;
 
 #[derive(Debug, Deserialize)]
-struct RuffLocation {
-    row: usize,
-    column: usize,
+pub struct RuffLocation {
+    pub row: usize,
+    pub column: usize,
 }
 
 #[derive(Debug, Deserialize)]
-struct RuffFix {
+pub struct RuffFix {
     #[allow(dead_code)]
-    applicability: Option<String>,
+    pub applicability: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RuffDiagnostic {
-    code: String,
-    message: String,
-    location: RuffLocation,
+pub struct RuffDiagnostic {
+    pub code: String,
+    pub message: String,
+    pub location: RuffLocation,
     #[allow(dead_code)]
-    end_location: Option<RuffLocation>,
-    filename: String,
-    fix: Option<RuffFix>,
+    pub end_location: Option<RuffLocation>,
+    pub filename: String,
+    pub fix: Option<RuffFix>,
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
@@ -112,7 +112,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 }
 
 /// Filter ruff check JSON output - group by rule and file
-fn filter_ruff_check_json(output: &str) -> String {
+pub fn filter_ruff_check_json(output: &str) -> String {
     let diagnostics: Result<Vec<RuffDiagnostic>, _> = serde_json::from_str(output);
 
     let diagnostics = match diagnostics {
@@ -214,7 +214,7 @@ fn filter_ruff_check_json(output: &str) -> String {
 }
 
 /// Filter ruff format output - show files that need formatting
-fn filter_ruff_format(output: &str) -> String {
+pub fn filter_ruff_format(output: &str) -> String {
     let mut files_to_format: Vec<String> = Vec::new();
     let mut files_checked = 0;
 

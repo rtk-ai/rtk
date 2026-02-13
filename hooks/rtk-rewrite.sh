@@ -124,6 +124,12 @@ elif echo "$FIRST_CMD" | grep -qE '^pip\s+(list|outdated|install|show)(\s|$)'; t
   REWRITTEN=$(echo "$CMD" | sed 's/^pip /rtk pip /')
 elif echo "$FIRST_CMD" | grep -qE '^uv\s+pip\s+(list|outdated|install|show)(\s|$)'; then
   REWRITTEN=$(echo "$CMD" | sed 's/^uv pip /rtk pip /')
+elif echo "$FIRST_CMD" | grep -qE '^pylint(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^pylint/rtk lint pylint/')
+elif echo "$FIRST_CMD" | grep -qE '^mypy(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^mypy/rtk lint mypy/')
+elif echo "$FIRST_CMD" | grep -qE '^black\s+--check(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^black/rtk format black/')
 
 # --- Go tooling ---
 elif echo "$FIRST_CMD" | grep -qE '^go\s+test(\s|$)'; then
