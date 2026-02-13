@@ -135,7 +135,8 @@ fn analyze_logs(content: &str) -> String {
                 .unwrap_or(normalized);
 
             let truncated = if original.len() > 100 {
-                format!("{}...", &original[..97])
+                let t: String = original.chars().take(97).collect();
+                format!("{}...", t)
             } else {
                 original.to_string()
             };
@@ -174,7 +175,8 @@ fn analyze_logs(content: &str) -> String {
                 .unwrap_or(normalized);
 
             let truncated = if original.len() > 100 {
-                format!("{}...", &original[..97])
+                let t: String = original.chars().take(97).collect();
+                format!("{}...", t)
             } else {
                 original.to_string()
             };
@@ -228,6 +230,19 @@ mod tests {
 "#;
         let result = analyze_logs(logs);
         assert!(result.contains("×3"));
+        assert!(result.contains("ERRORS"));
+    }
+
+    #[test]
+    fn test_analyze_logs_multibyte() {
+        let logs = format!(
+            "2024-01-01 10:00:00 ERROR: {} connection failed\n\
+             2024-01-01 10:00:01 WARN: {} retry attempt\n",
+            "ข้อผิดพลาด".repeat(15),
+            "คำเตือน".repeat(15)
+        );
+        let result = analyze_logs(&logs);
+        // Should not panic even with very long multi-byte messages
         assert!(result.contains("ERRORS"));
     }
 }
