@@ -133,6 +133,20 @@ elif echo "$FIRST_CMD" | grep -qE '^wget\s+'; then
 # --- pnpm package management ---
 elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+(list|ls|outdated)(\s|$)'; then
   REWRITTEN=$(echo "$CMD" | sed 's/^pnpm /rtk pnpm /')
+
+# --- Python tooling ---
+elif echo "$FIRST_CMD" | grep -qE '^ruff\s+(check|format)(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^ruff /rtk ruff /')
+elif echo "$FIRST_CMD" | grep -qE '^pytest(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^pytest/rtk pytest/')
+elif echo "$FIRST_CMD" | grep -qE '^pip\s+(list|install|outdated)(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^pip /rtk pip /')
+
+# --- Go tooling ---
+elif echo "$FIRST_CMD" | grep -qE '^go\s+(test|build|vet)(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^go /rtk go /')
+elif echo "$FIRST_CMD" | grep -qE '^golangci-lint(\s|$)'; then
+  REWRITTEN=$(echo "$CMD" | sed 's/^golangci-lint/rtk golangci-lint/')
 fi
 
 # If no rewrite needed, approve as-is
