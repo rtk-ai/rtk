@@ -196,11 +196,12 @@ fn compact_url(url: &str) -> String {
         .unwrap_or(url);
 
     // Truncate if too long
-    if without_proto.len() <= 50 {
+    let chars: Vec<char> = without_proto.chars().collect();
+    if chars.len() <= 50 {
         without_proto.to_string()
     } else {
-        let prefix: String = without_proto.chars().take(25).collect();
-        let suffix: String = without_proto.chars().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
+        let prefix: String = chars[..25].iter().collect();
+        let suffix: String = chars[chars.len() - 20..].iter().collect();
         format!("{}...{}", prefix, suffix)
     }
 }
