@@ -2,9 +2,19 @@
 # RTK auto-rewrite hook for Claude Code PreToolUse:Bash
 # Transparently rewrites raw commands to their rtk equivalents.
 # Outputs JSON with updatedInput to modify the command before execution.
+#
+# Environment Variables:
+#   RTK_HOOK_ENABLED=0|1       - Master toggle (default: 1)
+#   RTK_HOOK_HYBRID=0|1        - Use hybrid engine for all commands (default: 1)
+#   RTK_HOOK_FALLBACK=0|1      - Fallback to regex if hybrid fails (default: 1)
 
 # Guards: skip silently if dependencies missing
 if ! command -v rtk &>/dev/null || ! command -v jq &>/dev/null; then
+  exit 0
+fi
+
+# Master toggle check
+if [ "${RTK_HOOK_ENABLED:-1}" = "0" ]; then
   exit 0
 fi
 
@@ -18,7 +28,6 @@ if [ -z "$CMD" ]; then
 fi
 
 # Extract the first meaningful command (before pipes, &&, etc.)
-# We only rewrite if the FIRST command in a chain matches.
 FIRST_CMD="$CMD"
 
 # Skip if already using rtk
@@ -26,14 +35,57 @@ case "$FIRST_CMD" in
   rtk\ *|*/rtk\ *) exit 0 ;;
 esac
 
-# Skip commands with heredocs, variable assignments as the whole command, etc.
+# Recursion guard: skip if RTK is already active
+if [ "${RTK_ACTIVE:-0}" = "1" ]; then
+  exit 0
+fi
+
+# Skip commands with heredocs
 case "$FIRST_CMD" in
   *'<<'*) exit 0 ;;
 esac
 
+# === HYBRID ENGINE MODE ===
+# Use rtk hook check for intelligent command analysis
+if [ "${RTK_HOOK_HYBRID:-1}" = "1" ]; then
+  REWRITTEN=$(rtk hook check --agent claude "$CMD" 2>&1)
+  EXIT_CODE=$?
+
+  if [ $EXIT_CODE -eq 0 ]; then
+    # Success: Output the rewritten command
+    # Build the updated tool_input with all original fields preserved
+    ORIGINAL_INPUT=$(echo "$INPUT" | jq -c '.tool_input')
+    UPDATED_INPUT=$(echo "$ORIGINAL_INPUT" | jq --arg cmd "$REWRITTEN" '.command = $cmd')
+
+    jq -n \
+      --argjson updated "$UPDATED_INPUT" \
+      '{
+        "hookSpecificOutput": {
+          "hookEventName": "PreToolUse",
+          "permissionDecision": "allow",
+          "permissionDecisionReason": "RTK hybrid engine",
+          "updatedInput": $updated
+        }
+      }'
+    exit 0
+  else
+    # Blocked: Output error to stderr and deny
+    echo "$REWRITTEN" >&2
+    jq -n '{
+      "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "RTK safety block"
+      }
+    }'
+    exit 1
+  fi
+fi
+
+# === FALLBACK: REGEX MODE ===
+# Used when RTK_HOOK_HYBRID=0 or hybrid mode is disabled
+
 # Strip leading env var assignments for pattern matching
-# e.g., "TEST_SESSION_ID=2 npx playwright test" → match against "npx playwright test"
-# but preserve them in the rewritten command for execution.
 ENV_PREFIX=$(echo "$FIRST_CMD" | grep -oE '^([A-Za-z_][A-Za-z0-9_]*=[^ ]* +)+' || echo "")
 if [ -n "$ENV_PREFIX" ]; then
   MATCH_CMD="${FIRST_CMD:${#ENV_PREFIX}}"
