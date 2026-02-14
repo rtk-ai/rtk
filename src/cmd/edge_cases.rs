@@ -439,7 +439,10 @@ mod tests {
     static ENV_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        // Recover from poisoned mutex if a previous test panicked
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn cleanup_safety_env() {
@@ -498,19 +501,37 @@ mod tests {
         std::env::remove_var("RTK_SAFE_COMMANDS");
     }
 
-    /// Test: Safety disabled by default
+    /// Test: Safety enabled by default (rm->trash, git clean blocked)
     #[test]
-    fn test_safety_disabled_by_default() {
+    fn test_safety_enabled_by_default() {
         let _lock = env_lock();
         cleanup_safety_env();
 
-        // rm should pass through without RTK_SAFE_COMMANDS
+        // rm should be redirected to trash by default
+        let result = check("rm", &["file".to_string()]);
+        assert!(matches!(result, SafetyResult::TrashRequested(_)));
+
+        // git clean should be blocked by default
+        let result = check("git", &["clean".to_string(), "-fd".to_string()]);
+        assert!(matches!(result, SafetyResult::Blocked(_)));
+    }
+
+    /// Test: Safety can be disabled with RTK_SAFE_COMMANDS=0
+    #[test]
+    fn test_safety_can_be_disabled() {
+        let _lock = env_lock();
+        cleanup_safety_env();
+        std::env::set_var("RTK_SAFE_COMMANDS", "0");
+
+        // rm should pass through when disabled
         let result = check("rm", &["file".to_string()]);
         assert_eq!(result, SafetyResult::Safe);
 
-        // git clean should pass through
+        // git clean should pass through when disabled
         let result = check("git", &["clean".to_string(), "-fd".to_string()]);
         assert_eq!(result, SafetyResult::Safe);
+
+        std::env::remove_var("RTK_SAFE_COMMANDS");
     }
 
     /// Test: Token waste prevention enabled by default

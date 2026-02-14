@@ -52,20 +52,14 @@ impl SafetyRule {
     /// Check if rule should apply (env var + predicate)
     ///
     /// Env var behavior:
-    /// - RTK_SAFE_COMMANDS: Opt-in, only applies if set (rm->trash, git safety)
+    /// - RTK_SAFE_COMMANDS: Opt-out, applies by default, disable with =0
     /// - RTK_BLOCK_TOKEN_WASTE: Opt-out, applies by default, disable with =0
     pub fn should_apply(&self) -> bool {
         // Check env var if specified
         if let Some(env) = self.env_var {
             match env {
-                // Opt-in features: only apply if explicitly enabled
-                "RTK_SAFE_COMMANDS" => {
-                    if std::env::var(env).is_err() {
-                        return false;
-                    }
-                }
                 // Opt-out features: apply by default, disable with =0
-                "RTK_BLOCK_TOKEN_WASTE" => {
+                "RTK_SAFE_COMMANDS" | "RTK_BLOCK_TOKEN_WASTE" => {
                     if let Ok(val) = std::env::var(env) {
                         if val == "0" || val == "false" {
                             return false;
@@ -110,25 +104,24 @@ pub enum SafetyResult {
 /// - RTK_SAFE_COMMANDS=1    - Master toggle for ALL safety features (rm->trash, git safety)
 /// - RTK_BLOCK_TOKEN_WASTE=0 - Disable token waste prevention (cat/sed/head blocking)
 ///
-/// When RTK_SAFE_COMMANDS is set, it enables:
-/// - rm -> trash redirection
-/// - git reset --hard -> prepend git stash
-/// - git clean -fd/-df -> block
+/// All safety features are enabled by default. To disable:
+/// - RTK_SAFE_COMMANDS=0 - Disable rm->trash and git safety
+/// - RTK_BLOCK_TOKEN_WASTE=0 - Disable token waste prevention
 pub fn get_rules() -> Vec<SafetyRule> {
     vec![
         // === DANGEROUS FILE OPERATIONS ===
-        // Enabled by RTK_SAFE_COMMANDS=1
+        // Enabled by default, disable with RTK_SAFE_COMMANDS=0
         SafetyRule {
             pattern: "rm",
             action: SafetyAction::Trash,
-            human_msg: "Safety: Moving to trash (RTK_SAFE_COMMANDS=1).",
+            human_msg: "Safety: Moving to trash.",
             agent_msg: "REWRITE: rm -> trash",
             predicate: None,
             env_var: Some("RTK_SAFE_COMMANDS"),
         },
 
         // === DANGEROUS GIT OPERATIONS ===
-        // Enabled by RTK_SAFE_COMMANDS=1
+        // Enabled by default, disable with RTK_SAFE_COMMANDS=0
         SafetyRule {
             pattern: "git reset --hard",
             action: SafetyAction::Prepend("git stash push -m 'RTK Safety Stash'".into()),
@@ -232,8 +225,13 @@ pub fn check(binary: &str, args: &[String]) -> SafetyResult {
 /// Check raw command string (for passthrough mode)
 /// This catches dangerous patterns even when we can't parse the command
 pub fn check_raw(raw: &str) -> SafetyResult {
-    // Check for rm in various forms (when RTK_SAFE_COMMANDS is enabled)
-    if std::env::var("RTK_SAFE_COMMANDS").is_ok() {
+    // Check if RTK_SAFE_COMMANDS is disabled (opt-out)
+    let safe_commands_disabled = std::env::var("RTK_SAFE_COMMANDS")
+        .map(|v| v == "0" || v == "false")
+        .unwrap_or(false);
+
+    if !safe_commands_disabled {
+        // Check for rm in various forms (enabled by default)
         let rm_patterns = [" rm ", "rm ", "/rm ", "\\rm "];
         for pattern in rm_patterns {
             if raw.contains(pattern) || raw.starts_with("rm ") {
@@ -265,7 +263,10 @@ mod tests {
     static ENV_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 
     fn env_lock() -> MutexGuard<'static, ()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        // Recover from poisoned mutex if a previous test panicked
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     // === BASIC CHECK TESTS ===
@@ -317,11 +318,27 @@ mod tests {
     }
 
     #[test]
-    fn test_check_rm_passes_when_env_not_set() {
+    fn test_check_rm_blocked_by_default() {
         let _lock = env_lock();
         cleanup_env_vars();
+        // rm should be redirected to trash by default now
+        let result = check("rm", &["file.txt".to_string()]);
+        match result {
+            SafetyResult::TrashRequested(paths) => {
+                assert_eq!(paths, vec!["file.txt"]);
+            }
+            _ => panic!("Expected TrashRequested by default, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_check_rm_passes_when_disabled() {
+        let _lock = env_lock();
+        cleanup_env_vars();
+        env::set_var("RTK_SAFE_COMMANDS", "0");
         let result = check("rm", &["file.txt".to_string()]);
         assert_eq!(result, SafetyResult::Safe);
+        env::remove_var("RTK_SAFE_COMMANDS");
     }
 
     #[test]
@@ -448,11 +465,22 @@ mod tests {
     }
 
     #[test]
-    fn test_check_git_clean_passes_when_env_not_set() {
+    fn test_check_git_clean_blocked_by_default() {
         let _lock = env_lock();
         cleanup_env_vars();
+        // git clean should be blocked by default now
+        let result = check("git", &["clean".to_string(), "-fd".to_string()]);
+        assert!(matches!(result, SafetyResult::Blocked(_)));
+    }
+
+    #[test]
+    fn test_check_git_clean_passes_when_disabled() {
+        let _lock = env_lock();
+        cleanup_env_vars();
+        env::set_var("RTK_SAFE_COMMANDS", "0");
         let result = check("git", &["clean".to_string(), "-fd".to_string()]);
         assert_eq!(result, SafetyResult::Safe);
+        env::remove_var("RTK_SAFE_COMMANDS");
     }
 
     // === CHECK_RAW TESTS ===
@@ -461,26 +489,24 @@ mod tests {
     fn test_check_raw_rm_detected() {
         let _lock = env_lock();
         cleanup_env_vars();
-        env::set_var("RTK_SAFE_COMMANDS", "1");
+        // RTK_SAFE_COMMANDS is enabled by default, so rm should be blocked
         let result = check_raw("rm file.txt");
         match result {
             SafetyResult::Blocked(_) => {}
             _ => panic!("Expected Blocked"),
         }
-        env::remove_var("RTK_SAFE_COMMANDS");
     }
 
     #[test]
     fn test_check_raw_sudo_rm_detected() {
         let _lock = env_lock();
         cleanup_env_vars();
-        env::set_var("RTK_SAFE_COMMANDS", "1");
+        // RTK_SAFE_COMMANDS is enabled by default, so sudo rm should be blocked
         let result = check_raw("sudo rm file.txt");
         match result {
             SafetyResult::Blocked(_) => {}
             _ => panic!("Expected Blocked"),
         }
-        env::remove_var("RTK_SAFE_COMMANDS");
     }
 
     #[test]
@@ -496,8 +522,8 @@ mod tests {
         let _lock = env_lock();
         // "rm" inside quotes should still be caught in passthrough
         // since we can't parse quotes in raw mode
+        // RTK_SAFE_COMMANDS is enabled by default
         cleanup_env_vars();
-        env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check_raw("echo \"rm file\"");
         // This will be blocked because we can't distinguish quoted rm
         // That's intentional - better safe than sorry
@@ -507,7 +533,6 @@ mod tests {
             SafetyResult::Rewritten(_) => {}
             SafetyResult::TrashRequested(_) => {}
         }
-        env::remove_var("RTK_SAFE_COMMANDS");
     }
 
     // === RULE ORDERING TESTS ===
