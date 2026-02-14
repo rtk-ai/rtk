@@ -27,6 +27,9 @@ toml = "0.8"
 chrono = "0.4"
 thiserror = "1.0"
 tempfile = "3"
+trash = "5"      # Built-in trash (cross-platform)
+atty = "0.2"     # Detect interactive terminal (for human vs agent messages)
+which = "7"      # Find binaries in PATH (for exec module)
 
 [dev-dependencies]
 

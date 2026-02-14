@@ -1,5 +1,6 @@
 mod cargo_cmd;
 mod cc_economics;
+mod cmd;
 mod ccusage;
 mod config;
 mod container;
@@ -474,6 +475,19 @@ enum Commands {
         args: Vec<OsString>,
     },
 
+    /// Run command through hybrid engine (native + passthrough)
+    Run {
+        /// Command string to execute
+        #[arg(short = 'c', long)]
+        command: String,
+    },
+
+    /// Hook protocol for Claude Code/Gemini integration
+    Hook {
+        #[command(subcommand)]
+        command: HookCommands,
+    },
+
     /// Ruff linter/formatter with compact output
     Ruff {
         /// Ruff arguments (e.g., check, format --check)
@@ -791,6 +805,21 @@ enum GoCommands {
     /// Passthrough: runs any unsupported go subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum HookCommands {
+    /// Check command for safety and rewrite (for Claude Code hooks)
+    Check {
+        /// Agent type: claude or gemini
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Command to check
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+    /// Handle Gemini JSON hook protocol (reads from stdin)
+    Gemini,
 }
 
 fn main() -> Result<()> {
@@ -1384,6 +1413,30 @@ fn main() -> Result<()> {
                 std::process::exit(output.status.code().unwrap_or(1));
             }
         }
+
+        Commands::Run { command } => {
+            let success = cmd::execute(&command, cli.verbose)?;
+            if !success {
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Hook { command } => match command {
+            HookCommands::Check { agent, command } => {
+                let cmd_str = command.join(" ");
+                let result = cmd::check_for_hook(&cmd_str, &agent);
+                let (output, _success, code) = cmd::hook::format_for_claude(result);
+                if code == 0 {
+                    println!("{}", output);
+                } else {
+                    eprintln!("{}", output);
+                }
+                std::process::exit(code);
+            }
+            HookCommands::Gemini => {
+                cmd::gemini_hook::run()?;
+            }
+        },
     }
 
     Ok(())
