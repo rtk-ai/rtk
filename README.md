@@ -50,7 +50,7 @@ With rtk: **~45,000 tokens** → **70% reduction**
 
 ### Migration Search Benchmark Snapshot (February 14, 2026)
 
-Source: `easy_math/tasks/benchmark_migration_search_compare_20260214-000212/compare.tsv`
+Source: internal migration benchmark artifacts (private repository)
 
 | Scenario | Agent | Est. tokens | Unique files | Files / 1K tokens |
 |---|---|---:|---:|---:|
@@ -61,7 +61,7 @@ Source: `easy_math/tasks/benchmark_migration_search_compare_20260214-000212/comp
 | quality_norm | rg | 14065 | 103 | 7.32 |
 | quality_norm | rgai | 7349 | 103 | 14.02 |
 
-Methodology and raw artifacts: `easy_math/tasks/benchmark_migration_search_*`
+Methodology and raw artifacts are private and not publicly linked.
 
 ## Search Priority Policy
 
