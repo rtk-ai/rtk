@@ -258,6 +258,15 @@ pub fn check_raw(raw: &str) -> SafetyResult {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::{Mutex, MutexGuard};
+
+    // Mutex to serialize tests that modify environment variables
+    // This prevents race conditions when tests run in parallel
+    static ENV_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     // === BASIC CHECK TESTS ===
 
@@ -268,6 +277,7 @@ mod tests {
 
     #[test]
     fn test_check_safe_command() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check("ls", &["-la".to_string()]);
         assert_eq!(result, SafetyResult::Safe);
@@ -275,6 +285,7 @@ mod tests {
 
     #[test]
     fn test_check_git_status() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check("git", &["status".to_string()]);
         assert_eq!(result, SafetyResult::Safe);
@@ -282,6 +293,7 @@ mod tests {
 
     #[test]
     fn test_check_empty_args() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check("pwd", &[]);
         assert_eq!(result, SafetyResult::Safe);
@@ -291,6 +303,7 @@ mod tests {
 
     #[test]
     fn test_check_rm_blocked_when_env_set() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check("rm", &["file.txt".to_string()]);
@@ -305,6 +318,7 @@ mod tests {
 
     #[test]
     fn test_check_rm_passes_when_env_not_set() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check("rm", &["file.txt".to_string()]);
         assert_eq!(result, SafetyResult::Safe);
@@ -312,6 +326,7 @@ mod tests {
 
     #[test]
     fn test_check_rm_with_flags() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check("rm", &["-rf".to_string(), "dir".to_string()]);
@@ -327,6 +342,7 @@ mod tests {
 
     #[test]
     fn test_check_rm_multiple_files() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check("rm", &["a.txt".to_string(), "b.txt".to_string(), "c.txt".to_string()]);
@@ -341,6 +357,7 @@ mod tests {
 
     #[test]
     fn test_check_rm_no_files() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check("rm", &["-rf".to_string()]);
@@ -357,6 +374,7 @@ mod tests {
 
     #[test]
     fn test_check_cat_blocked() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check("cat", &["file.txt".to_string()]);
         match result {
@@ -369,6 +387,7 @@ mod tests {
 
     #[test]
     fn test_check_cat_passes_when_disabled() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_BLOCK_TOKEN_WASTE", "0");
         let result = check("cat", &["file.txt".to_string()]);
@@ -378,6 +397,7 @@ mod tests {
 
     #[test]
     fn test_check_sed_blocked() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check("sed", &["-i".to_string(), "s/old/new/g".to_string()]);
         match result {
@@ -390,6 +410,7 @@ mod tests {
 
     #[test]
     fn test_check_head_blocked() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check("head", &["-n".to_string(), "10".to_string(), "file.txt".to_string()]);
         match result {
@@ -404,6 +425,7 @@ mod tests {
 
     #[test]
     fn test_check_git_reset_hard_blocked_when_env_set() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         // This test may or may not trigger depending on git state
@@ -414,6 +436,7 @@ mod tests {
 
     #[test]
     fn test_check_git_clean_fd_blocked() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check("git", &["clean".to_string(), "-fd".to_string()]);
@@ -426,6 +449,7 @@ mod tests {
 
     #[test]
     fn test_check_git_clean_passes_when_env_not_set() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check("git", &["clean".to_string(), "-fd".to_string()]);
         assert_eq!(result, SafetyResult::Safe);
@@ -435,6 +459,7 @@ mod tests {
 
     #[test]
     fn test_check_raw_rm_detected() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check_raw("rm file.txt");
@@ -447,6 +472,7 @@ mod tests {
 
     #[test]
     fn test_check_raw_sudo_rm_detected() {
+        let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check_raw("sudo rm file.txt");
@@ -459,6 +485,7 @@ mod tests {
 
     #[test]
     fn test_check_raw_safe_command() {
+        let _lock = env_lock();
         cleanup_env_vars();
         let result = check_raw("ls -la");
         assert_eq!(result, SafetyResult::Safe);
@@ -466,6 +493,7 @@ mod tests {
 
     #[test]
     fn test_check_raw_rm_in_quoted_string() {
+        let _lock = env_lock();
         // "rm" inside quotes should still be caught in passthrough
         // since we can't parse quotes in raw mode
         cleanup_env_vars();
@@ -486,6 +514,7 @@ mod tests {
 
     #[test]
     fn test_rules_are_ordered() {
+        let _lock = env_lock();
         let rules = get_rules();
         // More specific patterns should come before less specific
         // git reset --hard should come before git
