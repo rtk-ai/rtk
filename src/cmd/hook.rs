@@ -2,7 +2,8 @@
 //!
 //! Claude Code expects:
 //! - Success: rewritten command on stdout, exit 0
-//! - Blocked: error message on stderr, exit 1
+//! - Blocked: error message on stderr, exit 2 (blocking error)
+//! - Other exit codes: non-blocking errors
 //!
 //! Gemini expects:
 //! - JSON payload in, JSON response out
@@ -77,10 +78,14 @@ fn escape_quotes(s: &str) -> String {
 }
 
 /// Format hook result for Claude (text output)
+///
+/// Exit codes:
+/// - 0: Success, command rewritten/allowed
+/// - 2: Blocking error, command should be denied
 pub fn format_for_claude(result: HookResult) -> (String, bool, i32) {
     match result {
         HookResult::Rewrite(cmd) => (cmd, true, 0),
-        HookResult::Blocked(msg) => (msg, false, 1),
+        HookResult::Blocked(msg) => (msg, false, 2),  // Exit 2 = blocking error per Claude Code spec
     }
 }
 
@@ -218,7 +223,7 @@ mod tests {
         let (output, success, code) = format_for_claude(result);
         assert_eq!(output, "Error message");
         assert!(!success);
-        assert_eq!(code, 1);
+        assert_eq!(code, 2);  // Exit 2 = blocking error per Claude Code spec
     }
 
     // === FORMAT_FOR_GEMINI TESTS ===
@@ -239,5 +244,160 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(json["result"], "deny");
         assert_eq!(json["message"], "Error message");
+    }
+
+    // === ADDITIONAL EDGE CASE TESTS ===
+
+    #[test]
+    fn test_check_head_blocked() {
+        let result = check_for_hook("head -n 10 file.txt", "claude");
+        match result {
+            HookResult::Blocked(msg) => {
+                assert!(msg.contains("Read"));
+            }
+            _ => panic!("Expected Blocked for head command"),
+        }
+    }
+
+    #[test]
+    fn test_check_complex_command_with_env() {
+        // Commands with env var prefixes should be handled
+        let result = check_for_hook("FOO=bar echo hello", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("Expected Rewrite for env prefix command"),
+        }
+    }
+
+    #[test]
+    fn test_check_command_with_backticks() {
+        // Backticks should trigger shellism passthrough
+        let result = check_for_hook("echo `date`", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("Expected Rewrite for backtick command"),
+        }
+    }
+
+    #[test]
+    fn test_check_command_with_subshell() {
+        // Subshell syntax should trigger shellism passthrough
+        let result = check_for_hook("echo $(date)", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("Expected Rewrite for subshell command"),
+        }
+    }
+
+    #[test]
+    fn test_check_command_with_brace_expansion() {
+        // Brace expansion should trigger shellism passthrough
+        let result = check_for_hook("echo {a,b}.txt", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("Expected Rewrite for brace expansion"),
+        }
+    }
+
+    #[test]
+    fn test_check_chain_with_and_operator() {
+        // Chained commands should be handled
+        let result = check_for_hook("cd /tmp && git status", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk run"));
+                assert!(cmd.contains("&&"));
+            }
+            _ => panic!("Expected Rewrite for chained command"),
+        }
+    }
+
+    #[test]
+    fn test_check_chain_with_blocked_command() {
+        // If any command in chain is blocked, whole chain is blocked
+        let result = check_for_hook("cd /tmp && cat file.txt", "claude");
+        match result {
+            HookResult::Blocked(msg) => {
+                assert!(msg.contains("Read"));
+            }
+            _ => panic!("Expected Blocked when chain contains cat"),
+        }
+    }
+
+    #[test]
+    fn test_check_special_characters_in_command() {
+        // Commands with special characters should be handled
+        let result = check_for_hook("echo 'hello!@#$%^&*()'", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("Expected Rewrite for command with special chars"),
+        }
+    }
+
+    #[test]
+    fn test_check_unicode_command() {
+        // Unicode in commands should be preserved
+        let result = check_for_hook("echo '日本語 🎉'", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("日本語") || cmd.contains("rtk run"));
+            }
+            _ => panic!("Expected Rewrite for unicode command"),
+        }
+    }
+
+    #[test]
+    fn test_check_very_long_command() {
+        // Very long commands should be handled without truncation
+        let long_arg = "a".repeat(1000);
+        let cmd = format!("echo {}", long_arg);
+        let result = check_for_hook(&cmd, "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("Expected Rewrite for long command"),
+        }
+    }
+
+    #[test]
+    fn test_format_blocked_exit_code_is_2() {
+        // Critical: Exit code must be 2 for blocking (per Claude Code spec)
+        let result = HookResult::Blocked("Blocked for safety".to_string());
+        let (_, _, code) = format_for_claude(result);
+        assert_eq!(code, 2, "Blocked commands must return exit code 2");
+    }
+
+    #[test]
+    fn test_format_rewrite_exit_code_is_0() {
+        // Success/rewrite must return exit code 0
+        let result = HookResult::Rewrite("rtk run -c 'echo hello'".to_string());
+        let (_, _, code) = format_for_claude(result);
+        assert_eq!(code, 0, "Rewritten commands must return exit code 0");
+    }
+
+    #[test]
+    fn test_check_different_agents() {
+        // Both claude and gemini agents should work
+        let claude_result = check_for_hook("git status", "claude");
+        let gemini_result = check_for_hook("git status", "gemini");
+
+        match (claude_result, gemini_result) {
+            (HookResult::Rewrite(c), HookResult::Rewrite(g)) => {
+                assert!(c.contains("rtk run"));
+                assert!(g.contains("rtk run"));
+            }
+            _ => panic!("Both agents should produce Rewrite for safe command"),
+        }
     }
 }

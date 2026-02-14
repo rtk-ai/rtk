@@ -78,7 +78,7 @@ if [ "${RTK_HOOK_HYBRID:-1}" = "1" ]; then
         "permissionDecisionReason": "RTK safety block"
       }
     }'
-    exit 1
+    exit 2  # Exit 2 = blocking error per Claude Code spec
   fi
 fi
 

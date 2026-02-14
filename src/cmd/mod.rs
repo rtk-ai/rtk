@@ -19,5 +19,8 @@ pub mod exec;
 pub mod hook;
 pub mod gemini_hook;
 
+#[cfg(test)]
+mod edge_cases;
+
 pub use exec::execute;
 pub use hook::check_for_hook;

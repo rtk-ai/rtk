@@ -132,23 +132,23 @@ mod tests {
 
     #[test]
     fn test_export_simple() {
-        builtin_export(&["RTK_TEST_VAR=value".to_string()]).unwrap();
-        assert_eq!(env::var("RTK_TEST_VAR").unwrap(), "value");
-        env::remove_var("RTK_TEST_VAR");
+        builtin_export(&["RTK_TEST_SIMPLE=value".to_string()]).unwrap();
+        assert_eq!(env::var("RTK_TEST_SIMPLE").unwrap(), "value");
+        env::remove_var("RTK_TEST_SIMPLE");
     }
 
     #[test]
     fn test_export_with_equals_in_value() {
-        builtin_export(&["RTK_TEST_VAR=key=value".to_string()]).unwrap();
-        assert_eq!(env::var("RTK_TEST_VAR").unwrap(), "key=value");
-        env::remove_var("RTK_TEST_VAR");
+        builtin_export(&["RTK_TEST_EQUALS=key=value".to_string()]).unwrap();
+        assert_eq!(env::var("RTK_TEST_EQUALS").unwrap(), "key=value");
+        env::remove_var("RTK_TEST_EQUALS");
     }
 
     #[test]
     fn test_export_quoted_value() {
-        builtin_export(&["RTK_TEST_VAR=\"hello world\"".to_string()]).unwrap();
-        assert_eq!(env::var("RTK_TEST_VAR").unwrap(), "hello world");
-        env::remove_var("RTK_TEST_VAR");
+        builtin_export(&["RTK_TEST_QUOTED=\"hello world\"".to_string()]).unwrap();
+        assert_eq!(env::var("RTK_TEST_QUOTED").unwrap(), "hello world");
+        env::remove_var("RTK_TEST_QUOTED");
     }
 
     #[test]
