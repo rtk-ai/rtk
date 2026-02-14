@@ -35,6 +35,7 @@ mod prettier_cmd;
 mod prisma_cmd;
 mod pytest_cmd;
 mod read;
+mod rgai_cmd; // semantic search command (grepai-style intent matching)
 mod ruff_cmd;
 mod runner;
 mod summary;
@@ -248,6 +249,34 @@ enum Commands {
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
+    },
+
+    /// Rust-native semantic search (grepai-style intent matching)
+    Rgai {
+        /// Natural-language query
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        /// Path to search in
+        #[arg(short, long, default_value = ".")]
+        path: String,
+        /// Max files to show
+        #[arg(short, long, default_value = "8")]
+        max: usize,
+        /// Context lines around each match
+        #[arg(short = 'c', long, default_value = "1")]
+        context: usize,
+        /// Filter by file type (e.g., ts, py, rust)
+        #[arg(short = 't', long)]
+        file_type: Option<String>,
+        /// Skip files larger than N KB
+        #[arg(long, default_value = "512")]
+        max_file_kb: usize,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Compact output (fewer lines per hit)
+        #[arg(long)]
+        compact: bool,
     },
 
     /// Initialize rtk instructions in CLAUDE.md
@@ -1036,6 +1065,31 @@ fn main() -> Result<()> {
             )?;
         }
 
+        Commands::Rgai {
+            query,
+            path,
+            max,
+            context,
+            file_type,
+            max_file_kb,
+            json,
+            compact,
+        } => {
+            // Backward-compat: rtk rgai "query words" ./src -> path="./src"
+            let (query, path) = normalize_rgai_args(query, path);
+            rgai_cmd::run(
+                &query,
+                &path,
+                max,
+                context,
+                file_type.as_deref(),
+                max_file_kb,
+                json,
+                compact,
+                cli.verbose,
+            )?;
+        }
+
         Commands::Init {
             global,
             show,
@@ -1399,4 +1453,61 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Normalize rgai positional args: detect trailing path token in query words.
+fn normalize_rgai_args(mut query_parts: Vec<String>, mut path: String) -> (String, String) {
+    if path == "." && query_parts.len() > 1 {
+        if let Some(last) = query_parts.last().cloned() {
+            if looks_like_path_token(&last) {
+                path = last;
+                query_parts.pop();
+            }
+        }
+    }
+    let query = query_parts.join(" ");
+    (query, path)
+}
+
+fn looks_like_path_token(token: &str) -> bool {
+    token == "."
+        || token == ".."
+        || token.starts_with("./")
+        || token.starts_with('/')
+        || token.contains('/')
+}
+
+#[cfg(test)]
+mod rgai_arg_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_rgai_keeps_multiword_query() {
+        let (query, path) = normalize_rgai_args(
+            vec!["token".to_string(), "refresh".to_string()],
+            ".".to_string(),
+        );
+        assert_eq!(query, "token refresh");
+        assert_eq!(path, ".");
+    }
+
+    #[test]
+    fn normalize_rgai_supports_old_positional_path() {
+        let (query, path) = normalize_rgai_args(
+            vec!["auth".to_string(), "flow".to_string(), "./src".to_string()],
+            ".".to_string(),
+        );
+        assert_eq!(query, "auth flow");
+        assert_eq!(path, "./src");
+    }
+
+    #[test]
+    fn normalize_rgai_does_not_treat_plain_word_as_path() {
+        let (query, path) = normalize_rgai_args(
+            vec!["domain".to_string(), "model".to_string()],
+            ".".to_string(),
+        );
+        assert_eq!(query, "domain model");
+        assert_eq!(path, ".");
+    }
 }
