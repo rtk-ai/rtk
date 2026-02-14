@@ -5,6 +5,13 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0](https://github.com/rtk-ai/rtk/compare/v0.15.4...v0.16.0) (2026-02-14)
+
+
+### Features
+
+* **python:** add lint dispatcher + universal format command ([#100](https://github.com/rtk-ai/rtk/issues/100)) ([4cae6b6](https://github.com/rtk-ai/rtk/commit/4cae6b6c9a4fbc91c56a99f640d217478b92e6d9))
+
 ## [0.15.4](https://github.com/rtk-ai/rtk/compare/v0.15.3...v0.15.4) (2026-02-14)
 
 
