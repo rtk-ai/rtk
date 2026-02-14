@@ -1,8 +1,19 @@
-//! Filter Registry
-//! Connects binaries to their specific RTK token reducers.
+//! Filter Registry — basic token reduction for `rtk run` native execution.
+//!
+//! This module provides **basic filtering (20-40% savings)** for commands
+//! executed through the hybrid engine. It is a **fallback** for commands
+//! without dedicated RTK implementations.
+//!
+//! For **specialized filtering (60-90% savings)**, use dedicated modules:
+//! - `src/git.rs` — git commands (diff, log, status, etc.)
+//! - `src/runner.rs` — test commands (cargo test, pytest, etc.)
+//! - `src/grep_cmd.rs` — code search (grep, ripgrep)
+//! - `src/pnpm_cmd.rs` — package managers
 
 use std::io::Read;
 use std::process::{ChildStderr, ChildStdout};
+
+use crate::utils;
 
 /// Filter types for different command categories
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,80 +40,30 @@ pub fn get_filter_type(binary: &str) -> FilterType {
     }
 }
 
-/// Apply token reduction to command output
-/// Returns (filtered_stdout, filtered_stderr)
+/// Apply token reduction to child process streams.
+/// Reads stdout/stderr to strings, then delegates to `apply_to_string`.
 pub fn apply(
     filter: FilterType,
     stdout: &mut ChildStdout,
     stderr: &mut ChildStderr,
 ) -> anyhow::Result<(String, String)> {
-    let mut out_str = String::new();
-    let mut err_str = String::new();
-
-    stdout.read_to_string(&mut out_str)?;
-    stderr.read_to_string(&mut err_str)?;
-
-    // Apply basic filtering based on type
-    let filtered_out = match filter {
-        FilterType::Git => {
-            // Strip ANSI and apply basic git formatting
-            strip_ansi(&out_str)
-        }
-        FilterType::Cargo => {
-            // Strip "Compiling" lines, keep errors
-            filter_cargo_output(&out_str)
-        }
-        FilterType::Test => {
-            // Strip success lines, keep failures
-            filter_test_output(&out_str)
-        }
-        FilterType::Generic => {
-            // Apply line truncation
-            truncate_lines(&out_str, 100)
-        }
-        FilterType::Npm | FilterType::Pnpm => {
-            // Strip npm boilerplate
-            strip_ansi(&out_str)
-        }
-        FilterType::None => out_str,
-    };
-
-    Ok((filtered_out, strip_ansi(&err_str)))
+    let mut out = String::new();
+    let mut err = String::new();
+    stdout.read_to_string(&mut out)?;
+    stderr.read_to_string(&mut err)?;
+    Ok((apply_to_string(filter, &out), utils::strip_ansi(&err)))
 }
 
 /// Apply filter to already-captured string output
 pub fn apply_to_string(filter: FilterType, output: &str) -> String {
     match filter {
-        FilterType::Git => strip_ansi(output),
+        FilterType::Git => utils::strip_ansi(output),
         FilterType::Cargo => filter_cargo_output(output),
         FilterType::Test => filter_test_output(output),
         FilterType::Generic => truncate_lines(output, 100),
-        FilterType::Npm | FilterType::Pnpm => strip_ansi(output),
+        FilterType::Npm | FilterType::Pnpm => utils::strip_ansi(output),
         FilterType::None => output.to_string(),
     }
-}
-
-/// Strip ANSI escape codes from string
-pub fn strip_ansi(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if let Some(&'[') = chars.peek() {
-                chars.next(); // consume '['
-                while let Some(&ch) = chars.peek() {
-                    chars.next();
-                    if ch.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-                continue;
-            }
-        }
-        result.push(c);
-    }
-    result
 }
 
 /// Filter cargo output: remove verbose "Compiling" lines
@@ -111,7 +72,6 @@ fn filter_cargo_output(output: &str) -> String {
         .lines()
         .filter(|line| {
             let line = line.trim();
-            // Keep errors, warnings, and summaries
             !line.starts_with("Compiling ") ||
             line.contains("error") ||
             line.contains("warning")
@@ -126,7 +86,6 @@ fn filter_test_output(output: &str) -> String {
         .lines()
         .filter(|line| {
             let line = line.trim();
-            // Keep failures, errors, and summaries
             line.contains("FAILED") ||
             line.contains("error") ||
             line.contains("Error") ||
@@ -182,27 +141,27 @@ mod tests {
         assert_eq!(get_filter_type("unknown_command"), FilterType::None);
     }
 
-    // === STRIP_ANSI TESTS ===
+    // === STRIP_ANSI TESTS (now testing utils::strip_ansi) ===
 
     #[test]
     fn test_strip_ansi_no_codes() {
-        assert_eq!(strip_ansi("hello world"), "hello world");
+        assert_eq!(utils::strip_ansi("hello world"), "hello world");
     }
 
     #[test]
     fn test_strip_ansi_color() {
-        assert_eq!(strip_ansi("\x1b[32mgreen\x1b[0m"), "green");
+        assert_eq!(utils::strip_ansi("\x1b[32mgreen\x1b[0m"), "green");
     }
 
     #[test]
     fn test_strip_ansi_bold() {
-        assert_eq!(strip_ansi("\x1b[1mbold\x1b[0m"), "bold");
+        assert_eq!(utils::strip_ansi("\x1b[1mbold\x1b[0m"), "bold");
     }
 
     #[test]
     fn test_strip_ansi_multiple() {
         assert_eq!(
-            strip_ansi("\x1b[31mred\x1b[0m \x1b[32mgreen\x1b[0m"),
+            utils::strip_ansi("\x1b[31mred\x1b[0m \x1b[32mgreen\x1b[0m"),
             "red green"
         );
     }
@@ -210,7 +169,7 @@ mod tests {
     #[test]
     fn test_strip_ansi_complex() {
         assert_eq!(
-            strip_ansi("\x1b[1;31;42mbold red on green\x1b[0m"),
+            utils::strip_ansi("\x1b[1;31;42mbold red on green\x1b[0m"),
             "bold red on green"
         );
     }

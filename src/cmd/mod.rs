@@ -20,6 +20,8 @@ pub mod hook;
 pub mod gemini_hook;
 
 #[cfg(test)]
+pub(crate) mod test_helpers;
+#[cfg(test)]
 mod edge_cases;
 
 pub use exec::execute;

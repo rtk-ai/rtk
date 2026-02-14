@@ -57,7 +57,7 @@ pub fn run(
         };
 
         let ft = entry.file_type();
-        let is_dir = ft.as_ref().map_or(false, |t| t.is_dir());
+        let is_dir = ft.as_ref().is_some_and(|t| t.is_dir());
 
         // Filter by type
         if want_dirs && !is_dir {

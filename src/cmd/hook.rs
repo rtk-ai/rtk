@@ -6,7 +6,7 @@
 //! - Other exit codes: non-blocking errors
 //!
 //! Gemini expects:
-//! - JSON payload in, JSON response out
+//! - JSON payload in, JSON response out (see gemini_hook module)
 
 use super::{lexer, analysis, safety};
 
@@ -19,9 +19,24 @@ pub enum HookResult {
     Blocked(String),
 }
 
+/// Maximum rewrite depth to prevent infinite recursion from cyclic safety rules.
+const MAX_REWRITE_DEPTH: usize = 3;
+
 /// Check a command for the hook protocol.
 /// Returns the rewritten command or an error message.
-pub fn check_for_hook(raw: &str, agent: &str) -> HookResult {
+///
+/// The `_agent` parameter is reserved for future per-agent behavior.
+pub fn check_for_hook(raw: &str, _agent: &str) -> HookResult {
+    check_for_hook_inner(raw, 0)
+}
+
+fn check_for_hook_inner(raw: &str, depth: usize) -> HookResult {
+    if depth >= MAX_REWRITE_DEPTH {
+        return HookResult::Blocked(
+            "Safety rewrite loop detected (max depth exceeded)".to_string()
+        );
+    }
+
     // Handle empty
     if raw.trim().is_empty() {
         return HookResult::Rewrite(raw.to_string());
@@ -51,8 +66,7 @@ pub fn check_for_hook(raw: &str, agent: &str) -> HookResult {
                         return HookResult::Blocked(msg);
                     }
                     safety::SafetyResult::Rewritten(new_cmd) => {
-                        // Rewrite and re-check
-                        return check_for_hook(&new_cmd, agent);
+                        return check_for_hook_inner(&new_cmd, depth + 1);
                     }
                     safety::SafetyResult::TrashRequested(_) => {
                         // Redirect to rtk run which handles trash
@@ -89,409 +103,258 @@ pub fn format_for_claude(result: HookResult) -> (String, bool, i32) {
     }
 }
 
-/// Format hook result for Gemini (JSON output)
-pub fn format_for_gemini(result: HookResult) -> String {
-    match result {
-        HookResult::Rewrite(cmd) => {
-            serde_json::json!({
-                "result": "allow",
-                "modified_input": serde_json::json!({
-                    "command": cmd
-                }),
-                "message": "RTK applied safety optimizations."
-            }).to_string()
-        }
-        HookResult::Blocked(msg) => {
-            serde_json::json!({
-                "result": "deny",
-                "message": msg
-            }).to_string()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // === ESCAPE_QUOTES TESTS ===
+    // === TEST HELPERS ===
+
+    fn assert_rewrite(input: &str, contains: &str) {
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => assert!(cmd.contains(contains),
+                "'{}' rewrite should contain '{}', got '{}'", input, contains, cmd),
+            other => panic!("Expected Rewrite for '{}', got {:?}", input, other),
+        }
+    }
+
+    fn assert_blocked(input: &str, contains: &str) {
+        match check_for_hook(input, "claude") {
+            HookResult::Blocked(msg) => assert!(msg.contains(contains),
+                "'{}' block msg should contain '{}', got '{}'", input, contains, msg),
+            other => panic!("Expected Blocked for '{}', got {:?}", input, other),
+        }
+    }
+
+    // === ESCAPE_QUOTES ===
 
     #[test]
-    fn test_escape_quotes_no_quotes() {
+    fn test_escape_quotes() {
         assert_eq!(escape_quotes("hello"), "hello");
-    }
-
-    #[test]
-    fn test_escape_quotes_with_single() {
         assert_eq!(escape_quotes("it's"), "it'\\''s");
-    }
-
-    #[test]
-    fn test_escape_quotes_multiple() {
         assert_eq!(escape_quotes("it's a test's"), "it'\\''s a test'\\''s");
     }
 
-    // === CHECK_FOR_HOOK TESTS ===
+    // === EMPTY / WHITESPACE ===
 
     #[test]
-    fn test_check_empty() {
-        let result = check_for_hook("", "claude");
-        match result {
+    fn test_check_empty_and_whitespace() {
+        match check_for_hook("", "claude") {
             HookResult::Rewrite(cmd) => assert!(cmd.is_empty()),
-            _ => panic!("Expected Rewrite"),
+            _ => panic!("Expected Rewrite for empty"),
         }
-    }
-
-    #[test]
-    fn test_check_whitespace() {
-        let result = check_for_hook("   ", "claude");
-        match result {
+        match check_for_hook("   ", "claude") {
             HookResult::Rewrite(cmd) => assert!(cmd.trim().is_empty()),
-            _ => panic!("Expected Rewrite"),
+            _ => panic!("Expected Rewrite for whitespace"),
+        }
+    }
+
+    // === COMMANDS THAT SHOULD REWRITE (table-driven) ===
+
+    #[test]
+    fn test_safe_commands_rewrite() {
+        let cases = [
+            ("git status", "rtk run"),
+            ("ls *.rs", "rtk run"),                          // shellism passthrough
+            (r#"git commit -m "Fix && Bug""#, "rtk run"),    // quoted operator
+            ("FOO=bar echo hello", "rtk run"),               // env prefix
+            ("echo `date`", "rtk run"),                      // backticks
+            ("echo $(date)", "rtk run"),                     // subshell
+            ("echo {a,b}.txt", "rtk run"),                   // brace expansion
+            ("echo 'hello!@#$%^&*()'", "rtk run"),          // special chars
+            ("echo '日本語 🎉'", "rtk run"),                   // unicode
+        ];
+        for (input, expected) in cases {
+            assert_rewrite(input, expected);
         }
     }
 
     #[test]
-    fn test_check_safe_command() {
-        let result = check_for_hook("git status", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.starts_with("rtk run"));
-            }
-            _ => panic!("Expected Rewrite"),
-        }
-    }
-
-    #[test]
-    fn test_check_cat_blocked() {
-        let result = check_for_hook("cat file.txt", "claude");
-        match result {
-            HookResult::Blocked(msg) => {
-                assert!(msg.contains("Read"));
-            }
-            _ => panic!("Expected Blocked"),
-        }
-    }
-
-    #[test]
-    fn test_check_sed_blocked() {
-        let result = check_for_hook("sed -i 's/old/new/' file.txt", "claude");
-        match result {
-            HookResult::Blocked(msg) => {
-                assert!(msg.contains("Edit"));
-            }
-            _ => panic!("Expected Blocked"),
-        }
-    }
-
-    #[test]
-    fn test_check_shellism_passthrough() {
-        let result = check_for_hook("ls *.rs", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("Expected Rewrite"),
-        }
-    }
-
-    #[test]
-    fn test_check_quoted_operator() {
-        let result = check_for_hook(r#"git commit -m "Fix && Bug""#, "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("Expected Rewrite"),
-        }
-    }
-
-    // === FORMAT_FOR_CLAUDE TESTS ===
-
-    #[test]
-    fn test_format_rewrite() {
-        let result = HookResult::Rewrite("rtk run -c 'git status'".to_string());
-        let (output, success, code) = format_for_claude(result);
-        assert_eq!(output, "rtk run -c 'git status'");
-        assert!(success);
-        assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn test_format_blocked() {
-        let result = HookResult::Blocked("Error message".to_string());
-        let (output, success, code) = format_for_claude(result);
-        assert_eq!(output, "Error message");
-        assert!(!success);
-        assert_eq!(code, 2);  // Exit 2 = blocking error per Claude Code spec
-    }
-
-    // === FORMAT_FOR_GEMINI TESTS ===
-
-    #[test]
-    fn test_format_gemini_rewrite() {
-        let result = HookResult::Rewrite("rtk run -c 'git status'".to_string());
-        let output = format_for_gemini(result);
-        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(json["result"], "allow");
-        assert!(json["modified_input"]["command"].is_string());
-    }
-
-    #[test]
-    fn test_format_gemini_blocked() {
-        let result = HookResult::Blocked("Error message".to_string());
-        let output = format_for_gemini(result);
-        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(json["result"], "deny");
-        assert_eq!(json["message"], "Error message");
-    }
-
-    // === ADDITIONAL EDGE CASE TESTS ===
-
-    #[test]
-    fn test_check_head_blocked() {
-        let result = check_for_hook("head -n 10 file.txt", "claude");
-        match result {
-            HookResult::Blocked(msg) => {
-                assert!(msg.contains("Read"));
-            }
-            _ => panic!("Expected Blocked for head command"),
-        }
-    }
-
-    #[test]
-    fn test_check_complex_command_with_env() {
-        // Commands with env var prefixes should be handled
-        let result = check_for_hook("FOO=bar echo hello", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("Expected Rewrite for env prefix command"),
-        }
-    }
-
-    #[test]
-    fn test_check_command_with_backticks() {
-        // Backticks should trigger shellism passthrough
-        let result = check_for_hook("echo `date`", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("Expected Rewrite for backtick command"),
-        }
-    }
-
-    #[test]
-    fn test_check_command_with_subshell() {
-        // Subshell syntax should trigger shellism passthrough
-        let result = check_for_hook("echo $(date)", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("Expected Rewrite for subshell command"),
-        }
-    }
-
-    #[test]
-    fn test_check_command_with_brace_expansion() {
-        // Brace expansion should trigger shellism passthrough
-        let result = check_for_hook("echo {a,b}.txt", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("Expected Rewrite for brace expansion"),
-        }
-    }
-
-    #[test]
-    fn test_check_chain_with_and_operator() {
-        // Chained commands should be handled
+    fn test_chain_rewrite() {
         let result = check_for_hook("cd /tmp && git status", "claude");
         match result {
             HookResult::Rewrite(cmd) => {
                 assert!(cmd.contains("rtk run"));
                 assert!(cmd.contains("&&"));
             }
-            _ => panic!("Expected Rewrite for chained command"),
+            _ => panic!("Expected Rewrite for chain"),
         }
     }
 
     #[test]
-    fn test_check_chain_with_blocked_command() {
-        // If any command in chain is blocked, whole chain is blocked
-        let result = check_for_hook("cd /tmp && cat file.txt", "claude");
-        match result {
-            HookResult::Blocked(msg) => {
-                assert!(msg.contains("Read"));
-            }
-            _ => panic!("Expected Blocked when chain contains cat"),
-        }
-    }
-
-    #[test]
-    fn test_check_special_characters_in_command() {
-        // Commands with special characters should be handled
-        let result = check_for_hook("echo 'hello!@#$%^&*()'", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("Expected Rewrite for command with special chars"),
-        }
-    }
-
-    #[test]
-    fn test_check_unicode_command() {
-        // Unicode in commands should be preserved
-        let result = check_for_hook("echo '日本語 🎉'", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("日本語") || cmd.contains("rtk run"));
-            }
-            _ => panic!("Expected Rewrite for unicode command"),
-        }
-    }
-
-    #[test]
-    fn test_check_very_long_command() {
-        // Very long commands should be handled without truncation
+    fn test_very_long_command() {
         let long_arg = "a".repeat(1000);
-        let cmd = format!("echo {}", long_arg);
-        let result = check_for_hook(&cmd, "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
+        assert_rewrite(&format!("echo {}", long_arg), "rtk run");
+    }
+
+    // === COMMANDS THAT SHOULD BLOCK (table-driven) ===
+
+    #[test]
+    fn test_blocked_commands() {
+        let cases = [
+            ("cat file.txt", "Read"),
+            ("sed -i 's/old/new/' file.txt", "Edit"),
+            ("head -n 10 file.txt", "Read"),
+            ("cd /tmp && cat file.txt", "Read"),             // cat in chain
+        ];
+        for (input, expected_msg) in cases {
+            assert_blocked(input, expected_msg);
+        }
+    }
+
+    // === SHELLISM PASSTHROUGH: cat/sed/head allowed with pipe/redirect ===
+
+    #[test]
+    fn test_token_waste_allowed_in_pipelines() {
+        let cases = [
+            "cat file.txt | grep pattern",
+            "cat file.txt > output.txt",
+            "sed 's/old/new/' file.txt > output.txt",
+            "head -n 10 file.txt | grep pattern",
+            "for f in *.txt; do cat \"$f\" | grep x; done",
+        ];
+        for input in cases {
+            assert_rewrite(input, "rtk run");
+        }
+    }
+
+    // === MULTI-AGENT ===
+
+    #[test]
+    fn test_different_agents_same_result() {
+        for agent in ["claude", "gemini"] {
+            match check_for_hook("git status", agent) {
+                HookResult::Rewrite(cmd) => assert!(cmd.contains("rtk run")),
+                _ => panic!("Expected Rewrite for agent '{}'", agent),
             }
-            _ => panic!("Expected Rewrite for long command"),
+        }
+    }
+
+    // === FORMAT_FOR_CLAUDE ===
+
+    #[test]
+    fn test_format_for_claude() {
+        let (output, success, code) = format_for_claude(
+            HookResult::Rewrite("rtk run -c 'git status'".to_string()));
+        assert_eq!(output, "rtk run -c 'git status'");
+        assert!(success);
+        assert_eq!(code, 0);
+
+        let (output, success, code) = format_for_claude(
+            HookResult::Blocked("Error message".to_string()));
+        assert_eq!(output, "Error message");
+        assert!(!success);
+        assert_eq!(code, 2);  // Exit 2 = blocking error per Claude Code spec
+    }
+
+    // === RECURSION DEPTH LIMIT ===
+
+    #[test]
+    fn test_rewrite_depth_limit() {
+        // At max depth → blocked
+        match check_for_hook_inner("echo hello", MAX_REWRITE_DEPTH) {
+            HookResult::Blocked(msg) => assert!(msg.contains("loop"), "msg: {}", msg),
+            _ => panic!("Expected Blocked at max depth"),
+        }
+        // At depth 0 → normal rewrite
+        match check_for_hook_inner("echo hello", 0) {
+            HookResult::Rewrite(cmd) => assert!(cmd.contains("rtk run")),
+            _ => panic!("Expected Rewrite at depth 0"),
+        }
+    }
+
+    // =========================================================================
+    // CLAUDE CODE WIRE FORMAT CONFORMANCE
+    // https://docs.anthropic.com/en/docs/claude-code/hooks
+    //
+    // Claude Code hook protocol:
+    // - Rewrite: command on stdout, exit code 0
+    // - Block: message on stderr, exit code 2
+    // - Other exit codes are non-blocking errors
+    //
+    // format_for_claude() is the boundary between HookResult and the wire.
+    // These tests verify it produces the exact contract Claude Code expects.
+    // =========================================================================
+
+    #[test]
+    fn test_claude_rewrite_exit_code_is_zero() {
+        let (_, _, code) = format_for_claude(HookResult::Rewrite("rtk run -c 'ls'".into()));
+        assert_eq!(code, 0, "Rewrite must exit 0 (success)");
+    }
+
+    #[test]
+    fn test_claude_block_exit_code_is_two() {
+        let (_, _, code) = format_for_claude(HookResult::Blocked("denied".into()));
+        assert_eq!(code, 2, "Block must exit 2 (blocking error per Claude Code spec)");
+    }
+
+    #[test]
+    fn test_claude_rewrite_output_is_command_text() {
+        // Claude Code reads stdout as the rewritten command — must be plain text, not JSON
+        let (output, success, _) = format_for_claude(
+            HookResult::Rewrite("rtk run -c 'git status'".into()));
+        assert_eq!(output, "rtk run -c 'git status'");
+        assert!(success);
+        // Must NOT be JSON
+        assert!(!output.starts_with('{'), "Rewrite output must be plain text, not JSON");
+    }
+
+    #[test]
+    fn test_claude_block_output_is_human_message() {
+        // Claude Code reads stderr for the block reason
+        let (output, success, _) = format_for_claude(
+            HookResult::Blocked("Use Read tool instead".into()));
+        assert_eq!(output, "Use Read tool instead");
+        assert!(!success);
+        // Must NOT be JSON
+        assert!(!output.starts_with('{'), "Block output must be plain text, not JSON");
+    }
+
+    #[test]
+    fn test_claude_rewrite_success_flag_true() {
+        let (_, success, _) = format_for_claude(HookResult::Rewrite("cmd".into()));
+        assert!(success, "Rewrite must set success=true");
+    }
+
+    #[test]
+    fn test_claude_block_success_flag_false() {
+        let (_, success, _) = format_for_claude(HookResult::Blocked("msg".into()));
+        assert!(!success, "Block must set success=false");
+    }
+
+    #[test]
+    fn test_claude_exit_codes_not_one() {
+        // Exit code 1 means non-blocking error in Claude Code — we must never use it
+        let (_, _, rewrite_code) = format_for_claude(HookResult::Rewrite("cmd".into()));
+        let (_, _, block_code) = format_for_claude(HookResult::Blocked("msg".into()));
+        assert_ne!(rewrite_code, 1, "Exit code 1 is non-blocking error, not valid for rewrite");
+        assert_ne!(block_code, 1, "Exit code 1 is non-blocking error, not valid for block");
+    }
+
+    // === CROSS-PROTOCOL: Same decision for both agents ===
+
+    #[test]
+    fn test_cross_protocol_safe_command_allowed_by_both() {
+        // Both Claude and Gemini must allow the same safe commands
+        for cmd in ["git status", "cargo test", "ls -la", "echo hello"] {
+            let claude = check_for_hook(cmd, "claude");
+            let gemini = check_for_hook(cmd, "gemini");
+            match (&claude, &gemini) {
+                (HookResult::Rewrite(_), HookResult::Rewrite(_)) => {}
+                _ => panic!("'{}': Claude={:?}, Gemini={:?} — both should Rewrite", cmd, claude, gemini),
+            }
         }
     }
 
     #[test]
-    fn test_format_blocked_exit_code_is_2() {
-        // Critical: Exit code must be 2 for blocking (per Claude Code spec)
-        let result = HookResult::Blocked("Blocked for safety".to_string());
-        let (_, _, code) = format_for_claude(result);
-        assert_eq!(code, 2, "Blocked commands must return exit code 2");
-    }
-
-    #[test]
-    fn test_format_rewrite_exit_code_is_0() {
-        // Success/rewrite must return exit code 0
-        let result = HookResult::Rewrite("rtk run -c 'echo hello'".to_string());
-        let (_, _, code) = format_for_claude(result);
-        assert_eq!(code, 0, "Rewritten commands must return exit code 0");
-    }
-
-    #[test]
-    fn test_check_different_agents() {
-        // Both claude and gemini agents should work
-        let claude_result = check_for_hook("git status", "claude");
-        let gemini_result = check_for_hook("git status", "gemini");
-
-        match (claude_result, gemini_result) {
-            (HookResult::Rewrite(c), HookResult::Rewrite(g)) => {
-                assert!(c.contains("rtk run"));
-                assert!(g.contains("rtk run"));
+    fn test_cross_protocol_blocked_command_denied_by_both() {
+        // Both Claude and Gemini must block the same unsafe commands
+        for cmd in ["cat file.txt", "head -n 10 file.txt"] {
+            let claude = check_for_hook(cmd, "claude");
+            let gemini = check_for_hook(cmd, "gemini");
+            match (&claude, &gemini) {
+                (HookResult::Blocked(_), HookResult::Blocked(_)) => {}
+                _ => panic!("'{}': Claude={:?}, Gemini={:?} — both should Block", cmd, claude, gemini),
             }
-            _ => panic!("Both agents should produce Rewrite for safe command"),
-        }
-    }
-
-    // === TOKEN WASTE CONTEXT TESTS ===
-    // Verify that cat/sed/head are only blocked when standalone, not in pipes/redirects
-
-    #[test]
-    fn test_cat_with_pipe_allowed() {
-        // cat in a pipeline is a legitimate use case
-        let result = check_for_hook("cat file.txt | grep pattern", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                // Should be allowed via passthrough (pipe detected)
-                assert!(cmd.contains("rtk run"));
-                assert!(cmd.contains("|"));
-            }
-            _ => panic!("cat with pipe should be allowed"),
-        }
-    }
-
-    #[test]
-    fn test_cat_with_redirect_allowed() {
-        // cat with redirect is a legitimate use case
-        let result = check_for_hook("cat file.txt > output.txt", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                // Should be allowed via passthrough (redirect detected)
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("cat with redirect should be allowed"),
-        }
-    }
-
-    #[test]
-    fn test_sed_with_redirect_allowed() {
-        // sed with redirect (not -i) is a legitimate use case
-        let result = check_for_hook("sed 's/old/new/' file.txt > output.txt", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                // Should be allowed via passthrough (redirect detected)
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("sed with redirect should be allowed"),
-        }
-    }
-
-    #[test]
-    fn test_head_with_pipe_allowed() {
-        // head in a pipeline is a legitimate use case
-        let result = check_for_hook("head -n 10 file.txt | grep pattern", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                // Should be allowed via passthrough (pipe detected)
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("head with pipe should be allowed"),
-        }
-    }
-
-    #[test]
-    fn test_cat_standalone_blocked() {
-        // Standalone cat should be blocked (token waste)
-        let result = check_for_hook("cat file.txt", "claude");
-        match result {
-            HookResult::Blocked(msg) => {
-                assert!(msg.contains("Read"));
-            }
-            _ => panic!("standalone cat should be blocked"),
-        }
-    }
-
-    #[test]
-    fn test_cat_in_chain_blocked() {
-        // cat in a chain without pipe/redirect should still be blocked
-        // Agent should use: cd dir, then Read tool
-        let result = check_for_hook("cd /tmp && cat file.txt", "claude");
-        match result {
-            HookResult::Blocked(msg) => {
-                assert!(msg.contains("Read"));
-            }
-            _ => panic!("cat in chain without pipe should be blocked"),
-        }
-    }
-
-    #[test]
-    fn test_cat_in_complex_script_allowed() {
-        // Complex scripts with for loops, etc. have shellisms → passthrough
-        let result = check_for_hook("for f in *.txt; do cat \"$f\" | grep x; done", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                // Shellism detected (for loop, glob, pipe) → passthrough
-                assert!(cmd.contains("rtk run"));
-            }
-            _ => panic!("complex script should be allowed via passthrough"),
         }
     }
 }

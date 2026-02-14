@@ -488,12 +488,10 @@ fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()>
                 } else {
                     "C"
                 }
+            } else if state == "OPEN" {
+                "🟢"
             } else {
-                if state == "OPEN" {
-                    "🟢"
-                } else {
-                    "🔴"
-                }
+                "🔴"
             };
             let line = format!("  {} #{} {}\n", icon, number, truncate(title, 60));
             filtered.push_str(&line);

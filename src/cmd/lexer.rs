@@ -70,9 +70,7 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 let mut op = c.to_string();
                 // Lookahead for double-char operators
                 if let Some(&next) = chars.peek() {
-                    if next == c && c != ';' && c != '<' {
-                        op.push(chars.next().unwrap());
-                    } else if c == '>' && next == '>' {
+                    if (next == c && c != ';' && c != '<') || (c == '>' && next == '>') {
                         op.push(chars.next().unwrap());
                     }
                 }
@@ -112,19 +110,12 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String) {
 /// Strip quotes from a token value
 pub fn strip_quotes(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
-    if chars.len() >= 2 {
-        if (chars[0] == '"' && chars[chars.len()-1] == '"') ||
-           (chars[0] == '\'' && chars[chars.len()-1] == '\'') {
+    if chars.len() >= 2
+        && ((chars[0] == '"' && chars[chars.len()-1] == '"') ||
+           (chars[0] == '\'' && chars[chars.len()-1] == '\'')) {
             return chars[1..chars.len()-1].iter().collect();
         }
-    }
     s.to_string()
-}
-
-/// Check if a command string contains shellisms (for early passthrough detection)
-pub fn has_shellisms(input: &str) -> bool {
-    let tokens = tokenize(input);
-    tokens.iter().any(|t| matches!(t.kind, TokenKind::Shellism | TokenKind::Pipe | TokenKind::Redirect))
 }
 
 #[cfg(test)]
@@ -449,19 +440,4 @@ mod tests {
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Redirect)));
     }
 
-    // === HELPER FUNCTION TESTS ===
-
-    #[test]
-    fn test_has_shellisms_true() {
-        assert!(has_shellisms("ls *.rs"));
-        assert!(has_shellisms("cat file | grep x"));
-        assert!(has_shellisms("cmd > file"));
-    }
-
-    #[test]
-    fn test_has_shellisms_false() {
-        assert!(!has_shellisms("git status"));
-        assert!(!has_shellisms("cd dir && git status"));
-        assert!(!has_shellisms("echo hello"));
-    }
 }

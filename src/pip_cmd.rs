@@ -229,9 +229,7 @@ fn filter_pip_outdated(output: &str) -> String {
 
     for (i, pkg) in packages.iter().take(20).enumerate() {
         let latest = pkg
-            .latest_version
-            .as_ref()
-            .map(|v| v.as_str())
+            .latest_version.as_deref()
             .unwrap_or("unknown");
         result.push_str(&format!(
             "{}. {} ({} → {})\n",

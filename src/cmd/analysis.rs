@@ -1,6 +1,6 @@
 //! Analyzes tokens to decide: Native execution or Passthrough?
 
-use super::lexer::{ParsedToken, TokenKind, tokenize, strip_quotes};
+use super::lexer::{ParsedToken, TokenKind, strip_quotes};
 
 /// Represents a single command in a chain
 #[derive(Debug, Clone, PartialEq)]
@@ -8,15 +8,6 @@ pub struct NativeCommand {
     pub binary: String,
     pub args: Vec<String>,
     pub operator: Option<String>,  // &&, ||, ;, or None for last command
-}
-
-/// Execution plan determined by analysis
-#[derive(Debug, Clone)]
-pub enum ExecutionPlan {
-    /// Simple chain - execute natively
-    Native(Vec<NativeCommand>),
-    /// Complex command with shellisms - pass to /bin/sh
-    Passthrough(String),
 }
 
 /// Check if command needs real shell (has shellisms, pipes, redirects)
@@ -72,20 +63,6 @@ pub fn parse_chain(tokens: Vec<ParsedToken>) -> Result<Vec<NativeCommand>, Strin
     Ok(commands)
 }
 
-/// Analyze a raw command string and return execution plan
-pub fn analyze(raw: &str) -> ExecutionPlan {
-    let tokens = tokenize(raw);
-
-    if needs_shell(&tokens) {
-        return ExecutionPlan::Passthrough(raw.to_string());
-    }
-
-    match parse_chain(tokens) {
-        Ok(commands) => ExecutionPlan::Native(commands),
-        Err(_) => ExecutionPlan::Passthrough(raw.to_string()),
-    }
-}
-
 /// Should the next command run based on operator and last result?
 pub fn should_run(operator: Option<&str>, last_success: bool) -> bool {
     match operator {
@@ -99,6 +76,7 @@ pub fn should_run(operator: Option<&str>, last_success: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::lexer::tokenize;
 
     // === NEEDS_SHELL TESTS ===
 
@@ -224,26 +202,6 @@ mod tests {
         let tokens = tokenize("");
         let cmds = parse_chain(tokens).unwrap();
         assert!(cmds.is_empty());
-    }
-
-    // === ANALYZE TESTS ===
-
-    #[test]
-    fn test_analyze_simple() {
-        match analyze("git status") {
-            ExecutionPlan::Native(cmds) => {
-                assert_eq!(cmds.len(), 1);
-            }
-            ExecutionPlan::Passthrough(_) => panic!("Should be native"),
-        }
-    }
-
-    #[test]
-    fn test_analyze_complex() {
-        match analyze("ls *.rs") {
-            ExecutionPlan::Passthrough(_) => {}
-            ExecutionPlan::Native(_) => panic!("Should be passthrough"),
-        }
     }
 
     // === SHOULD_RUN TESTS ===

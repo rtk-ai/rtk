@@ -268,6 +268,10 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
+        /// Set up Gemini CLI hook integration
+        #[arg(long, group = "mode")]
+        gemini: bool,
+
         /// Auto-patch settings.json without prompting
         #[arg(long = "auto-patch", group = "patch")]
         auto_patch: bool,
@@ -1062,6 +1066,7 @@ fn main() -> Result<()> {
             show,
             claude_md,
             hook_only,
+            gemini,
             auto_patch,
             no_patch,
             uninstall,
@@ -1078,7 +1083,11 @@ fn main() -> Result<()> {
                 } else {
                     init::PatchMode::Ask
                 };
-                init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                if gemini {
+                    init::run_gemini(patch_mode, cli.verbose)?;
+                } else {
+                    init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                }
             }
         }
 

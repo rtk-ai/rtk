@@ -11,14 +11,20 @@ fn is_rtk_active() -> bool {
     std::env::var("RTK_ACTIVE").is_ok()
 }
 
-/// Set RTK active flag
-fn set_rtk_active() {
-    std::env::set_var("RTK_ACTIVE", "1");
+/// RAII guard: sets RTK_ACTIVE on creation, removes on drop (even on panic).
+struct RtkActiveGuard;
+
+impl RtkActiveGuard {
+    fn new() -> Self {
+        std::env::set_var("RTK_ACTIVE", "1");
+        RtkActiveGuard
+    }
 }
 
-/// Unset RTK active flag
-fn unset_rtk_active() {
-    std::env::remove_var("RTK_ACTIVE");
+impl Drop for RtkActiveGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("RTK_ACTIVE");
+    }
 }
 
 /// Execute a raw command string
@@ -36,11 +42,8 @@ pub fn execute(raw: &str, verbose: u8) -> Result<bool> {
         return Ok(true);
     }
 
-    set_rtk_active();
-    let result = execute_inner(raw, verbose);
-    unset_rtk_active();
-
-    result
+    let _guard = RtkActiveGuard::new();
+    execute_inner(raw, verbose)
 }
 
 fn execute_inner(raw: &str, verbose: u8) -> Result<bool> {
@@ -81,8 +84,8 @@ fn run_native(commands: &[analysis::NativeCommand], verbose: u8) -> Result<bool>
 
         // === RECURSION PREVENTION ===
         // Handle "rtk run" or "rtk" binary specially
-        if cmd.binary == "rtk" {
-            if cmd.args.first().map(|s| s.as_str()) == Some("run") {
+        if cmd.binary == "rtk"
+            && cmd.args.first().map(|s| s.as_str()) == Some("run") {
                 // Flatten: execute the inner command directly
                 let inner = cmd.args.get(1).cloned().unwrap_or_default();
                 if verbose > 0 {
@@ -91,7 +94,6 @@ fn run_native(commands: &[analysis::NativeCommand], verbose: u8) -> Result<bool>
                 return execute(&inner, verbose);
             }
             // Other rtk commands: spawn as external (they have their own filters)
-        }
 
         // === SAFETY CHECK ===
         match safety::check(&cmd.binary, &cmd.args) {
@@ -130,7 +132,7 @@ fn run_native(commands: &[analysis::NativeCommand], verbose: u8) -> Result<bool>
 }
 
 /// Spawn external command and apply appropriate filter
-fn spawn_with_filter(binary: &str, args: &[String], verbose: u8) -> Result<bool> {
+fn spawn_with_filter(binary: &str, args: &[String], _verbose: u8) -> Result<bool> {
     let timer = tracking::TimedExecution::start();
 
     // Try to find the binary in PATH
@@ -206,7 +208,7 @@ pub fn run_passthrough(raw: &str, verbose: u8) -> Result<bool> {
     let full_output = format!("{}{}", stdout, stderr);
 
     // Basic filtering even in passthrough (strip ANSI)
-    let filtered = filters::strip_ansi(&full_output);
+    let filtered = crate::utils::strip_ansi(&full_output);
     print!("{}", filtered);
 
     timer.track(raw, &format!("rtk passthrough {}", raw), &full_output, &filtered);
@@ -218,21 +220,34 @@ pub fn run_passthrough(raw: &str, verbose: u8) -> Result<bool> {
 mod tests {
     use super::*;
 
-    // === RECURSION GUARD TESTS ===
+    // === RAII GUARD TESTS ===
 
     #[test]
     fn test_is_rtk_active_default() {
-        // Should be false by default
         std::env::remove_var("RTK_ACTIVE");
         assert!(!is_rtk_active());
     }
 
     #[test]
-    fn test_set_unset_rtk_active() {
-        set_rtk_active();
-        assert!(is_rtk_active());
-        unset_rtk_active();
-        assert!(!is_rtk_active());
+    fn test_raii_guard_sets_and_clears() {
+        std::env::remove_var("RTK_ACTIVE");
+        {
+            let _guard = RtkActiveGuard::new();
+            assert!(is_rtk_active());
+        }
+        assert!(!is_rtk_active(), "RTK_ACTIVE must be cleared when guard drops");
+    }
+
+    #[test]
+    fn test_raii_guard_clears_on_panic() {
+        std::env::remove_var("RTK_ACTIVE");
+        let result = std::panic::catch_unwind(|| {
+            let _guard = RtkActiveGuard::new();
+            assert!(is_rtk_active());
+            panic!("simulated panic");
+        });
+        assert!(result.is_err());
+        assert!(!is_rtk_active(), "RTK_ACTIVE must be cleared even after panic");
     }
 
     // === EXECUTE TESTS ===

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 /// Change directory (persists in RTK process)
 pub fn builtin_cd(args: &[String]) -> Result<bool> {
-    let target = args.get(0)
+    let target = args.first()
         .map(|s| expand_tilde(s))
         .unwrap_or_else(get_home);
 
@@ -47,7 +47,13 @@ pub fn execute(binary: &str, args: &[String]) -> Result<bool> {
             Ok(true)
         }
         "echo" => {
-            println!("{}", args.join(" "));
+            let (print_args, no_newline) = if args.first().map(|s| s.as_str()) == Some("-n") {
+                (&args[1..], true)
+            } else {
+                (args, false)
+            };
+            print!("{}", print_args.join(" "));
+            if !no_newline { println!(); }
             Ok(true)
         }
         "true" | ":" => Ok(true),
@@ -60,7 +66,7 @@ pub fn execute(binary: &str, args: &[String]) -> Result<bool> {
 mod tests {
     use super::*;
     use std::env;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     // === CD TESTS ===
 
@@ -95,7 +101,7 @@ mod tests {
         // Verify we're at home or the cd succeeded
         let cwd = env::current_dir().unwrap();
         // Just check that we moved from /tmp (cd worked)
-        assert!(cwd != PathBuf::from("/tmp") || cwd.to_string_lossy().contains(&home));
+        assert!(cwd.as_path() != Path::new("/tmp") || cwd.to_string_lossy().contains(&home));
 
         let _ = env::set_current_dir(&original);
     }
@@ -109,7 +115,7 @@ mod tests {
         assert!(result);
         // Verify we're at home (or a parent of it)
         let cwd = env::current_dir().unwrap();
-        assert!(cwd == PathBuf::from(&home) || cwd.to_string_lossy().starts_with(&home));
+        assert!(cwd.as_path() == Path::new(&home) || cwd.to_string_lossy().starts_with(&home));
 
         let _ = env::set_current_dir(&original);
     }
@@ -239,5 +245,18 @@ mod tests {
     fn test_execute_unknown_builtin() {
         let result = execute("notabuiltin", &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_execute_echo_n_flag() {
+        // echo -n should succeed (prints without newline)
+        let result = execute("echo", &["-n".to_string(), "hello".to_string()]).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_execute_echo_empty_args() {
+        let result = execute("echo", &[]).unwrap();
+        assert!(result);
     }
 }

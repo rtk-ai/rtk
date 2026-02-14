@@ -6,24 +6,11 @@ use std::collections::HashMap;
 use std::process::Command;
 
 #[derive(Debug, Deserialize)]
-struct RuffLocation {
-    row: usize,
-    column: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct RuffFix {
-    #[allow(dead_code)]
-    applicability: Option<String>,
-}
+struct RuffFix {}
 
 #[derive(Debug, Deserialize)]
 struct RuffDiagnostic {
     code: String,
-    message: String,
-    location: RuffLocation,
-    #[allow(dead_code)]
-    end_location: Option<RuffLocation>,
     filename: String,
     fix: Option<RuffFix>,
 }
@@ -238,7 +225,7 @@ fn filter_ruff_format(output: &str) -> String {
             for part in parts {
                 let part_lower = part.to_lowercase();
                 if part_lower.contains("left unchanged") {
-                    let words: Vec<&str> = part.trim().split_whitespace().collect();
+                    let words: Vec<&str> = part.split_whitespace().collect();
                     // Look for number before "file" or "files"
                     for (i, word) in words.iter().enumerate() {
                         if (word == &"file" || word == &"files") && i > 0 {

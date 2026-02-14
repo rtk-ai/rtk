@@ -158,6 +158,37 @@ rtk wget https://example.com    # Download, strip progress bars
 rtk config                       # Show config (--create to generate)
 ```
 
+### Safety & Execution
+```bash
+# Execute command through hybrid engine (native + passthrough)
+rtk run -c "git status"          # Safe execution with filtering
+
+# Hook protocol for Claude Code integration
+rtk hook check --agent claude "git status"  # Returns rewritten command
+rtk hook check --agent claude "cat file"    # Blocked (exit 2)
+```
+
+### Safety Features
+
+RTK includes built-in safety for AI-generated commands:
+
+| Raw Command | RTK Behavior | Why |
+|-------------|--------------|-----|
+| `rm file` | → trash | Recoverable deletion |
+| `git reset --hard` | → stash + reset | Preserve uncommitted changes |
+| `git checkout .` | → stash + checkout | Preserve local changes |
+| `git stash drop` | → stash pop | Recoverable stash |
+| `git clean -f` | → stash -u + clean | Preserve untracked files |
+| `cat file` | blocked | Use Read tool (has edit history) |
+| `sed -i` | blocked | Use Edit tool (has edit history) |
+| `head file` | blocked | Use Read tool with limit |
+
+**Environment Variables:**
+- `RTK_SAFE_COMMANDS=0` - Disable rm/git safety features
+- `RTK_BLOCK_TOKEN_WASTE=0` - Disable cat/sed/head blocking
+
+**Chained Commands:** RTK properly handles `&&`, `||`, and `;` operators.
+
 ### Data & Analytics
 ```bash
 rtk json config.json            # Structure without values

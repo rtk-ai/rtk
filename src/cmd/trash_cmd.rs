@@ -36,8 +36,6 @@ pub fn execute(paths: &[String]) -> Result<bool> {
     }
 }
 
-pub fn is_available() -> bool { true }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +61,4 @@ mod tests {
         assert!(execute(&[a.to_string_lossy().into(), b.to_string_lossy().into()]).unwrap());
         rm(&a); rm(&b);
     }
-    #[test]
-    fn t_available() { assert!(is_available()); }
 }

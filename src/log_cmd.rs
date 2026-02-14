@@ -101,7 +101,7 @@ fn analyze_logs(content: &str) -> String {
     let total_warnings: usize = warn_counts.values().sum();
     let total_info: usize = info_counts.values().sum();
 
-    result.push(format!("📊 Log Summary"));
+    result.push("📊 Log Summary".to_string());
     result.push(format!(
         "   ❌ {} errors ({} unique)",
         total_errors,
