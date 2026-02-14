@@ -120,8 +120,8 @@ fn extract_filename_from_output(stderr: &str, url: &str, args: &[String]) -> Str
                 return name.clone();
             }
         }
-        if arg.starts_with("-O") {
-            return arg[2..].to_string();
+        if let Some(name) = arg.strip_prefix("-O") {
+            return name.to_string();
         }
     }
 
@@ -196,14 +196,13 @@ fn compact_url(url: &str) -> String {
         .unwrap_or(url);
 
     // Truncate if too long
-    if without_proto.len() <= 50 {
+    let chars: Vec<char> = without_proto.chars().collect();
+    if chars.len() <= 50 {
         without_proto.to_string()
     } else {
-        format!(
-            "{}...{}",
-            &without_proto[..25],
-            &without_proto[without_proto.len() - 20..]
-        )
+        let prefix: String = chars[..25].iter().collect();
+        let suffix: String = chars[chars.len() - 20..].iter().collect();
+        format!("{}...{}", prefix, suffix)
     }
 }
 
@@ -241,7 +240,8 @@ fn parse_error(stderr: &str, stdout: &str) -> String {
         let trimmed = line.trim();
         if !trimmed.is_empty() && !trimmed.starts_with("--") {
             if trimmed.len() > 60 {
-                return format!("{}...", &trimmed[..60]);
+                let t: String = trimmed.chars().take(60).collect();
+                return format!("{}...", t);
             }
             return trimmed.to_string();
         }
@@ -254,6 +254,7 @@ fn truncate_line(line: &str, max: usize) -> String {
     if line.len() <= max {
         line.to_string()
     } else {
-        format!("{}...", &line[..max - 3])
+        let t: String = line.chars().take(max.saturating_sub(3)).collect();
+        format!("{}...", t)
     }
 }
