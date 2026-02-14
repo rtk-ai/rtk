@@ -2,9 +2,11 @@
 # Test suite for rtk-rewrite.sh
 # Feeds mock JSON through the hook and verifies the rewritten commands.
 #
-# Usage: bash ~/.claude/hooks/test-rtk-rewrite.sh
+# Usage: bash hooks/test-rtk-rewrite.sh
+# Override hook path: HOOK=/path/to/rtk-rewrite.sh bash hooks/test-rtk-rewrite.sh
 
-HOOK="$HOME/.claude/hooks/rtk-rewrite.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOOK="${HOOK:-$SCRIPT_DIR/rtk-rewrite.sh}"
 PASS=0
 FAIL=0
 TOTAL=0
@@ -109,6 +111,22 @@ test_rewrite "rg pattern src/" \
   "rg pattern src/" \
   "rtk grep pattern src/"
 
+test_rewrite "grepai search query" \
+  "grepai search auth middleware" \
+  "rtk rgai auth middleware"
+
+test_rewrite "grepai search with flags" \
+  "grepai search \"error handler\" --json --compact" \
+  "rtk rgai \"error handler\" --json --compact"
+
+test_rewrite "rgai search query (priority over rg/grep)" \
+  "rgai search auth middleware --compact" \
+  "rtk rgai auth middleware --compact"
+
+test_rewrite "plain rgai" \
+  "rgai auth middleware --json" \
+  "rtk rgai auth middleware --json"
+
 test_rewrite "cargo test" \
   "cargo test" \
   "rtk cargo test"
@@ -148,6 +166,18 @@ test_rewrite "env + npm run" \
 test_rewrite "env + docker compose" \
   "COMPOSE_PROJECT_NAME=test docker compose up -d" \
   "COMPOSE_PROJECT_NAME=test rtk docker compose up -d"
+
+test_rewrite "env + grepai search" \
+  "NODE_ENV=test grepai search token refresh --json" \
+  "NODE_ENV=test rtk rgai token refresh --json"
+
+test_rewrite "env + rg exact search" \
+  "RG_IGNORE_DOT=1 rg token src/" \
+  "RG_IGNORE_DOT=1 rtk grep token src/"
+
+test_rewrite "env + grep exact search" \
+  "LC_ALL=C grep -rn token src/" \
+  "LC_ALL=C rtk grep -rn token src/"
 
 echo ""
 
@@ -193,17 +223,17 @@ test_rewrite "docker exec -it db psql" \
   "docker exec -it db psql" \
   "rtk docker exec -it db psql"
 
-test_rewrite "find (NOT rewritten — different arg format)" \
+test_rewrite "find with native args" \
   "find . -name '*.ts'" \
-  ""
+  "rtk find . -name '*.ts'"
 
-test_rewrite "tree (NOT rewritten — different arg format)" \
+test_rewrite "tree with path arg" \
   "tree src/" \
-  ""
+  "rtk tree src/"
 
-test_rewrite "wget (NOT rewritten — different arg format)" \
+test_rewrite "wget URL" \
   "wget https://example.com/file" \
-  ""
+  "rtk wget https://example.com/file"
 
 test_rewrite "gh api repos/owner/repo" \
   "gh api repos/owner/repo" \

@@ -48,6 +48,15 @@ With rtk: **~45,000 tokens** → **70% reduction**
 
 > Estimates based on medium-sized TypeScript/Rust projects. Actual savings vary by project size.
 
+## Search Priority
+
+**Search priority: rgai > rg > grep.**
+
+- Use `rtk rgai` first for semantic/intention-based discovery.
+- Use `rtk grep` for exact/regex matching.
+- `rtk grep` internally follows `rg -> grep` backend fallback.
+- For fully raw output, use `rtk proxy <cmd>`.
+
 ## Installation
 
 ### ⚠️ Pre-Installation Check (REQUIRED)
@@ -130,7 +139,8 @@ rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
-rtk grep "pattern" .            # Grouped search results
+rtk rgai "auth token refresh"   # Semantic code search
+rtk grep "pattern" .            # Exact/regex search (internal rg -> grep fallback)
 ```
 
 ### Git
@@ -400,6 +410,11 @@ The most effective way to use rtk is with the **auto-rewrite hook** for Claude C
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead in Claude's context.
 
+**Search ladder**:
+- `rtk rgai` for semantic discovery
+- `rtk grep` for exact/regex follow-up (`rg -> grep` fallback)
+- `rtk proxy ...` when you need fully raw behavior
+
 ### What Are Hooks?
 
 **For Beginners**:
@@ -491,12 +506,16 @@ The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To us
 
 ### Commands Rewritten
 
+Search rewrite order is strict and deterministic: `rgai > rg > grep`.
+
 | Raw Command | Rewritten To |
 |-------------|-------------|
 | `git status/diff/log/add/commit/push/pull/branch/fetch/stash` | `rtk git ...` |
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy` | `rtk cargo ...` |
 | `cat <file>` | `rtk read <file>` |
+| `grepai/rgai search <query>` | `rtk rgai <query>` |
+| `rgai <query>` | `rtk rgai <query>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
 | `ls` | `rtk ls` |
 | `vitest/pnpm test` | `rtk vitest run` |

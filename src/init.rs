@@ -102,11 +102,12 @@ rtk npx <cmd>           # Compact npx command output
 rtk prisma              # Prisma without ASCII art (88%)
 ```
 
-### Files & Search (60-75% savings)
+### Files & Search (60-85% savings)
 ```bash
 rtk ls <path>           # Tree format, compact (65%)
 rtk read <file>         # Code reading with filtering (60%)
-rtk grep <pattern>      # Search grouped by file (75%)
+rtk rgai <query>        # Semantic search ranked by relevance (85%)
+rtk grep <pattern>      # Exact/regex search (internal rg -> grep fallback)
 rtk find <pattern>      # Find grouped by directory (70%)
 ```
 
@@ -155,7 +156,7 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 | Git | status, log, diff, add, commit | 59-80% |
 | GitHub | gh pr, gh run, gh issue | 26-87% |
 | Package Managers | pnpm, npm, npx | 70-90% |
-| Files | ls, read, grep, find | 60-75% |
+| Files | ls, read, grep, rgai, find | 60-85% |
 | Infrastructure | docker, kubectl | 85% |
 | Network | curl, wget | 65-70% |
 
@@ -767,15 +768,48 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
 
     if path.exists() {
         let existing = fs::read_to_string(&path)?;
+        // upsert_rtk_block handles all 4 cases: add, update, unchanged, malformed
+        let (new_content, action) = upsert_rtk_block(&existing, RTK_INSTRUCTIONS);
 
-        if existing.contains("<!-- rtk-instructions") {
-            println!("✅ {} already contains rtk instructions", path.display());
-            return Ok(());
+        match action {
+            RtkBlockUpsert::Added => {
+                fs::write(&path, new_content)?;
+                println!("✅ Added rtk instructions to existing {}", path.display());
+            }
+            RtkBlockUpsert::Updated => {
+                fs::write(&path, new_content)?;
+                println!("✅ Updated rtk instructions in {}", path.display());
+            }
+            RtkBlockUpsert::Unchanged => {
+                println!(
+                    "✅ {} already contains up-to-date rtk instructions",
+                    path.display()
+                );
+                return Ok(());
+            }
+            RtkBlockUpsert::Malformed => {
+                eprintln!(
+                    "⚠️  Warning: Found '<!-- rtk-instructions' without closing marker in {}",
+                    path.display()
+                );
+
+                if let Some((line_num, _)) = existing
+                    .lines()
+                    .enumerate()
+                    .find(|(_, line)| line.contains("<!-- rtk-instructions"))
+                {
+                    eprintln!("    Location: line {}", line_num + 1);
+                }
+
+                eprintln!("    Action: Manually remove the incomplete block, then re-run:");
+                if global {
+                    eprintln!("            rtk init -g --claude-md");
+                } else {
+                    eprintln!("            rtk init --claude-md");
+                }
+                return Ok(());
+            }
         }
-
-        let new_content = format!("{}\n\n{}", existing.trim(), RTK_INSTRUCTIONS);
-        fs::write(&path, new_content)?;
-        println!("✅ Added rtk instructions to existing {}", path.display());
     } else {
         fs::write(&path, RTK_INSTRUCTIONS)?;
         println!("✅ Created {} with rtk instructions", path.display());
@@ -788,6 +822,69 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
     }
 
     Ok(())
+}
+
+// --- upsert_rtk_block: idempotent RTK block management ---
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RtkBlockUpsert {
+    /// No existing block found — appended new block
+    Added,
+    /// Existing block found with different content — replaced
+    Updated,
+    /// Existing block found with identical content — no-op
+    Unchanged,
+    /// Opening marker found without closing marker — not safe to rewrite
+    Malformed,
+}
+
+/// Insert or replace the RTK instructions block in `content`.
+///
+/// Returns `(new_content, action)` describing what happened.
+/// The caller decides whether to write `new_content` based on `action`.
+fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
+    let start_marker = "<!-- rtk-instructions";
+    let end_marker = "<!-- /rtk-instructions -->";
+
+    if let Some(start) = content.find(start_marker) {
+        if let Some(relative_end) = content[start..].find(end_marker) {
+            let end = start + relative_end;
+            let end_pos = end + end_marker.len();
+            let current_block = content[start..end_pos].trim();
+            let desired_block = block.trim();
+
+            if current_block == desired_block {
+                return (content.to_string(), RtkBlockUpsert::Unchanged);
+            }
+
+            // Replace stale block with desired block
+            let before = content[..start].trim_end();
+            let after = content[end_pos..].trim_start();
+
+            let result = match (before.is_empty(), after.is_empty()) {
+                (true, true) => desired_block.to_string(),
+                (true, false) => format!("{desired_block}\n\n{after}"),
+                (false, true) => format!("{before}\n\n{desired_block}"),
+                (false, false) => format!("{before}\n\n{desired_block}\n\n{after}"),
+            };
+
+            return (result, RtkBlockUpsert::Updated);
+        }
+
+        // Opening marker without closing marker — malformed
+        return (content.to_string(), RtkBlockUpsert::Malformed);
+    }
+
+    // No existing block — append
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        (block.to_string(), RtkBlockUpsert::Added)
+    } else {
+        (
+            format!("{trimmed}\n\n{}", block.trim()),
+            RtkBlockUpsert::Added,
+        )
+    }
 }
 
 /// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
@@ -985,7 +1082,9 @@ pub fn show_config() -> Result<()> {
         println!("⚪ settings.json: not found");
     }
 
-    println!("\nUsage:");
+    println!("\nSearch priority: rgai > rg > grep.");
+    println!("  Use rtk rgai first; use rtk grep for exact/regex.\n");
+    println!("Usage:");
     println!("  rtk init              # Full injection into local CLAUDE.md");
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
     println!("  rtk init -g --auto-patch    # Same as above but no prompt");
@@ -1020,6 +1119,7 @@ mod tests {
             "rtk git",
             "rtk docker",
             "rtk kubectl",
+            "rtk rgai",
         ] {
             assert!(
                 RTK_INSTRUCTIONS.contains(cmd),
@@ -1099,8 +1199,58 @@ More content"#;
         // Just verify RTK_INSTRUCTIONS constant has the right content
         assert!(RTK_INSTRUCTIONS.contains("<!-- rtk-instructions"));
         assert!(RTK_INSTRUCTIONS.contains("rtk cargo test"));
+        assert!(RTK_INSTRUCTIONS.contains("rtk rgai"));
         assert!(RTK_INSTRUCTIONS.contains("<!-- /rtk-instructions -->"));
         assert!(RTK_INSTRUCTIONS.len() > 4000);
+    }
+
+    // --- upsert_rtk_block tests ---
+
+    #[test]
+    fn test_upsert_rtk_block_appends_when_missing() {
+        let input = "# Team instructions";
+        let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
+        assert_eq!(action, RtkBlockUpsert::Added);
+        assert!(content.contains("# Team instructions"));
+        assert!(content.contains("<!-- rtk-instructions"));
+    }
+
+    #[test]
+    fn test_upsert_rtk_block_updates_stale_block() {
+        let input = r#"# Team instructions
+
+<!-- rtk-instructions v1 -->
+OLD RTK CONTENT
+<!-- /rtk-instructions -->
+
+More notes
+"#;
+
+        let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
+        assert_eq!(action, RtkBlockUpsert::Updated);
+        assert!(!content.contains("OLD RTK CONTENT"));
+        assert!(content.contains("rtk cargo test")); // from current RTK_INSTRUCTIONS
+        assert!(content.contains("# Team instructions"));
+        assert!(content.contains("More notes"));
+    }
+
+    #[test]
+    fn test_upsert_rtk_block_noop_when_already_current() {
+        let input = format!(
+            "# Team instructions\n\n{}\n\nMore notes\n",
+            RTK_INSTRUCTIONS
+        );
+        let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
+        assert_eq!(action, RtkBlockUpsert::Unchanged);
+        assert_eq!(content, input);
+    }
+
+    #[test]
+    fn test_upsert_rtk_block_detects_malformed_block() {
+        let input = "<!-- rtk-instructions v2 -->\npartial";
+        let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
+        assert_eq!(action, RtkBlockUpsert::Malformed);
+        assert_eq!(content, input);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 # RTK auto-rewrite hook for Claude Code PreToolUse:Bash
 # Transparently rewrites raw commands to their rtk equivalents.
 # Outputs JSON with updatedInput to modify the command before execution.
+# Source of truth: hooks/rtk-rewrite.sh (keep .claude/hooks copy in sync)
 
 # Guards: skip silently if dependencies missing
 if ! command -v rtk &>/dev/null || ! command -v jq &>/dev/null; then
@@ -88,10 +89,20 @@ elif echo "$MATCH_CMD" | grep -qE '^cargo[[:space:]]+fmt([[:space:]]|$)'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^cargo fmt/rtk cargo fmt/')"
 
 # --- File operations ---
+# Search priority (mandatory): rgai > rg > grep
+# Tier 1: semantic intent search (grepai/rgai) -> rtk rgai
+# Tier 2: exact search via ripgrep -> rtk grep (rtk grep runs rg -> grep fallback internally)
+# Tier 3: exact search via grep    -> rtk grep
+elif echo "$MATCH_CMD" | grep -qE '^(grepai|rgai)[[:space:]]+search([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^(grepai|rgai)[[:space:]]+search[[:space:]]+/rtk rgai /')"
+elif echo "$MATCH_CMD" | grep -qE '^rgai[[:space:]]+'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^rgai[[:space:]]+/rtk rgai /')"
 elif echo "$MATCH_CMD" | grep -qE '^cat[[:space:]]+'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^cat /rtk read /')"
-elif echo "$MATCH_CMD" | grep -qE '^(rg|grep)[[:space:]]+'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^(rg|grep) /rtk grep /')"
+elif echo "$MATCH_CMD" | grep -qE '^rg[[:space:]]+'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^rg /rtk grep /')"
+elif echo "$MATCH_CMD" | grep -qE '^grep[[:space:]]+'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^grep /rtk grep /')"
 elif echo "$MATCH_CMD" | grep -qE '^ls([[:space:]]|$)'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^ls/rtk ls/')"
 elif echo "$MATCH_CMD" | grep -qE '^tree([[:space:]]|$)'; then

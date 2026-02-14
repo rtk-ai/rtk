@@ -25,5 +25,14 @@ which rtk             # Verify correct binary
 
 All other commands are automatically rewritten by the Claude Code hook.
 Example: `git status` → `rtk git status` (transparent, 0 tokens overhead)
+Example: `grepai search "auth token refresh"` → `rtk rgai "auth token refresh"`
+
+## Semantic Search
+
+```bash
+rtk rgai "auth token refresh"         # Intent-aware code search
+rtk rgai auth token refresh --compact # Unquoted multi-word query
+rtk rgai "auth token refresh" --json  # Machine-readable output
+```
 
 Refer to CLAUDE.md for full command reference.
