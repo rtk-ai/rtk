@@ -501,7 +501,7 @@ mod tests {
         std::env::remove_var("RTK_SAFE_COMMANDS");
     }
 
-    /// Test: Safety enabled by default (rm->trash, git clean blocked)
+    /// Test: Safety enabled by default (rm->trash, git clean -> stash)
     #[test]
     fn test_safety_enabled_by_default() {
         let _lock = env_lock();
@@ -511,9 +511,9 @@ mod tests {
         let result = check("rm", &["file".to_string()]);
         assert!(matches!(result, SafetyResult::TrashRequested(_)));
 
-        // git clean should be blocked by default
+        // git clean should be rewritten with stash by default
         let result = check("git", &["clean".to_string(), "-fd".to_string()]);
-        assert!(matches!(result, SafetyResult::Blocked(_)));
+        assert!(matches!(result, SafetyResult::Rewritten(_)));
     }
 
     /// Test: Safety can be disabled with RTK_SAFE_COMMANDS=0

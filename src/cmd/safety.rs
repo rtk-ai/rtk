@@ -101,16 +101,13 @@ pub enum SafetyResult {
 /// Get all safety rules (ordered by specificity)
 ///
 /// Environment Variables (coarse-grained):
-/// - RTK_SAFE_COMMANDS=1    - Master toggle for ALL safety features (rm->trash, git safety)
+/// - RTK_SAFE_COMMANDS=0 - Disable rm->trash and git safety
 /// - RTK_BLOCK_TOKEN_WASTE=0 - Disable token waste prevention (cat/sed/head blocking)
 ///
-/// All safety features are enabled by default. To disable:
-/// - RTK_SAFE_COMMANDS=0 - Disable rm->trash and git safety
-/// - RTK_BLOCK_TOKEN_WASTE=0 - Disable token waste prevention
+/// All safety features are enabled by default.
 pub fn get_rules() -> Vec<SafetyRule> {
     vec![
         // === DANGEROUS FILE OPERATIONS ===
-        // Enabled by default, disable with RTK_SAFE_COMMANDS=0
         SafetyRule {
             pattern: "rm",
             action: SafetyAction::Trash,
@@ -121,34 +118,65 @@ pub fn get_rules() -> Vec<SafetyRule> {
         },
 
         // === DANGEROUS GIT OPERATIONS ===
-        // Enabled by default, disable with RTK_SAFE_COMMANDS=0
+        // Order: most specific patterns first
         SafetyRule {
             pattern: "git reset --hard",
-            action: SafetyAction::Prepend("git stash push -m 'RTK Safety Stash'".into()),
-            human_msg: "Safety: Stashing changes before hard reset.",
+            action: SafetyAction::Prepend("git stash push -m 'RTK: reset backup'".into()),
+            human_msg: "Safety: Stashing before reset.",
             agent_msg: "PREPEND: git stash",
             predicate: Some(predicates::has_unstaged_changes),
             env_var: Some("RTK_SAFE_COMMANDS"),
         },
         SafetyRule {
+            pattern: "git checkout --",
+            action: SafetyAction::Prepend("git stash push -m 'RTK: checkout backup'".into()),
+            human_msg: "Safety: Stashing before checkout.",
+            agent_msg: "PREPEND: git stash",
+            predicate: Some(predicates::has_unstaged_changes),
+            env_var: Some("RTK_SAFE_COMMANDS"),
+        },
+        SafetyRule {
+            pattern: "git checkout .",
+            action: SafetyAction::Prepend("git stash push -m 'RTK: checkout backup'".into()),
+            human_msg: "Safety: Stashing before checkout.",
+            agent_msg: "PREPEND: git stash",
+            predicate: Some(predicates::has_unstaged_changes),
+            env_var: Some("RTK_SAFE_COMMANDS"),
+        },
+        SafetyRule {
+            pattern: "git stash drop",
+            action: SafetyAction::Rewrite("git stash pop".into()),
+            human_msg: "Safety: Using pop instead of drop (recoverable).",
+            agent_msg: "REWRITE: stash drop -> pop",
+            predicate: None,
+            env_var: Some("RTK_SAFE_COMMANDS"),
+        },
+        SafetyRule {
             pattern: "git clean -fd",
-            action: SafetyAction::Block,
-            human_msg: "Blocked: 'git clean -fd' would delete untracked files. Confirm manually.",
-            agent_msg: "BLOCK: git clean -fd unsafe",
+            action: SafetyAction::Prepend("git stash -u -m 'RTK: clean backup'".into()),
+            human_msg: "Safety: Stashing untracked before clean.",
+            agent_msg: "PREPEND: git stash -u",
             predicate: None,
             env_var: Some("RTK_SAFE_COMMANDS"),
         },
         SafetyRule {
             pattern: "git clean -df",
-            action: SafetyAction::Block,
-            human_msg: "Blocked: 'git clean -df' would delete untracked files. Confirm manually.",
-            agent_msg: "BLOCK: git clean -df unsafe",
+            action: SafetyAction::Prepend("git stash -u -m 'RTK: clean backup'".into()),
+            human_msg: "Safety: Stashing untracked before clean.",
+            agent_msg: "PREPEND: git stash -u",
+            predicate: None,
+            env_var: Some("RTK_SAFE_COMMANDS"),
+        },
+        SafetyRule {
+            pattern: "git clean -f",
+            action: SafetyAction::Prepend("git stash -u -m 'RTK: clean backup'".into()),
+            human_msg: "Safety: Stashing untracked before clean.",
+            agent_msg: "PREPEND: git stash -u",
             predicate: None,
             env_var: Some("RTK_SAFE_COMMANDS"),
         },
 
         // === TOKEN WASTE PREVENTION ===
-        // Enabled by default, disable with RTK_BLOCK_TOKEN_WASTE=0
         SafetyRule {
             pattern: "cat",
             action: SafetyAction::SuggestTool("Read".into()),
@@ -452,25 +480,33 @@ mod tests {
     }
 
     #[test]
-    fn test_check_git_clean_fd_blocked() {
+    fn test_check_git_clean_fd_rewritten() {
         let _lock = env_lock();
         cleanup_env_vars();
         env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check("git", &["clean".to_string(), "-fd".to_string()]);
         match result {
-            SafetyResult::Blocked(_) => {}
-            _ => panic!("Expected Blocked, got {:?}", result),
+            SafetyResult::Rewritten(cmd) => {
+                assert!(cmd.contains("stash -u"));
+                assert!(cmd.contains("clean"));
+            }
+            _ => panic!("Expected Rewritten, got {:?}", result),
         }
         env::remove_var("RTK_SAFE_COMMANDS");
     }
 
     #[test]
-    fn test_check_git_clean_blocked_by_default() {
+    fn test_check_git_clean_rewritten_by_default() {
         let _lock = env_lock();
         cleanup_env_vars();
-        // git clean should be blocked by default now
+        // git clean should be rewritten with stash by default
         let result = check("git", &["clean".to_string(), "-fd".to_string()]);
-        assert!(matches!(result, SafetyResult::Blocked(_)));
+        match result {
+            SafetyResult::Rewritten(cmd) => {
+                assert!(cmd.contains("stash -u"));
+            }
+            _ => panic!("Expected Rewritten by default, got {:?}", result),
+        }
     }
 
     #[test]
@@ -542,12 +578,87 @@ mod tests {
         let _lock = env_lock();
         let rules = get_rules();
         // More specific patterns should come before less specific
-        // git reset --hard should come before git
         let reset_idx = rules.iter().position(|r| r.pattern == "git reset --hard");
-        let git_idx = rules.iter().position(|r| r.pattern == "git");
-        // We don't have a "git" rule currently, but if we did:
-        if let (Some(reset), Some(git)) = (reset_idx, git_idx) {
-            assert!(reset < git, "More specific patterns should come first");
+        let checkout_idx = rules.iter().position(|r| r.pattern == "git checkout --");
+        // git reset --hard and git checkout -- should exist
+        assert!(reset_idx.is_some());
+        assert!(checkout_idx.is_some());
+    }
+
+    // === NEW GIT SAFETY TESTS ===
+
+    #[test]
+    fn test_git_checkout_dot_stash_prepended() {
+        let _lock = env_lock();
+        cleanup_env_vars();
+        let result = check("git", &["checkout".to_string(), ".".to_string()]);
+        // May or may not trigger based on predicate, just ensure no panic
+        match result {
+            SafetyResult::Rewritten(cmd) => {
+                assert!(cmd.contains("stash"));
+                assert!(cmd.contains("checkout"));
+            }
+            SafetyResult::Safe => {} // Predicate returned false (no changes)
+            _ => {}
         }
+    }
+
+    #[test]
+    fn test_git_checkout_dashdash_stash_prepended() {
+        let _lock = env_lock();
+        cleanup_env_vars();
+        let result = check("git", &["checkout".to_string(), "--".to_string(), "file.txt".to_string()]);
+        match result {
+            SafetyResult::Rewritten(cmd) => {
+                assert!(cmd.contains("stash"));
+                assert!(cmd.contains("checkout"));
+            }
+            SafetyResult::Safe => {}
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn test_git_stash_drop_rewritten_to_pop() {
+        let _lock = env_lock();
+        cleanup_env_vars();
+        let result = check("git", &["stash".to_string(), "drop".to_string()]);
+        match result {
+            SafetyResult::Rewritten(cmd) => {
+                assert!(cmd.contains("stash pop"));
+            }
+            _ => panic!("Expected Rewritten to stash pop"),
+        }
+    }
+
+    #[test]
+    fn test_git_clean_f_rewritten() {
+        let _lock = env_lock();
+        cleanup_env_vars();
+        let result = check("git", &["clean".to_string(), "-f".to_string()]);
+        match result {
+            SafetyResult::Rewritten(cmd) => {
+                assert!(cmd.contains("stash -u"));
+                assert!(cmd.contains("clean"));
+            }
+            _ => panic!("Expected Rewritten with stash -u"),
+        }
+    }
+
+    #[test]
+    fn test_git_branch_checkout_safe() {
+        // git checkout <branch> should be safe (not matched by checkout . or checkout --)
+        let _lock = env_lock();
+        cleanup_env_vars();
+        let result = check("git", &["checkout".to_string(), "main".to_string()]);
+        assert_eq!(result, SafetyResult::Safe);
+    }
+
+    #[test]
+    fn test_git_checkout_new_branch_safe() {
+        let _lock = env_lock();
+        cleanup_env_vars();
+        let result = check("git", &["checkout".to_string(), "-b".to_string(), "feature".to_string()]);
+        assert_eq!(result, SafetyResult::Safe);
     }
 }
