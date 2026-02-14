@@ -1,9 +1,5 @@
 # CLAUDE.md
 
-> **⚠️ CRITICAL MAINTENANCE**: Update this file when adding modules/commands/strategies.
-> Claude Code reads this file every session. Outdated info = broken workflows.
-> Reference CHANGELOG.md before working on RTK.
-
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -201,7 +197,7 @@ rtk gain --history | grep proxy
 - Supports Rust, Python, JS/TS, Java, Go, C/C++, etc.
 - Tokenization rules vary by language (comments, strings, blocks)
 
-### Module Responsibilities (46 modules total)
+### Module Responsibilities
 
 | Module | Purpose | Token Strategy |
 |--------|---------|----------------|
@@ -228,12 +224,6 @@ rtk gain --history | grep proxy
 | golangci_cmd.rs | golangci-lint | JSON parsing, group by rule (85% reduction) |
 | utils.rs | Shared utilities | Package manager detection, common formatting |
 | discover/ | Claude Code history analysis | Scan JSONL sessions, classify commands, report missed savings |
-
-> **📌 Latest Updates**: RTK v0.15.1 (2026-02-12)
-> - Python & Go support (v0.15.0): 7 new commands (ruff, pytest, pip, go, golangci-lint)
-> - CI benchmarks with Python/Go fixtures (v0.15.1)
-> - Extended hook coverage for Python/Go (v0.15.1)
-> - See [CHANGELOG.md](CHANGELOG.md) for complete history
 
 ## Fork-Specific Features
 
@@ -271,17 +261,6 @@ rtk gain --history | grep proxy
   - `rtk golangci-lint`: JSON parsing grouped by rule (85% reduction)
 - **Architecture**: Standalone Python commands (mirror lint/prettier), Go sub-enum (mirror git/cargo)
 - **Patterns**: JSON for structured output (ruff check, golangci-lint, pip), NDJSON streaming (go test), text state machine (pytest), text filters (go build/vet, ruff format)
-
-### Hook Coverage (v0.15.1)
-
-**Python/Go commands automatically rewritten** via `.claude/hooks/rtk-rewrite.sh`:
-- ✅ `ruff check/format` → `rtk ruff ...`
-- ✅ `pytest` → `rtk pytest`
-- ✅ `pip list/install/outdated` → `rtk pip ...`
-- ✅ `go test/build/vet` → `rtk go ...`
-- ✅ `golangci-lint run` → `rtk golangci-lint ...`
-
-See `.claude/hooks/rtk-rewrite.sh` for complete rewrite logic.
 
 ## Testing Strategy
 

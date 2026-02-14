@@ -138,16 +138,20 @@ fn clean_line(line: &str, max_len: usize, context_only: bool, pattern: &str) -> 
         let pattern_lower = pattern.to_lowercase();
 
         if let Some(pos) = lower.find(&pattern_lower) {
-            let start = pos.saturating_sub(max_len / 3);
-            let end = (start + max_len).min(trimmed.len());
-            let start = if end == trimmed.len() {
+            let char_pos = lower[..pos].chars().count();
+            let chars: Vec<char> = trimmed.chars().collect();
+            let char_len = chars.len();
+
+            let start = char_pos.saturating_sub(max_len / 3);
+            let end = (start + max_len).min(char_len);
+            let start = if end == char_len {
                 end.saturating_sub(max_len)
             } else {
                 start
             };
 
-            let slice = &trimmed[start..end];
-            if start > 0 && end < trimmed.len() {
+            let slice: String = chars[start..end].iter().collect();
+            if start > 0 && end < char_len {
                 format!("...{}...", slice)
             } else if start > 0 {
                 format!("...{}", slice)
@@ -155,7 +159,8 @@ fn clean_line(line: &str, max_len: usize, context_only: bool, pattern: &str) -> 
                 format!("{}...", slice)
             }
         } else {
-            format!("{}...", &trimmed[..max_len - 3])
+            let t: String = trimmed.chars().take(max_len - 3).collect();
+            format!("{}...", t)
         }
     }
 }
@@ -203,5 +208,21 @@ mod tests {
         // This is a compile-time test - if it compiles, the signature is correct
         let _extra: Vec<String> = vec!["-i".to_string(), "-A".to_string(), "3".to_string()];
         // No need to actually run - we're verifying the parameter exists
+    }
+
+    #[test]
+    fn test_clean_line_multibyte() {
+        // Thai text that exceeds max_len in bytes
+        let line = "  สวัสดีครับ นี่คือข้อความที่ยาวมากสำหรับทดสอบ  ";
+        let cleaned = clean_line(line, 20, false, "ครับ");
+        // Should not panic
+        assert!(!cleaned.is_empty());
+    }
+
+    #[test]
+    fn test_clean_line_emoji() {
+        let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
+        let cleaned = clean_line(line, 15, false, "text");
+        assert!(!cleaned.is_empty());
     }
 }

@@ -112,7 +112,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 }
 
 /// Filter ruff check JSON output - group by rule and file
-fn filter_ruff_check_json(output: &str) -> String {
+pub fn filter_ruff_check_json(output: &str) -> String {
     let diagnostics: Result<Vec<RuffDiagnostic>, _> = serde_json::from_str(output);
 
     let diagnostics = match diagnostics {
@@ -214,7 +214,7 @@ fn filter_ruff_check_json(output: &str) -> String {
 }
 
 /// Filter ruff format output - show files that need formatting
-fn filter_ruff_format(output: &str) -> String {
+pub fn filter_ruff_format(output: &str) -> String {
     let mut files_to_format: Vec<String> = Vec::new();
     let mut files_checked = 0;
 

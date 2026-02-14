@@ -44,7 +44,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 }
 
 /// Filter Prettier output - show only files that need formatting
-fn filter_prettier_output(output: &str) -> String {
+pub fn filter_prettier_output(output: &str) -> String {
     let mut files_to_format: Vec<String> = Vec::new();
     let mut files_checked = 0;
     let mut is_check_mode = true;

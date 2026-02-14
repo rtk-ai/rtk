@@ -38,7 +38,8 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         let display_value = if is_sensitive && !show_all {
             mask_value(value)
         } else if value.len() > 100 {
-            format!("{}... ({} chars)", &value[..50], value.len())
+            let preview: String = value.chars().take(50).collect();
+            format!("{}... ({} chars)", preview, value.chars().count())
         } else {
             value.clone()
         };
@@ -143,10 +144,13 @@ fn get_sensitive_patterns() -> HashSet<&'static str> {
 }
 
 fn mask_value(value: &str) -> String {
-    if value.len() <= 4 {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 4 {
         "****".to_string()
     } else {
-        format!("{}****{}", &value[..2], &value[value.len() - 2..])
+        let prefix: String = chars[..2].iter().collect();
+        let suffix: String = chars[chars.len() - 2..].iter().collect();
+        format!("{}****{}", prefix, suffix)
     }
 }
 
