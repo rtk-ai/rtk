@@ -1,42 +1,42 @@
-//! Built-in trash implementation using the `trash` crate.
-//! Cross-platform: Windows Recycle Bin, macOS Trash, Linux FreeDesktop trash.
-//! Silent on success (like rm), only outputs on error.
+//! Built-in trash - mirrors rm behavior: silent on success, error on failure.
 
 use anyhow::Result;
 use std::path::Path;
 
-/// Move files/directories to system trash.
-/// Returns true on success, false on failure.
 pub fn execute(paths: &[String]) -> Result<bool> {
-    // Filter out empty paths and expand ~
-    let expanded_paths: Vec<String> = paths.iter()
+    let expanded: Vec<String> = paths.iter()
         .filter(|p| !p.is_empty())
         .map(|p| super::predicates::expand_tilde(p))
         .collect();
 
-    // Filter to existing paths only
-    let existing: Vec<&str> = expanded_paths.iter()
-        .filter(|p| Path::new(p).exists())
-        .map(|s| s.as_str())
-        .collect();
+    if expanded.is_empty() {
+        eprintln!("trash: no paths specified");
+        return Ok(false);
+    }
+
+    let (existing, missing): (Vec<_>, Vec<_>) = expanded.iter()
+        .partition(|p| Path::new(p).exists());
+
+    // Report missing like rm does
+    for p in &missing {
+        eprintln!("trash: cannot remove '{}': No such path", p);
+    }
 
     if existing.is_empty() {
         return Ok(false);
     }
 
-    match trash::delete_all(&existing) {
+    let refs: Vec<&str> = existing.iter().map(|s| s.as_str()).collect();
+    match trash::delete_all(&refs) {
         Ok(_) => Ok(true),
         Err(e) => {
-            eprintln!("trash: ✗ {} (RTK_SAFE_COMMANDS=0 to bypass)", e);
+            eprintln!("trash: {}", e);
             Ok(false)
         }
     }
 }
 
-/// Check if trash is available
-pub fn is_available() -> bool {
-    true
-}
+pub fn is_available() -> bool { true }
 
 #[cfg(test)]
 mod tests {
@@ -44,46 +44,25 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    fn create_temp_file(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("rtk_test_{}", name));
-        fs::write(&path, "test").unwrap();
-        path
+    fn tmp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("rtk_{}", name));
+        fs::write(&p, "x").unwrap();
+        p
     }
-
-    fn cleanup(path: &PathBuf) {
-        let _ = fs::remove_file(path);
-    }
+    fn rm(p: &PathBuf) { let _ = fs::remove_file(p); }
 
     #[test]
-    fn test_trash_empty() {
-        // Empty paths = nothing to trash = returns false
-        assert!(!execute(&[]).unwrap());
-    }
-
+    fn t_empty() { assert!(!execute(&[]).unwrap()); }
     #[test]
-    fn test_trash_single() {
-        let path = create_temp_file("single");
-        let path_str = path.to_string_lossy().to_string();
-        assert!(execute(&[path_str]).unwrap());
-        cleanup(&path);
-    }
-
+    fn t_missing() { assert!(!execute(&["/nope".into()]).unwrap()); }
     #[test]
-    fn test_trash_multiple() {
-        let p1 = create_temp_file("m1");
-        let p2 = create_temp_file("m2");
-        assert!(execute(&[p1.to_string_lossy().to_string(), p2.to_string_lossy().to_string()]).unwrap());
-        cleanup(&p1);
-        cleanup(&p2);
-    }
-
+    fn t_single() { let p = tmp("s"); assert!(execute(&[p.to_string_lossy().into()]).unwrap()); rm(&p); }
     #[test]
-    fn test_trash_nonexistent() {
-        assert!(!execute(&["/nonexistent/file".to_string()]).unwrap());
+    fn t_multi() {
+        let (a,b) = (tmp("a"), tmp("b"));
+        assert!(execute(&[a.to_string_lossy().into(), b.to_string_lossy().into()]).unwrap());
+        rm(&a); rm(&b);
     }
-
     #[test]
-    fn test_is_available() {
-        assert!(is_available());
-    }
+    fn t_available() { assert!(is_available()); }
 }
