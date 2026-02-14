@@ -27,6 +27,7 @@ toml = "0.8"
 chrono = "0.4"
 thiserror = "1.0"
 tempfile = "3"
+sha2 = "0.10"
 
 [dev-dependencies]
 
