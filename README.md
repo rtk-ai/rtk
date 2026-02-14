@@ -48,6 +48,30 @@ With rtk: **~45,000 tokens** → **70% reduction**
 
 > Estimates based on medium-sized TypeScript/Rust projects. Actual savings vary by project size.
 
+### Migration Search Benchmark Snapshot (February 14, 2026)
+
+Source: internal migration benchmark artifacts (private repository)
+
+| Scenario | Agent | Est. tokens | Unique files | Files / 1K tokens |
+|---|---|---:|---:|---:|
+| token_opt | grep | 14106 | 94 | 6.66 |
+| token_opt | rg | 14008 | 102 | 7.28 |
+| token_opt | rgai | 3428 | 58 | 16.92 |
+| quality_norm | grep | 14106 | 94 | 6.66 |
+| quality_norm | rg | 14065 | 103 | 7.32 |
+| quality_norm | rgai | 7349 | 103 | 14.02 |
+
+Methodology and raw artifacts are private and not publicly linked.
+
+## Search Priority Policy
+
+**Search priority (mandatory): rgai > rg > grep.**
+
+- Use `rtk rgai` first for semantic/intention-based discovery.
+- Use `rtk grep` for exact/regex matching.
+- `rtk grep` internally follows `rg -> grep` backend fallback.
+- For fully raw output, use `rtk proxy <cmd>`.
+
 ## Installation
 
 ### ⚠️ Pre-Installation Check (REQUIRED)
@@ -130,7 +154,9 @@ rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
-rtk grep "pattern" .            # Grouped search results
+rtk rgai "auth token refresh"   # Semantic code search (grepai-style)
+rtk grep "pattern" .            # Exact/regex search (internal rg -> grep fallback)
+rtk rgai auth token --path src  # Unquoted multi-word query + explicit path
 ```
 
 ### Git
@@ -400,6 +426,11 @@ The most effective way to use rtk is with the **auto-rewrite hook** for Claude C
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead in Claude's context.
 
+**Predictable search ladder**:
+- `rtk rgai` for semantic discovery
+- `rtk grep` for exact/regex follow-up (`rg -> grep` fallback)
+- `rtk proxy ...` when you need fully raw behavior
+
 ### What Are Hooks?
 
 **For Beginners**:
@@ -491,12 +522,16 @@ The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To us
 
 ### Commands Rewritten
 
+Search rewrite order is strict and deterministic: `rgai > rg > grep`.
+
 | Raw Command | Rewritten To |
 |-------------|-------------|
 | `git status/diff/log/add/commit/push/pull/branch/fetch/stash` | `rtk git ...` |
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy` | `rtk cargo ...` |
 | `cat <file>` | `rtk read <file>` |
+| `grepai/rgai search <query>` | `rtk rgai <query>` |
+| `rgai <query>` | `rtk rgai <query>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
 | `ls` | `rtk ls` |
 | `vitest/pnpm test` | `rtk vitest run` |
@@ -531,6 +566,7 @@ If you prefer Claude Code to **suggest** rtk usage rather than automatically rew
 - You're learning rtk patterns and want visibility into the rewrite logic
 - You prefer Claude Code to make explicit decisions rather than transparent rewrites
 - You want to preserve exact command execution for debugging
+- You suspect `strangeness tax` in a specific workflow and want explicit command choice
 
 #### Suggest Hook Setup
 
