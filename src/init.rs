@@ -1239,6 +1239,37 @@ pub fn show_config() -> Result<()> {
         println!("⚪ settings.json: not found");
     }
 
+    // Check Gemini settings.json
+    match resolve_gemini_dir() {
+        Ok(gemini_dir) => {
+            let gemini_settings = gemini_dir.join("settings.json");
+            if gemini_settings.exists() {
+                let content = fs::read_to_string(&gemini_settings)?;
+                if !content.trim().is_empty() {
+                    if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if gemini_hook_already_present(&root) {
+                            println!("✅ Gemini settings.json: RTK hook configured");
+                        } else {
+                            println!(
+                                "⚠️  Gemini settings.json: exists but RTK hook not configured"
+                            );
+                            println!("    Run: rtk init --gemini --auto-patch");
+                        }
+                    } else {
+                        println!("⚠️  Gemini settings.json: exists but invalid JSON");
+                    }
+                } else {
+                    println!("⚪ Gemini settings.json: empty");
+                }
+            } else {
+                println!("⚪ Gemini settings.json: not found");
+            }
+        }
+        Err(_) => {
+            println!("⚪ Gemini: cannot determine home directory");
+        }
+    }
+
     println!("\nUsage:");
     println!("  rtk init              # Full injection into local CLAUDE.md");
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
@@ -1247,6 +1278,9 @@ pub fn show_config() -> Result<()> {
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
+    println!("  rtk init --gemini           # Gemini CLI hook setup");
+    println!("  rtk init --gemini --auto-patch  # Gemini hook without prompting");
+    println!("  rtk init --gemini --uninstall   # Remove Gemini hook");
 
     Ok(())
 }
