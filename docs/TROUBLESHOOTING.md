@@ -165,6 +165,15 @@ Then add to `~/.claude/settings.json` (replace `~` with full path):
 
 **Note**: Use absolute path in `settings.json`, not `~/.claude/...`
 
+### Search Priority Policy
+
+**Search priority (mandatory): rgai > rg > grep.**
+
+- Use `rtk rgai` first for semantic/intention-based discovery.
+- Use `rtk grep` for exact/regex matching.
+- `rtk grep` internally follows `rg -> grep` backend fallback.
+- If you need fully raw output for debugging, use `rtk proxy <cmd>`.
+
 ---
 
 ## Problem: "command not found: rtk" after installation
