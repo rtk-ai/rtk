@@ -400,4 +400,98 @@ mod tests {
             _ => panic!("Both agents should produce Rewrite for safe command"),
         }
     }
+
+    // === TOKEN WASTE CONTEXT TESTS ===
+    // Verify that cat/sed/head are only blocked when standalone, not in pipes/redirects
+
+    #[test]
+    fn test_cat_with_pipe_allowed() {
+        // cat in a pipeline is a legitimate use case
+        let result = check_for_hook("cat file.txt | grep pattern", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                // Should be allowed via passthrough (pipe detected)
+                assert!(cmd.contains("rtk run"));
+                assert!(cmd.contains("|"));
+            }
+            _ => panic!("cat with pipe should be allowed"),
+        }
+    }
+
+    #[test]
+    fn test_cat_with_redirect_allowed() {
+        // cat with redirect is a legitimate use case
+        let result = check_for_hook("cat file.txt > output.txt", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                // Should be allowed via passthrough (redirect detected)
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("cat with redirect should be allowed"),
+        }
+    }
+
+    #[test]
+    fn test_sed_with_redirect_allowed() {
+        // sed with redirect (not -i) is a legitimate use case
+        let result = check_for_hook("sed 's/old/new/' file.txt > output.txt", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                // Should be allowed via passthrough (redirect detected)
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("sed with redirect should be allowed"),
+        }
+    }
+
+    #[test]
+    fn test_head_with_pipe_allowed() {
+        // head in a pipeline is a legitimate use case
+        let result = check_for_hook("head -n 10 file.txt | grep pattern", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                // Should be allowed via passthrough (pipe detected)
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("head with pipe should be allowed"),
+        }
+    }
+
+    #[test]
+    fn test_cat_standalone_blocked() {
+        // Standalone cat should be blocked (token waste)
+        let result = check_for_hook("cat file.txt", "claude");
+        match result {
+            HookResult::Blocked(msg) => {
+                assert!(msg.contains("Read"));
+            }
+            _ => panic!("standalone cat should be blocked"),
+        }
+    }
+
+    #[test]
+    fn test_cat_in_chain_blocked() {
+        // cat in a chain without pipe/redirect should still be blocked
+        // Agent should use: cd dir, then Read tool
+        let result = check_for_hook("cd /tmp && cat file.txt", "claude");
+        match result {
+            HookResult::Blocked(msg) => {
+                assert!(msg.contains("Read"));
+            }
+            _ => panic!("cat in chain without pipe should be blocked"),
+        }
+    }
+
+    #[test]
+    fn test_cat_in_complex_script_allowed() {
+        // Complex scripts with for loops, etc. have shellisms → passthrough
+        let result = check_for_hook("for f in *.txt; do cat \"$f\" | grep x; done", "claude");
+        match result {
+            HookResult::Rewrite(cmd) => {
+                // Shellism detected (for loop, glob, pipe) → passthrough
+                assert!(cmd.contains("rtk run"));
+            }
+            _ => panic!("complex script should be allowed via passthrough"),
+        }
+    }
 }
