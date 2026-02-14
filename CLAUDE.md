@@ -219,6 +219,7 @@ rtk gain --history | grep proxy
 | pnpm_cmd.rs | pnpm package manager | Compact dependency trees (70-90% reduction) |
 | ruff_cmd.rs | Ruff linter/formatter | JSON for check, text for format (80%+ reduction) |
 | pytest_cmd.rs | Pytest test runner | State machine text parser (90%+ reduction) |
+| mypy_cmd.rs | Mypy type checker | Group by file/error code (80% reduction) |
 | pip_cmd.rs | pip/uv package manager | JSON parsing, auto-detect uv (70-85% reduction) |
 | go_cmd.rs | Go commands | NDJSON for test, text for build/vet (80-90% reduction) |
 | golangci_cmd.rs | golangci-lint | JSON parsing, group by rule (85% reduction) |
@@ -312,3 +313,10 @@ GitHub Actions workflow (.github/workflows/release.yml):
 - DEB/RPM package generation
 - Automated releases on version tags (v*)
 - Checksums for binary verification
+
+## Active Technologies
+- Rust 2021 edition + regex (1), lazy_static (1.4), anyhow (1.0) -- all already in Cargo.toml (001-mypy-cmd)
+- SQLite via rusqlite (existing tracking.rs) (001-mypy-cmd)
+
+## Recent Changes
+- 001-mypy-cmd: Added Rust 2021 edition + regex (1), lazy_static (1.4), anyhow (1.0) -- all already in Cargo.toml
