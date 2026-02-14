@@ -569,7 +569,13 @@ fn run_status(args: &[String], verbose: u8) -> Result<()> {
         .context("Failed to run git status")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let formatted = format_status_output(&stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let formatted = if !stderr.is_empty() && stderr.contains("not a git repository") {
+        "Not a git repository".to_string()
+    } else {
+        format_status_output(&stdout)
+    };
 
     println!("{}", formatted);
 
