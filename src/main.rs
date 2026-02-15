@@ -268,12 +268,12 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
-        /// Set up Claude Code only
-        #[arg(long, group = "platform")]
+        /// Include Claude Code setup (default: true unless --gemini alone)
+        #[arg(long)]
         claude: bool,
 
-        /// Set up Gemini CLI only
-        #[arg(long, group = "platform")]
+        /// Include Gemini CLI setup (default: true unless --claude alone)
+        #[arg(long)]
         gemini: bool,
 
         /// Auto-patch settings.json without prompting
@@ -1081,10 +1081,9 @@ fn main() -> Result<()> {
             if show {
                 init::show_config()?;
             } else if uninstall {
-                // Platform selection: default = both, flag specifies one
-                // (clap's platform group allows at most one flag)
-                let uninstall_claude = !gemini;
-                let uninstall_gemini = !claude;
+                // Additive platform selection: true unless that platform alone is skipped
+                let uninstall_claude = !gemini || claude;
+                let uninstall_gemini = !claude || gemini;
 
                 if uninstall_claude {
                     init::uninstall(global, cli.verbose)?;
@@ -1101,13 +1100,9 @@ fn main() -> Result<()> {
                     init::PatchMode::Ask
                 };
 
-                // Platform selection: default = both, flag specifies one
-                // No flags    → Both Claude and Gemini
-                // --claude    → Claude only
-                // --gemini    → Gemini only
-                // (clap's platform group allows at most one flag)
-                let setup_claude = !gemini;
-                let setup_gemini = !claude;
+                // Additive platform selection: true unless that platform alone is skipped
+                let setup_claude = !gemini || claude;
+                let setup_gemini = !claude || gemini;
 
                 if setup_claude {
                     init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
@@ -1116,7 +1111,7 @@ fn main() -> Result<()> {
                     init::run_gemini(patch_mode, cli.verbose)?;
                 }
 
-                // Summary message when both platforms set up
+                // Summary when both platforms set up
                 if setup_claude && setup_gemini {
                     println!("\n✓ RTK installed for both Claude Code and Gemini CLI");
                     println!("  Restart both CLIs to apply changes.");
