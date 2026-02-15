@@ -53,7 +53,6 @@ impl Rule {
         // When predicate
         check_when(&self.when)
     }
-
 }
 
 // === Predicate Registry ===
@@ -163,18 +162,127 @@ pub fn load_all() -> &'static [Rule] {
     })
 }
 
+// === Global Option Stripping ===
+
+/// Strip global options that appear between a command and its subcommand.
+///
+/// Tools like git, cargo, docker, and kubectl accept global options before
+/// the subcommand (e.g., `git -C /path --no-pager status`). These must be
+/// stripped before pattern matching so that safety rules like `"git reset --hard"`
+/// still match `git --no-pager reset --hard`.
+///
+/// Based on the patterns from upstream PR #99 (hooks/rtk-rewrite.sh).
+fn strip_global_options(full_cmd: &str) -> String {
+    let words: Vec<&str> = full_cmd.split_whitespace().collect();
+    if words.is_empty() {
+        return full_cmd.to_string();
+    }
+
+    let binary = words[0];
+    let rest = &words[1..];
+
+    match binary {
+        "git" => {
+            // Strip: -C <path>, -c <key=val>, --no-pager, --no-optional-locks,
+            //         --bare, --literal-pathspecs, --key=value
+            let mut result = vec!["git"];
+            let mut i = 0;
+            while i < rest.len() {
+                let w = rest[i];
+                if (w == "-C" || w == "-c") && i + 1 < rest.len() {
+                    i += 2; // skip flag + argument
+                } else if w.starts_with("--")
+                    && w.contains('=')
+                    && !w.starts_with("--hard")
+                    && !w.starts_with("--force")
+                {
+                    i += 1; // skip --key=value global options
+                } else if matches!(
+                    w,
+                    "--no-pager"
+                        | "--no-optional-locks"
+                        | "--bare"
+                        | "--literal-pathspecs"
+                        | "--paginate"
+                        | "--git-dir"
+                ) {
+                    i += 1; // skip standalone boolean global options
+                } else {
+                    // First non-global-option word is the subcommand; keep everything from here
+                    result.extend_from_slice(&rest[i..]);
+                    break;
+                }
+            }
+            result.join(" ")
+        }
+        "cargo" => {
+            // Strip: +toolchain (e.g., cargo +nightly test)
+            let mut result = vec!["cargo"];
+            let mut i = 0;
+            while i < rest.len() {
+                let w = rest[i];
+                if w.starts_with('+') {
+                    i += 1; // skip +toolchain
+                } else {
+                    result.extend_from_slice(&rest[i..]);
+                    break;
+                }
+            }
+            result.join(" ")
+        }
+        "docker" => {
+            // Strip: -H <host>, --context <ctx>, --config <path>, --key=value
+            let mut result = vec!["docker"];
+            let mut i = 0;
+            while i < rest.len() {
+                let w = rest[i];
+                if matches!(w, "-H" | "--context" | "--config") && i + 1 < rest.len() {
+                    i += 2; // skip flag + argument
+                } else if w.starts_with("--") && w.contains('=') {
+                    i += 1; // skip --key=value
+                } else {
+                    result.extend_from_slice(&rest[i..]);
+                    break;
+                }
+            }
+            result.join(" ")
+        }
+        "kubectl" => {
+            // Strip: --context <ctx>, --kubeconfig <path>, --namespace <ns>, -n <ns>, --key=value
+            let mut result = vec!["kubectl"];
+            let mut i = 0;
+            while i < rest.len() {
+                let w = rest[i];
+                if matches!(w, "--context" | "--kubeconfig" | "--namespace" | "-n")
+                    && i + 1 < rest.len()
+                {
+                    i += 2; // skip flag + argument
+                } else if w.starts_with("--") && w.contains('=') {
+                    i += 1; // skip --key=value
+                } else {
+                    result.extend_from_slice(&rest[i..]);
+                    break;
+                }
+            }
+            result.join(" ")
+        }
+        _ => full_cmd.to_string(),
+    }
+}
+
 // === Pattern Matching ===
 
 /// Check if a rule matches a command.
 ///
 /// - Single-word pattern: exact binary match (avoids "cat" matching "catalog")
-/// - Multi-word pattern: prefix match on full command string
+/// - Multi-word pattern: prefix match on full command string (with global option stripping)
 /// - Raw mode (binary=None): word-boundary search (handles "sudo rm")
 pub fn matches_rule(rule: &Rule, binary: Option<&str>, full_cmd: &str) -> bool {
     rule.patterns.iter().any(|pat| {
         if pat.contains(' ') {
-            // Multi-word: prefix match
-            full_cmd.starts_with(pat.as_str())
+            // Multi-word: prefix match, also try with global options stripped
+            let normalized = strip_global_options(full_cmd);
+            full_cmd.starts_with(pat.as_str()) || normalized.starts_with(pat.as_str())
         } else if let Some(bin) = binary {
             // Parsed mode: exact binary
             bin == pat
@@ -658,6 +766,107 @@ Full message."#;
             rules_by_name.is_empty(),
             "Project-local disable should remove rule entirely"
         );
+    }
+
+    // === Global Option Stripping (PR #99 parity) ===
+    // Table-driven: (input, expected_output) pairs covering git, cargo, docker, kubectl.
+
+    #[test]
+    fn test_strip_global_options() {
+        let cases: &[(&str, &str)] = &[
+            // Git: single flags
+            ("git --no-pager status", "git status"),
+            ("git -C /path/to/project status", "git status"),
+            ("git -c core.autocrlf=true diff", "git diff"),
+            ("git --git-dir=/path/.git status", "git status"),
+            ("git --no-optional-locks status", "git status"),
+            ("git --bare log --oneline", "git log --oneline"),
+            ("git --literal-pathspecs add .", "git add ."),
+            // Git: multiple globals stacked
+            (
+                "git -C /path --no-pager --no-optional-locks reset --hard",
+                "git reset --hard",
+            ),
+            // Git: subcommand flags preserved (not stripped)
+            ("git reset --hard HEAD~1", "git reset --hard HEAD~1"),
+            ("git checkout --force main", "git checkout --force main"),
+            // Git: no globals (identity)
+            ("git status", "git status"),
+            ("git log --oneline -10", "git log --oneline -10"),
+            // Cargo: toolchain prefix
+            ("cargo +nightly test", "cargo test"),
+            ("cargo +stable build --release", "cargo build --release"),
+            ("cargo test", "cargo test"), // no prefix (identity)
+            // Docker: global flags
+            ("docker --context prod ps", "docker ps"),
+            ("docker -H tcp://host:2375 images", "docker images"),
+            ("docker --config /tmp/.docker run hello", "docker run hello"),
+            ("docker ps", "docker ps"), // no globals (identity)
+            // Kubectl: global flags
+            ("kubectl -n kube-system get pods", "kubectl get pods"),
+            (
+                "kubectl --context prod --namespace default describe pod foo",
+                "kubectl describe pod foo",
+            ),
+            ("kubectl --kubeconfig=/path get svc", "kubectl get svc"),
+            ("kubectl get pods", "kubectl get pods"), // no globals (identity)
+            // Non-matching commands (identity)
+            ("rm -rf /tmp/foo", "rm -rf /tmp/foo"),
+            ("cat file.txt", "cat file.txt"),
+            ("echo hello", "echo hello"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                strip_global_options(input),
+                *expected,
+                "strip_global_options({input:?})"
+            );
+        }
+    }
+
+    // === Rule Matching with Global Options (PR #99 parity) ===
+    // Multi-word safety patterns must match even with global options inserted.
+
+    #[test]
+    fn test_matches_rule_with_global_options() {
+        let cases: &[(&str, &str, bool)] = &[
+            // (pattern, full_cmd, expected_match)
+            ("git reset --hard", "git --no-pager reset --hard HEAD", true),
+            ("git reset --hard", "git -C /path reset --hard", true),
+            (
+                "git reset --hard",
+                "git -C /p --no-pager --no-optional-locks reset --hard",
+                true,
+            ),
+            ("git checkout .", "git -C /project checkout .", true),
+            (
+                "git checkout --",
+                "git --no-pager checkout -- file.txt",
+                true,
+            ),
+            (
+                "git clean -fd",
+                "git -C /path --no-pager --no-optional-locks clean -fd",
+                true,
+            ),
+            ("git stash drop", "git --no-pager stash drop", true),
+            // No globals: direct match still works
+            ("git reset --hard", "git reset --hard HEAD~1", true),
+            ("git checkout .", "git checkout .", true),
+            // Non-matching
+            ("git reset --hard", "git reset --soft HEAD", false),
+            ("git checkout .", "git checkout main", false),
+        ];
+        for (pattern, full_cmd, expected) in cases {
+            let yaml = format!("---\nname: test\npatterns: [\"{pattern}\"]\n---\n");
+            let rule = parse_rule(&yaml, "test").unwrap();
+            let binary = full_cmd.split_whitespace().next();
+            assert_eq!(
+                matches_rule(&rule, binary, full_cmd),
+                *expected,
+                "matches_rule(pat={pattern:?}, cmd={full_cmd:?})"
+            );
+        }
     }
 
     #[test]

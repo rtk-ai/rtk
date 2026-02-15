@@ -325,5 +325,4 @@ mod tests {
         assert_eq!(periods[0].metrics.cache_creation_tokens, 0); // default
         assert_eq!(periods[0].metrics.cache_read_tokens, 0);
     }
-
 }

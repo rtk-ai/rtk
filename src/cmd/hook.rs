@@ -304,6 +304,34 @@ mod tests {
         }
     }
 
+    // === GLOBAL OPTIONS (PR #99 parity) ===
+    // Commands with global options before subcommands must not be blocked.
+    // Ported from upstream hooks/rtk-rewrite.sh global option stripping.
+
+    #[test]
+    fn test_global_options_not_blocked() {
+        let cases = [
+            // Git global options
+            "git --no-pager status",
+            "git -C /path/to/project status",
+            "git -C /path --no-pager log --oneline",
+            "git --no-optional-locks diff HEAD",
+            "git --bare log",
+            // Cargo toolchain prefix
+            "cargo +nightly test",
+            "cargo +stable build --release",
+            // Docker global options
+            "docker --context prod ps",
+            "docker -H tcp://host:2375 images",
+            // Kubectl global options
+            "kubectl -n kube-system get pods",
+            "kubectl --context prod describe pod foo",
+        ];
+        for input in cases {
+            assert_rewrite(input, "rtk run");
+        }
+    }
+
     // === SPECIFIC COMMANDS NOT BLOCKED ===
     // Ported from old hooks/test-rtk-rewrite.sh Sections 1 & 3.
     // These commands must pass through (not be blocked by safety rules).
@@ -375,6 +403,61 @@ mod tests {
         ];
         for input in cases {
             assert_rewrite(input, "rtk run");
+        }
+    }
+
+    // === COMPOUND COMMANDS (chained with &&, ||, ;) ===
+    // Shell script only matched FIRST command in a chain.
+    // Rust hook parses each command independently (#112).
+
+    #[test]
+    fn test_compound_commands_rewrite() {
+        let cases = [
+            // Basic chains — each command rewritten independently
+            ("cd /tmp && git status", "&&"),
+            ("cd dir && git status && git diff", "&&"),
+            ("git add . && git commit -m msg", "&&"),
+            // Semicolon chains
+            ("echo start ; git status ; echo done", ";"),
+            // Or-chains
+            ("git pull || echo failed", "||"),
+        ];
+        for (input, operator) in cases {
+            match check_for_hook(input, "claude") {
+                HookResult::Rewrite(cmd) => {
+                    assert!(cmd.contains("rtk run"), "'{input}' should rewrite");
+                    assert!(
+                        cmd.contains(operator),
+                        "'{input}' must preserve '{operator}', got '{cmd}'"
+                    );
+                }
+                other => panic!("Expected Rewrite for '{input}', got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_compound_blocked_in_chain() {
+        // Safety rules catch dangerous commands even mid-chain
+        let cases = [
+            ("cd /tmp && cat file.txt", "file-reading"),
+            ("echo start && sed -i 's/x/y/' f", "file-editing"),
+            ("git add . && head -5 f.txt", "file-reading"),
+        ];
+        for (input, expected_msg) in cases {
+            assert_blocked(input, expected_msg);
+        }
+    }
+
+    #[test]
+    fn test_compound_quoted_operators_not_split() {
+        // && inside quotes must NOT split the command
+        let input = r#"git commit -m "Fix && Bug""#;
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk run"), "Should rewrite, got '{cmd}'");
+            }
+            other => panic!("Expected Rewrite for quoted &&, got {other:?}"),
         }
     }
 
