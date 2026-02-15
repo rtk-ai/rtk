@@ -35,7 +35,17 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::OnceLock; // added: lazy BPE initialization
 use std::time::Instant;
+use tiktoken_rs::{cl100k_base, CoreBPE}; // added: accurate tokenizer
+
+/// Lazily-initialized cl100k_base tokenizer (used by Claude/GPT models). // added
+static BPE: OnceLock<Option<CoreBPE>> = OnceLock::new();
+
+/// Get the BPE tokenizer, initializing on first call. Returns None if init fails. // added
+fn get_bpe() -> Option<&'static CoreBPE> {
+    BPE.get_or_init(|| cl100k_base().ok()).as_ref()
+}
 
 /// Number of days to retain tracking history before automatic cleanup.
 const HISTORY_DAYS: i64 = 90;
@@ -695,14 +705,11 @@ fn get_db_path() -> Result<PathBuf> {
     Ok(data_dir.join("rtk").join("history.db"))
 }
 
-/// Estimate token count from text using ~4 chars = 1 token heuristic.
+/// Estimate token count using cl100k_base tokenizer with chars/4 fallback. // changed
 ///
-/// This is a fast approximation suitable for tracking purposes.
-/// For precise counts, integrate with your LLM's tokenizer API.
-///
-/// # Formula
-///
-/// `tokens = ceil(chars / 4)`
+/// Uses the cl100k_base BPE tokenizer (same family as Claude/GPT models)
+/// for accurate counting. Falls back to ceil(chars/4) heuristic if the
+/// tokenizer fails to initialize.
 ///
 /// # Examples
 ///
@@ -710,12 +717,20 @@ fn get_db_path() -> Result<PathBuf> {
 /// use rtk::tracking::estimate_tokens;
 ///
 /// assert_eq!(estimate_tokens(""), 0);
-/// assert_eq!(estimate_tokens("abcd"), 1);  // 4 chars = 1 token
-/// assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
-/// assert_eq!(estimate_tokens("hello world"), 3); // 11 chars = ceil(2.75) = 3
+/// // Exact values depend on tokenizer availability;
+/// // with BPE: "hello world" = 2 tokens
+/// // with fallback: "hello world" = ceil(11/4) = 3
+/// assert!(estimate_tokens("hello world") > 0);
 /// ```
 pub fn estimate_tokens(text: &str) -> usize {
-    // ~4 chars per token on average
+    if text.is_empty() {
+        return 0;
+    }
+    // Primary: cl100k_base BPE tokenizer (accurate) // changed
+    if let Some(bpe) = get_bpe() {
+        return bpe.encode_with_special_tokens(text).len();
+    }
+    // Fallback: chars/4 heuristic // changed
     (text.len() as f64 / 4.0).ceil() as usize
 }
 
@@ -894,11 +909,15 @@ mod tests {
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
     fn test_estimate_tokens() {
+        // Empty input always returns 0 regardless of backend // changed
         assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("abcd"), 1); // 4 chars = 1 token
-        assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
-        assert_eq!(estimate_tokens("a"), 1); // 1 char = ceil(0.25) = 1
-        assert_eq!(estimate_tokens("12345678"), 2); // 8 chars = 2 tokens
+        // Non-empty input returns >0 (exact value depends on tokenizer backend) // changed
+        assert!(estimate_tokens("abcd") > 0);
+        assert!(estimate_tokens("abcde") > 0);
+        assert!(estimate_tokens("a") > 0);
+        assert!(estimate_tokens("12345678") > 0);
+        // Longer text produces more tokens than shorter text // changed
+        assert!(estimate_tokens("hello world this is a longer sentence") > estimate_tokens("hi"));
     }
 
     // 2. args_display — format OsString vec

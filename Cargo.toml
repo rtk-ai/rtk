@@ -27,6 +27,7 @@ toml = "0.8"
 chrono = "0.4"
 thiserror = "1.0"
 tempfile = "3"
+tiktoken-rs = "0.5" # added: cl100k_base tokenizer for accurate token counting
 
 [dev-dependencies]
 
