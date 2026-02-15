@@ -1408,16 +1408,50 @@ fn main() -> Result<()> {
 /// (i.e., commands that process rewritten shell commands).
 /// Meta commands (init, gain, verify, etc.) are excluded because
 /// they are run directly by the user, not through the hook.
+/// Returns true for commands that go through the hook pipeline
+/// and therefore require integrity verification.
+///
+/// SECURITY: whitelist pattern — new commands are NOT integrity-checked
+/// until explicitly added here. A forgotten command fails open (no check)
+/// rather than creating false confidence about what's protected.
 fn is_operational_command(cmd: &Commands) -> bool {
-    !matches!(
+    matches!(
         cmd,
-        Commands::Init { .. }
-            | Commands::Gain { .. }
-            | Commands::CcEconomics { .. }
-            | Commands::Config { .. }
-            | Commands::Discover { .. }
-            | Commands::Learn { .. }
-            | Commands::Verify
-            | Commands::Proxy { .. }
+        Commands::Ls { .. }
+            | Commands::Tree { .. }
+            | Commands::Read { .. }
+            | Commands::Smart { .. }
+            | Commands::Git { .. }
+            | Commands::Gh { .. }
+            | Commands::Pnpm { .. }
+            | Commands::Err { .. }
+            | Commands::Test { .. }
+            | Commands::Json { .. }
+            | Commands::Deps { .. }
+            | Commands::Env { .. }
+            | Commands::Find { .. }
+            | Commands::Diff { .. }
+            | Commands::Log { .. }
+            | Commands::Docker { .. }
+            | Commands::Kubectl { .. }
+            | Commands::Summary { .. }
+            | Commands::Grep { .. }
+            | Commands::Wget { .. }
+            | Commands::Vitest { .. }
+            | Commands::Prisma { .. }
+            | Commands::Tsc { .. }
+            | Commands::Next { .. }
+            | Commands::Lint { .. }
+            | Commands::Prettier { .. }
+            | Commands::Playwright { .. }
+            | Commands::Cargo { .. }
+            | Commands::Npm { .. }
+            | Commands::Npx { .. }
+            | Commands::Curl { .. }
+            | Commands::Ruff { .. }
+            | Commands::Pytest { .. }
+            | Commands::Pip { .. }
+            | Commands::Go { .. }
+            | Commands::GolangciLint { .. }
     )
 }

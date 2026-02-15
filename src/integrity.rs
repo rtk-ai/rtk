@@ -148,18 +148,31 @@ pub fn verify_hook_at(hook_path: &Path) -> Result<IntegrityStatus> {
     }
 }
 
-/// Read the stored hash from the hash file
+/// Read the stored hash from the hash file.
+///
+/// Expects exact `sha256sum -c` format: `<64 hex>  <filename>\n`
+/// Rejects malformed files rather than silently accepting them.
 fn read_stored_hash(path: &Path) -> Result<String> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read hash file: {}", path.display()))?;
 
-    // Parse sha256sum format: "hash  filename\n"
-    content
-        .split_whitespace()
+    let line = content
+        .lines()
         .next()
-        .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
-        .map(|s| s.to_string())
-        .with_context(|| format!("Invalid hash format in {}", path.display()))
+        .with_context(|| format!("Empty hash file: {}", path.display()))?;
+
+    // sha256sum format uses two-space separator: "<hash>  <filename>"
+    let parts: Vec<&str> = line.splitn(2, "  ").collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Invalid hash format in {} (expected 'hash  filename')", path.display());
+    }
+
+    let hash = parts[0];
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("Invalid SHA-256 hash in {}", path.display());
+    }
+
+    Ok(hash.to_string())
 }
 
 /// Resolve the default hook path (~/.claude/hooks/rtk-rewrite.sh)
@@ -224,13 +237,9 @@ pub fn run_verify(verbose: u8) -> Result<()> {
 /// - `Tampered`: print warning to stderr, exit 1
 /// - `OrphanedHash`: warn to stderr, continue
 ///
-/// Can be bypassed with `RTK_SKIP_INTEGRITY=1` for emergencies.
+/// No env-var bypass is provided — if the hook is legitimately modified,
+/// re-run `rtk init -g --auto-patch` to re-establish the baseline.
 pub fn runtime_check() -> Result<()> {
-    // Allow emergency bypass
-    if std::env::var("RTK_SKIP_INTEGRITY").unwrap_or_default() == "1" {
-        return Ok(());
-    }
-
     match verify_hook()? {
         IntegrityStatus::Verified | IntegrityStatus::NotInstalled => {
             // All good, proceed
@@ -241,15 +250,14 @@ pub fn runtime_check() -> Result<()> {
         }
         IntegrityStatus::Tampered { expected, actual } => {
             eprintln!("rtk: hook integrity check FAILED");
-            eprintln!("  Expected hash: {}...", &expected[..16]);
-            eprintln!("  Actual hash:   {}...", &actual[..16]);
+            eprintln!("  Expected hash: {}...", expected.get(..16).unwrap_or(&expected));
+            eprintln!("  Actual hash:   {}...", actual.get(..16).unwrap_or(&actual));
             eprintln!();
             eprintln!("  The hook at ~/.claude/hooks/rtk-rewrite.sh has been modified.");
             eprintln!("  This may indicate tampering. RTK will not execute.");
             eprintln!();
             eprintln!("  To restore:  rtk init -g --auto-patch");
             eprintln!("  To inspect:  rtk verify");
-            eprintln!("  To override: RTK_SKIP_INTEGRITY=1 rtk <command>");
             std::process::exit(1);
         }
         IntegrityStatus::OrphanedHash => {
@@ -359,7 +367,7 @@ mod tests {
         // Create hash but no hook
         fs::write(
             &hash_file,
-            "abc123def456abc123def456abc123def456abc123def456abc123def456abc12345  rtk-rewrite.sh\n",
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2  rtk-rewrite.sh\n",
         )
         .unwrap();
 
@@ -381,8 +389,10 @@ mod tests {
         let content = fs::read_to_string(&hash_file).unwrap();
         // Format: "<64 hex chars>  rtk-rewrite.sh\n"
         assert!(content.ends_with("  rtk-rewrite.sh\n"));
-        let hash_part = content.split_whitespace().next().unwrap();
-        assert_eq!(hash_part.len(), 64);
+        let parts: Vec<&str> = content.trim().splitn(2, "  ").collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].len(), 64);
+        assert_eq!(parts[1], "rtk-rewrite.sh");
     }
 
     #[test]
@@ -456,6 +466,42 @@ mod tests {
 
         let result = verify_hook_at(&hook);
         assert!(result.is_err(), "Should reject invalid hash format");
+    }
+
+    #[test]
+    fn test_hash_only_no_filename_rejected() {
+        let temp = TempDir::new().unwrap();
+        let hook = temp.path().join("rtk-rewrite.sh");
+        let hash_file = temp.path().join(".rtk-hook.sha256");
+
+        fs::write(&hook, "test").unwrap();
+        // Hash with no two-space separator and filename
+        fs::write(
+            &hash_file,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n",
+        )
+        .unwrap();
+
+        let result = verify_hook_at(&hook);
+        assert!(result.is_err(), "Should reject hash-only format (no filename)");
+    }
+
+    #[test]
+    fn test_wrong_separator_rejected() {
+        let temp = TempDir::new().unwrap();
+        let hook = temp.path().join("rtk-rewrite.sh");
+        let hash_file = temp.path().join(".rtk-hook.sha256");
+
+        fs::write(&hook, "test").unwrap();
+        // Single space instead of two-space separator
+        fs::write(
+            &hash_file,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 rtk-rewrite.sh\n",
+        )
+        .unwrap();
+
+        let result = verify_hook_at(&hook);
+        assert!(result.is_err(), "Should reject single-space separator");
     }
 
     #[test]
