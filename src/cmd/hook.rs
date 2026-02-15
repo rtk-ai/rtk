@@ -191,6 +191,100 @@ mod tests {
         assert_rewrite(&format!("echo {}", "a".repeat(1000)), "rtk run");
     }
 
+    // === ENV VAR PREFIX PRESERVATION ===
+    // Ported from old hooks/test-rtk-rewrite.sh Section 2.
+    // Commands prefixed with KEY=VALUE env vars must not be blocked.
+
+    #[test]
+    fn test_env_var_prefix_preserved() {
+        let cases = [
+            "GIT_PAGER=cat git status",
+            "GIT_PAGER=cat git log --oneline -10",
+            "NODE_ENV=test CI=1 npx vitest run",
+            "LANG=C ls -la",
+            "NODE_ENV=test npm run test:e2e",
+            "COMPOSE_PROJECT_NAME=test docker compose up -d",
+            "TEST_SESSION_ID=2 npx playwright test --config=foo",
+        ];
+        for input in cases {
+            assert_rewrite(input, "rtk run");
+        }
+    }
+
+    // === SPECIFIC COMMANDS NOT BLOCKED ===
+    // Ported from old hooks/test-rtk-rewrite.sh Sections 1 & 3.
+    // These commands must pass through (not be blocked by safety rules).
+
+    #[test]
+    fn test_specific_commands_not_blocked() {
+        let cases = [
+            // Git variants
+            "git log --oneline -10",
+            "git diff HEAD",
+            "git show abc123",
+            "git add .",
+            // GitHub CLI
+            "gh pr list",
+            "gh api repos/owner/repo",
+            "gh release list",
+            // Package managers
+            "npm run test:e2e",
+            "npm run build",
+            "npm test",
+            // Docker
+            "docker compose up -d",
+            "docker compose logs postgrest",
+            "docker compose down",
+            "docker run --rm postgres",
+            "docker exec -it db psql",
+            // Kubernetes
+            "kubectl describe pod foo",
+            "kubectl apply -f deploy.yaml",
+            // Test runners
+            "npx playwright test",
+            "npx prisma migrate",
+            "cargo test",
+            // Vitest variants (dedup is internal to rtk run, not hook level)
+            "vitest",
+            "vitest run",
+            "vitest run --reporter=verbose",
+            "npx vitest run",
+            "pnpm vitest run --coverage",
+            // TypeScript
+            "vue-tsc -b",
+            "npx vue-tsc --noEmit",
+            // Utilities
+            "curl -s https://example.com",
+            "ls -la",
+            "grep -rn pattern src/",
+            "rg pattern src/",
+        ];
+        for input in cases {
+            assert_rewrite(input, "rtk run");
+        }
+    }
+
+    // === COMMANDS THAT PASS THROUGH (builtins/unknown) ===
+    // Ported from old hooks/test-rtk-rewrite.sh Section 5.
+    // These are not blocked — they get wrapped in rtk run -c.
+
+    #[test]
+    fn test_builtins_not_blocked() {
+        let cases = [
+            "echo hello world",
+            "cd /tmp",
+            "mkdir -p foo/bar",
+            "python3 script.py",
+            "node -e 'console.log(1)'",
+            "find . -name '*.ts'",
+            "tree src/",
+            "wget https://example.com/file",
+        ];
+        for input in cases {
+            assert_rewrite(input, "rtk run");
+        }
+    }
+
     // === COMMANDS THAT SHOULD BLOCK (table-driven) ===
 
     #[test]

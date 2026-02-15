@@ -822,6 +822,8 @@ enum HookCommands {
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
     },
+    /// Handle Claude Code JSON hook protocol (reads from stdin)
+    Claude,
     /// Handle Gemini JSON hook protocol (reads from stdin)
     Gemini,
 }
@@ -1441,6 +1443,9 @@ fn main() -> Result<()> {
                     eprintln!("{}", output);
                 }
                 std::process::exit(code);
+            }
+            HookCommands::Claude => {
+                cmd::claude_hook::run()?;
             }
             HookCommands::Gemini => {
                 cmd::gemini_hook::run()?;

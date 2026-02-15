@@ -4,9 +4,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
-// Embedded hook script (guards before set -euo pipefail)
-const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
-
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 
@@ -179,53 +176,6 @@ pub fn run(
     }
 }
 
-/// Prepare hook directory and return paths (hook_dir, hook_path)
-fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
-    let claude_dir = resolve_claude_dir()?;
-    let hook_dir = claude_dir.join("hooks");
-    fs::create_dir_all(&hook_dir)
-        .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
-    let hook_path = hook_dir.join("rtk-rewrite.sh");
-    Ok((hook_dir, hook_path))
-}
-
-/// Write hook file if missing or outdated, return true if changed
-#[cfg(unix)]
-fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
-    let changed = if hook_path.exists() {
-        let existing = fs::read_to_string(hook_path)
-            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
-
-        if existing == REWRITE_HOOK {
-            if verbose > 0 {
-                eprintln!("Hook already up to date: {}", hook_path.display());
-            }
-            false
-        } else {
-            fs::write(hook_path, REWRITE_HOOK)
-                .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
-            if verbose > 0 {
-                eprintln!("Updated hook: {}", hook_path.display());
-            }
-            true
-        }
-    } else {
-        fs::write(hook_path, REWRITE_HOOK)
-            .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Created hook: {}", hook_path.display());
-        }
-        true
-    };
-
-    // Set executable permissions
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
-
-    Ok(changed)
-}
-
 /// Idempotent file write: create or update if content differs
 fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Result<bool> {
     if path.exists() {
@@ -311,13 +261,13 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
 }
 
 /// Print manual instructions for settings.json patching
-fn print_manual_instructions(hook_path: &Path) {
+fn print_manual_instructions(hook_command: &str) {
     println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
     println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_path.display());
+    println!("        \"command\": \"{}\"", hook_command);
     println!("      }}]");
     println!("    }}]}}");
     println!("  }}");
@@ -343,7 +293,7 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    if command.contains("rtk-rewrite.sh") {
+                    if command.contains("rtk-rewrite.sh") || command.contains("rtk hook claude") {
                         return false; // Remove this entry
                     }
                 }
@@ -413,12 +363,12 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     let claude_dir = resolve_claude_dir()?;
     let mut removed = Vec::new();
 
-    // 1. Remove hook file
+    // 1. Remove legacy hook file (if present from old installs)
     let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
     if hook_path.exists() {
         fs::remove_file(&hook_path)
             .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
-        removed.push(format!("Hook: {}", hook_path.display()));
+        removed.push(format!("Legacy hook: {}", hook_path.display()));
     }
 
     // 2. Remove RTK.md
@@ -558,18 +508,15 @@ fn patch_settings_shared(
 }
 
 /// Patch Claude settings.json with RTK hook
-fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result<PatchResult> {
+fn patch_settings_json(mode: PatchMode, verbose: u8) -> Result<PatchResult> {
     let settings_path = resolve_claude_dir()?.join("settings.json");
-    let hook_command = hook_path
-        .to_str()
-        .context("Hook path contains invalid UTF-8")?
-        .to_string();
+    let hook_command = "rtk hook claude";
 
     patch_settings_shared(
         &settings_path,
-        |root| hook_already_present(root, &hook_command),
-        |root| insert_hook_entry(root, &hook_command),
-        || print_manual_instructions(hook_path),
+        |root| hook_already_present(root, hook_command),
+        |root| insert_hook_entry(root, hook_command),
+        || print_manual_instructions(hook_command),
         mode,
         "settings.json",
         "Restart Claude Code. Test with: git status",
@@ -644,7 +591,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
 }
 
 /// Check if RTK hook is already present in settings.json
-/// Matches on rtk-rewrite.sh substring to handle different path formats
+/// Matches on rtk-rewrite.sh (legacy) or rtk hook claude (current)
 fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
     let pre_tool_use_array = match root
         .get("hooks")
@@ -661,9 +608,9 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            // Exact match OR both contain rtk-rewrite.sh
             cmd == hook_command
-                || (cmd.contains("rtk-rewrite.sh") && hook_command.contains("rtk-rewrite.sh"))
+                || cmd.contains("rtk-rewrite.sh")   // Legacy match for migration
+                || cmd.contains("rtk hook claude") // New direct binary invocation
         })
 }
 
@@ -687,29 +634,25 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
     let rtk_md_path = claude_dir.join("RTK.md");
     let claude_md_path = claude_dir.join("CLAUDE.md");
 
-    // 1. Prepare hook directory and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
-    ensure_hook_installed(&hook_path, verbose)?;
-
-    // 2. Write RTK.md
+    // 1. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
 
-    // 3. Patch CLAUDE.md (add @RTK.md, migrate if needed)
+    // 2. Patch CLAUDE.md (add @RTK.md, migrate if needed)
     let migrated = patch_claude_md(&claude_md_path, verbose)?;
 
-    // 4. Print success message
+    // 3. Print success message
     println!("\nRTK hook installed (global).\n");
-    println!("  Hook:      {}", hook_path.display());
+    println!("  Hook:      rtk hook claude (direct binary)");
     println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
     println!("  CLAUDE.md: @RTK.md reference added");
 
     if migrated {
-        println!("\n  ✅ Migrated: removed 137-line RTK block from CLAUDE.md");
-        println!("              replaced with @RTK.md (10 lines)");
+        println!("\n  Migrated: removed 137-line RTK block from CLAUDE.md");
+        println!("            replaced with @RTK.md (10 lines)");
     }
 
-    // 5. Patch settings.json
-    let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
+    // 4. Patch settings.json
+    let patch_result = patch_settings_json(patch_mode, verbose)?;
 
     // Report result
     match patch_result {
@@ -744,18 +687,14 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
         return Ok(());
     }
 
-    // Prepare and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
-    ensure_hook_installed(&hook_path, verbose)?;
-
     println!("\nRTK hook installed (hook-only mode).\n");
-    println!("  Hook: {}", hook_path.display());
+    println!("  Hook: rtk hook claude (direct binary)");
     println!(
         "  Note: No RTK.md created. Claude won't know about meta commands (gain, discover, proxy)."
     );
 
     // Patch settings.json
-    let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
+    let patch_result = patch_settings_json(patch_mode, verbose)?;
 
     // Report result
     match patch_result {
@@ -1118,44 +1057,30 @@ fn show_agent_hook_status(
 /// Show current rtk configuration
 pub fn show_config() -> Result<()> {
     let claude_dir = resolve_claude_dir()?;
-    let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
     let rtk_md_path = claude_dir.join("RTK.md");
     let global_claude_md = claude_dir.join("CLAUDE.md");
     let local_claude_md = PathBuf::from("CLAUDE.md");
 
-    println!("📋 rtk Configuration:\n");
+    println!("rtk Configuration:\n");
 
-    // Check hook
-    if hook_path.exists() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = fs::metadata(&hook_path)?;
-            let perms = metadata.permissions();
-            let is_executable = perms.mode() & 0o111 != 0;
-
-            let hook_content = fs::read_to_string(&hook_path)?;
-            let has_guards =
-                hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
-
-            if is_executable && has_guards {
-                println!("✅ Hook: {} (executable, with guards)", hook_path.display());
-            } else if !is_executable {
-                println!(
-                    "⚠️  Hook: {} (NOT executable - run: chmod +x)",
-                    hook_path.display()
-                );
+    // Check hook in settings.json
+    let settings_path = claude_dir.join("settings.json");
+    if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)?;
+        if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+            if hook_already_present(&root, "rtk hook claude") {
+                println!("  Hook: rtk hook claude (configured in settings.json)");
             } else {
-                println!("⚠️  Hook: {} (no guards - outdated)", hook_path.display());
+                let legacy_hook = claude_dir.join("hooks").join("rtk-rewrite.sh");
+                if legacy_hook.exists() {
+                    println!("  Hook: legacy rtk-rewrite.sh (run: rtk init -g to migrate)");
+                } else {
+                    println!("  Hook: not configured");
+                }
             }
         }
-
-        #[cfg(not(unix))]
-        {
-            println!("✅ Hook: {} (exists)", hook_path.display());
-        }
     } else {
-        println!("⚪ Hook: not found");
+        println!("  Hook: settings.json not found");
     }
 
     // Check RTK.md
@@ -1195,11 +1120,10 @@ pub fn show_config() -> Result<()> {
 
     // Check Claude settings.json
     let settings_path = claude_dir.join("settings.json");
-    let hook_command = hook_path.display().to_string();
     show_agent_hook_status(
         "",
         &settings_path,
-        |root| hook_already_present(root, &hook_command),
+        |root| hook_already_present(root, "rtk hook claude"),
         "rtk init -g --auto-patch",
     );
 
@@ -1274,19 +1198,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_has_guards() {
-        assert!(REWRITE_HOOK.contains("command -v rtk"));
-        assert!(REWRITE_HOOK.contains("command -v jq"));
-        // Guards must be BEFORE set -euo pipefail
-        let guard_pos = REWRITE_HOOK.find("command -v rtk").unwrap();
-        let set_pos = REWRITE_HOOK.find("set -euo pipefail").unwrap();
-        assert!(
-            guard_pos < set_pos,
-            "Guards must come before set -euo pipefail"
-        );
-    }
-
-    #[test]
     fn test_migration_removes_old_block() {
         let input = r#"# My Config
 
@@ -1312,23 +1223,13 @@ More content"#;
     }
 
     #[test]
-    #[cfg(unix)]
-    fn test_default_mode_creates_hook_and_rtk_md() {
+    fn test_default_mode_creates_rtk_md() {
         let temp = TempDir::new().unwrap();
-        let hook_path = temp.path().join("rtk-rewrite.sh");
         let rtk_md_path = temp.path().join("RTK.md");
-
-        fs::write(&hook_path, REWRITE_HOOK).unwrap();
         fs::write(&rtk_md_path, RTK_SLIM).unwrap();
-
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-        assert!(hook_path.exists());
         assert!(rtk_md_path.exists());
-
-        let metadata = fs::metadata(&hook_path).unwrap();
-        assert!(metadata.permissions().mode() & 0o111 != 0);
+        let content = fs::read_to_string(&rtk_md_path).unwrap();
+        assert!(content.contains("rtk"));
     }
 
     #[test]
@@ -1373,18 +1274,19 @@ More content"#;
                     "matcher": "Bash",
                     "hooks": [{
                         "type": "command",
-                        "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                        "command": "rtk hook claude"
                     }]
                 }]
             }
         });
 
-        let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
+        let hook_command = "rtk hook claude";
         assert!(hook_already_present(&json_content, hook_command));
     }
 
     #[test]
-    fn test_hook_already_present_different_path() {
+    fn test_hook_already_present_legacy_migration() {
+        // Old installs have rtk-rewrite.sh — should still match for migration
         let json_content = serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
@@ -1397,15 +1299,14 @@ More content"#;
             }
         });
 
-        let hook_command = "~/.claude/hooks/rtk-rewrite.sh";
-        // Should match on rtk-rewrite.sh substring
+        let hook_command = "rtk hook claude";
         assert!(hook_already_present(&json_content, hook_command));
     }
 
     #[test]
     fn test_hook_not_present_empty() {
         let json_content = serde_json::json!({});
-        let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
+        let hook_command = "rtk hook claude";
         assert!(!hook_already_present(&json_content, hook_command));
     }
 
@@ -1423,7 +1324,7 @@ More content"#;
             }
         });
 
-        let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
+        let hook_command = "rtk hook claude";
         assert!(!hook_already_present(&json_content, hook_command));
     }
 
@@ -1431,7 +1332,7 @@ More content"#;
     #[test]
     fn test_insert_hook_entry_empty_root() {
         let mut json_content = serde_json::json!({});
-        let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
+        let hook_command = "rtk hook claude";
 
         insert_hook_entry(&mut json_content, hook_command);
 
@@ -1464,7 +1365,7 @@ More content"#;
             }
         });
 
-        let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
+        let hook_command = "rtk hook claude";
         insert_hook_entry(&mut json_content, hook_command);
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
@@ -1487,7 +1388,7 @@ More content"#;
             "model": "claude-sonnet-4"
         });
 
-        let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
+        let hook_command = "rtk hook claude";
         insert_hook_entry(&mut json_content, hook_command);
 
         // Should preserve all other keys
@@ -1632,7 +1533,7 @@ More content"#;
                     "matcher": "Bash",
                     "hooks": [{
                         "type": "command",
-                        "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                        "command": "rtk hook claude"
                     }]
                 }]
             }
@@ -1753,7 +1654,7 @@ More content"#;
                     "matcher": "Bash",
                     "hooks": [{
                         "type": "command",
-                        "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                        "command": "rtk hook claude"
                     }]
                 }],
                 "BeforeTool": [{
@@ -1776,7 +1677,7 @@ More content"#;
         assert!(pre_tool_use[0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
-            .contains("rtk-rewrite.sh"));
+            .contains("rtk hook claude"));
 
         // Gemini hook should be gone
         let before_tool = json_content["hooks"]["BeforeTool"].as_array().unwrap();

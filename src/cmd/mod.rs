@@ -10,6 +10,7 @@
 
 pub(crate) mod analysis;
 pub(crate) mod builtins;
+pub mod claude_hook;
 pub mod exec;
 pub(crate) mod filters;
 pub mod gemini_hook;
