@@ -297,6 +297,17 @@ Full message."#;
     }
 
     #[test]
+    fn test_matches_rule_multiple_patterns_in_one_rule() {
+        let content =
+            "---\nname: test\npatterns: [\"chmod -R 777\", \"chmod 777\"]\naction: warn\n---\n";
+        let rule = parse_rule(content, "test").unwrap();
+        assert_eq!(rule.patterns.len(), 2);
+        assert!(matches_rule(&rule, Some("chmod"), "chmod -R 777 /tmp"));
+        assert!(matches_rule(&rule, Some("chmod"), "chmod 777 /tmp"));
+        assert!(!matches_rule(&rule, Some("chmod"), "chmod 755 /tmp"));
+    }
+
+    #[test]
     fn test_matches_rule_multi_word_prefix() {
         let content = "---\nname: test\npatterns: [\"git reset --hard\"]\n---\n";
         let rule = parse_rule(content, "test").unwrap();

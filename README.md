@@ -6,7 +6,7 @@
 
 [Website](https://www.rtk-ai.app) | [GitHub](https://github.com/rtk-ai/rtk) | [Install](INSTALL.md)
 
-rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens on common operations.
+rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens on common operations. Works with **Claude Code** and **Gemini CLI**.
 
 ## ⚠️ Important: Name Collision Warning
 
@@ -14,7 +14,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 
 1. ✅ **This project (Rust Token Killer)** - LLM token optimizer
    - Repos: `rtk-ai/rtk`
-   - Purpose: Reduce Claude Code token consumption
+   - Purpose: Reduce Claude Code and Gemini CLI token consumption
 
 2. ❌ **reachingforthejack/rtk** - Rust Type Kit (DIFFERENT PROJECT)
    - Purpose: Query Rust codebase and generate types
@@ -28,7 +28,7 @@ rtk gain        # Should show token savings stats
 
 If `rtk gain` doesn't exist, you installed the wrong package. See installation instructions below.
 
-## Token Savings (30-min Claude Code Session)
+## Token Savings (30-min LLM Session)
 
 Typical session without rtk: **~150,000 tokens**
 With rtk: **~45,000 tokens** → **70% reduction**
@@ -49,6 +49,8 @@ With rtk: **~45,000 tokens** → **70% reduction**
 > Estimates based on medium-sized TypeScript/Rust projects. Actual savings vary by project size.
 
 ## Installation
+
+RTK supports **Claude Code** and **Gemini CLI** from a single binary.
 
 ### ⚠️ Pre-Installation Check (REQUIRED)
 
@@ -98,10 +100,10 @@ Download from [rtk-ai/releases](https://github.com/rtk-ai/rtk/releases):
 # 1. Verify installation
 rtk gain  # Must show token stats, not "command not found"
 
-# 2. Initialize for Claude Code (RECOMMENDED: hook-first mode)
-rtk init --global
-# → Installs hook + creates slim RTK.md (10 lines, 99.5% token savings)
-# → Follow printed instructions to add hook to ~/.claude/settings.json
+# 2. Initialize for Claude Code and Gemini CLI
+rtk init --global              # Both platforms — recommended default
+rtk init --global --claude     # Claude Code only
+rtk init --global --gemini     # Gemini CLI only
 
 # 3. Test it works
 rtk git status  # Should show ultra-compact output
@@ -164,30 +166,71 @@ rtk config                       # Show config (--create to generate)
 rtk run -c "git status"          # Safe execution with filtering
 
 # Hook protocol for Claude Code integration
-rtk hook check --agent claude "git status"  # Returns rewritten command
-rtk hook check --agent claude "cat file"    # Blocked (exit 2)
+rtk hook check --agent claude "git status"  # Prints rewritten command to stdout
+rtk hook check --agent claude "cat file"    # Blocked (exit 2, prints reason)
 ```
 
 ### Safety Features
 
-RTK includes built-in safety for AI-generated commands:
+RTK includes built-in data safety for AI-generated commands. Each data loss incident costs ~20-50K tokens in recovery (investigate damage, restore/rewrite, regenerate, debug differences). RTK prevents this through recoverable rewrites:
 
-| Raw Command | RTK Behavior | Why |
-|-------------|--------------|-----|
-| `rm file` | → trash | Recoverable deletion |
-| `git reset --hard` | → stash + reset | Preserve uncommitted changes |
-| `git checkout .` | → stash + checkout | Preserve local changes |
-| `git stash drop` | → stash pop | Recoverable stash |
-| `git clean -f` | → stash -u + clean | Preserve untracked files |
-| `cat file` | blocked | Use Read tool (has edit history) |
-| `sed -i` | blocked | Use Edit tool (has edit history) |
-| `head file` | blocked | Use Read tool with limit |
+| Raw Command | RTK Behavior | Why | Opt-out |
+|-------------|--------------|-----|---------|
+| `rm file` | → trash | Recoverable deletion | `RTK_SAFE_COMMANDS=0` |
+| `git reset --hard` | → stash + reset | Preserve uncommitted changes | `RTK_SAFE_COMMANDS=0` |
+| `git checkout .` | → stash + checkout | Preserve local changes | `RTK_SAFE_COMMANDS=0` |
+| `git checkout -- file` | → stash + checkout | Preserve local changes | `RTK_SAFE_COMMANDS=0` |
+| `git stash drop` | → stash pop | Recoverable stash | `RTK_SAFE_COMMANDS=0` |
+| `git clean -f` | → stash -u + clean | Preserve untracked files | `RTK_SAFE_COMMANDS=0` |
+| `git clean -fd` | → stash -u + clean | Preserve untracked files | `RTK_SAFE_COMMANDS=0` |
+| `git clean -df` | → stash -u + clean | Preserve untracked files | `RTK_SAFE_COMMANDS=0` |
+| `cat file` | blocked | Use Read tool instead | `RTK_BLOCK_TOKEN_WASTE=0` |
+| `sed -i` | blocked | Use Edit tool instead | `RTK_BLOCK_TOKEN_WASTE=0` |
+| `head file` | blocked | Use Read tool with limit | `RTK_BLOCK_TOKEN_WASTE=0` |
 
-**Environment Variables:**
-- `RTK_SAFE_COMMANDS=0` - Disable rm/git safety features
-- `RTK_BLOCK_TOKEN_WASTE=0` - Disable cat/sed/head blocking
+**Why these commands?** `rm` is permanent but `trash` is recoverable. `git reset --hard` loses uncommitted changes but `stash` saves them. `cat`/`sed`/`head` don't preserve edit history but Read/Edit tools do. Blocked commands fail with an error message suggesting the native tool alternative.
 
-**Chained Commands:** RTK properly handles `&&`, `||`, and `;` operators.
+**Action types**: `trash` (move to OS trash), `rewrite` (modify command before execution), `warn` (print message, allow execution), `block`/`suggest_tool` (fail with error and suggest alternative).
+
+11 rule files (`rtk.*.md` with YAML frontmatter, similar to SKILL.md files). The table groups related patterns by row. For example, `git clean -f`, `-fd`, `-df` are 3 separate rule files shown in one row. Custom rules can be placed in `~/.config/rtk/`, `~/.claude/`, `~/.gemini/`, or `.rtk/` directories.
+
+**Rule priority** (highest to lowest):
+1. `--rules-add` CLI paths
+2. `.claude/`, `.gemini/`, `.rtk/` in project directories (closest to cwd wins)
+3. `~/.claude/`, `~/.gemini/` (global, LLM-visible)
+4. `~/.config/rtk/` (global config directory)
+5. Built-in rules (compiled in RTK)
+
+**Example custom rule** (`~/.config/rtk/rtk.safety.chmod-777.md`):
+```markdown
+---
+name: chmod-777
+patterns: ["chmod -R 777", "chmod 777"]
+action: warn
+when: "git rev-parse --is-inside-work-tree 2>/dev/null"
+env_var: RTK_SAFE_COMMANDS
+---
+Warning: chmod 777 grants full access to all users. Consider chmod 755 or chmod 644.
+```
+
+**Rule fields**: `patterns` (command patterns to match), `action` (rewrite/trash/warn/block), `when` (condition), `env_var` (opt-out env var, rule applies unless set to `0`), `enabled` (set to `false` to disable a built-in rule).
+
+The `when:` field supports:
+- Named predicates: `always` (default), `has_unstaged_changes` (only if working tree is dirty)
+- Arbitrary shell commands: any command that exits 0 means the rule applies
+
+Built-in examples: `git reset --hard` uses `when: has_unstaged_changes` (only protects uncommitted work). The custom chmod rule above uses `when: "git rev-parse ..."` (only warns inside git repos).
+
+**Chained Commands:** RTK extracts and rewrites each command in `&&`, `||`, `;` chains independently. Smart quoting prevents false splits on operators inside strings (e.g., `git commit -m "Fix && Bug"` stays intact). Pipes and redirects pass through unchanged (no rewriting inside pipes).
+
+```
+Before: cd /path && git status && git diff
+  Hook sees "cd" only, git status and git diff pass through unoptimized
+
+After:  cd /path && git status && git diff
+  → cd /path && rtk git status && rtk git diff
+  Each command extracted and rewritten independently (95%/75% savings)
+```
 
 ### Data & Analytics
 ```bash
@@ -425,9 +468,9 @@ database_path = "/path/to/custom.db"
 
 Priority: `RTK_DB_PATH` env var > `config.toml` > default location.
 
-## Auto-Rewrite Hook (Recommended)
+## Claude Code Integration
 
-The most effective way to use rtk is with the **auto-rewrite hook** for Claude Code. Instead of relying on CLAUDE.md instructions (which subagents may ignore), this hook transparently intercepts Bash commands and rewrites them to their rtk equivalents before execution.
+The most effective way to use rtk with Claude Code is the **auto-rewrite hook**. Instead of relying on CLAUDE.md instructions (which subagents may ignore), this hook transparently intercepts Bash commands and rewrites them to their rtk equivalents before execution.
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead in Claude's context.
 
@@ -487,7 +530,7 @@ rtk init -g --no-patch  # Prints JSON snippet
 
 **Alternative: Full manual setup**
 
-Add this entry to `~/.claude/settings.json`:
+Add this entry to `~/.claude/settings.json` under `hooks.PreToolUse`:
 
 ```json
 {
@@ -532,7 +575,7 @@ RTK uses a direct binary invocation (`rtk hook claude`), so no hook files need t
 | `curl` | `rtk curl` |
 | `pnpm list/ls/outdated` | `rtk pnpm ...` |
 
-Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
+Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged. Commands like `cat`, `sed`, `head` are blocked with suggestions to use Claude Code's Read/Edit tools instead (see Safety Features above).
 
 ### Alternative: Suggest Hook (Non-Intrusive)
 
@@ -636,7 +679,7 @@ When Gemini CLI is about to execute a shell command, it sends a JSON payload to 
 - **Block**: Returns `"deny"` with a reason explaining which native tool to use instead
 - **Passthrough**: Commands already using `rtk` pass through unchanged
 
-The Gemini hook filters on `run_shell_command`, `shell`, and MCP shell tool patterns. Non-shell tool events are allowed without inspection.
+The `matcher` field (`run_shell_command`) identifies Gemini's shell execution tool (analogous to Claude Code's `Bash` matcher). Non-shell tool events pass through without inspection.
 
 ### Uninstalling Gemini Hook
 
@@ -655,11 +698,10 @@ The global `rtk init -g --uninstall` also removes Gemini hooks alongside Claude 
 rtk init -g --uninstall
 
 # Removes:
-#   - RTK hook entry from ~/.claude/settings.json
+#   - RTK hook from ~/.claude/settings.json
+#   - RTK hook from ~/.gemini/settings.json
 #   - ~/.claude/RTK.md
 #   - @RTK.md reference from ~/.claude/CLAUDE.md
-#   - RTK hook entry from ~/.claude/settings.json
-#   - RTK hook entry from ~/.gemini/settings.json
 
 # Restart Claude Code / Gemini CLI after uninstall
 ```
