@@ -5,30 +5,82 @@
 //!
 //! Protocol: https://docs.anthropic.com/en/docs/claude-code/hooks
 //!
-//! Exit codes:
-//!   0 = success (allow or rewrite) — command proceeds
-//!   2 = blocking error (deny) — command rejected
+//! ## Exit Code Behavior
 //!
-//! Deny output strategy (dual-path for robustness):
-//!   stdout: JSON with permissionDecision "deny" (documented main path)
-//!   stderr: plain text reason (workaround for Claude Code bug #4669,
-//!           where permissionDecision "deny" on stdout was ignored;
-//!           exit code 2 causes Claude Code to read stderr as error)
+//! - Exit 0 = success (allow/rewrite) — tool proceeds
+//! - Exit 2 = blocking error (deny) — tool rejected
 //!
-//! I/O enforcement: `run_inner()` returns `HookResponse` (no I/O).
-//! Only `run()` writes to stdout/stderr via `write!`/`writeln!`.
-//! The `#![deny(clippy::print_stdout, clippy::print_stderr)]` on this
-//! module catches any accidental `println!`/`eprintln!` at compile time.
+//! ## Claude Code Stderr Rule (CRITICAL)
+//!
+//! **Source:** See `/Users/athundt/.claude/clautorun/.worktrees/claude-stable-pre-v0.8.0/notes/hooks_api_reference.md:720-728`
+//!
+//! ```text
+//! CRITICAL: ANY stderr output at exit 0 = hook error = fail-open
+//! ```
+//!
+//! **Implication:**
+//! - Exit 0 + ANY stderr → Claude Code treats hook as FAILED → tool executes anyway (fail-open)
+//! - Exit 2 + stderr → Claude Code treats stderr as the block reason → tool blocked, AI sees reason
+//!
+//! **This module's stderr usage:**
+//! - ✅ Exit 0 paths (NoOpinion, Allow): **NEVER write to stderr**
+//! - ✅ Exit 2 path (Deny): **stderr ONLY** for bug #4669 workaround (see below)
+//!
+//! ## Bug #4669 Workaround (Dual-Path Deny)
+//!
+//! **Issue:** https://github.com/anthropics/claude-code/issues/4669
+//! **Versions:** v1.0.62+ through current (not fixed)
+//! **Problem:** `permissionDecision: "deny"` at exit 0 is IGNORED — tool executes anyway
+//!
+//! **Workaround:**
+//! ```text
+//! stdout: JSON with permissionDecision "deny" (documented main path, but broken)
+//! stderr: plain text reason (fallback path that actually works)
+//! exit code: 2 (triggers Claude Code to read stderr as error)
+//! ```
+//!
+//! This ensures deny works regardless of which path Claude Code processes.
+//!
+//! ## I/O Enforcement (Module-Specific)
+//!
+//! **This restriction applies ONLY to claude_hook.rs and gemini_hook.rs.**
+//! All other RTK modules (main.rs, git.rs, etc.) use `println!`/`eprintln!` normally.
+//!
+//! **Why restricted here:**
+//! - Hook protocol requires JSON-only stdout
+//! - Claude Code's "ANY stderr = hook error" rule (see above)
+//! - Accidental prints corrupt the JSON protocol
+//!
+//! **Enforcement mechanism:**
+//! - `#![deny(clippy::print_stdout, clippy::print_stderr)]` at module level (line 52)
+//! - `run_inner()` returns `HookResponse` enum — pure logic, no I/O
+//! - `run()` is the ONLY function that writes output — single I/O point
+//! - Uses `write!`/`writeln!` which are NOT caught by the clippy lint
+//!
+//! **Pathway:** main.rs → Commands::Hook → claude_hook::run() [DENY ENFORCED HERE]
 //!
 //! Fail-open: Any parse error or unexpected input → exit 0, no output.
-//! Claude Code treats no-output-exit-0 as "no opinion" and proceeds.
 
-// Compile-time enforcement: no accidental println!/eprintln! in this module.
-// All stdout/stderr output is done via write!/writeln! in run() only.
-// clippy::print_stdout/print_stderr catch println!/eprintln! but NOT write!.
+// Compile-time I/O enforcement for THIS MODULE ONLY.
+// Other RTK modules (main.rs, git.rs, etc.) use println!/eprintln! normally.
+//
+// Why restrict here:
+// - Claude Code hook protocol requires JSON-only stdout
+// - Claude Code rule: "ANY stderr at exit 0 = hook error = fail-open"
+//   (Source: clautorun hooks_api_reference.md:720-728)
+// - Accidental prints would corrupt the JSON response
+//
+// Mechanism:
+// - Denies println!/eprintln! at compile-time
+// - Allows write!/writeln! (used only in run() for controlled output)
+// - run_inner() returns HookResponse (no I/O)
+// - run() is the single I/O point
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use super::hook::{check_for_hook, is_hook_disabled, should_passthrough, HookResponse, HookResult};
+use super::hook::{
+    check_for_hook, is_hook_disabled, should_passthrough, update_command_in_tool_input,
+    HookResponse, HookResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Read, Write};
@@ -117,17 +169,33 @@ pub fn run() -> anyhow::Result<()> {
         Err(_) => HookResponse::NoOpinion, // Fail-open: swallow errors
     };
 
-    // Single I/O point: write!/writeln! are not caught by the clippy lint,
-    // so this is the only place that can produce output in this module.
+    // ┌────────────────────────────────────────────────────────────────┐
+    // │ SINGLE I/O POINT - All stdout/stderr output happens here only │
+    // │                                                                │
+    // │ Why: Claude Code rule "ANY stderr at exit 0 = hook error"     │
+    // │      (Source: hooks_api_reference.md:720-728)                 │
+    // │                                                                │
+    // │ Enforcement: #![deny(...)] at line 52 prevents println!/eprintln! │
+    // │              write!/writeln! are not caught by lint (allowed) │
+    // └────────────────────────────────────────────────────────────────┘
     match response {
-        HookResponse::NoOpinion => {} // Exit 0, no output
+        HookResponse::NoOpinion => {
+            // Exit 0, NO stdout, NO stderr
+            // Claude Code sees no output → proceeds with original command
+        }
         HookResponse::Allow(json) => {
+            // Exit 0, JSON to stdout, NO stderr
+            // CRITICAL: No stderr at exit 0 (would cause fail-open)
             writeln!(io::stdout(), "{json}")?;
         }
         HookResponse::Deny(json, reason) => {
-            // Dual-path deny for bug #4669 robustness:
-            // stdout: JSON with permissionDecision "deny" (documented main path)
-            // stderr: plain text reason (exit code 2 fallback path)
+            // Exit 2, JSON to stdout, reason to stderr
+            // This is the ONLY path that writes to stderr (valid at exit 2 only)
+            //
+            // Dual-path deny for bug #4669 workaround:
+            // - stdout: JSON with permissionDecision "deny" (documented path, but ignored)
+            // - stderr: plain text reason (actual blocking mechanism via exit 2)
+            // - exit 2: Triggers Claude Code to read stderr and block tool
             writeln!(io::stdout(), "{json}")?;
             writeln!(io::stderr(), "{reason}")?;
             std::process::exit(2);
@@ -161,12 +229,8 @@ fn run_inner() -> anyhow::Result<HookResponse> {
     match result {
         HookResult::Rewrite(new_cmd) => {
             // Preserve all original tool_input fields, only replace "command"
-            let mut updated = payload
-                .tool_input
-                .unwrap_or_else(|| Value::Object(Default::default()));
-            if let Some(obj) = updated.as_object_mut() {
-                obj.insert("command".into(), Value::String(new_cmd));
-            }
+            // Shared helper (DRY with gemini_hook.rs via hook.rs)
+            let updated = update_command_in_tool_input(payload.tool_input, new_cmd);
 
             let response = allow_response("RTK safety rewrite applied".into(), Some(updated));
             let json = serde_json::to_string(&response)?;

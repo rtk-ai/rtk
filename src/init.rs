@@ -426,6 +426,30 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     Ok(())
 }
 
+/// Uninstall RTK Gemini CLI hook.
+/// Removes hook entry from ~/.gemini/settings.json.
+pub fn uninstall_gemini(verbose: u8) -> Result<()> {
+    let mut removed = Vec::new();
+
+    // Remove hook entry from Gemini settings.json
+    if remove_gemini_hook_from_settings(verbose)? {
+        removed.push("Gemini settings.json: removed RTK hook entry".to_string());
+    }
+
+    // Report results
+    if removed.is_empty() {
+        println!("RTK Gemini hook was not installed (nothing to remove)");
+    } else {
+        println!("RTK Gemini hook uninstalled:");
+        for item in removed {
+            println!("  - {}", item);
+        }
+        println!("\nRestart Gemini CLI to apply changes.");
+    }
+
+    Ok(())
+}
+
 /// Shared: patch a settings.json with an agent hook.
 /// Reads/creates JSON, checks idempotency, handles PatchMode, inserts hook,
 /// backs up, and atomically writes.

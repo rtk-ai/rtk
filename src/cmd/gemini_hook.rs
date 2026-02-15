@@ -3,25 +3,69 @@
 //! Reads JSON from stdin, applies safety checks and rewrites,
 //! outputs JSON to stdout.
 //!
-//! See: https://geminicli.com/docs/hooks/reference/
+//! Protocol: https://geminicli.com/docs/hooks/reference/
 //!
-//! Input: JSON on stdin with hook_event_name, tool_name, tool_input
-//! Output: JSON on stdout with decision, reason, hookSpecificOutput
+//! ## Exit Code Behavior
 //!
-//! I/O enforcement: `run_inner()` returns `HookResponse` (no I/O).
-//! Only `run()` writes to stdout via `write!`/`writeln!`.
-//! The `#![deny(clippy::print_stdout, clippy::print_stderr)]` on this
-//! module catches any accidental `println!`/`eprintln!` at compile time.
+//! - Exit 0 = normal (JSON `decision` field is respected)
+//! - Exit 2 = blocking error (equivalent to `decision: "deny"`)
+//!
+//! ## Gemini CLI Stderr Rule
+//!
+//! **Source:** See `/Users/athundt/.claude/clautorun/.worktrees/claude-stable-pre-v0.8.0/notes/hooks_api_reference.md:740-753`
+//!
+//! Unlike Claude Code, Gemini CLI **allows stderr for debugging**:
+//! ```text
+//! stderr is SAFE for debug/logging (shown to user/agent)
+//! ```
+//!
+//! **This module's stderr usage:**
+//! - Currently: **NO stderr output** (JSON `reason` field sufficient for all cases)
+//! - Future: Could add debug logging to stderr if needed (safe in Gemini)
+//!
+//! ## I/O Enforcement (Module-Specific)
+//!
+//! **This restriction applies ONLY to gemini_hook.rs and claude_hook.rs.**
+//! All other RTK modules (main.rs, git.rs, etc.) use `println!`/`eprintln!` normally.
+//!
+//! **Why restricted here:**
+//! - Hook protocol requires JSON-only stdout
+//! - Accidental prints corrupt the JSON response
+//! - Consistency with claude_hook.rs architecture
+//!
+//! **Enforcement mechanism:**
+//! - `#![deny(clippy::print_stdout, clippy::print_stderr)]` at module level (line 42)
+//! - `run_inner()` returns `HookResponse` enum — pure logic, no I/O
+//! - `run()` is the ONLY function that writes output — single I/O point
+//! - Uses `write!`/`writeln!` which are NOT caught by the clippy lint
+//!
+//! **Pathway:** main.rs → Commands::Hook → gemini_hook::run() [DENY ENFORCED HERE]
 //!
 //! Fail-open: Any parse error or unexpected input → exit 0, no output.
-//! Gemini CLI treats no-output-exit-0 as "no opinion" and proceeds.
 
-// Compile-time enforcement: no accidental println!/eprintln! in this module.
-// All stdout output is done via write!/writeln! in run() only.
-// clippy::print_stdout/print_stderr catch println!/eprintln! but NOT write!.
+// Compile-time I/O enforcement for THIS MODULE ONLY.
+// Other RTK modules (main.rs, git.rs, etc.) use println!/eprintln! normally.
+//
+// Why restrict here:
+// - Gemini CLI hook protocol requires JSON-only stdout
+// - Accidental prints would corrupt the JSON response
+// - Architectural consistency with claude_hook.rs
+//
+// Note: Unlike Claude Code, Gemini ALLOWS stderr for debug logging
+//       (see hooks_api_reference.md:740-753), but we don't need it.
+//       The JSON `reason` field is sufficient for all messaging.
+//
+// Mechanism:
+// - Denies println!/eprintln! at compile-time
+// - Allows write!/writeln! (used only in run() for controlled output)
+// - run_inner() returns HookResponse (no I/O)
+// - run() is the single I/O point
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use super::hook::{check_for_hook, is_hook_disabled, should_passthrough, HookResponse, HookResult};
+use super::hook::{
+    check_for_hook, is_hook_disabled, should_passthrough, update_command_in_tool_input,
+    HookResponse, HookResult,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Read, Write};
@@ -68,10 +112,25 @@ pub fn run() -> anyhow::Result<()> {
         Err(_) => HookResponse::NoOpinion, // Fail-open: swallow errors
     };
 
-    // Single I/O point: write!/writeln! are not caught by the clippy lint.
+    // ┌────────────────────────────────────────────────────────────────┐
+    // │ SINGLE I/O POINT - All stdout output happens here only        │
+    // │                                                                │
+    // │ Why: Gemini CLI hook protocol requires JSON-only stdout       │
+    // │      (Gemini ALLOWS stderr for debug, but we don't need it)   │
+    // │                                                                │
+    // │ Enforcement: #![deny(...)] at line 42 prevents println!/eprintln! │
+    // │              write!/writeln! are not caught by lint (allowed) │
+    // └────────────────────────────────────────────────────────────────┘
     match response {
-        HookResponse::NoOpinion => {}
+        HookResponse::NoOpinion => {
+            // Exit 0, NO stdout, NO stderr
+            // Gemini CLI sees no output → proceeds with original command
+        }
         HookResponse::Allow(json) | HookResponse::Deny(json, _) => {
+            // Exit 0, JSON to stdout, NO stderr
+            // Note: Gemini ALLOWS stderr for debug (unlike Claude), but JSON
+            //       `reason` field is sufficient. The HookResponse::Deny
+            //       second field (stderr_reason) is empty for Gemini.
             writeln!(io::stdout(), "{json}")?;
         }
     }
@@ -123,12 +182,10 @@ fn run_inner() -> anyhow::Result<HookResponse> {
 
     let response = match decision {
         HookResult::Rewrite(new_cmd) => {
-            let mut new_input = payload
-                .tool_input
-                .unwrap_or(Value::Object(Default::default()));
-            if let Some(obj) = new_input.as_object_mut() {
-                obj.insert("command".into(), Value::String(new_cmd));
-            }
+            // Preserve all original tool_input fields, only replace "command"
+            // Shared helper (DRY with claude_hook.rs via hook.rs)
+            let new_input = update_command_in_tool_input(payload.tool_input, new_cmd);
+
             GeminiResponse {
                 decision: "allow".into(),
                 reason: Some("RTK applied safety optimizations.".into()),

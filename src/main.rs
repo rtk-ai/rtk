@@ -1076,7 +1076,11 @@ fn main() -> Result<()> {
             if show {
                 init::show_config()?;
             } else if uninstall {
-                init::uninstall(global, cli.verbose)?;
+                if gemini {
+                    init::uninstall_gemini(cli.verbose)?;
+                } else {
+                    init::uninstall(global, cli.verbose)?;
+                }
             } else {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto

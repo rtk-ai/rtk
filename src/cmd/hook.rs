@@ -1,12 +1,40 @@
 //! Hook protocol for Claude Code and Gemini support.
 //!
-//! Claude Code expects:
+//! This module provides **shared decision logic** for both Claude Code and Gemini CLI hooks.
+//! Protocol-specific I/O handling lives in `claude_hook.rs` and `gemini_hook.rs`.
+//!
+//! ## Architecture: Separation of Concerns
+//!
+//! ```text
+//! main.rs (CAN use println! - normal RTK behavior)
+//!    ↓
+//! Commands::Hook match
+//!    ├─→ HookCommands::Check → hook::check_for_hook() (THIS MODULE - CAN use println!)
+//!    ├─→ HookCommands::Claude → claude_hook::run() [DENY ENFORCED - see claude_hook.rs:52]
+//!    └─→ HookCommands::Gemini → gemini_hook::run() [DENY ENFORCED - see gemini_hook.rs:42]
+//! ```
+//!
+//! **I/O Policy Scope:**
+//! - **This module (hook.rs)**: CAN use `println!`/`eprintln!` (used by `rtk hook check` text protocol)
+//! - **main.rs and all command modules**: CAN use `println!`/`eprintln!` (normal RTK behavior)
+//! - **claude_hook.rs, gemini_hook.rs ONLY**: CANNOT use `println!`/`eprintln!` (JSON protocols)
+//!
+//! The `#![deny(clippy::print_stdout, clippy::print_stderr)]` attribute is applied
+//! at the **module boundary** (earliest possible stage) — when control enters
+//! `claude_hook::run()` or `gemini_hook::run()`, the deny is enforced.
+//!
+//! ## Protocol Differences
+//!
+//! **Claude Code** (`rtk hook check` text protocol):
 //! - Success: rewritten command on stdout, exit 0
 //! - Blocked: error message on stderr, exit 2 (blocking error)
 //! - Other exit codes: non-blocking errors
 //!
-//! Gemini expects:
-//! - JSON payload in, JSON response out (see gemini_hook module)
+//! **Claude Code** (JSON protocol via `claude_hook.rs`):
+//! - See `claude_hook.rs` module documentation
+//!
+//! **Gemini CLI** (JSON protocol via `gemini_hook.rs`):
+//! - See `gemini_hook.rs` module documentation
 
 use super::{analysis, lexer, safety};
 
@@ -105,6 +133,26 @@ pub fn is_hook_disabled() -> bool {
 /// - Contains heredoc (`<<`) which needs raw shell processing
 pub fn should_passthrough(cmd: &str) -> bool {
     cmd.starts_with("rtk ") || cmd.contains("/rtk ") || cmd.contains("<<")
+}
+
+/// Replace the command field in a tool_input object, preserving other fields.
+///
+/// Used by both claude_hook.rs and gemini_hook.rs when rewriting commands.
+/// If tool_input is None or not an object, creates a new object with just the command.
+///
+/// # Arguments
+/// * `tool_input` - The original tool_input from the hook payload (may be None)
+/// * `new_cmd` - The rewritten command string to replace with
+///
+/// # Returns
+/// A Value with the command field updated, all other fields preserved.
+pub fn update_command_in_tool_input(tool_input: Option<serde_json::Value>, new_cmd: String) -> serde_json::Value {
+    use serde_json::Value;
+    let mut updated = tool_input.unwrap_or_else(|| Value::Object(Default::default()));
+    if let Some(obj) = updated.as_object_mut() {
+        obj.insert("command".into(), Value::String(new_cmd));
+    }
+    updated
 }
 
 /// Hook output for protocol handlers (claude_hook.rs, gemini_hook.rs).
