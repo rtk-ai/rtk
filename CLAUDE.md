@@ -16,7 +16,7 @@ This is a fork with critical fixes for git argument parsing and modern JavaScrip
 
 **Verify correct installation:**
 ```bash
-rtk --version  # Should show "rtk X.Y.Z"
+rtk --version  # Should show "rtk 0.16.0" (or newer)
 rtk gain       # Should show token savings stats (NOT "command not found")
 ```
 
@@ -225,6 +225,127 @@ rtk gain --history | grep proxy
 | utils.rs | Shared utilities | Package manager detection, common formatting |
 | discover/ | Claude Code history analysis | Scan JSONL sessions, classify commands, report missed savings |
 
+## Performance Constraints
+
+RTK has **strict performance targets** to maintain zero-overhead CLI experience:
+
+| Metric | Target | Verification Method |
+|--------|--------|---------------------|
+| **Startup time** | <10ms | `hyperfine 'rtk git status' 'git status'` |
+| **Memory overhead** | <5MB resident | `/usr/bin/time -l rtk git status` (macOS) |
+| **Token savings** | 60-90% | Verify in tests with `count_tokens()` assertions |
+| **Binary size** | <5MB stripped | `ls -lh target/release/rtk` |
+
+**Performance regressions are release blockers** - always benchmark before/after changes:
+
+```bash
+# Before changes
+hyperfine 'rtk git log -10' --warmup 3 > /tmp/before.txt
+
+# After changes
+cargo build --release
+hyperfine 'target/release/rtk git log -10' --warmup 3 > /tmp/after.txt
+
+# Compare (should be <10ms)
+diff /tmp/before.txt /tmp/after.txt
+```
+
+**Why <10ms matters**: Claude Code users expect CLI tools to be instant. Any perceptible delay (>10ms) breaks the developer flow. RTK achieves this through:
+- **Zero async overhead**: Single-threaded, no tokio runtime
+- **Lazy regex compilation**: Compile once with `lazy_static!`, reuse forever
+- **Minimal allocations**: Borrow over clone, in-place filtering
+- **No user config**: Zero file I/O on startup (config loaded on-demand)
+
+## Error Handling
+
+RTK follows Rust best practices for error handling:
+
+**Rules**:
+- **anyhow::Result** for CLI binary (RTK is an application, not a library)
+- **ALWAYS** use `.context("description")` with `?` operator
+- **NO unwrap()** in production code (tests only - use `expect("explanation")` if needed)
+- **Graceful degradation**: If filter fails, fallback to raw command execution
+
+**Example**:
+
+```rust
+use anyhow::{Context, Result};
+
+pub fn filter_git_log(input: &str) -> Result<String> {
+    let lines: Vec<_> = input
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    // ✅ RIGHT: Context on error
+    let hash = extract_hash(lines[0])
+        .context("Failed to extract commit hash from git log")?;
+
+    // ❌ WRONG: No context
+    let hash = extract_hash(lines[0])?;
+
+    // ❌ WRONG: Panic in production
+    let hash = extract_hash(lines[0]).unwrap();
+
+    Ok(format!("Commit: {}", hash))
+}
+```
+
+**Fallback pattern** (critical for all filters):
+
+```rust
+// ✅ RIGHT: Fallback to raw command if filter fails
+pub fn execute_with_filter(cmd: &str, args: &[&str]) -> Result<()> {
+    match get_filter(cmd) {
+        Some(filter) => match filter.apply(cmd, args) {
+            Ok(output) => println!("{}", output),
+            Err(e) => {
+                eprintln!("Filter failed: {}, falling back to raw", e);
+                execute_raw(cmd, args)?;
+            }
+        },
+        None => execute_raw(cmd, args)?,
+    }
+    Ok(())
+}
+
+// ❌ WRONG: Panic if no filter
+pub fn execute_with_filter(cmd: &str, args: &[&str]) -> Result<()> {
+    let filter = get_filter(cmd).expect("Filter must exist");
+    filter.apply(cmd, args)?;
+    Ok(())
+}
+```
+
+## Common Pitfalls
+
+**Don't add async dependencies** (kills startup time)
+- RTK is single-threaded by design
+- Adding tokio/async-std adds ~5-10ms startup overhead
+- Use blocking I/O with fallback to raw command
+
+**Don't recompile regex at runtime** (kills performance)
+- ❌ WRONG: `let re = Regex::new(r"pattern").unwrap();` inside function
+- ✅ RIGHT: `lazy_static! { static ref RE: Regex = Regex::new(r"pattern").unwrap(); }`
+
+**Don't panic on filter failure** (breaks user workflow)
+- Always fallback to raw command execution
+- Log error to stderr, execute original command unchanged
+
+**Don't assume command output format** (breaks across versions)
+- Test with real fixtures from multiple versions
+- Use flexible regex patterns that tolerate format changes
+
+**Don't skip cross-platform testing** (macOS ≠ Linux ≠ Windows)
+- Shell escaping differs: bash/zsh vs PowerShell
+- Path separators differ: `/` vs `\`
+- Line endings differ: LF vs CRLF
+
+**Don't break pipe compatibility** (users expect Unix behavior)
+- `rtk git status | grep modified` must work
+- Preserve stdout/stderr separation
+- Respect exit codes (0 = success, non-zero = failure)
+
 ## Fork-Specific Features
 
 ### PR #5: Git Argument Parsing Fix (CRITICAL)
@@ -312,3 +433,176 @@ GitHub Actions workflow (.github/workflows/release.yml):
 - DEB/RPM package generation
 - Automated releases on version tags (v*)
 - Checksums for binary verification
+
+## Build Verification (Mandatory)
+
+**CRITICAL**: After ANY Rust file edits, ALWAYS run the full quality check pipeline before committing:
+
+```bash
+cargo fmt --all && cargo clippy --all-targets && cargo test --all
+```
+
+**Rules**:
+- Never commit code that hasn't passed all 3 checks
+- Fix ALL clippy warnings before moving on (zero tolerance)
+- If build fails, fix it immediately before continuing to next task
+- Pre-commit hook will auto-enforce this (see `.claude/hooks/bash/pre-commit-format.sh`)
+
+**Why**: RTK is a production CLI tool used by developers in their workflows. Bugs break developer productivity. Quality gates prevent regressions and maintain user trust.
+
+**Performance verification** (for filter changes):
+
+```bash
+# Benchmark before/after
+hyperfine 'rtk git log -10' --warmup 3
+cargo build --release
+hyperfine 'target/release/rtk git log -10' --warmup 3
+
+# Memory profiling
+/usr/bin/time -l target/release/rtk git status  # macOS
+/usr/bin/time -v target/release/rtk git status  # Linux
+```
+
+## Testing Policy
+
+**Manual testing is REQUIRED** for filter changes and new commands:
+
+- **For new filters**: Test with real command (`rtk <cmd>`), verify output matches expectations
+  - Example: `rtk git log -10` → inspect output, verify condensed correctly
+  - Example: `rtk cargo test` → verify only failures shown, not full output
+
+- **For hook changes**: Test in real Claude Code session, verify command rewriting works
+  - Create test Claude Code session
+  - Type raw command (e.g., `git status`)
+  - Verify hook rewrites to `rtk git status`
+
+- **For performance**: Run `hyperfine` comparison (before/after), verify <10ms startup
+  - Benchmark baseline: `hyperfine 'rtk git status' --warmup 3`
+  - Make changes, rebuild
+  - Benchmark again: `hyperfine 'target/release/rtk git status' --warmup 3`
+  - Compare results: startup time should be <10ms
+
+- **For cross-platform**: Test on macOS + Linux (Docker) + Windows (CI), verify shell escaping
+  - macOS (zsh): Test locally
+  - Linux (bash): Use Docker `docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test`
+  - Windows (PowerShell): Trust CI/CD pipeline or test manually if available
+
+**Anti-pattern**: Running only automated tests (`cargo test`, `cargo clippy`) without actually executing `rtk <cmd>` and inspecting output.
+
+**Example**: If fixing the `git log` filter, run `rtk git log -10` and verify:
+1. Output is condensed (shorter than raw `git log -10`)
+2. Critical info preserved (commit hashes, messages)
+3. Format is readable and consistent
+4. Exit code matches git's exit code (0 for success)
+
+## Working Directory Confirmation
+
+**ALWAYS confirm working directory before starting any work**:
+
+```bash
+pwd  # Verify you're in /Users/florianbruniaux/Sites/rtk-ai/rtk
+git branch  # Verify correct branch (main, feature/*, etc.)
+```
+
+**Never assume** which project to work in. RTK shares parent directory with other projects (ccboard, cc-economics).
+
+**Context**: Wrong directory detection was a common friction point in multi-repo environments. Always verify before file operations.
+
+## Avoiding Rabbit Holes
+
+**Stay focused on the task**. Do not make excessive operations to verify external APIs, documentation, or edge cases unless explicitly asked.
+
+**Rule**: If verification requires more than 3-4 exploratory commands, STOP and ask the user whether to continue or trust available info.
+
+**Examples of rabbit holes to avoid**:
+- Excessive regex pattern testing (trust snapshot tests, don't manually verify 20 edge cases)
+- Deep diving into external command documentation (use fixtures, don't research git/cargo internals)
+- Over-testing cross-platform behavior (test macOS + Linux, trust CI for Windows)
+- Verifying API signatures across multiple crate versions (use docs.rs if needed, don't clone repos)
+
+**When to stop and ask**:
+- "Should I research X external API behavior?" → ASK if it requires >3 commands
+- "Should I test Y edge case?" → ASK if not mentioned in requirements
+- "Should I verify Z across N platforms?" → ASK if N > 2
+
+## Plan Execution Protocol
+
+When user provides a numbered plan (QW1-QW4, Phase 1-5, sprint tasks, etc.):
+
+1. **Execute sequentially**: Follow plan order unless explicitly told otherwise
+2. **Commit after each logical step**: One commit per completed phase/task
+3. **Never skip or reorder**: If a step is blocked, report it and ask before proceeding
+4. **Track progress**: Use task list (TaskCreate/TaskUpdate) for plans with 3+ steps
+5. **Validate assumptions**: Before starting, verify all referenced file paths exist and working directory is correct
+
+**Why**: Plan-driven execution produces better outcomes than ad-hoc implementation. Structured plans help maintain focus and prevent scope creep.
+
+## Language & Communication
+
+- **User communicates in French**: Respond in French unless explicitly writing English content (docs, code comments, READMEs)
+- **"reprend"**: Resume previous task where it was left off
+- **Be direct**: User prefers direct, factual communication (Bold Guy style - cash, bienveillant, énergique)
+
+**Examples**:
+- ✅ "Ça ne va pas marcher parce que X. Voici ce que je ferais : Y."
+- ✅ "Le test échoue car le regex ne capture pas les commits merge. Fix : ajouter `(?:Merge|commit)`."
+- ❌ "Je pense que peut-être nous pourrions éventuellement envisager de..." (trop verbeux, pas direct)
+
+## Filter Development Checklist
+
+When adding a new filter (e.g., `rtk newcmd`):
+
+### Implementation
+- [ ] Create filter module in `src/<cmd>_cmd.rs` (or extend existing)
+- [ ] Add `lazy_static!` regex patterns for parsing (compile once, reuse)
+- [ ] Implement fallback to raw command on error (graceful degradation)
+- [ ] Preserve exit codes (`std::process::exit(code)` if non-zero)
+
+### Testing
+- [ ] Write snapshot test with real command output fixture (`tests/fixtures/<cmd>_raw.txt`)
+- [ ] Verify token savings ≥60% with `count_tokens()` assertion
+- [ ] Test cross-platform shell escaping (macOS, Linux, Windows)
+- [ ] Write unit tests for edge cases (empty output, errors, unicode, ANSI codes)
+
+### Integration
+- [ ] Register filter in main.rs Commands enum
+- [ ] Update README.md with new command support and token savings %
+- [ ] Update CHANGELOG.md with feature description
+
+### Quality Gates
+- [ ] Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
+- [ ] Benchmark startup time with `hyperfine` (verify <10ms)
+- [ ] Test manually: `rtk <cmd>` and inspect output for correctness
+- [ ] Verify fallback: Break filter intentionally, confirm raw command executes
+
+### Documentation
+- [ ] Add command to this CLAUDE.md Module Responsibilities table
+- [ ] Document token savings % (from tests)
+- [ ] Add usage examples to README.md
+
+**Example workflow** (adding `rtk newcmd`):
+
+```bash
+# 1. Create module
+touch src/newcmd_cmd.rs
+
+# 2. Write test first (TDD)
+echo 'raw command output fixture' > tests/fixtures/newcmd_raw.txt
+# Add test in src/newcmd_cmd.rs
+
+# 3. Implement filter
+# Add lazy_static regex, implement logic, add fallback
+
+# 4. Quality checks
+cargo fmt --all && cargo clippy --all-targets && cargo test
+
+# 5. Benchmark
+hyperfine 'rtk newcmd args'
+
+# 6. Manual test
+rtk newcmd args
+# Inspect output, verify condensed
+
+# 7. Document
+# Update README.md, CHANGELOG.md, this file
+```
