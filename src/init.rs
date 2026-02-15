@@ -1058,27 +1058,9 @@ fn remove_gemini_hook_from_settings(verbose: u8) -> Result<bool> {
 
 /// Public entry point for `rtk init --gemini`
 pub fn run_gemini(patch_mode: PatchMode, verbose: u8) -> Result<()> {
-    let patch_result = patch_gemini_settings(patch_mode, verbose)?;
-
-    println!("\nRTK Gemini CLI hook setup.\n");
-
-    match patch_result {
-        PatchResult::Patched => {
-            println!("  Hook command: rtk hook gemini");
-            println!("  Event: BeforeTool");
-            println!("  Matcher: run_shell_command");
-            println!("\n  Restart Gemini CLI to apply.");
-        }
-        PatchResult::AlreadyPresent => {
-            println!("  Gemini settings.json: hook already present");
-            println!("  No changes needed.");
-        }
-        PatchResult::Declined | PatchResult::Skipped => {
-            // Manual instructions already printed
-        }
-    }
-
-    println!();
+    let _patch_result = patch_gemini_settings(patch_mode, verbose)?;
+    // patch_settings_shared() already printed the result (hook added, already present, etc.)
+    // No additional output needed - matches Claude's consolidated reporting
     Ok(())
 }
 
