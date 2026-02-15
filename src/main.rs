@@ -250,7 +250,7 @@ enum Commands {
         extra_args: Vec<String>,
     },
 
-    /// Initialize rtk instructions in CLAUDE.md
+    /// Initialize rtk for Claude Code and/or Gemini CLI (default: both)
     Init {
         /// Add to global ~/.claude/CLAUDE.md instead of local
         #[arg(short, long)]
@@ -268,8 +268,16 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
-        /// Set up Gemini CLI hook integration
-        #[arg(long, group = "mode")]
+        /// Skip Claude Code setup (default: include Claude)
+        #[arg(long, group = "platform")]
+        skip_claude: bool,
+
+        /// Skip Gemini CLI setup (default: include Gemini)
+        #[arg(long, group = "platform")]
+        skip_gemini: bool,
+
+        /// Set up Gemini CLI hook integration only (alias for --skip-claude)
+        #[arg(long, group = "platform")]
         gemini: bool,
 
         /// Auto-patch settings.json without prompting
@@ -1068,6 +1076,8 @@ fn main() -> Result<()> {
             show,
             claude_md,
             hook_only,
+            skip_claude,
+            skip_gemini,
             gemini,
             auto_patch,
             no_patch,
@@ -1076,10 +1086,19 @@ fn main() -> Result<()> {
             if show {
                 init::show_config()?;
             } else if uninstall {
-                if gemini {
-                    init::uninstall_gemini(cli.verbose)?;
-                } else {
+                // Determine which platforms to uninstall
+                let uninstall_claude = !skip_claude && !gemini;
+                let uninstall_gemini = !skip_gemini || gemini;
+
+                if !uninstall_claude && !uninstall_gemini {
+                    anyhow::bail!("Cannot skip both platforms. Use: rtk init --uninstall (both) or --skip-claude (Gemini only) or --skip-gemini (Claude only)");
+                }
+
+                if uninstall_claude {
                     init::uninstall(global, cli.verbose)?;
+                }
+                if uninstall_gemini {
+                    init::uninstall_gemini(cli.verbose)?;
                 }
             } else {
                 let patch_mode = if auto_patch {
@@ -1089,10 +1108,30 @@ fn main() -> Result<()> {
                 } else {
                     init::PatchMode::Ask
                 };
-                if gemini {
-                    init::run_gemini(patch_mode, cli.verbose)?;
-                } else {
+
+                // Determine which platforms to set up
+                // Default (no flags): Both Claude AND Gemini
+                // --gemini (backward compat): Gemini only (alias for --skip-claude)
+                // --skip-claude: Gemini only
+                // --skip-gemini: Claude only
+                let setup_claude = !skip_claude && !gemini;
+                let setup_gemini = !skip_gemini || gemini;
+
+                if !setup_claude && !setup_gemini {
+                    anyhow::bail!("Cannot skip both platforms. Use: rtk init (both) or --skip-claude (Gemini only) or --skip-gemini (Claude only)");
+                }
+
+                if setup_claude {
                     init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                }
+                if setup_gemini {
+                    init::run_gemini(patch_mode, cli.verbose)?;
+                }
+
+                // Summary message when both platforms set up
+                if setup_claude && setup_gemini {
+                    println!("\n✓ RTK installed for both Claude Code and Gemini CLI");
+                    println!("  Restart both CLIs to apply changes.");
                 }
             }
         }
