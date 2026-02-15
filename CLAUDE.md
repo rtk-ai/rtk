@@ -16,7 +16,7 @@ This is a fork with critical fixes for git argument parsing and modern JavaScrip
 
 **Verify correct installation:**
 ```bash
-rtk --version  # Should show "rtk 0.16.0" (or newer)
+rtk --version  # Should show "rtk 0.18.0" (or newer)
 rtk gain       # Should show token savings stats (NOT "command not found")
 ```
 

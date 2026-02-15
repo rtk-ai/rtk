@@ -22,7 +22,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 
 **How to verify you have the correct rtk:**
 ```bash
-rtk --version   # Should show "rtk 0.16.0"
+rtk --version   # Should show "rtk 0.18.0"
 rtk gain        # Should show token savings stats
 ```
 
