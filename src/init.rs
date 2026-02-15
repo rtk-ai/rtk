@@ -381,25 +381,8 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
 
     // 3. Remove @RTK.md reference from CLAUDE.md
     let claude_md_path = claude_dir.join("CLAUDE.md");
-    if claude_md_path.exists() {
-        let content = fs::read_to_string(&claude_md_path)
-            .with_context(|| format!("Failed to read CLAUDE.md: {}", claude_md_path.display()))?;
-
-        if content.contains("@RTK.md") {
-            let new_content = content
-                .lines()
-                .filter(|line| !line.trim().starts_with("@RTK.md"))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            // Clean up double blanks
-            let cleaned = clean_double_blanks(&new_content);
-
-            fs::write(&claude_md_path, cleaned).with_context(|| {
-                format!("Failed to write CLAUDE.md: {}", claude_md_path.display())
-            })?;
-            removed.push("CLAUDE.md: removed @RTK.md reference".to_string());
-        }
+    if remove_rtk_reference_from_file(&claude_md_path, "CLAUDE.md")? {
+        removed.push("CLAUDE.md: removed @RTK.md reference".to_string());
     }
 
     // 4. Remove hook entry from Claude Code settings.json
@@ -426,21 +409,36 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Uninstall RTK Gemini CLI hook.
-/// Removes hook entry from ~/.gemini/settings.json.
+/// Uninstall RTK Gemini CLI integration.
+/// Mirrors Claude uninstall: removes RTK.md, @RTK.md reference, and settings.json hook.
 pub fn uninstall_gemini(verbose: u8) -> Result<()> {
+    let gemini_dir = resolve_gemini_dir()?;
     let mut removed = Vec::new();
 
-    // Remove hook entry from Gemini settings.json
+    // 1. Remove RTK.md
+    let rtk_md_path = gemini_dir.join("RTK.md");
+    if rtk_md_path.exists() {
+        fs::remove_file(&rtk_md_path)
+            .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
+        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    }
+
+    // 2. Remove @RTK.md reference from GEMINI.md
+    let gemini_md_path = gemini_dir.join("GEMINI.md");
+    if remove_rtk_reference_from_file(&gemini_md_path, "GEMINI.md")? {
+        removed.push("GEMINI.md: removed @RTK.md reference".to_string());
+    }
+
+    // 3. Remove hook entry from Gemini settings.json
     if remove_gemini_hook_from_settings(verbose)? {
         removed.push("Gemini settings.json: removed RTK hook entry".to_string());
     }
 
     // Report results
     if removed.is_empty() {
-        println!("RTK Gemini hook was not installed (nothing to remove)");
+        println!("RTK Gemini integration was not installed (nothing to remove)");
     } else {
-        println!("RTK Gemini hook uninstalled:");
+        println!("RTK Gemini integration uninstalled:");
         for item in removed {
             println!("  - {}", item);
         }
@@ -459,29 +457,34 @@ pub fn uninstall_gemini(verbose: u8) -> Result<()> {
 //
 // ## Shared Infrastructure (DRY)
 //
-// 1. patch_settings_shared()  - Core settings.json patching logic (lines 454-530)
-// 2. show_agent_hook_status() - Hook status verification (lines 1042-1094)
-// 3. prompt_user_consent()    - User confirmation prompt (lines 241-261)
-// 4. atomic_write()           - Safe file writing (lines 208-236)
-// 5. PatchMode enum           - Patch behavior control (Auto/Ask/Skip)
-// 6. PatchResult enum         - Patch outcome reporting
+// 1. patch_settings_shared()       - Core settings.json patching logic
+// 2. patch_instruction_file()      - Add @RTK.md to CLAUDE.md / GEMINI.md
+// 3. remove_rtk_reference_from_file() - Remove @RTK.md (for uninstall)
+// 4. show_agent_hook_status()      - Hook status verification
+// 5. prompt_user_consent()         - User confirmation prompt
+// 6. atomic_write() / write_if_changed() - Safe file I/O
+// 7. PatchMode / PatchResult enums - Behavior control and outcome reporting
 //
-// ## Platform-Specific Differences (Intentional)
+// ## Symmetric Installation Workflow (Both Platforms)
 //
 // ### Claude Code
-// - Event: PreToolUse, Matcher: Bash
-// - Artifacts: ~/.claude/RTK.md + @RTK.md reference in CLAUDE.md + settings.json
-// - Hook command: "rtk hook claude"
-// - Functions: patch_settings_json(), hook_already_present(), insert_hook_entry()
+// - Create: ~/.claude/RTK.md
+// - Patch: ~/.claude/CLAUDE.md (add @RTK.md)
+// - Patch: ~/.claude/settings.json (PreToolUse hook)
+// - Uninstall: Removes all 3 artifacts
 //
 // ### Gemini CLI
-// - Event: BeforeTool, Matcher: run_shell_command
-// - Artifacts: ~/.gemini/settings.json only (no RTK.md equivalent)
-// - Hook command: "rtk hook gemini"
-// - Functions: patch_gemini_settings(), gemini_hook_already_present(), insert_gemini_hook_entry()
+// - Create: ~/.gemini/RTK.md (same content)
+// - Patch: ~/.gemini/GEMINI.md (add @RTK.md)
+// - Patch: ~/.gemini/settings.json (BeforeTool hook)
+// - Uninstall: Removes all 3 artifacts
 //
-// These differences reflect real protocol variations and cannot be unified
-// without conditional logic that would obscure the code.
+// ## Protocol-Specific Differences (Settings.json Only)
+//
+// - Claude: Event=PreToolUse, Matcher=Bash, Command="rtk hook claude"
+// - Gemini: Event=BeforeTool, Matcher=run_shell_command, Command="rtk hook gemini"
+//
+// These reflect API differences and cannot be unified.
 //
 // ## Default Behavior (as of v0.15.3)
 //
@@ -827,8 +830,9 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
-fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
+/// Shared: Patch instruction file (CLAUDE.md or GEMINI.md) to add @RTK.md reference.
+/// Migrates old RTK blocks if present. Returns true if migration occurred.
+fn patch_instruction_file(path: &Path, file_label: &str, verbose: u8) -> Result<bool> {
     let mut content = if path.exists() {
         fs::read_to_string(path)?
     } else {
@@ -844,7 +848,7 @@ fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
             content = new_content;
             migrated = true;
             if verbose > 0 {
-                eprintln!("Migrated: removed old RTK block from CLAUDE.md");
+                eprintln!("Migrated: removed old RTK block from {}", file_label);
             }
         }
     }
@@ -852,7 +856,7 @@ fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
     // Check if @RTK.md already present
     if content.contains("@RTK.md") {
         if verbose > 0 {
-            eprintln!("@RTK.md reference already present in CLAUDE.md");
+            eprintln!("@RTK.md reference already present in {}", file_label);
         }
         if migrated {
             fs::write(path, content)?;
@@ -870,13 +874,51 @@ fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
     fs::write(path, new_content)?;
 
     if verbose > 0 {
-        eprintln!("Added @RTK.md reference to CLAUDE.md");
+        eprintln!("Added @RTK.md reference to {}", file_label);
     }
 
     Ok(migrated)
 }
 
-/// Remove old RTK block from CLAUDE.md (migration helper)
+/// Shared: Remove @RTK.md reference from an instruction file (CLAUDE.md or GEMINI.md).
+/// Returns true if the reference was found and removed.
+fn remove_rtk_reference_from_file(path: &Path, file_label: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}: {}", file_label, path.display()))?;
+
+    if !content.contains("@RTK.md") {
+        return Ok(false);
+    }
+
+    let new_content = content
+        .lines()
+        .filter(|line| !line.trim().starts_with("@RTK.md"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let cleaned = clean_double_blanks(&new_content);
+
+    fs::write(path, cleaned)
+        .with_context(|| format!("Failed to write {}: {}", file_label, path.display()))?;
+
+    Ok(true)
+}
+
+/// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
+fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
+    patch_instruction_file(path, "CLAUDE.md", verbose)
+}
+
+/// Patch GEMINI.md: add @RTK.md, migrate if old block exists
+fn patch_gemini_md(path: &Path, verbose: u8) -> Result<bool> {
+    patch_instruction_file(path, "GEMINI.md", verbose)
+}
+
+/// Remove old RTK block from CLAUDE.md or GEMINI.md (migration helper)
 fn remove_rtk_block(content: &str) -> (String, bool) {
     if let (Some(start), Some(end)) = (
         content.find("<!-- rtk-instructions"),
@@ -1057,10 +1099,32 @@ fn remove_gemini_hook_from_settings(verbose: u8) -> Result<bool> {
 }
 
 /// Public entry point for `rtk init --gemini`
+/// Mirrors Claude Code setup: RTK.md + GEMINI.md patching + settings.json hook
 pub fn run_gemini(patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    let gemini_dir = resolve_gemini_dir()?;
+    let rtk_md_path = gemini_dir.join("RTK.md");
+    let gemini_md_path = gemini_dir.join("GEMINI.md");
+
+    // 1. Write RTK.md (same content as Claude's RTK.md)
+    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
+
+    // 2. Patch GEMINI.md (add @RTK.md reference, migrate if needed)
+    let migrated = patch_gemini_md(&gemini_md_path, verbose)?;
+
+    // 3. Print success message
+    println!("\nRTK hook installed (Gemini CLI).\n");
+    println!("  Hook:      rtk hook gemini (direct binary)");
+    println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+    println!("  GEMINI.md: @RTK.md reference added");
+
+    if migrated {
+        println!("\n  Migrated: Removed old RTK block from GEMINI.md (now using @RTK.md)");
+    }
+
+    // 4. Patch settings.json
     let _patch_result = patch_gemini_settings(patch_mode, verbose)?;
-    // patch_settings_shared() already printed the result (hook added, already present, etc.)
-    // No additional output needed - matches Claude's consolidated reporting
+
+    println!();
     Ok(())
 }
 
