@@ -113,17 +113,13 @@ echo ""
 
 # Check 6: Auto-rewrite hook
 echo "6. Checking auto-rewrite hook (optional but recommended)..."
-if [ -f "$HOME/.claude/hooks/rtk-rewrite.sh" ]; then
-    echo -e "   ${GREEN}✅${NC} Hook script installed"
-    if [ -f "$HOME/.claude/settings.json" ] && grep -q "rtk-rewrite.sh" "$HOME/.claude/settings.json"; then
-        echo -e "   ${GREEN}✅${NC} Hook enabled in settings.json"
-    else
-        echo -e "   ${YELLOW}⚠️${NC}  Hook script exists but not enabled in settings.json"
-        echo "      See README.md 'Auto-Rewrite Hook' section"
-    fi
+if [ -f "$HOME/.claude/settings.json" ] && grep -q "rtk hook claude" "$HOME/.claude/settings.json"; then
+    echo -e "   ${GREEN}✅${NC} Hook enabled in settings.json (rtk hook claude)"
+elif [ -f "$HOME/.claude/settings.json" ] && grep -q "rtk-rewrite.sh" "$HOME/.claude/settings.json"; then
+    echo -e "   ${YELLOW}⚠️${NC}  Legacy hook found (rtk-rewrite.sh). Run: rtk init -g to migrate"
 else
-    echo -e "   ${YELLOW}⚠️${NC}  Auto-rewrite hook not installed (optional)"
-    echo "      Install: cp .claude/hooks/rtk-rewrite.sh ~/.claude/hooks/"
+    echo -e "   ${YELLOW}⚠️${NC}  Auto-rewrite hook not configured"
+    echo "      Install: rtk init -g"
 fi
 echo ""
 

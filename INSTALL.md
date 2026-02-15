@@ -75,7 +75,7 @@ rtk gain  # MUST show token savings, not "command not found"
 
 ```bash
 rtk init -g
-# → Installs hook to ~/.claude/hooks/rtk-rewrite.sh
+# → Registers "rtk hook claude" in ~/.claude/settings.json
 # → Creates ~/.claude/RTK.md (10 lines, meta commands only)
 # → Adds @RTK.md reference to ~/.claude/CLAUDE.md
 # → Prompts: "Patch settings.json? [y/N]"
@@ -195,7 +195,7 @@ rtk vitest run
 rtk init -g --uninstall
 
 # What gets removed:
-#   - Hook: ~/.claude/hooks/rtk-rewrite.sh
+#   - Hook: RTK entry from ~/.claude/settings.json
 #   - Context: ~/.claude/RTK.md
 #   - Reference: @RTK.md line from ~/.claude/CLAUDE.md
 #   - Registration: RTK hook entry from settings.json

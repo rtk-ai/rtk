@@ -440,7 +440,7 @@ Claude Code hooks are scripts that run before/after Claude executes commands. RT
 Claude Code reads `~/.claude/settings.json` to find registered hooks. Without this file, Claude doesn't know the RTK hook exists. Think of it as the hook registry.
 
 **Is it safe?**
-Yes. RTK creates a backup (`settings.json.bak`) before changes. The hook is read-only (it only modifies command strings, never deletes files or accesses secrets). Review the hook script at `~/.claude/hooks/rtk-rewrite.sh` anytime.
+Yes. RTK creates a backup (`settings.json.bak`) before changes. The hook is read-only (it only modifies command strings, never deletes files or accesses secrets). The hook runs `rtk hook claude` as a direct binary invocation — no shell scripts involved.
 
 ### How It Works
 
@@ -450,7 +450,7 @@ The hook runs as a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/d
 
 ```bash
 rtk init -g
-# → Installs hook to ~/.claude/hooks/rtk-rewrite.sh (with executable permissions)
+# → Registers "rtk hook claude" in ~/.claude/settings.json
 # → Creates ~/.claude/RTK.md (10 lines, minimal context footprint)
 # → Adds @RTK.md reference to ~/.claude/CLAUDE.md
 # → Prompts: "Patch settings.json? [y/N]"
@@ -487,16 +487,7 @@ rtk init -g --no-patch  # Prints JSON snippet
 
 **Alternative: Full manual setup**
 
-```bash
-# 1. Copy the hook script
-mkdir -p ~/.claude/hooks
-cp .claude/hooks/rtk-rewrite.sh ~/.claude/hooks/rtk-rewrite.sh
-chmod +x ~/.claude/hooks/rtk-rewrite.sh
-
-# 2. Add to ~/.claude/settings.json under hooks.PreToolUse:
-```
-
-Add this entry to the `PreToolUse` array in `~/.claude/settings.json`:
+Add this entry to `~/.claude/settings.json`:
 
 ```json
 {
@@ -507,7 +498,7 @@ Add this entry to the `PreToolUse` array in `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/rtk-rewrite.sh"
+            "command": "rtk hook claude"
           }
         ]
       }
@@ -518,7 +509,7 @@ Add this entry to the `PreToolUse` array in `~/.claude/settings.json`:
 
 ### Per-Project Install
 
-The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To use it in another project, copy the hook and add the same settings.json entry using a relative path or project-level `.claude/settings.json`.
+RTK uses a direct binary invocation (`rtk hook claude`), so no hook files need to be copied. For per-project setup, add the same settings.json entry to your project-level `.claude/settings.json`.
 
 ### Commands Rewritten
 
@@ -664,7 +655,7 @@ The global `rtk init -g --uninstall` also removes Gemini hooks alongside Claude 
 rtk init -g --uninstall
 
 # Removes:
-#   - ~/.claude/hooks/rtk-rewrite.sh
+#   - RTK hook entry from ~/.claude/settings.json
 #   - ~/.claude/RTK.md
 #   - @RTK.md reference from ~/.claude/CLAUDE.md
 #   - RTK hook entry from ~/.claude/settings.json
@@ -746,8 +737,9 @@ git status  # Should use rtk automatically
 
 **Manual Cleanup**:
 ```bash
-# Remove hook
-rm ~/.claude/hooks/rtk-rewrite.sh
+# Remove hook entry from settings.json (or use rtk init -g --uninstall)
+# Legacy hook file cleanup (if present from old installs):
+rm -f ~/.claude/hooks/rtk-rewrite.sh
 
 # Remove RTK.md
 rm ~/.claude/RTK.md
