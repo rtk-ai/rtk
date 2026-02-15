@@ -896,6 +896,7 @@ pub fn args_display(args: &[OsString]) -> String {
 /// let timer = TimedExecution::start();
 /// timer.track("ls -la", "rtk ls", "input", "output");
 /// ```
+#[allow(dead_code)]
 #[deprecated(note = "Use TimedExecution instead")]
 pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
     if !is_tracking_enabled() {

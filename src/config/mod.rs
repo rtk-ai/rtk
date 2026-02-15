@@ -390,11 +390,6 @@ pub fn get_rules_dir() -> Result<PathBuf> {
     Ok(home.join(".config").join("rtk"))
 }
 
-/// All configured rules directories (for discovery). Includes rules_dirs from config.
-pub fn get_all_rules_dirs() -> Vec<PathBuf> {
-    get_merged().discovery.rules_dirs.clone()
-}
-
 /// Project-local config path: `.rtk/config.toml` in cwd
 pub fn get_local_config_path() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;

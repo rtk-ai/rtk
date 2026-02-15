@@ -54,13 +54,6 @@ impl Rule {
         check_when(&self.when)
     }
 
-    /// Is this a safety rule (not a rewrite-only remap)?
-    pub fn is_safety(&self) -> bool {
-        matches!(
-            self.action.as_str(),
-            "block" | "trash" | "suggest_tool" | "warn"
-        )
-    }
 }
 
 // === Predicate Registry ===
@@ -352,19 +345,6 @@ Full message."#;
         let content = "---\nname: test\nwhen: always\n---\n";
         let rule = parse_rule(content, "test").unwrap();
         assert!(rule.should_apply());
-    }
-
-    #[test]
-    fn test_is_safety() {
-        let make_rule = |action: &str| -> Rule {
-            let content = format!("---\nname: test\naction: {action}\n---\n");
-            parse_rule(&content, "test").unwrap()
-        };
-        assert!(make_rule("block").is_safety());
-        assert!(make_rule("trash").is_safety());
-        assert!(make_rule("suggest_tool").is_safety());
-        assert!(make_rule("warn").is_safety());
-        assert!(!make_rule("rewrite").is_safety());
     }
 
     #[test]

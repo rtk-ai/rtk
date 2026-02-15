@@ -14,8 +14,6 @@ use crate::utils::{format_cpt, format_tokens, format_usd};
 
 // ── Constants ──
 
-const BILLION: f64 = 1e9;
-
 // API pricing ratios (verified Feb 2026, consistent across Claude models <=200K context)
 // Source: https://docs.anthropic.com/en/docs/about-claude/models
 const WEIGHT_OUTPUT: f64 = 5.0; // Output = 5x input

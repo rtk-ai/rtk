@@ -9,8 +9,10 @@ use std::process::Command;
 struct Position {
     #[serde(rename = "Filename")]
     filename: String,
+    #[serde(default)]
     #[serde(rename = "Line")]
     line: usize,
+    #[serde(default)]
     #[serde(rename = "Column")]
     column: usize,
 }
@@ -19,6 +21,7 @@ struct Position {
 struct Issue {
     #[serde(rename = "FromLinter")]
     from_linter: String,
+    #[serde(default)]
     #[serde(rename = "Text")]
     text: String,
     #[serde(rename = "Pos")]

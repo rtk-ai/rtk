@@ -54,7 +54,8 @@ struct PlaywrightTestResult {
     status: String,
     #[serde(rename = "error")]
     error: Option<PlaywrightError>,
-    #[serde(rename = "duration", default)]
+    #[serde(default)]
+    #[serde(rename = "duration")]
     duration: u64,
 }
 
