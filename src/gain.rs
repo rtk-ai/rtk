@@ -2,7 +2,9 @@ use crate::display_helpers::{format_duration, print_period_table};
 use crate::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::utils::format_tokens;
 use anyhow::{Context, Result};
+use colored::Colorize; // added: terminal colors
 use serde::Serialize;
+use std::io::IsTerminal; // added: TTY detection for graceful degradation
 
 pub fn run(
     graph: bool,
@@ -37,53 +39,111 @@ pub fn run(
 
     // Default view (summary)
     if !daily && !weekly && !monthly && !all {
-        println!("📊 RTK Token Savings");
-        println!("════════════════════════════════════════");
+        // added: styled header with bold title
+        println!("{}", styled("RTK Token Savings (Global Scope)", true));
+        println!("{}", "═".repeat(60));
         println!();
 
-        println!("Total commands:    {}", summary.total_commands);
-        println!("Input tokens:      {}", format_tokens(summary.total_input));
-        println!("Output tokens:     {}", format_tokens(summary.total_output));
-        println!(
-            "Tokens saved:      {} ({:.1}%)",
-            format_tokens(summary.total_saved),
-            summary.avg_savings_pct
+        // added: KPI-style aligned output
+        print_kpi("Total commands", summary.total_commands.to_string());
+        print_kpi("Input tokens", format_tokens(summary.total_input));
+        print_kpi("Output tokens", format_tokens(summary.total_output));
+        print_kpi(
+            "Tokens saved",
+            format!(
+                "{} ({:.1}%)",
+                format_tokens(summary.total_saved),
+                summary.avg_savings_pct
+            ),
         );
-        println!(
-            "Total exec time:   {} (avg {})",
-            format_duration(summary.total_time_ms),
-            format_duration(summary.avg_time_ms)
+        print_kpi(
+            "Total exec time",
+            format!(
+                "{} (avg {})",
+                format_duration(summary.total_time_ms),
+                format_duration(summary.avg_time_ms)
+            ),
         );
+        print_efficiency_meter(summary.avg_savings_pct); // added: visual meter
         println!();
 
         if !summary.by_command.is_empty() {
-            println!("By Command:");
-            println!("────────────────────────────────────────");
+            // added: styled section header
+            println!("{}", styled("By Command", true));
+
+            // added: dynamic column widths for clean alignment
+            let cmd_width = 24usize;
+            let impact_width = 10usize;
+            let count_width = summary
+                .by_command
+                .iter()
+                .map(|(_, count, _, _, _)| count.to_string().len())
+                .max()
+                .unwrap_or(5)
+                .max(5);
+            let saved_width = summary
+                .by_command
+                .iter()
+                .map(|(_, _, saved, _, _)| format_tokens(*saved).len())
+                .max()
+                .unwrap_or(5)
+                .max(5);
+            let time_width = summary
+                .by_command
+                .iter()
+                .map(|(_, _, _, _, avg_time)| format_duration(*avg_time).len())
+                .max()
+                .unwrap_or(6)
+                .max(6);
+
+            let table_width =
+                3 + 2 + cmd_width + 2 + count_width + 2 + saved_width + 2 + 6 + 2 + time_width + 2 + impact_width;
+            println!("{}", "─".repeat(table_width));
             println!(
-                "{:<20} {:>6} {:>10} {:>8} {:>8}",
-                "Command", "Count", "Saved", "Avg%", "Time"
+                "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",
+                "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact",
+                cmd_width = cmd_width, count_width = count_width,
+                saved_width = saved_width, time_width = time_width,
+                impact_width = impact_width
             );
-            for (cmd, count, saved, pct, avg_time) in &summary.by_command {
-                let cmd_short = if cmd.len() > 18 {
-                    format!("{}...", &cmd[..15])
-                } else {
-                    cmd.clone()
-                };
-                println!(
-                    "{:<20} {:>6} {:>10} {:>7.1}% {:>8}",
-                    cmd_short,
-                    count,
+            println!("{}", "─".repeat(table_width));
+
+            let max_saved = summary
+                .by_command
+                .iter()
+                .map(|(_, _, saved, _, _)| *saved)
+                .max()
+                .unwrap_or(1);
+
+            for (idx, (cmd, count, saved, pct, avg_time)) in summary.by_command.iter().enumerate() {
+                let row_idx = format!("{:>2}.", idx + 1);
+                let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width)); // added: colored command
+                let count_cell = format!("{:>count_width$}", count, count_width = count_width);
+                let saved_cell = format!(
+                    "{:>saved_width$}",
                     format_tokens(*saved),
-                    pct,
-                    format_duration(*avg_time)
+                    saved_width = saved_width
+                );
+                let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
+                let pct_cell = colorize_pct_cell(*pct, &pct_plain); // added: color-coded percentage
+                let time_cell = format!(
+                    "{:>time_width$}",
+                    format_duration(*avg_time),
+                    time_width = time_width
+                );
+                let impact = mini_bar(*saved, max_saved, impact_width); // added: impact bar
+                println!(
+                    "{}  {}  {}  {}  {}  {}  {}",
+                    row_idx, cmd_cell, count_cell, saved_cell, pct_cell, time_cell, impact
                 );
             }
+            println!("{}", "─".repeat(table_width));
             println!();
         }
 
         if graph && !summary.by_day.is_empty() {
-            println!("Daily Savings (last 30 days):");
-            println!("────────────────────────────────────────");
+            println!("{}", styled("Daily Savings (last 30 days)", true)); // added: styled header
+            println!("──────────────────────────────────────────────────────────");
             print_ascii_graph(&summary.by_day);
             println!();
         }
@@ -91,8 +151,8 @@ pub fn run(
         if history {
             let recent = tracker.get_recent(10)?;
             if !recent.is_empty() {
-                println!("Recent Commands:");
-                println!("────────────────────────────────────────");
+                println!("{}", styled("Recent Commands", true)); // added: styled header
+                println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
                     let time = rec.timestamp.format("%m-%d %H:%M");
                     let cmd_short = if rec.rtk_cmd.len() > 25 {
@@ -100,9 +160,18 @@ pub fn run(
                     } else {
                         rec.rtk_cmd.clone()
                     };
+                    // added: tier indicators by savings level
+                    let sign = if rec.savings_pct >= 70.0 {
+                        "▲"
+                    } else if rec.savings_pct >= 30.0 {
+                        "■"
+                    } else {
+                        "•"
+                    };
                     println!(
-                        "{} {:<25} -{:.0}% ({})",
+                        "{} {} {:<25} -{:.0}% ({})",
                         time,
+                        sign,
                         cmd_short,
                         rec.savings_pct,
                         format_tokens(rec.saved_tokens)
@@ -124,15 +193,15 @@ pub fn run(
 
             let quota_pct = (summary.total_saved as f64 / quota_tokens as f64) * 100.0;
 
-            println!("Monthly Quota Analysis:");
-            println!("────────────────────────────────────────");
-            println!("Subscription tier:        {}", tier_name);
-            println!("Estimated monthly quota:  {}", format_tokens(quota_tokens));
-            println!(
-                "Tokens saved (lifetime):  {}",
-                format_tokens(summary.total_saved)
+            println!("{}", styled("Monthly Quota Analysis", true)); // added: styled header
+            println!("──────────────────────────────────────────────────────────");
+            print_kpi("Subscription tier", tier_name.to_string()); // added: KPI style
+            print_kpi("Estimated monthly quota", format_tokens(quota_tokens));
+            print_kpi(
+                "Tokens saved (lifetime)",
+                format_tokens(summary.total_saved),
             );
-            println!("Quota preserved:          {:.1}%", quota_pct);
+            print_kpi("Quota preserved", format!("{:.1}%", quota_pct));
             println!();
             println!("Note: Heuristic estimate based on ~44K tokens/5h (Pro baseline)");
             println!("      Actual limits use rolling 5-hour windows, not monthly caps.");
@@ -155,6 +224,100 @@ pub fn run(
     }
 
     Ok(())
+}
+
+// ── Display helpers (TTY-aware) ── // added: entire section
+
+/// Format text with bold styling (TTY-aware). // added
+fn styled(text: &str, strong: bool) -> String {
+    if !std::io::stdout().is_terminal() {
+        return text.to_string();
+    }
+    if strong {
+        text.bold().green().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// Print a key-value pair in KPI layout. // added
+fn print_kpi(label: &str, value: String) {
+    println!("{:<18} {}", format!("{label}:"), value);
+}
+
+/// Colorize percentage based on savings tier (TTY-aware). // added
+fn colorize_pct_cell(pct: f64, padded: &str) -> String {
+    if !std::io::stdout().is_terminal() {
+        return padded.to_string();
+    }
+    if pct >= 70.0 {
+        padded.green().bold().to_string()
+    } else if pct >= 40.0 {
+        padded.yellow().bold().to_string()
+    } else {
+        padded.red().bold().to_string()
+    }
+}
+
+/// Truncate text to fit column width with ellipsis. // added
+fn truncate_for_column(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let char_count = text.chars().count();
+    if char_count <= width {
+        return format!("{:<width$}", text, width = width);
+    }
+    if width <= 3 {
+        return text.chars().take(width).collect();
+    }
+    let mut out: String = text.chars().take(width - 3).collect();
+    out.push_str("...");
+    out
+}
+
+/// Style command names with cyan+bold (TTY-aware). // added
+fn style_command_cell(cmd: &str) -> String {
+    if !std::io::stdout().is_terminal() {
+        return cmd.to_string();
+    }
+    cmd.bright_cyan().bold().to_string()
+}
+
+/// Render a proportional bar chart segment (TTY-aware). // added
+fn mini_bar(value: usize, max: usize, width: usize) -> String {
+    if max == 0 || width == 0 {
+        return String::new();
+    }
+    let filled = ((value as f64 / max as f64) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let mut bar = "█".repeat(filled);
+    bar.push_str(&"░".repeat(width - filled));
+    if std::io::stdout().is_terminal() {
+        bar.cyan().to_string()
+    } else {
+        bar
+    }
+}
+
+/// Print an efficiency meter with colored progress bar (TTY-aware). // added
+fn print_efficiency_meter(pct: f64) {
+    let width = 24usize;
+    let filled = (((pct / 100.0) * width as f64).round() as usize).min(width);
+    let meter = format!("{}{}", "█".repeat(filled), "░".repeat(width - filled));
+    if std::io::stdout().is_terminal() {
+        let pct_str = format!("{pct:.1}%");
+        let colored_pct = if pct >= 70.0 {
+            pct_str.green().bold().to_string()
+        } else if pct >= 40.0 {
+            pct_str.yellow().bold().to_string()
+        } else {
+            pct_str.red().bold().to_string()
+        };
+        println!("Efficiency meter: {} {}", meter.green(), colored_pct);
+    } else {
+        println!("Efficiency meter: {} {:.1}%", meter, pct);
+    }
 }
 
 fn print_ascii_graph(data: &[(String, usize)]) {
