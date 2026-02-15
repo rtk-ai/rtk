@@ -385,70 +385,38 @@ fn kubectl_logs(args: &[String], _verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Format `docker compose ps` output into compact form
+/// Format `docker compose ps --format` output into compact form.
+/// Expects tab-separated lines: Name\tImage\tStatus\tPorts
+/// (no header row — `--format` output is headerless)
 pub fn format_compose_ps(raw: &str) -> String {
-    let lines: Vec<&str> = raw.lines().collect();
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
 
-    // Empty or header-only
-    if lines.len() <= 1 {
+    if lines.is_empty() {
         return "🐳 0 compose services".to_string();
     }
 
-    // Skip the header row
-    let services: Vec<&str> = lines[1..]
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .copied()
-        .collect();
-    if services.is_empty() {
-        return "🐳 0 compose services".to_string();
-    }
+    let mut result = format!("🐳 {} compose services:\n", lines.len());
 
-    let mut result = format!("🐳 {} compose services:\n", services.len());
-
-    for line in services.iter().take(20) {
-        // docker compose ps columns are whitespace-separated but STATUS can contain spaces
-        // Columns: NAME IMAGE COMMAND SERVICE CREATED STATUS PORTS
-        // We split by 2+ spaces to handle multi-word fields
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 6 {
+    for line in lines.iter().take(20) {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 4 {
             let name = parts[0];
             let image = parts[1];
+            let status = parts[2];
+            let ports = parts[3];
 
-            // Find SERVICE column (usually index 3, after quoted COMMAND)
-            // Find STATUS by looking for "Up" or "Exited" keywords
-            let line_str = *line;
-            let status = if line_str.contains("Up") {
-                let idx = line_str.find("Up").unwrap();
-                let end = line_str[idx..]
-                    .find("   ")
-                    .map(|e| idx + e)
-                    .unwrap_or(line_str.len());
-                line_str[idx..end].trim()
-            } else if line_str.contains("Exited") {
-                let idx = line_str.find("Exited").unwrap();
-                let end = line_str[idx..]
-                    .find("   ")
-                    .map(|e| idx + e)
-                    .unwrap_or(line_str.len());
-                line_str[idx..end].trim()
-            } else {
-                "unknown"
-            };
+            let short_image = image.split('/').next_back().unwrap_or(image);
 
-            // Extract port from end of line
-            let port_str = if let Some(port_idx) = line_str.rfind("0.0.0.0:") {
-                let chars: Vec<char> = line_str.chars().collect();
-                let port_chars: Vec<char> = chars[port_idx..].to_vec();
-                let port_text: String = port_chars.iter().collect();
-                let compact = compact_ports(port_text.trim());
-                format!(" [{}]", compact)
-            } else {
+            let port_str = if ports.trim().is_empty() {
                 String::new()
+            } else {
+                let compact = compact_ports(ports.trim());
+                if compact == "-" {
+                    String::new()
+                } else {
+                    format!(" [{}]", compact)
+                }
             };
-
-            // Shorten image name: keep only the last segment
-            let short_image = image.split('/').last().unwrap_or(image);
 
             result.push_str(&format!(
                 "  {} ({}) {}{}\n",
@@ -456,8 +424,8 @@ pub fn format_compose_ps(raw: &str) -> String {
             ));
         }
     }
-    if services.len() > 20 {
-        result.push_str(&format!("  ... +{} more\n", services.len() - 20));
+    if lines.len() > 20 {
+        result.push_str(&format!("  ... +{} more\n", lines.len() - 20));
     }
 
     result.trim_end().to_string()
@@ -502,11 +470,12 @@ pub fn format_compose_build(raw: &str) -> String {
 
     // Collect unique service names from build steps like "[web 1/4]"
     let mut services: Vec<String> = Vec::new();
+    // find('[') returns byte offset — use byte slicing throughout
+    // '[' and ']' are single-byte ASCII, so byte arithmetic is safe
     for line in raw.lines() {
         if let Some(start) = line.find('[') {
-            let after: String = line.chars().skip(start + 1).collect();
-            if let Some(end) = after.find(']') {
-                let bracket: String = after.chars().take(end).collect();
+            if let Some(end) = line[start + 1..].find(']') {
+                let bracket = &line[start + 1..start + 1 + end];
                 let svc = bracket.split_whitespace().next().unwrap_or("");
                 if !svc.is_empty() && svc != "+" && !services.contains(&svc.to_string()) {
                     services.push(svc.to_string());
@@ -581,17 +550,30 @@ pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
 pub fn run_compose_ps(verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
+    // Raw output for token tracking
     let raw = Command::new("docker")
         .args(["compose", "ps"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
 
+    // Structured output for parsing (same pattern as docker_ps)
+    let output = Command::new("docker")
+        .args([
+            "compose",
+            "ps",
+            "--format",
+            "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
+        ])
+        .output()
+        .context("Failed to run docker compose ps")?;
+    let structured = String::from_utf8_lossy(&output.stdout).to_string();
+
     if verbose > 0 {
         eprintln!("raw docker compose ps:\n{}", raw);
     }
 
-    let rtk = format_compose_ps(&raw);
+    let rtk = format_compose_ps(&structured);
     println!("{}", rtk);
     timer.track("docker compose ps", "rtk docker compose ps", &raw, &rtk);
     Ok(())
@@ -716,16 +698,16 @@ mod tests {
 
     #[test]
     fn test_format_compose_ps_basic() {
-        let raw = "\
-NAME        IMAGE          COMMAND                  SERVICE   CREATED        STATUS         PORTS
-web-1       nginx:latest   \"/docker-entrypoint.…\"   web       2 hours ago    Up 2 hours     0.0.0.0:80->80/tcp
-api-1       node:20        \"docker-entrypoint.s…\"   api       2 hours ago    Up 2 hours     0.0.0.0:3000->3000/tcp
-db-1        postgres:16    \"docker-entrypoint.s…\"   db        2 hours ago    Up 2 hours     0.0.0.0:5432->5432/tcp";
+        // Tab-separated --format output: Name\tImage\tStatus\tPorts
+        let raw = "web-1\tnginx:latest\tUp 2 hours\t0.0.0.0:80->80/tcp\n\
+                   api-1\tnode:20\tUp 2 hours\t0.0.0.0:3000->3000/tcp\n\
+                   db-1\tpostgres:16\tUp 2 hours\t0.0.0.0:5432->5432/tcp";
         let out = format_compose_ps(raw);
         assert!(out.contains("3"), "should show container count");
         assert!(out.contains("web"), "should show service name");
         assert!(out.contains("api"), "should show service name");
         assert!(out.contains("db"), "should show service name");
+        assert!(out.contains("Up 2 hours"), "should show status");
         assert!(out.len() < raw.len(), "output should be shorter than raw");
     }
 
@@ -736,20 +718,43 @@ db-1        postgres:16    \"docker-entrypoint.s…\"   db        2 hours ago   
     }
 
     #[test]
-    fn test_format_compose_ps_header_only() {
-        let raw = "NAME   IMAGE   COMMAND   SERVICE   CREATED   STATUS   PORTS";
-        let out = format_compose_ps(raw);
+    fn test_format_compose_ps_whitespace_only() {
+        let out = format_compose_ps("   \n  \n");
         assert!(out.contains("0"), "should show zero containers");
     }
 
     #[test]
     fn test_format_compose_ps_exited_service() {
-        let raw = "\
-NAME        IMAGE          COMMAND              SERVICE   CREATED      STATUS                     PORTS
-worker-1    python:3.12    \"python worker.py\"   worker    5 min ago    Exited (1) 2 minutes ago   ";
+        // Tab-separated --format output
+        let raw = "worker-1\tpython:3.12\tExited (1) 2 minutes ago\t";
         let out = format_compose_ps(raw);
         assert!(out.contains("worker"), "should show service name");
         assert!(out.contains("Exited"), "should show exited status");
+    }
+
+    #[test]
+    fn test_format_compose_ps_no_ports() {
+        let raw = "redis-1\tredis:7\tUp 5 hours\t";
+        let out = format_compose_ps(raw);
+        assert!(out.contains("redis"), "should show service name");
+        assert!(
+            !out.contains("["),
+            "should not show port brackets when empty"
+        );
+    }
+
+    #[test]
+    fn test_format_compose_ps_long_image_path() {
+        let raw = "app-1\tghcr.io/myorg/myapp:latest\tUp 1 hour\t0.0.0.0:8080->8080/tcp";
+        let out = format_compose_ps(raw);
+        assert!(
+            out.contains("myapp:latest"),
+            "should shorten image to last segment"
+        );
+        assert!(
+            !out.contains("ghcr.io"),
+            "should not show full registry path"
+        );
     }
 
     // ── format_compose_logs ────────────────────────────────
@@ -762,7 +767,10 @@ web-1  | 192.168.1.1 - GET /favicon.ico 404
 api-1  | Server listening on port 3000
 api-1  | Connected to database";
         let out = format_compose_logs(raw);
-        assert!(!out.is_empty(), "should produce output");
+        assert!(
+            out.contains("Compose logs"),
+            "should have compose logs header"
+        );
     }
 
     #[test]
