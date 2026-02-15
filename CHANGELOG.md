@@ -5,6 +5,13 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0](https://github.com/rtk-ai/rtk/compare/v0.17.0...v0.18.0) (2026-02-15)
+
+
+### Features
+
+* **gain:** colored dashboard with efficiency meter and impact bars ([#129](https://github.com/rtk-ai/rtk/issues/129)) ([606b86e](https://github.com/rtk-ai/rtk/commit/606b86ed43902dc894e6f1711f6fe7debedc2530))
+
 ## [0.17.0](https://github.com/rtk-ai/rtk/compare/v0.16.0...v0.17.0) (2026-02-15)
 
 
