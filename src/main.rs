@@ -268,15 +268,11 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
-        /// Skip Claude Code setup (default: include Claude)
+        /// Set up Claude Code only
         #[arg(long, group = "platform")]
-        skip_claude: bool,
+        claude: bool,
 
-        /// Skip Gemini CLI setup (default: include Gemini)
-        #[arg(long, group = "platform")]
-        skip_gemini: bool,
-
-        /// Set up Gemini CLI hook integration only (alias for --skip-claude)
+        /// Set up Gemini CLI only
         #[arg(long, group = "platform")]
         gemini: bool,
 
@@ -1076,8 +1072,7 @@ fn main() -> Result<()> {
             show,
             claude_md,
             hook_only,
-            skip_claude,
-            skip_gemini,
+            claude,
             gemini,
             auto_patch,
             no_patch,
@@ -1086,13 +1081,10 @@ fn main() -> Result<()> {
             if show {
                 init::show_config()?;
             } else if uninstall {
-                // Determine which platforms to uninstall
-                let uninstall_claude = !skip_claude && !gemini;
-                let uninstall_gemini = !skip_gemini || gemini;
-
-                if !uninstall_claude && !uninstall_gemini {
-                    anyhow::bail!("Cannot skip both platforms. Use: rtk init --uninstall (both) or --skip-claude (Gemini only) or --skip-gemini (Claude only)");
-                }
+                // Platform selection: default = both, flag specifies one
+                // (clap's platform group allows at most one flag)
+                let uninstall_claude = !gemini;
+                let uninstall_gemini = !claude;
 
                 if uninstall_claude {
                     init::uninstall(global, cli.verbose)?;
@@ -1109,17 +1101,13 @@ fn main() -> Result<()> {
                     init::PatchMode::Ask
                 };
 
-                // Determine which platforms to set up
-                // Default (no flags): Both Claude AND Gemini
-                // --gemini (backward compat): Gemini only (alias for --skip-claude)
-                // --skip-claude: Gemini only
-                // --skip-gemini: Claude only
-                let setup_claude = !skip_claude && !gemini;
-                let setup_gemini = !skip_gemini || gemini;
-
-                if !setup_claude && !setup_gemini {
-                    anyhow::bail!("Cannot skip both platforms. Use: rtk init (both) or --skip-claude (Gemini only) or --skip-gemini (Claude only)");
-                }
+                // Platform selection: default = both, flag specifies one
+                // No flags    → Both Claude and Gemini
+                // --claude    → Claude only
+                // --gemini    → Gemini only
+                // (clap's platform group allows at most one flag)
+                let setup_claude = !gemini;
+                let setup_gemini = !claude;
 
                 if setup_claude {
                     init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;

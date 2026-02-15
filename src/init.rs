@@ -450,9 +450,54 @@ pub fn uninstall_gemini(verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ============================================================================
+// MULTI-PLATFORM ARCHITECTURE (Claude Code + Gemini CLI)
+// ============================================================================
+//
+// RTK supports both Claude Code and Gemini CLI via a DRY architecture that
+// shares common logic while respecting protocol-specific differences.
+//
+// ## Shared Infrastructure (DRY)
+//
+// 1. patch_settings_shared()  - Core settings.json patching logic (lines 454-530)
+// 2. show_agent_hook_status() - Hook status verification (lines 1042-1094)
+// 3. prompt_user_consent()    - User confirmation prompt (lines 241-261)
+// 4. atomic_write()           - Safe file writing (lines 208-236)
+// 5. PatchMode enum           - Patch behavior control (Auto/Ask/Skip)
+// 6. PatchResult enum         - Patch outcome reporting
+//
+// ## Platform-Specific Differences (Intentional)
+//
+// ### Claude Code
+// - Event: PreToolUse, Matcher: Bash
+// - Artifacts: ~/.claude/RTK.md + @RTK.md reference in CLAUDE.md + settings.json
+// - Hook command: "rtk hook claude"
+// - Functions: patch_settings_json(), hook_already_present(), insert_hook_entry()
+//
+// ### Gemini CLI
+// - Event: BeforeTool, Matcher: run_shell_command
+// - Artifacts: ~/.gemini/settings.json only (no RTK.md equivalent)
+// - Hook command: "rtk hook gemini"
+// - Functions: patch_gemini_settings(), gemini_hook_already_present(), insert_gemini_hook_entry()
+//
+// These differences reflect real protocol variations and cannot be unified
+// without conditional logic that would obscure the code.
+//
+// ## Default Behavior (as of v0.15.3)
+//
+// `rtk init` (no platform flags) → Sets up BOTH Claude and Gemini
+// `rtk init --claude`            → Claude only
+// `rtk init --gemini`            → Gemini only
+// `rtk init --uninstall`         → Remove both
+// `rtk init --uninstall --claude` → Remove Claude only
+// `rtk init --uninstall --gemini` → Remove Gemini only
+// ============================================================================
+
 /// Shared: patch a settings.json with an agent hook.
 /// Reads/creates JSON, checks idempotency, handles PatchMode, inserts hook,
 /// backs up, and atomically writes.
+///
+/// Used by both Claude Code (patch_settings_json) and Gemini CLI (patch_gemini_settings).
 fn patch_settings_shared(
     settings_path: &Path,
     is_present: impl Fn(&serde_json::Value) -> bool,
