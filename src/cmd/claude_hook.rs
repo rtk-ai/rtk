@@ -9,13 +9,29 @@
 //!   0 = success (allow or rewrite) — command proceeds
 //!   2 = blocking error (deny) — command rejected
 //!
+//! Deny output strategy (dual-path for robustness):
+//!   stdout: JSON with permissionDecision "deny" (documented main path)
+//!   stderr: plain text reason (workaround for Claude Code bug #4669,
+//!           where permissionDecision "deny" on stdout was ignored;
+//!           exit code 2 causes Claude Code to read stderr as error)
+//!
+//! I/O enforcement: `run_inner()` returns `HookResponse` (no I/O).
+//! Only `run()` writes to stdout/stderr via `write!`/`writeln!`.
+//! The `#![deny(clippy::print_stdout, clippy::print_stderr)]` on this
+//! module catches any accidental `println!`/`eprintln!` at compile time.
+//!
 //! Fail-open: Any parse error or unexpected input → exit 0, no output.
 //! Claude Code treats no-output-exit-0 as "no opinion" and proceeds.
 
-use super::hook::{check_for_hook, HookResult};
+// Compile-time enforcement: no accidental println!/eprintln! in this module.
+// All stdout/stderr output is done via write!/writeln! in run() only.
+// clippy::print_stdout/print_stderr catch println!/eprintln! but NOT write!.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
+
+use super::hook::{check_for_hook, is_hook_disabled, should_passthrough, HookResponse, HookResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
 // --- Wire format structs (field names must match Claude Code spec exactly) ---
 
@@ -56,19 +72,8 @@ pub(crate) fn extract_command(payload: &ClaudePayload) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Check if this command should bypass hook processing entirely.
-/// Returns true if the command should be passed through without rewriting.
-pub(crate) fn should_passthrough(cmd: &str) -> bool {
-    // Already routed through rtk
-    cmd.starts_with("rtk ") || cmd.contains("/rtk ")
-    // Heredocs need shell, not rtk
-    || cmd.contains("<<")
-}
-
-/// Check if hook processing is disabled by environment.
-pub(crate) fn is_disabled() -> bool {
-    std::env::var("RTK_HOOK_ENABLED").as_deref() == Ok("0") || std::env::var("RTK_ACTIVE").is_ok()
-}
+// Guard functions `is_hook_disabled()` and `should_passthrough()` are shared
+// with gemini_hook.rs via hook.rs to avoid duplication (DRY).
 
 /// Build a ClaudeResponse for an allowed/rewritten command.
 pub(crate) fn allow_response(reason: String, updated_input: Option<Value>) -> ClaudeResponse {
@@ -98,46 +103,59 @@ pub(crate) fn deny_response(reason: String) -> ClaudeResponse {
 
 /// Run the Claude Code hook handler.
 ///
-/// Reads JSON from stdin, processes safety checks via shared
-/// `check_for_hook()`, outputs JSON to stdout.
+/// This is the ONLY function that performs I/O (stdout/stderr).
+/// `run_inner()` returns a `HookResponse` enum — pure logic, no I/O.
+/// Combined with `#![deny(clippy::print_stdout, clippy::print_stderr)]`,
+/// this ensures no stray output corrupts the JSON hook protocol.
 ///
 /// Fail-open design: malformed input → exit 0, no output.
 /// Claude Code interprets this as "no opinion" and proceeds normally.
 pub fn run() -> anyhow::Result<()> {
-    // Fail-open: wrap entire handler so ANY panic/error → exit 0 (no opinion).
-    // Claude Code treats no-output-exit-0 as "hook has no opinion, proceed."
-    match run_inner() {
-        Ok(exit_code) => {
-            if exit_code != 0 {
-                std::process::exit(exit_code);
-            }
+    // Fail-open: wrap entire handler so ANY error → exit 0 (no opinion).
+    let response = match run_inner() {
+        Ok(r) => r,
+        Err(_) => HookResponse::NoOpinion, // Fail-open: swallow errors
+    };
+
+    // Single I/O point: write!/writeln! are not caught by the clippy lint,
+    // so this is the only place that can produce output in this module.
+    match response {
+        HookResponse::NoOpinion => {} // Exit 0, no output
+        HookResponse::Allow(json) => {
+            writeln!(io::stdout(), "{json}")?;
         }
-        Err(_) => {} // Fail-open: swallow errors, exit 0
+        HookResponse::Deny(json, reason) => {
+            // Dual-path deny for bug #4669 robustness:
+            // stdout: JSON with permissionDecision "deny" (documented main path)
+            // stderr: plain text reason (exit code 2 fallback path)
+            writeln!(io::stdout(), "{json}")?;
+            writeln!(io::stderr(), "{reason}")?;
+            std::process::exit(2);
+        }
     }
     Ok(())
 }
 
-/// Inner handler returns exit code (0 = allow, 2 = block).
-/// Separated from run() so errors propagate to the fail-open wrapper.
-fn run_inner() -> anyhow::Result<i32> {
+/// Inner handler: pure decision logic, no I/O.
+/// Returns `HookResponse` for `run()` to output.
+fn run_inner() -> anyhow::Result<HookResponse> {
     let mut buffer = String::new();
     io::stdin().read_to_string(&mut buffer)?;
 
     let payload: ClaudePayload = match serde_json::from_str(&buffer) {
         Ok(p) => p,
-        Err(_) => return Ok(0), // Fail-open: bad JSON → no opinion
+        Err(_) => return Ok(HookResponse::NoOpinion),
     };
 
     let cmd = match extract_command(&payload) {
         Some(c) => c,
-        None => return Ok(0), // No command → no opinion
+        None => return Ok(HookResponse::NoOpinion),
     };
 
-    if is_disabled() || should_passthrough(cmd) {
-        return Ok(0);
+    if is_hook_disabled() || should_passthrough(cmd) {
+        return Ok(HookResponse::NoOpinion);
     }
 
-    // Shared safety/rewrite logic (same function gemini_hook.rs uses)
     let result = check_for_hook(cmd, "claude");
 
     match result {
@@ -151,13 +169,13 @@ fn run_inner() -> anyhow::Result<i32> {
             }
 
             let response = allow_response("RTK safety rewrite applied".into(), Some(updated));
-            println!("{}", serde_json::to_string(&response)?);
-            Ok(0)
+            let json = serde_json::to_string(&response)?;
+            Ok(HookResponse::Allow(json))
         }
         HookResult::Blocked(msg) => {
-            let response = deny_response(msg);
-            println!("{}", serde_json::to_string(&response)?);
-            Ok(2) // Exit 2 = blocking error per Claude Code spec
+            let response = deny_response(msg.clone());
+            let json = serde_json::to_string(&response)?;
+            Ok(HookResponse::Deny(json, msg))
         }
     }
 }
@@ -347,20 +365,20 @@ mod tests {
     }
 
     #[test]
-    fn test_should_passthrough_rtk_prefix() {
+    fn test_shared_should_passthrough_rtk_prefix() {
         assert!(should_passthrough("rtk run -c 'ls'"));
         assert!(should_passthrough("rtk cargo test"));
         assert!(should_passthrough("/usr/local/bin/rtk run -c 'ls'"));
     }
 
     #[test]
-    fn test_should_passthrough_heredoc() {
+    fn test_shared_should_passthrough_heredoc() {
         assert!(should_passthrough("cat <<EOF\nhello\nEOF"));
         assert!(should_passthrough("cat <<'EOF'\nhello\nEOF"));
     }
 
     #[test]
-    fn test_should_passthrough_normal_commands() {
+    fn test_shared_should_passthrough_normal_commands() {
         assert!(!should_passthrough("git status"));
         assert!(!should_passthrough("ls -la"));
         assert!(!should_passthrough("echo hello"));
@@ -377,77 +395,48 @@ mod tests {
     // --- Fail-open behavior ---
 
     #[test]
-    fn test_run_inner_returns_zero_for_empty_payload() {
-        // Simulates what happens when run_inner processes "{}" —
-        // no tool_input means no command, should return exit 0
+    fn test_run_inner_returns_no_opinion_for_empty_payload() {
+        // "{}" has no tool_input → no command → NoOpinion
         let payload: ClaudePayload = serde_json::from_str("{}").unwrap();
         assert_eq!(extract_command(&payload), None);
-        // run_inner() would return Ok(0) here
     }
 
     #[test]
-    fn test_is_disabled_hook_enabled_zero() {
+    fn test_shared_is_hook_disabled_hook_enabled_zero() {
         std::env::set_var("RTK_HOOK_ENABLED", "0");
-        assert!(is_disabled());
+        assert!(is_hook_disabled());
         std::env::remove_var("RTK_HOOK_ENABLED");
     }
 
     #[test]
-    fn test_is_disabled_rtk_active() {
+    fn test_shared_is_hook_disabled_rtk_active() {
         std::env::set_var("RTK_ACTIVE", "1");
-        assert!(is_disabled());
+        assert!(is_hook_disabled());
         std::env::remove_var("RTK_ACTIVE");
     }
 
-    // --- Integration: safety decisions ---
+    // --- Integration: Bug #4669 workaround verification ---
 
     #[test]
-    fn test_safe_command_produces_allow_with_rewrite() {
-        let payload: ClaudePayload =
-            serde_json::from_str(r#"{"tool_input": {"command": "git status"}}"#).unwrap();
-        let cmd = extract_command(&payload).unwrap();
-        let result = check_for_hook(cmd, "claude");
+    fn test_deny_response_includes_reason_for_stderr() {
+        // Bug #4669 workaround: deny must provide plain text reason
+        // that can be output to stderr alongside the JSON stdout.
+        // The msg is cloned for both paths in run_inner().
+        let msg = "RTK: cat is blocked (use rtk read instead)";
+        let response = deny_response(msg.to_string());
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
 
-        match result {
-            HookResult::Rewrite(new_cmd) => {
-                assert!(
-                    new_cmd.contains("rtk run"),
-                    "safe command should be rewritten to use rtk run"
-                );
-            }
-            HookResult::Blocked(_) => panic!("git status should not be blocked"),
-        }
-    }
-
-    #[test]
-    fn test_blocked_command_produces_deny() {
-        let payload: ClaudePayload =
-            serde_json::from_str(r#"{"tool_input": {"command": "cat /etc/passwd"}}"#).unwrap();
-        let cmd = extract_command(&payload).unwrap();
-        let result = check_for_hook(cmd, "claude");
-
-        assert!(
-            matches!(result, HookResult::Blocked(_)),
-            "cat should be blocked by safety rules"
+        // JSON stdout path
+        assert_eq!(parsed["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["permissionDecisionReason"],
+            msg
         );
+        // The same msg string is used for stderr in run() via HookResponse::Deny
     }
 
-    #[test]
-    fn test_cross_protocol_same_decision() {
-        // Same command must produce same allow/block decision
-        // regardless of whether it comes through Claude or Gemini protocol
-        for cmd in ["git status", "ls -la", "cat file.txt"] {
-            let claude = check_for_hook(cmd, "claude");
-            let gemini = check_for_hook(cmd, "gemini");
-
-            let claude_blocked = matches!(claude, HookResult::Blocked(_));
-            let gemini_blocked = matches!(gemini, HookResult::Blocked(_));
-
-            assert_eq!(
-                claude_blocked, gemini_blocked,
-                "command '{}': Claude blocked={} but Gemini blocked={}",
-                cmd, claude_blocked, gemini_blocked
-            );
-        }
-    }
+    // Note: Integration tests for check_for_hook() safety decisions are in
+    // src/cmd/hook.rs (test_safe_commands_rewrite, test_blocked_commands, etc.)
+    // to avoid duplication. This module focuses on Claude Code wire format.
 }

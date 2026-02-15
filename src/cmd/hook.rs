@@ -87,6 +87,43 @@ fn check_for_hook_inner(raw: &str, depth: usize) -> HookResult {
     }
 }
 
+// --- Shared guard logic (used by both claude_hook.rs and gemini_hook.rs) ---
+
+/// Check if hook processing is disabled by environment.
+///
+/// Returns true if:
+/// - `RTK_HOOK_ENABLED=0` (master toggle off)
+/// - `RTK_ACTIVE` is set (recursion prevention — rtk sets this when running commands)
+pub fn is_hook_disabled() -> bool {
+    std::env::var("RTK_HOOK_ENABLED").as_deref() == Ok("0") || std::env::var("RTK_ACTIVE").is_ok()
+}
+
+/// Check if this command should bypass hook processing entirely.
+///
+/// Returns true for commands that should not be rewritten:
+/// - Already routed through rtk (`rtk ...` or `/path/to/rtk ...`)
+/// - Contains heredoc (`<<`) which needs raw shell processing
+pub fn should_passthrough(cmd: &str) -> bool {
+    cmd.starts_with("rtk ") || cmd.contains("/rtk ") || cmd.contains("<<")
+}
+
+/// Hook output for protocol handlers (claude_hook.rs, gemini_hook.rs).
+///
+/// This enum separates decision logic from I/O: `run_inner()` returns a
+/// `HookResponse`, and `run()` is the single place that writes to stdout/stderr.
+/// Combined with `#[deny(clippy::print_stdout, clippy::print_stderr)]` on the
+/// hook modules, this prevents any stray output from corrupting the JSON protocol.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HookResponse {
+    /// No opinion — exit 0, no output. Host proceeds normally.
+    NoOpinion,
+    /// Allow/rewrite — exit 0, JSON to stdout.
+    Allow(String),
+    /// Deny — exit 2, JSON to stdout + reason to stderr.
+    /// Fields: (stdout_json, stderr_reason)
+    Deny(String, String),
+}
+
 /// Escape single quotes for shell
 fn escape_quotes(s: &str) -> String {
     s.replace("'", "'\\''")

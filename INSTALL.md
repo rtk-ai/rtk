@@ -111,6 +111,37 @@ rtk init  # Creates ./CLAUDE.md with full RTK instructions (137 lines)
 
 **Token savings**: Instructions loaded only for this project
 
+### Gemini CLI Setup
+
+**Best for: Gemini CLI users wanting the same token optimization**
+
+```bash
+rtk init --gemini
+# → Registers "rtk hook gemini" in ~/.gemini/settings.json
+# → Prompts: "Patch settings.json? [y/N]"
+# → If yes: patches + creates backup (~/.gemini/settings.json.bak)
+
+# Automated alternatives:
+rtk init --gemini --auto-patch    # Patch without prompting
+rtk init --gemini --no-patch      # Print manual instructions instead
+
+# Verify installation
+rtk init --show  # Shows both Claude and Gemini hook status
+```
+
+**Manual setup** (if `rtk init --gemini` isn't available):
+```json
+// Add to ~/.gemini/settings.json
+{
+  "hooks": {
+    "BeforeTool": [{
+      "matcher": "run_shell_command",
+      "hooks": [{ "type": "command", "command": "rtk hook gemini" }]
+    }]
+  }
+}
+```
+
 ### Upgrading from Previous Version
 
 If you previously used `rtk init -g` with the old system (137-line injection):

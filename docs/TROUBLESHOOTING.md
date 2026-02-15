@@ -161,6 +161,58 @@ Add to `~/.claude/settings.json`:
 
 ---
 
+## Problem: RTK not working in Gemini CLI
+
+### Symptom
+Gemini CLI doesn't use rtk for shell commands, outputs are verbose.
+
+### Checklist
+
+**1. Verify rtk is installed and correct:**
+```bash
+rtk --version
+rtk gain  # Must show stats
+```
+
+**2. Install Gemini hook:**
+```bash
+rtk init --gemini
+# → Registers "rtk hook gemini" in ~/.gemini/settings.json
+# → Restart Gemini CLI
+```
+
+**3. Verify hook is configured:**
+```bash
+rtk init --show  # Should show Gemini hook status
+# Or check manually:
+grep "rtk hook gemini" ~/.gemini/settings.json
+```
+
+**4. Manual setup (fallback):**
+
+Add to `~/.gemini/settings.json`:
+```json
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook gemini"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Then restart Gemini CLI.
+
+---
+
 ## Problem: "command not found: rtk" after installation
 
 ### Symptom

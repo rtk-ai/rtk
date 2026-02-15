@@ -121,6 +121,14 @@ else
     echo -e "   ${YELLOW}⚠️${NC}  Auto-rewrite hook not configured"
     echo "      Install: rtk init -g"
 fi
+# Check 7: Gemini CLI hook
+echo "7. Checking Gemini CLI hook (optional)..."
+if [ -f "$HOME/.gemini/settings.json" ] && grep -q "rtk hook gemini" "$HOME/.gemini/settings.json"; then
+    echo -e "   ${GREEN}✅${NC} Gemini hook enabled in settings.json (rtk hook gemini)"
+else
+    echo -e "   ${YELLOW}⚠️${NC}  Gemini hook not configured"
+    echo "      Install: rtk init --gemini"
+fi
 echo ""
 
 # Summary

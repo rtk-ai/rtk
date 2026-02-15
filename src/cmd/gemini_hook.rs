@@ -1,15 +1,30 @@
-//! Gemini Hook Protocol Handler
+//! Gemini CLI BeforeTool hook protocol handler.
 //!
-//! Implements the Gemini CLI BeforeTool hook protocol.
+//! Reads JSON from stdin, applies safety checks and rewrites,
+//! outputs JSON to stdout.
+//!
 //! See: https://geminicli.com/docs/hooks/reference/
 //!
 //! Input: JSON on stdin with hook_event_name, tool_name, tool_input
 //! Output: JSON on stdout with decision, reason, hookSpecificOutput
+//!
+//! I/O enforcement: `run_inner()` returns `HookResponse` (no I/O).
+//! Only `run()` writes to stdout via `write!`/`writeln!`.
+//! The `#![deny(clippy::print_stdout, clippy::print_stderr)]` on this
+//! module catches any accidental `println!`/`eprintln!` at compile time.
+//!
+//! Fail-open: Any parse error or unexpected input → exit 0, no output.
+//! Gemini CLI treats no-output-exit-0 as "no opinion" and proceeds.
 
-use super::hook::{check_for_hook, HookResult};
+// Compile-time enforcement: no accidental println!/eprintln! in this module.
+// All stdout output is done via write!/writeln! in run() only.
+// clippy::print_stdout/print_stderr catch println!/eprintln! but NOT write!.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
+
+use super::hook::{check_for_hook, is_hook_disabled, should_passthrough, HookResponse, HookResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
 #[derive(Deserialize)]
 struct GeminiPayload {
@@ -39,34 +54,50 @@ fn is_shell_tool(name: &str) -> bool {
     name == "run_shell_command" || name == "shell" || name.ends_with("__run_shell_command")
 }
 
-/// Run the Gemini hook handler
-/// Reads JSON from stdin, processes it, outputs JSON to stdout
+/// Run the Gemini hook handler.
+///
+/// This is the ONLY function that performs I/O (stdout).
+/// `run_inner()` returns a `HookResponse` enum — pure logic, no I/O.
+/// Combined with `#![deny(clippy::print_stdout, clippy::print_stderr)]`,
+/// this ensures no stray output corrupts the JSON hook protocol.
+///
+/// Fail-open design: malformed input → exit 0, no output.
 pub fn run() -> anyhow::Result<()> {
+    let response = match run_inner() {
+        Ok(r) => r,
+        Err(_) => HookResponse::NoOpinion, // Fail-open: swallow errors
+    };
+
+    // Single I/O point: write!/writeln! are not caught by the clippy lint.
+    match response {
+        HookResponse::NoOpinion => {}
+        HookResponse::Allow(json) | HookResponse::Deny(json, _) => {
+            writeln!(io::stdout(), "{json}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Inner handler: pure decision logic, no I/O.
+/// Returns `HookResponse` for `run()` to output.
+fn run_inner() -> anyhow::Result<HookResponse> {
     let mut buffer = String::new();
     io::stdin().read_to_string(&mut buffer)?;
 
     let payload: GeminiPayload = match serde_json::from_str(&buffer) {
         Ok(p) => p,
-        Err(_) => {
-            // Malformed or unrecognized payload — allow
-            println!(r#"{{"decision": "allow"}}"#);
-            return Ok(());
-        }
+        Err(_) => return Ok(HookResponse::NoOpinion),
     };
 
-    // Only handle BeforeTool events
+    // Only handle BeforeTool events — other events get a plain allow
     if payload.hook_event_name.as_deref() != Some("BeforeTool") {
-        println!(r#"{{"decision": "allow"}}"#);
-        return Ok(());
+        return Ok(HookResponse::Allow(r#"{"decision": "allow"}"#.into()));
     }
 
     // Only intercept shell execution tools
     match &payload.tool_name {
         Some(name) if is_shell_tool(name) => {}
-        _ => {
-            println!(r#"{{"decision": "allow"}}"#);
-            return Ok(());
-        }
+        _ => return Ok(HookResponse::Allow(r#"{"decision": "allow"}"#.into())),
     };
 
     // Extract the command string from tool_input
@@ -76,23 +107,22 @@ pub fn run() -> anyhow::Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        None => {
-            println!(r#"{{"decision": "allow"}}"#);
-            return Ok(());
-        }
+        None => return Ok(HookResponse::Allow(r#"{"decision": "allow"}"#.into())),
     };
 
     if cmd.is_empty() {
-        println!(r#"{{"decision": "allow"}}"#);
-        return Ok(());
+        return Ok(HookResponse::Allow(r#"{"decision": "allow"}"#.into()));
     }
 
-    // Run RTK safety logic
+    // Shared guard checks (same as claude_hook.rs, DRY via hook.rs)
+    if is_hook_disabled() || should_passthrough(&cmd) {
+        return Ok(HookResponse::NoOpinion);
+    }
+
     let decision = check_for_hook(&cmd, "gemini");
 
     let response = match decision {
         HookResult::Rewrite(new_cmd) => {
-            // Build modified tool_input, preserving other fields
             let mut new_input = payload
                 .tool_input
                 .unwrap_or(Value::Object(Default::default()));
@@ -114,8 +144,13 @@ pub fn run() -> anyhow::Result<()> {
         },
     };
 
-    println!("{}", serde_json::to_string(&response)?);
-    Ok(())
+    let json = serde_json::to_string(&response)?;
+    // Gemini deny uses JSON response only (no stderr/exit-code workaround needed)
+    if response.decision == "deny" {
+        Ok(HookResponse::Deny(json, String::new()))
+    } else {
+        Ok(HookResponse::Allow(json))
+    }
 }
 
 #[cfg(test)]
@@ -333,8 +368,6 @@ mod tests {
 
     #[test]
     fn test_rewrite_preserves_other_tool_input_fields() {
-        // If tool_input has { "command": "git status", "timeout": 30 },
-        // after rewrite it should be { "command": "rtk run -c '...'", "timeout": 30 }
         let original_input = serde_json::json!({
             "command": "git status",
             "timeout": 30,
@@ -378,5 +411,23 @@ mod tests {
             // Should not panic, just return Err or deserialize to defaults
             let _ = serde_json::from_str::<GeminiPayload>(input);
         }
+    }
+
+    // --- Guard parity with Claude hook ---
+
+    #[test]
+    fn test_shared_guards_available() {
+        // Verify shared guard functions are accessible (DRY with claude_hook.rs)
+        assert!(!should_passthrough("git status"));
+        assert!(should_passthrough("rtk git status"));
+        assert!(should_passthrough("cat <<EOF\nhello\nEOF"));
+    }
+
+    #[test]
+    fn test_shared_is_hook_disabled_default() {
+        // When no env vars set, hook should NOT be disabled
+        std::env::remove_var("RTK_HOOK_ENABLED");
+        std::env::remove_var("RTK_ACTIVE");
+        assert!(!is_hook_disabled());
     }
 }
