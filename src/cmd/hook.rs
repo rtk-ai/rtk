@@ -70,6 +70,11 @@ fn check_for_hook_inner(raw: &str, depth: usize) -> HookResult {
         return HookResult::Rewrite(raw.to_string());
     }
 
+    // Remap expansion (aliases like "t" → "cargo test")
+    if let Some(expanded) = crate::config::rules::try_remap(raw) {
+        return check_for_hook_inner(&expanded, depth + 1);
+    }
+
     let tokens = lexer::tokenize(raw);
 
     // Check for shellisms - if present, pass through
@@ -146,7 +151,10 @@ pub fn should_passthrough(cmd: &str) -> bool {
 ///
 /// # Returns
 /// A Value with the command field updated, all other fields preserved.
-pub fn update_command_in_tool_input(tool_input: Option<serde_json::Value>, new_cmd: String) -> serde_json::Value {
+pub fn update_command_in_tool_input(
+    tool_input: Option<serde_json::Value>,
+    new_cmd: String,
+) -> serde_json::Value {
     use serde_json::Value;
     let mut updated = tool_input.unwrap_or_else(|| Value::Object(Default::default()));
     if let Some(obj) = updated.as_object_mut() {

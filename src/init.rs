@@ -177,7 +177,12 @@ pub fn run(
 }
 
 /// Idempotent file write: create or update if content differs
-fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Result<bool> {
+pub(crate) fn write_if_changed(
+    path: &Path,
+    content: &str,
+    name: &str,
+    verbose: u8,
+) -> Result<bool> {
     if path.exists() {
         let existing = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}: {}", name, path.display()))?;
@@ -207,7 +212,7 @@ fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Resu
 
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
-fn atomic_write(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let parent = path.parent().with_context(|| {
         format!(
             "Cannot write to {}: path has no parent directory",
@@ -723,7 +728,16 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
         println!("            replaced with @RTK.md (10 lines)");
     }
 
-    // 4. Patch settings.json
+    // 4. Export default rules to ~/.config/rtk/ for discoverability
+    if let Err(e) = crate::config::export_rules(false) {
+        if verbose > 0 {
+            eprintln!("  Note: could not export default rules: {e}");
+        }
+    } else {
+        println!("  Rules:     ~/.config/rtk/rtk.*.md (customizable)");
+    }
+
+    // 5. Patch settings.json
     let patch_result = patch_settings_json(patch_mode, verbose)?;
 
     // Report result
@@ -957,14 +971,14 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
 }
 
 /// Resolve ~/.claude directory with proper home expansion
-fn resolve_claude_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_claude_dir() -> Result<PathBuf> {
     dirs::home_dir()
         .map(|h| h.join(".claude"))
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
 /// Resolve ~/.gemini directory with proper home expansion
-fn resolve_gemini_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_gemini_dir() -> Result<PathBuf> {
     dirs::home_dir()
         .map(|h| h.join(".gemini"))
         .context("Cannot determine home directory. Is $HOME set?")

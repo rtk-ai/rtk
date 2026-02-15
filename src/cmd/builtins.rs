@@ -72,72 +72,53 @@ pub fn execute(binary: &str, args: &[String]) -> Result<bool> {
 mod tests {
     use super::*;
     use std::env;
-    use std::path::Path;
 
     // === CD TESTS ===
+    // Consolidated into one test: cwd is process-global, so parallel tests race.
 
     #[test]
-    fn test_cd_to_existing_dir() {
+    fn test_cd_all_cases() {
         let original = env::current_dir().unwrap();
+        let home = get_home();
+
+        // 1. cd to existing dir
         let result = builtin_cd(&["/tmp".to_string()]).unwrap();
         assert!(result);
-        // On macOS, /tmp might be a symlink to /private/tmp
-        // Just verify we changed directories
         let new_dir = env::current_dir().unwrap();
-        assert!(new_dir.to_string_lossy().contains("tmp") || new_dir != original);
-        env::set_current_dir(original).unwrap();
-    }
+        // On macOS /tmp symlinks to /private/tmp — canonicalize both sides
+        let canon_tmp = std::fs::canonicalize("/tmp").unwrap();
+        let canon_new = std::fs::canonicalize(&new_dir).unwrap();
+        assert_eq!(canon_new, canon_tmp, "cd /tmp should land in /tmp");
 
-    #[test]
-    fn test_cd_to_nonexistent_dir() {
+        // 2. cd to nonexistent dir
         let result = builtin_cd(&["/nonexistent/path/xyz".to_string()]);
         assert!(result.is_err());
-    }
+        // cwd unchanged after failed cd
+        assert_eq!(
+            std::fs::canonicalize(env::current_dir().unwrap()).unwrap(),
+            canon_tmp
+        );
 
-    #[test]
-    fn test_cd_no_args() {
-        let original = env::current_dir().unwrap();
-        let home = get_home();
-
-        // Go somewhere else first
-        let _ = env::set_current_dir("/tmp");
-
+        // 3. cd with no args → home
         let result = builtin_cd(&[]).unwrap();
         assert!(result);
-        // Verify we're at home or the cd succeeded
         let cwd = env::current_dir().unwrap();
-        // Just check that we moved from /tmp (cd worked)
-        assert!(cwd.as_path() != Path::new("/tmp") || cwd.to_string_lossy().contains(&home));
+        let canon_home = std::fs::canonicalize(&home).unwrap();
+        let canon_cwd = std::fs::canonicalize(&cwd).unwrap();
+        assert_eq!(canon_cwd, canon_home, "cd with no args should go home");
 
-        let _ = env::set_current_dir(&original);
-    }
-
-    #[test]
-    fn test_cd_tilde_expansion() {
-        let original = env::current_dir().unwrap();
-        let home = get_home();
-
+        // 4. cd ~ → home
+        let _ = env::set_current_dir("/tmp");
         let result = builtin_cd(&["~".to_string()]).unwrap();
         assert!(result);
-        // Verify we're at home (or a parent of it)
-        let cwd = env::current_dir().unwrap();
-        assert!(cwd.as_path() == Path::new(&home) || cwd.to_string_lossy().starts_with(&home));
+        let cwd = std::fs::canonicalize(env::current_dir().unwrap()).unwrap();
+        assert_eq!(cwd, canon_home, "cd ~ should go home");
 
+        // 5. cd ~/nonexistent-subpath — may fail, just verify no panic
+        let _ = builtin_cd(&["~/nonexistent_rtk_test_subpath_xyz".to_string()]);
+
+        // Restore original cwd
         let _ = env::set_current_dir(&original);
-    }
-
-    #[test]
-    fn test_cd_tilde_subpath() {
-        let original = env::current_dir().unwrap();
-        let home = get_home();
-
-        // This may fail if ~/src doesn't exist, which is fine
-        let _ = builtin_cd(&["~/src".to_string()]);
-        // Just verify we're in something starting with home
-        let cwd = env::current_dir().unwrap();
-        assert!(cwd.starts_with(&home) || cwd != original);
-
-        env::set_current_dir(original).unwrap();
     }
 
     // === EXPORT TESTS ===

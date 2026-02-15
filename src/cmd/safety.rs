@@ -1,85 +1,12 @@
-//! Safety Policy Engine with dual messages (human vs agent).
+//! Safety Policy Engine — unified rule-based implementation.
 //!
-//! Design: Rules have predicates for conditional behavior.
-//! Messages are terse for agents, detailed for humans.
+//! All safety rules, remaps, and blocking rules are loaded from the unified
+//! Rule system (`config::rules`). Rules are MD files with YAML frontmatter,
+//! loaded from built-in defaults and user directories.
+
+use crate::config::rules::{self, Rule};
 
 use super::predicates;
-
-/// Actions a safety rule can take
-#[derive(Clone, Debug, PartialEq)]
-pub enum SafetyAction {
-    /// Rewrite to a different command template (e.g., "rtk trash {args}")
-    Rewrite(String),
-    /// Prepend a command (e.g., "git stash && {cmd}")
-    Prepend(String),
-    /// Suggest using a tool instead (for agents)
-    SuggestTool(String),
-    /// Route to built-in trash implementation
-    Trash,
-}
-
-/// A safety rule with pattern matching and actions
-#[derive(Clone)]
-pub struct SafetyRule {
-    /// Pattern to match at start of command (e.g., "rm", "git reset --hard")
-    pub pattern: &'static str,
-    /// Action to take when rule matches
-    pub action: SafetyAction,
-    /// Human-friendly message (shown in interactive mode)
-    pub human_msg: &'static str,
-    /// Agent-terse message (shown in non-interactive mode)
-    pub agent_msg: &'static str,
-    /// Optional predicate for conditional activation
-    pub predicate: Option<fn() -> bool>,
-    /// Optional env var that must be set for rule to apply
-    pub env_var: Option<&'static str>,
-}
-
-impl SafetyRule {
-    /// Get appropriate message based on context (interactive vs agent)
-    pub fn message(&self) -> &str {
-        if predicates::is_interactive() {
-            self.human_msg
-        } else {
-            self.agent_msg
-        }
-    }
-
-    /// Check if rule should apply (env var + predicate)
-    ///
-    /// Env var behavior:
-    /// - RTK_SAFE_COMMANDS: Opt-out, applies by default, disable with =0
-    /// - RTK_BLOCK_TOKEN_WASTE: Opt-out, applies by default, disable with =0
-    pub fn should_apply(&self) -> bool {
-        // Check env var if specified
-        if let Some(env) = self.env_var {
-            match env {
-                // Opt-out features: apply by default, disable with =0
-                "RTK_SAFE_COMMANDS" | "RTK_BLOCK_TOKEN_WASTE" => {
-                    if let Ok(val) = std::env::var(env) {
-                        if val == "0" || val == "false" {
-                            return false;
-                        }
-                    }
-                    // Default: enabled (no env var or env var != 0)
-                }
-                // Unknown env vars: require explicit setting
-                _ => {
-                    if std::env::var(env).is_err() {
-                        return false;
-                    }
-                }
-            }
-        }
-        // Check predicate if specified
-        if let Some(pred) = self.predicate {
-            if !pred() {
-                return false;
-            }
-        }
-        true
-    }
-}
 
 /// Result of safety check
 #[derive(Clone, Debug, PartialEq)]
@@ -94,92 +21,50 @@ pub enum SafetyResult {
     TrashRequested(Vec<String>),
 }
 
-/// Shorthand macro for declaring safety rules.
-///
-/// Two forms:
-/// - `rule!(pattern, action, human_msg, agent_msg, env: "ENV_VAR")` — no predicate
-/// - `rule!(pattern, action, human_msg, agent_msg, pred: fn, env: "ENV_VAR")` — with predicate
-macro_rules! rule {
-    ($pat:expr, $act:expr, $human:expr, $agent:expr, env: $env:expr) => {
-        SafetyRule {
-            pattern: $pat,
-            action: $act,
-            human_msg: $human,
-            agent_msg: $agent,
-            predicate: None,
-            env_var: Some($env),
+/// Dispatch a matched rule into a SafetyResult.
+fn dispatch(rule: &Rule, args: &str) -> SafetyResult {
+    match rule.action.as_str() {
+        "trash" => {
+            let paths: Vec<String> = args
+                .split_whitespace()
+                .filter(|a| !a.starts_with('-'))
+                .map(String::from)
+                .collect();
+            SafetyResult::TrashRequested(paths)
         }
-    };
-    ($pat:expr, $act:expr, $human:expr, $agent:expr, pred: $pred:expr, env: $env:expr) => {
-        SafetyRule {
-            pattern: $pat,
-            action: $act,
-            human_msg: $human,
-            agent_msg: $agent,
-            predicate: Some($pred),
-            env_var: Some($env),
+        "rewrite" => {
+            let redirect = rule.redirect.as_deref().unwrap_or(args);
+            SafetyResult::Rewritten(redirect.replace("{args}", args))
         }
-    };
+        "suggest_tool" | "block" => {
+            // Use interactive-aware message (human vs agent)
+            let msg = if predicates::is_interactive() {
+                // For suggest_tool, human message references the tool name
+                if rule.action == "suggest_tool" {
+                    // First line of message is typically the human-friendly version
+                    rule.message
+                        .lines()
+                        .next()
+                        .unwrap_or(&rule.message)
+                        .to_string()
+                } else {
+                    rule.message.clone()
+                }
+            } else {
+                // Agent: use the full message (contains BLOCK: prefix)
+                rule.message.clone()
+            };
+            SafetyResult::Blocked(msg)
+        }
+        "warn" => {
+            eprintln!("{}", rule.message);
+            SafetyResult::Safe
+        }
+        _ => SafetyResult::Safe,
+    }
 }
 
-/// Get all safety rules (ordered by specificity)
-///
-/// Environment Variables (coarse-grained):
-/// - RTK_SAFE_COMMANDS=0 - Disable rm->trash and git safety
-/// - RTK_BLOCK_TOKEN_WASTE=0 - Disable token waste prevention (cat/sed/head blocking)
-///
-/// All safety features are enabled by default.
-pub fn get_rules() -> Vec<SafetyRule> {
-    let stash_reset = SafetyAction::Prepend("git stash push -m 'RTK: reset backup'".into());
-    let stash_checkout = SafetyAction::Prepend("git stash push -m 'RTK: checkout backup'".into());
-    let stash_clean = SafetyAction::Prepend("git stash -u -m 'RTK: clean backup'".into());
-
-    vec![
-        // === DANGEROUS FILE OPERATIONS ===
-        rule!("rm", SafetyAction::Trash,
-            "Safety: Moving to trash.", "REWRITE: rm -> trash",
-            env: "RTK_SAFE_COMMANDS"),
-        // === DANGEROUS GIT OPERATIONS (most specific patterns first) ===
-        rule!("git reset --hard", stash_reset,
-            "Safety: Stashing before reset.", "PREPEND: git stash",
-            pred: predicates::has_unstaged_changes, env: "RTK_SAFE_COMMANDS"),
-        rule!("git checkout --", stash_checkout.clone(),
-            "Safety: Stashing before checkout.", "PREPEND: git stash",
-            pred: predicates::has_unstaged_changes, env: "RTK_SAFE_COMMANDS"),
-        rule!("git checkout .", stash_checkout,
-            "Safety: Stashing before checkout.", "PREPEND: git stash",
-            pred: predicates::has_unstaged_changes, env: "RTK_SAFE_COMMANDS"),
-        rule!("git stash drop", SafetyAction::Rewrite("git stash pop".into()),
-            "Safety: Using pop instead of drop (recoverable).", "REWRITE: stash drop -> pop",
-            env: "RTK_SAFE_COMMANDS"),
-        rule!("git clean -fd", stash_clean.clone(),
-            "Safety: Stashing untracked before clean.", "PREPEND: git stash -u",
-            env: "RTK_SAFE_COMMANDS"),
-        rule!("git clean -df", stash_clean.clone(),
-            "Safety: Stashing untracked before clean.", "PREPEND: git stash -u",
-            env: "RTK_SAFE_COMMANDS"),
-        rule!("git clean -f", stash_clean,
-            "Safety: Stashing untracked before clean.", "PREPEND: git stash -u",
-            env: "RTK_SAFE_COMMANDS"),
-        // === TOKEN WASTE PREVENTION (block and suggest internal tools) ===
-        // Messages use generic descriptions so both Claude Code ("Read tool")
-        // and Gemini CLI ("read_file") agents understand the suggestion.
-        rule!("cat", SafetyAction::SuggestTool("Read".into()),
-            "Use the **Read tool** for large files.",
-            "BLOCK: cat wastes tokens. Use your file-reading tool instead.",
-            env: "RTK_BLOCK_TOKEN_WASTE"),
-        rule!("sed", SafetyAction::SuggestTool("Edit".into()),
-            "Use the **Edit tool** for validated file modifications.",
-            "BLOCK: sed unsafe. Use your file-editing tool instead.",
-            env: "RTK_BLOCK_TOKEN_WASTE"),
-        rule!("head", SafetyAction::SuggestTool("Read (with limit)".into()),
-            "Use **Read tool with limit parameter** instead of head.",
-            "BLOCK: head wastes tokens. Use your file-reading tool with a line limit instead.",
-            env: "RTK_BLOCK_TOKEN_WASTE"),
-    ]
-}
-
-/// Check a command against all safety rules
+/// Check a parsed command against all safety rules.
 pub fn check(binary: &str, args: &[String]) -> SafetyResult {
     let full_cmd = if args.is_empty() {
         binary.to_string()
@@ -187,81 +72,41 @@ pub fn check(binary: &str, args: &[String]) -> SafetyResult {
         format!("{} {}", binary, args.join(" "))
     };
 
-    for rule in get_rules() {
-        // Single-word patterns match binary exactly to avoid false positives
-        // (e.g., "cat" must not match "catalog"). Multi-word patterns use
-        // starts_with on the full command (e.g., "git reset --hard").
-        let matches = if rule.pattern.contains(' ') {
-            full_cmd.starts_with(rule.pattern)
-        } else {
-            binary == rule.pattern
-        };
-        if matches {
-            if !rule.should_apply() {
-                continue;
-            }
-
-            return match &rule.action {
-                SafetyAction::Rewrite(new_cmd) => SafetyResult::Rewritten(new_cmd.clone()),
-                SafetyAction::Prepend(prefix) => {
-                    let new_cmd = format!("{} && {}", prefix, full_cmd);
-                    SafetyResult::Rewritten(new_cmd)
-                }
-                SafetyAction::SuggestTool(_tool) => {
-                    // The rule's human_msg/agent_msg already contains the full message
-                    // Do NOT append extra text (was causing duplicates)
-                    SafetyResult::Blocked(rule.message().to_string())
-                }
-                SafetyAction::Trash => {
-                    // Extract paths (skip flags like -rf, -f, -r, -i)
-                    let paths: Vec<String> = args
-                        .iter()
-                        .filter(|a| !a.starts_with('-'))
-                        .cloned()
-                        .collect();
-                    SafetyResult::TrashRequested(paths)
-                }
-            };
+    for rule in rules::load_all() {
+        if !rules::matches_rule(rule, Some(binary), &full_cmd) {
+            continue;
         }
+        if !rule.should_apply() {
+            continue;
+        }
+        return dispatch(rule, &args.join(" "));
     }
-
     SafetyResult::Safe
 }
 
-/// Check raw command string (for passthrough mode)
-/// This catches dangerous patterns even when we can't parse the command
+/// Check raw command string (for passthrough mode).
+/// Catches dangerous patterns even when we can't parse the command.
 pub fn check_raw(raw: &str) -> SafetyResult {
-    // Check if RTK_SAFE_COMMANDS is disabled (opt-out)
-    let safe_commands_disabled = std::env::var("RTK_SAFE_COMMANDS")
-        .map(|v| v == "0" || v == "false")
-        .unwrap_or(false);
-
-    if !safe_commands_disabled {
-        // Word-boundary check: split on whitespace and look for "rm" as a
-        // standalone token. This avoids false positives on "trim", "farm", etc.
-        let words: Vec<&str> = raw.split_whitespace().collect();
-        let has_rm = words.iter().any(|w| *w == "rm" || w.ends_with("/rm"));
-        if has_rm {
-            return SafetyResult::Blocked(
-                "Passthrough blocked: 'rm' detected. Use native mode for safe trash.".into(),
-            );
+    for rule in rules::load_all() {
+        if !rules::matches_rule(rule, None, raw) {
+            continue;
         }
-
-        // Check for sudo rm (scan all words after sudo, not just adjacent)
-        // Handles: sudo rm, sudo -u root rm, sudo --preserve-env rm
-        if let Some(sudo_pos) = words.iter().position(|w| *w == "sudo") {
-            if words[sudo_pos + 1..]
-                .iter()
-                .any(|w| *w == "rm" || w.ends_with("/rm"))
-            {
-                return SafetyResult::Blocked(
-                    "Passthrough blocked: 'sudo rm' detected. Use native mode for safe trash."
-                        .into(),
-                );
-            }
+        if !rule.should_apply() {
+            continue;
         }
+        // In passthrough, suggest_tool rules don't apply (cat in pipelines is valid)
+        if rule.action == "suggest_tool" {
+            continue;
+        }
+        // In passthrough, trash becomes block (can't extract paths reliably)
+        if rule.action == "trash" {
+            return SafetyResult::Blocked(format!(
+                "Passthrough blocked: '{}' detected. Use native mode for safe trash.",
+                rule.patterns.first().map(|s| s.as_str()).unwrap_or("rm")
+            ));
+        }
+        return dispatch(rule, raw);
     }
-
     SafetyResult::Safe
 }
 
@@ -534,20 +379,6 @@ mod tests {
             SafetyResult::Rewritten(_) => {}
             SafetyResult::TrashRequested(_) => {}
         }
-    }
-
-    // === RULE ORDERING TESTS ===
-
-    #[test]
-    fn test_rules_are_ordered() {
-        let _guard = EnvGuard::new();
-        let rules = get_rules();
-        // More specific patterns should come before less specific
-        let reset_idx = rules.iter().position(|r| r.pattern == "git reset --hard");
-        let checkout_idx = rules.iter().position(|r| r.pattern == "git checkout --");
-        // git reset --hard and git checkout -- should exist
-        assert!(reset_idx.is_some());
-        assert!(checkout_idx.is_some());
     }
 
     // === NEW GIT SAFETY TESTS ===

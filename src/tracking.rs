@@ -37,8 +37,15 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
-/// Number of days to retain tracking history before automatic cleanup.
-const HISTORY_DAYS: i64 = 90;
+/// Get history retention days from merged config (cached).
+fn history_days() -> i64 {
+    crate::config::get_merged().tracking.history_days as i64
+}
+
+/// Check if tracking is enabled via merged config.
+fn is_tracking_enabled() -> bool {
+    crate::config::get_merged().tracking.enabled
+}
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -312,7 +319,7 @@ impl Tracker {
     }
 
     fn cleanup_old(&self) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::days(HISTORY_DAYS);
+        let cutoff = Utc::now() - chrono::Duration::days(history_days());
         self.conn.execute(
             "DELETE FROM commands WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
@@ -678,19 +685,25 @@ impl Tracker {
 }
 
 fn get_db_path() -> Result<PathBuf> {
-    // Priority 1: Environment variable RTK_DB_PATH
-    if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {
-        return Ok(PathBuf::from(custom_path));
+    // Precedence (highest wins):
+    //   0. CLI params (--config-path, --config-add) — via get_merged()
+    //   1. env var (RTK_DB_PATH) — checked directly, not cached
+    //   2. project-local .rtk/config.toml
+    //   3. global ~/.config/rtk/config.toml
+    //   4. default platform-specific location
+    //
+    // Env var checked directly because get_merged() uses OnceLock (one-time init per process).
+    if let Ok(path) = std::env::var("RTK_DB_PATH") {
+        return Ok(PathBuf::from(path));
     }
 
-    // Priority 2: Configuration file
-    if let Ok(config) = crate::config::Config::load() {
-        if let Some(db_path) = config.tracking.database_path {
-            return Ok(db_path);
-        }
+    // Fall through to cached merged config for config-file-based path
+    let config = crate::config::get_merged();
+    if let Some(ref db_path) = config.tracking.database_path {
+        return Ok(db_path.clone());
     }
 
-    // Priority 3: Default platform-specific location
+    // Default platform-specific location
     let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     Ok(data_dir.join("rtk").join("history.db"))
 }
@@ -787,6 +800,9 @@ impl TimedExecution {
     /// timer.track("ls -la", "rtk ls", input, output);
     /// ```
     pub fn track(&self, original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+        if !is_tracking_enabled() {
+            return;
+        }
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
@@ -823,6 +839,9 @@ impl TimedExecution {
     /// timer.track_passthrough("git tag", "rtk git tag");
     /// ```
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
+        if !is_tracking_enabled() {
+            return;
+        }
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         // input_tokens=0, output_tokens=0 won't dilute savings statistics
         if let Ok(tracker) = Tracker::new() {
@@ -879,6 +898,9 @@ pub fn args_display(args: &[OsString]) -> String {
 /// ```
 #[deprecated(note = "Use TimedExecution instead")]
 pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
+    if !is_tracking_enabled() {
+        return;
+    }
     let input_tokens = estimate_tokens(input);
     let output_tokens = estimate_tokens(output);
 

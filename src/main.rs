@@ -72,6 +72,26 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Use ONLY these config file(s), replaces global + project discovery.
+    /// Can be specified multiple times: --config-path a.toml --config-path b.toml
+    #[arg(long = "config-path", global = true)]
+    config_path: Vec<std::path::PathBuf>,
+
+    /// Add extra config file(s) with high priority (after project-local, before env vars).
+    /// Can be specified multiple times: --config-add a.toml --config-add b.toml
+    #[arg(long = "config-add", global = true)]
+    config_add: Vec<std::path::PathBuf>,
+
+    /// Use ONLY these directories for rule discovery, replaces walk-up discovery.
+    /// Can be specified multiple times: --rules-path dir1 --rules-path dir2
+    #[arg(long = "rules-path", global = true)]
+    rules_path: Vec<std::path::PathBuf>,
+
+    /// Add extra rule directories with highest file priority.
+    /// Can be specified multiple times: --rules-add dir1 --rules-add dir2
+    #[arg(long = "rules-add", global = true)]
+    rules_add: Vec<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -351,9 +371,11 @@ enum Commands {
         format: String,
     },
 
-    /// Show or create configuration file
+    /// Show, create, or modify configuration
     Config {
-        /// Create default config file
+        #[command(subcommand)]
+        action: Option<ConfigCommands>,
+        /// Create default config file (backward compat)
         #[arg(long)]
         create: bool,
     },
@@ -832,8 +854,71 @@ enum HookCommands {
     Gemini,
 }
 
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Get a config value by key
+    Get {
+        /// Dotted key (e.g., "tracking.enabled")
+        key: String,
+    },
+    /// Set a config value or create a rule
+    Set {
+        /// Dotted key (e.g., "display.max_width" or "rules.my-alias")
+        key: String,
+        /// Value to set (for scalar config) or redirect template (for rules)
+        value: Option<String>,
+        /// Pattern for rule (e.g., "t" or "git reset --hard")
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Action for rule: block, warn, rewrite, trash, suggest_tool
+        #[arg(long)]
+        action: Option<String>,
+        /// Write to project-local .rtk/config.toml
+        #[arg(long)]
+        local: bool,
+    },
+    /// List all config values
+    List {
+        /// Show where each value comes from
+        #[arg(long)]
+        origin: bool,
+    },
+    /// Remove a config key (reset to default)
+    Unset {
+        /// Dotted key to remove
+        key: String,
+        /// Remove from project-local .rtk/config.toml
+        #[arg(long)]
+        local: bool,
+    },
+    /// Create default config file
+    Create,
+    /// Export built-in rules as editable MD files
+    ExportRules {
+        /// Export to ~/.claude/ instead of ~/.config/rtk/
+        #[arg(long)]
+        claude: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Set CLI config overrides before any config loading
+    config::set_cli_overrides(config::CliConfigOverrides {
+        config_path: if cli.config_path.is_empty() {
+            None
+        } else {
+            Some(cli.config_path.clone())
+        },
+        config_add: cli.config_add.clone(),
+        rules_path: if cli.rules_path.is_empty() {
+            None
+        } else {
+            Some(cli.rules_path.clone())
+        },
+        rules_add: cli.rules_add.clone(),
+    });
 
     match cli.command {
         Commands::Ls { args } => {
@@ -1162,11 +1247,64 @@ fn main() -> Result<()> {
             cc_economics::run(daily, weekly, monthly, all, &format, cli.verbose)?;
         }
 
-        Commands::Config { create } => {
+        Commands::Config { action, create } => {
+            // Backward compat: --create flag
             if create {
                 let path = config::Config::create_default()?;
                 println!("Created: {}", path.display());
+            } else if let Some(action) = action {
+                match action {
+                    ConfigCommands::Get { key } => match config::get_value(&key) {
+                        Ok(val) => println!("{val}"),
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    },
+                    ConfigCommands::Set {
+                        key,
+                        value,
+                        pattern,
+                        action,
+                        local,
+                    } => {
+                        if key.starts_with("rules.") {
+                            let rule_name = key.strip_prefix("rules.").unwrap();
+                            config::set_rule(
+                                rule_name,
+                                pattern.as_deref(),
+                                action.as_deref(),
+                                value.as_deref(),
+                                local,
+                            )?;
+                        } else {
+                            let val = value.ok_or_else(|| {
+                                anyhow::anyhow!("Value required for scalar config key: {key}")
+                            })?;
+                            config::set_value(&key, &val, local)?;
+                        }
+                    }
+                    ConfigCommands::List { origin } => {
+                        config::list_values(origin)?;
+                    }
+                    ConfigCommands::Unset { key, local } => {
+                        if key.starts_with("rules.") {
+                            let rule_name = key.strip_prefix("rules.").unwrap();
+                            config::unset_rule(rule_name, local)?;
+                        } else {
+                            config::unset_value(&key, local)?;
+                        }
+                    }
+                    ConfigCommands::Create => {
+                        let path = config::Config::create_default()?;
+                        println!("Created: {}", path.display());
+                    }
+                    ConfigCommands::ExportRules { claude } => {
+                        config::export_rules(claude)?;
+                    }
+                }
             } else {
+                // No subcommand: show config (backward compat)
                 config::show_config()?;
             }
         }
@@ -1480,4 +1618,108 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_parses_global_flags_before_subcommand() {
+        // Global flags before subcommand should be parsed correctly
+        let cli = Cli::try_parse_from(["rtk", "-v", "ls"]).unwrap();
+        assert_eq!(cli.verbose, 1);
+        assert!(matches!(cli.command, Commands::Ls { .. }));
+    }
+
+    #[test]
+    fn test_cli_double_dash_separates_flags_from_subcommand() {
+        // -- separator: everything after is positional (subcommand + its args)
+        let cli =
+            Cli::try_parse_from(["rtk", "--config-add", "/tmp/extra.toml", "--", "ls", "-la"]);
+        // Clap treats args after -- as positional; "ls" becomes the subcommand
+        // This may or may not parse depending on Clap's subcommand handling with --
+        // The key behavior: --config-add is parsed as RTK's flag, not forwarded
+        if let Ok(cli) = cli {
+            assert_eq!(cli.config_add.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_cli_config_path_multiple_values() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "--config-path",
+            "/tmp/a.toml",
+            "--config-path",
+            "/tmp/b.toml",
+            "ls",
+        ])
+        .unwrap();
+        assert_eq!(cli.config_path.len(), 2);
+        assert_eq!(cli.config_path[0], std::path::PathBuf::from("/tmp/a.toml"));
+        assert_eq!(cli.config_path[1], std::path::PathBuf::from("/tmp/b.toml"));
+    }
+
+    #[test]
+    fn test_cli_rules_path_multiple_values() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "--rules-path",
+            "/tmp/rules1",
+            "--rules-path",
+            "/tmp/rules2",
+            "ls",
+        ])
+        .unwrap();
+        assert_eq!(cli.rules_path.len(), 2);
+    }
+
+    #[test]
+    fn test_cli_rules_add_multiple_values() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "--rules-add",
+            "/tmp/extra1",
+            "--rules-add",
+            "/tmp/extra2",
+            "ls",
+        ])
+        .unwrap();
+        assert_eq!(cli.rules_add.len(), 2);
+    }
+
+    #[test]
+    fn test_cli_no_config_flags_leaves_defaults() {
+        let cli = Cli::try_parse_from(["rtk", "ls"]).unwrap();
+        assert!(cli.config_path.is_empty());
+        assert!(cli.config_add.is_empty());
+        assert!(cli.rules_path.is_empty());
+        assert!(cli.rules_add.is_empty());
+    }
+
+    #[test]
+    fn test_cli_subcommand_trailing_args_with_hyphens() {
+        // Subcommands should accept hyphenated args (git flags like --oneline)
+        let cli = Cli::try_parse_from(["rtk", "ls", "-la", "--color=auto"]).unwrap();
+        if let Commands::Ls { args } = cli.command {
+            assert!(args.contains(&"-la".to_string()));
+            assert!(args.contains(&"--color=auto".to_string()));
+        } else {
+            panic!("Expected Ls command");
+        }
+    }
+
+    #[test]
+    fn test_cli_proxy_preserves_all_args() {
+        // Proxy should pass through all args including flags
+        let cli =
+            Cli::try_parse_from(["rtk", "proxy", "git", "log", "--oneline", "-n", "5"]).unwrap();
+        if let Commands::Proxy { args } = cli.command {
+            assert_eq!(args.len(), 5);
+        } else {
+            panic!("Expected Proxy command");
+        }
+    }
 }

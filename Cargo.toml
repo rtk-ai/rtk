@@ -29,6 +29,7 @@ thiserror = "1.0"
 tempfile = "3"
 trash = "5"      # Built-in trash (cross-platform)
 which = "7"      # Find binaries in PATH (for exec module)
+serde_yaml = "0.9"  # YAML frontmatter in rule MD files
 
 [dev-dependencies]
 

@@ -47,6 +47,18 @@ pub fn execute(raw: &str, verbose: u8) -> Result<bool> {
 }
 
 fn execute_inner(raw: &str, verbose: u8) -> Result<bool> {
+    // === STEP 0: Remap expansion (aliases like "t" → "cargo test") ===
+    if let Some(expanded) = crate::config::rules::try_remap(raw) {
+        if verbose > 0 {
+            eprintln!(
+                "rtk remap: {} → {}",
+                raw.split_whitespace().next().unwrap_or(raw),
+                expanded
+            );
+        }
+        return execute_inner(&expanded, verbose);
+    }
+
     let tokens = lexer::tokenize(raw);
 
     // === STEP 1: Decide Native vs Passthrough ===
