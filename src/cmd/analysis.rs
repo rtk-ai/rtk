@@ -1,19 +1,22 @@
 //! Analyzes tokens to decide: Native execution or Passthrough?
 
-use super::lexer::{ParsedToken, TokenKind, strip_quotes};
+use super::lexer::{strip_quotes, ParsedToken, TokenKind};
 
 /// Represents a single command in a chain
 #[derive(Debug, Clone, PartialEq)]
 pub struct NativeCommand {
     pub binary: String,
     pub args: Vec<String>,
-    pub operator: Option<String>,  // &&, ||, ;, or None for last command
+    pub operator: Option<String>, // &&, ||, ;, or None for last command
 }
 
 /// Check if command needs real shell (has shellisms, pipes, redirects)
 pub fn needs_shell(tokens: &[ParsedToken]) -> bool {
     tokens.iter().any(|t| {
-        matches!(t.kind, TokenKind::Shellism | TokenKind::Pipe | TokenKind::Redirect)
+        matches!(
+            t.kind,
+            TokenKind::Shellism | TokenKind::Pipe | TokenKind::Redirect
+        )
     })
 }
 
@@ -31,7 +34,10 @@ pub fn parse_chain(tokens: Vec<ParsedToken>) -> Result<Vec<NativeCommand>, Strin
             }
             TokenKind::Operator => {
                 if current_args.is_empty() {
-                    return Err(format!("Syntax error: operator {} with no command", token.value));
+                    return Err(format!(
+                        "Syntax error: operator {} with no command",
+                        token.value
+                    ));
                 }
                 // First arg is the binary, rest are args
                 let binary = current_args.remove(0);
@@ -45,7 +51,10 @@ pub fn parse_chain(tokens: Vec<ParsedToken>) -> Result<Vec<NativeCommand>, Strin
             TokenKind::Pipe | TokenKind::Redirect | TokenKind::Shellism => {
                 // Should not reach here if needs_shell() was checked first
                 // But handle gracefully
-                return Err(format!("Unexpected {:?} in native mode - use passthrough", token.kind));
+                return Err(format!(
+                    "Unexpected {:?} in native mode - use passthrough",
+                    token.kind
+                ));
             }
         }
     }

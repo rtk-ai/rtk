@@ -8,7 +8,7 @@ pub fn has_unstaged_changes() -> bool {
     Command::new("git")
         .args(["diff", "--quiet"])
         .status()
-        .map(|s| !s.success())  // git diff --quiet returns 1 if changes exist
+        .map(|s| !s.success()) // git diff --quiet returns 1 if changes exist
         .unwrap_or(false)
 }
 

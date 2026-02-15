@@ -563,7 +563,6 @@ fn clean_double_blanks(content: &str) -> String {
         if line.trim().is_empty() {
             // Count consecutive blank lines
             let mut blank_count = 0;
-            let _start = i;
             while i < lines.len() && lines[i].trim().is_empty() {
                 blank_count += 1;
                 i += 1;
@@ -982,8 +981,12 @@ fn remove_gemini_hook_from_json(root: &mut serde_json::Value) -> bool {
 /// Orchestrator: patch Gemini settings.json with RTK hook
 fn patch_gemini_settings(mode: PatchMode, verbose: u8) -> Result<PatchResult> {
     let gemini_dir = resolve_gemini_dir()?;
-    fs::create_dir_all(&gemini_dir)
-        .with_context(|| format!("Failed to create Gemini directory: {}", gemini_dir.display()))?;
+    fs::create_dir_all(&gemini_dir).with_context(|| {
+        format!(
+            "Failed to create Gemini directory: {}",
+            gemini_dir.display()
+        )
+    })?;
 
     let settings_path = gemini_dir.join("settings.json");
 

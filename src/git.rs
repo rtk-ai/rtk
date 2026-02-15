@@ -307,9 +307,9 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
     });
 
     // Check if user provided limit flag
-    let has_limit_flag = args.iter().any(|arg| {
-        arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
-    });
+    let has_limit_flag = args
+        .iter()
+        .any(|arg| arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()));
 
     // Apply RTK defaults only if user didn't specify them
     if !has_format_flag {

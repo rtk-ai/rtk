@@ -3,17 +3,17 @@
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TokenKind {
-    Arg,           // Regular argument
-    Operator,      // &&, ||, ;
-    Pipe,          // |
-    Redirect,      // >, >>, <, 2>
-    Shellism,      // *, $, `, (, ), {, } - forces passthrough
+    Arg,      // Regular argument
+    Operator, // &&, ||, ;
+    Pipe,     // |
+    Redirect, // >, >>, <, 2>
+    Shellism, // *, $, `, (, ), {, } - forces passthrough
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedToken {
     pub kind: TokenKind,
-    pub value: String,   // The actual string value
+    pub value: String, // The actual string value
 }
 
 /// Tokenize input with quote awareness.
@@ -23,7 +23,7 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
     let mut current = String::new();
     let mut chars = input.chars().peekable();
 
-    let mut quote: Option<char> = None;  // None, Some('\''), Some('"')
+    let mut quote: Option<char> = None; // None, Some('\''), Some('"')
     let mut escaped = false;
 
     while let Some(c) = chars.next() {
@@ -42,7 +42,7 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
         // Handle quotes
         if let Some(q) = quote {
             if c == q {
-                quote = None;  // Close quote
+                quote = None; // Close quote
             }
             current.push(c);
             continue;
@@ -55,8 +55,8 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
 
         // Outside quotes - handle operators and shellisms
         match c {
-            // Shellisms force passthrough
-            '*' | '?' | '$' | '`' | '(' | ')' | '{' | '}' => {
+            // Shellisms force passthrough (includes ! for history expansion/negation)
+            '*' | '?' | '$' | '`' | '(' | ')' | '{' | '}' | '!' => {
                 flush_arg(&mut tokens, &mut current);
                 tokens.push(ParsedToken {
                     kind: TokenKind::Shellism,
@@ -78,6 +78,7 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 let kind = match op.as_str() {
                     "&&" | "||" | ";" => TokenKind::Operator,
                     "|" => TokenKind::Pipe,
+                    "&" => TokenKind::Shellism, // Background job needs real shell
                     _ => TokenKind::Redirect,
                 };
                 tokens.push(ParsedToken { kind, value: op });
@@ -111,10 +112,11 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String) {
 pub fn strip_quotes(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() >= 2
-        && ((chars[0] == '"' && chars[chars.len()-1] == '"') ||
-           (chars[0] == '\'' && chars[chars.len()-1] == '\'')) {
-            return chars[1..chars.len()-1].iter().collect();
-        }
+        && ((chars[0] == '"' && chars[chars.len() - 1] == '"')
+            || (chars[0] == '\'' && chars[chars.len() - 1] == '\''))
+    {
+        return chars[1..chars.len() - 1].iter().collect();
+    }
     s.to_string()
 }
 
@@ -149,9 +151,9 @@ mod tests {
     fn test_quoted_operator_not_split() {
         let tokens = tokenize(r#"git commit -m "Fix && Bug""#);
         // && inside quotes should NOT be an Operator token
-        assert!(!tokens.iter().any(|t|
-            matches!(t.kind, TokenKind::Operator) && t.value == "&&"
-        ));
+        assert!(!tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Operator) && t.value == "&&"));
         assert!(tokens.iter().any(|t| t.value.contains("Fix && Bug")));
     }
 
@@ -273,31 +275,32 @@ mod tests {
     #[test]
     fn test_and_operator() {
         let tokens = tokenize("cmd1 && cmd2");
-        assert!(tokens.iter().any(|t|
-            matches!(t.kind, TokenKind::Operator) && t.value == "&&"
-        ));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Operator) && t.value == "&&"));
     }
 
     #[test]
     fn test_or_operator() {
         let tokens = tokenize("cmd1 || cmd2");
-        assert!(tokens.iter().any(|t|
-            matches!(t.kind, TokenKind::Operator) && t.value == "||"
-        ));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Operator) && t.value == "||"));
     }
 
     #[test]
     fn test_semicolon() {
         let tokens = tokenize("cmd1 ; cmd2");
-        assert!(tokens.iter().any(|t|
-            matches!(t.kind, TokenKind::Operator) && t.value == ";"
-        ));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Operator) && t.value == ";"));
     }
 
     #[test]
     fn test_multiple_and() {
         let tokens = tokenize("a && b && c");
-        let ops: Vec<_> = tokens.iter()
+        let ops: Vec<_> = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Operator))
             .collect();
         assert_eq!(ops.len(), 2);
@@ -306,7 +309,8 @@ mod tests {
     #[test]
     fn test_mixed_operators() {
         let tokens = tokenize("a && b || c");
-        let ops: Vec<_> = tokens.iter()
+        let ops: Vec<_> = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Operator))
             .collect();
         assert_eq!(ops.len(), 2);
@@ -343,7 +347,8 @@ mod tests {
     #[test]
     fn test_multiple_pipes() {
         let tokens = tokenize("a | b | c");
-        let pipes: Vec<_> = tokens.iter()
+        let pipes: Vec<_> = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Pipe))
             .collect();
         assert_eq!(pipes.len(), 2);
@@ -391,7 +396,8 @@ mod tests {
     fn test_subshell_detection() {
         let tokens = tokenize("echo $(date)");
         // Both $ and ( should be shellisms
-        let shellisms: Vec<_> = tokens.iter()
+        let shellisms: Vec<_> = tokens
+            .iter()
             .filter(|t| matches!(t.kind, TokenKind::Shellism))
             .collect();
         assert!(!shellisms.is_empty());
@@ -407,9 +413,9 @@ mod tests {
     fn test_escaped_glob() {
         let tokens = tokenize("echo \\*.txt");
         // Escaped glob should not be a shellism
-        assert!(!tokens.iter().any(|t|
-            matches!(t.kind, TokenKind::Shellism) && t.value == "*"
-        ));
+        assert!(!tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Shellism) && t.value == "*"));
     }
 
     // === REDIRECT TESTS ===
@@ -423,9 +429,9 @@ mod tests {
     #[test]
     fn test_redirect_append() {
         let tokens = tokenize("cmd >> file");
-        assert!(tokens.iter().any(|t|
-            matches!(t.kind, TokenKind::Redirect) && t.value == ">>"
-        ));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Redirect) && t.value == ">>"));
     }
 
     #[test]
@@ -440,4 +446,29 @@ mod tests {
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Redirect)));
     }
 
+    // === EXCLAMATION / NEGATION TESTS ===
+
+    #[test]
+    fn test_exclamation_is_shellism() {
+        let tokens = tokenize("if ! grep -q pattern file; then echo missing; fi");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Shellism) && t.value == "!"),
+            "! (negation) must be Shellism"
+        );
+    }
+
+    // === BACKGROUND JOB TESTS ===
+
+    #[test]
+    fn test_background_job_is_shellism() {
+        let tokens = tokenize("sleep 10 &");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Shellism) && t.value == "&"),
+            "Single & (background job) must be Shellism, not Redirect"
+        );
+    }
 }

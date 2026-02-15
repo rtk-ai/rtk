@@ -6,10 +6,10 @@
 //! Input: JSON on stdin with hook_event_name, tool_name, tool_input
 //! Output: JSON on stdout with decision, reason, hookSpecificOutput
 
+use super::hook::{check_for_hook, HookResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Read};
-use super::hook::{HookResult, check_for_hook};
 
 #[derive(Deserialize)]
 struct GeminiPayload {
@@ -36,9 +36,7 @@ struct HookSpecificOutput {
 /// Tool names that represent shell command execution in Gemini CLI
 fn is_shell_tool(name: &str) -> bool {
     // Gemini CLI built-in shell tool, plus common MCP patterns
-    name == "run_shell_command"
-        || name == "shell"
-        || name.ends_with("__run_shell_command")
+    name == "run_shell_command" || name == "shell" || name.ends_with("__run_shell_command")
 }
 
 /// Run the Gemini hook handler
@@ -63,8 +61,8 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     // Only intercept shell execution tools
-    let _tool_name = match &payload.tool_name {
-        Some(name) if is_shell_tool(name) => name.clone(),
+    match &payload.tool_name {
+        Some(name) if is_shell_tool(name) => {}
         _ => {
             println!(r#"{{"decision": "allow"}}"#);
             return Ok(());
@@ -73,12 +71,11 @@ pub fn run() -> anyhow::Result<()> {
 
     // Extract the command string from tool_input
     let cmd = match &payload.tool_input {
-        Some(input) => {
-            input.get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        }
+        Some(input) => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         None => {
             println!(r#"{{"decision": "allow"}}"#);
             return Ok(());
@@ -95,34 +92,26 @@ pub fn run() -> anyhow::Result<()> {
 
     let response = match decision {
         HookResult::Rewrite(new_cmd) => {
-            if new_cmd == cmd {
-                GeminiResponse {
-                    decision: "allow".into(),
-                    reason: None,
-                    hook_specific_output: None,
-                }
-            } else {
-                // Build modified tool_input, preserving other fields
-                let mut new_input = payload.tool_input.unwrap_or(Value::Object(Default::default()));
-                if let Some(obj) = new_input.as_object_mut() {
-                    obj.insert("command".into(), Value::String(new_cmd));
-                }
-                GeminiResponse {
-                    decision: "allow".into(),
-                    reason: Some("RTK applied safety optimizations.".into()),
-                    hook_specific_output: Some(HookSpecificOutput {
-                        tool_input: new_input,
-                    }),
-                }
+            // Build modified tool_input, preserving other fields
+            let mut new_input = payload
+                .tool_input
+                .unwrap_or(Value::Object(Default::default()));
+            if let Some(obj) = new_input.as_object_mut() {
+                obj.insert("command".into(), Value::String(new_cmd));
             }
-        }
-        HookResult::Blocked(msg) => {
             GeminiResponse {
-                decision: "deny".into(),
-                reason: Some(msg),
-                hook_specific_output: None,
+                decision: "allow".into(),
+                reason: Some("RTK applied safety optimizations.".into()),
+                hook_specific_output: Some(HookSpecificOutput {
+                    tool_input: new_input,
+                }),
             }
         }
+        HookResult::Blocked(msg) => GeminiResponse {
+            decision: "deny".into(),
+            reason: Some(msg),
+            hook_specific_output: None,
+        },
     };
 
     println!("{}", serde_json::to_string(&response)?);
@@ -153,7 +142,10 @@ mod tests {
         // Verify the old wrong field name does NOT populate our struct
         let wrong_json = r#"{"type": "BeforeTool", "tool_name": "run_shell_command"}"#;
         let payload: GeminiPayload = serde_json::from_str(wrong_json).unwrap();
-        assert_eq!(payload.hook_event_name, None, "\"type\" must not be accepted as event name");
+        assert_eq!(
+            payload.hook_event_name, None,
+            "\"type\" must not be accepted as event name"
+        );
     }
 
     #[test]
@@ -193,8 +185,14 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
 
-        assert!(parsed.get("decision").is_some(), "must have 'decision' field");
-        assert!(parsed.get("result").is_none(), "must NOT have 'result' field");
+        assert!(
+            parsed.get("decision").is_some(),
+            "must have 'decision' field"
+        );
+        assert!(
+            parsed.get("result").is_none(),
+            "must NOT have 'result' field"
+        );
     }
 
     #[test]
@@ -209,7 +207,10 @@ mod tests {
         let parsed: Value = serde_json::from_str(&json).unwrap();
 
         assert!(parsed.get("reason").is_some(), "must have 'reason' field");
-        assert!(parsed.get("message").is_none(), "must NOT have 'message' field");
+        assert!(
+            parsed.get("message").is_none(),
+            "must NOT have 'message' field"
+        );
     }
 
     #[test]
@@ -225,8 +226,14 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
 
-        assert!(parsed.get("hookSpecificOutput").is_some(), "must have 'hookSpecificOutput' field");
-        assert!(parsed.get("modified_input").is_none(), "must NOT have 'modified_input' field");
+        assert!(
+            parsed.get("hookSpecificOutput").is_some(),
+            "must have 'hookSpecificOutput' field"
+        );
+        assert!(
+            parsed.get("modified_input").is_none(),
+            "must NOT have 'modified_input' field"
+        );
     }
 
     #[test]
@@ -242,8 +249,10 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed["hookSpecificOutput"]["tool_input"]["command"],
-            "rtk run -c 'git status'");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["tool_input"]["command"],
+            "rtk run -c 'git status'"
+        );
     }
 
     #[test]
@@ -255,7 +264,10 @@ mod tests {
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(!json.contains("reason"), "reason must be omitted when None");
-        assert!(!json.contains("hookSpecificOutput"), "hookSpecificOutput must be omitted when None");
+        assert!(
+            !json.contains("hookSpecificOutput"),
+            "hookSpecificOutput must be omitted when None"
+        );
     }
 
     #[test]
@@ -295,8 +307,11 @@ mod tests {
                 tool
             );
             let payload: GeminiPayload = serde_json::from_str(&json).unwrap();
-            assert!(!is_shell_tool(payload.tool_name.as_deref().unwrap()),
-                "tool '{}' must not be treated as shell tool", tool);
+            assert!(
+                !is_shell_tool(payload.tool_name.as_deref().unwrap()),
+                "tool '{}' must not be treated as shell tool",
+                tool
+            );
         }
     }
 
@@ -328,7 +343,10 @@ mod tests {
 
         let mut new_input = original_input.clone();
         if let Some(obj) = new_input.as_object_mut() {
-            obj.insert("command".into(), Value::String("rtk run -c 'git status'".into()));
+            obj.insert(
+                "command".into(),
+                Value::String("rtk run -c 'git status'".into()),
+            );
         }
 
         assert_eq!(new_input["timeout"], 30);
@@ -355,13 +373,7 @@ mod tests {
 
     #[test]
     fn test_malformed_json_does_not_panic() {
-        let bad_inputs = [
-            "",
-            "not json",
-            "{}",
-            r#"{"hook_event_name": 42}"#,
-            "null",
-        ];
+        let bad_inputs = ["", "not json", "{}", r#"{"hook_event_name": 42}"#, "null"];
         for input in bad_inputs {
             // Should not panic, just return Err or deserialize to defaults
             let _ = serde_json::from_str::<GeminiPayload>(input);

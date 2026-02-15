@@ -10,9 +10,6 @@
 //! - `src/grep_cmd.rs` — code search (grep, ripgrep)
 //! - `src/pnpm_cmd.rs` — package managers
 
-use std::io::Read;
-use std::process::{ChildStderr, ChildStdout};
-
 use crate::utils;
 
 /// Filter types for different command categories
@@ -40,20 +37,6 @@ pub fn get_filter_type(binary: &str) -> FilterType {
     }
 }
 
-/// Apply token reduction to child process streams.
-/// Reads stdout/stderr to strings, then delegates to `apply_to_string`.
-pub fn apply(
-    filter: FilterType,
-    stdout: &mut ChildStdout,
-    stderr: &mut ChildStderr,
-) -> anyhow::Result<(String, String)> {
-    let mut out = String::new();
-    let mut err = String::new();
-    stdout.read_to_string(&mut out)?;
-    stderr.read_to_string(&mut err)?;
-    Ok((apply_to_string(filter, &out), utils::strip_ansi(&err)))
-}
-
 /// Apply filter to already-captured string output
 pub fn apply_to_string(filter: FilterType, output: &str) -> String {
     match filter {
@@ -72,9 +55,7 @@ fn filter_cargo_output(output: &str) -> String {
         .lines()
         .filter(|line| {
             let line = line.trim();
-            !line.starts_with("Compiling ") ||
-            line.contains("error") ||
-            line.contains("warning")
+            !line.starts_with("Compiling ") || line.contains("error") || line.contains("warning")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -86,12 +67,12 @@ fn filter_test_output(output: &str) -> String {
         .lines()
         .filter(|line| {
             let line = line.trim();
-            line.contains("FAILED") ||
-            line.contains("error") ||
-            line.contains("Error") ||
-            line.contains("failed") ||
-            line.contains("test result:") ||
-            line.starts_with("----")
+            line.contains("FAILED")
+                || line.contains("error")
+                || line.contains("Error")
+                || line.contains("failed")
+                || line.contains("test result:")
+                || line.starts_with("----")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -104,7 +85,11 @@ fn truncate_lines(output: &str, max_lines: usize) -> String {
         output.to_string()
     } else {
         let truncated: Vec<&str> = lines.iter().take(max_lines).copied().collect();
-        format!("{}\n... ({} more lines)", truncated.join("\n"), lines.len() - max_lines)
+        format!(
+            "{}\n... ({} more lines)",
+            truncated.join("\n"),
+            lines.len() - max_lines
+        )
     }
 }
 

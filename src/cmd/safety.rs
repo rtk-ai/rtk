@@ -102,16 +102,22 @@ pub enum SafetyResult {
 macro_rules! rule {
     ($pat:expr, $act:expr, $human:expr, $agent:expr, env: $env:expr) => {
         SafetyRule {
-            pattern: $pat, action: $act,
-            human_msg: $human, agent_msg: $agent,
-            predicate: None, env_var: Some($env),
+            pattern: $pat,
+            action: $act,
+            human_msg: $human,
+            agent_msg: $agent,
+            predicate: None,
+            env_var: Some($env),
         }
     };
     ($pat:expr, $act:expr, $human:expr, $agent:expr, pred: $pred:expr, env: $env:expr) => {
         SafetyRule {
-            pattern: $pat, action: $act,
-            human_msg: $human, agent_msg: $agent,
-            predicate: Some($pred), env_var: Some($env),
+            pattern: $pat,
+            action: $act,
+            human_msg: $human,
+            agent_msg: $agent,
+            predicate: Some($pred),
+            env_var: Some($env),
         }
     };
 }
@@ -133,7 +139,6 @@ pub fn get_rules() -> Vec<SafetyRule> {
         rule!("rm", SafetyAction::Trash,
             "Safety: Moving to trash.", "REWRITE: rm -> trash",
             env: "RTK_SAFE_COMMANDS"),
-
         // === DANGEROUS GIT OPERATIONS (most specific patterns first) ===
         rule!("git reset --hard", stash_reset,
             "Safety: Stashing before reset.", "PREPEND: git stash",
@@ -156,16 +161,20 @@ pub fn get_rules() -> Vec<SafetyRule> {
         rule!("git clean -f", stash_clean,
             "Safety: Stashing untracked before clean.", "PREPEND: git stash -u",
             env: "RTK_SAFE_COMMANDS"),
-
         // === TOKEN WASTE PREVENTION (block and suggest internal tools) ===
+        // Messages use generic descriptions so both Claude Code ("Read tool")
+        // and Gemini CLI ("read_file") agents understand the suggestion.
         rule!("cat", SafetyAction::SuggestTool("Read".into()),
-            "Use the **Read tool** for large files.", "BLOCK: cat wastes tokens. Use Read tool.",
+            "Use the **Read tool** for large files.",
+            "BLOCK: cat wastes tokens. Use your file-reading tool instead.",
             env: "RTK_BLOCK_TOKEN_WASTE"),
         rule!("sed", SafetyAction::SuggestTool("Edit".into()),
-            "Use the **Edit tool** for validated file modifications.", "BLOCK: sed unsafe. Use Edit tool.",
+            "Use the **Edit tool** for validated file modifications.",
+            "BLOCK: sed unsafe. Use your file-editing tool instead.",
             env: "RTK_BLOCK_TOKEN_WASTE"),
         rule!("head", SafetyAction::SuggestTool("Read (with limit)".into()),
-            "Use **Read tool with limit parameter** instead of head.", "BLOCK: head wastes tokens. Use Read tool.",
+            "Use **Read tool with limit parameter** instead of head.",
+            "BLOCK: head wastes tokens. Use your file-reading tool with a line limit instead.",
             env: "RTK_BLOCK_TOKEN_WASTE"),
     ]
 }
@@ -193,10 +202,7 @@ pub fn check(binary: &str, args: &[String]) -> SafetyResult {
             }
 
             return match &rule.action {
-                SafetyAction::Rewrite(template) => {
-                    let new_cmd = template.replace("{args}", &args.join(" "));
-                    SafetyResult::Rewritten(new_cmd)
-                }
+                SafetyAction::Rewrite(new_cmd) => SafetyResult::Rewritten(new_cmd.clone()),
                 SafetyAction::Prepend(prefix) => {
                     let new_cmd = format!("{} && {}", prefix, full_cmd);
                     SafetyResult::Rewritten(new_cmd)
@@ -208,7 +214,8 @@ pub fn check(binary: &str, args: &[String]) -> SafetyResult {
                 }
                 SafetyAction::Trash => {
                     // Extract paths (skip flags like -rf, -f, -r, -i)
-                    let paths: Vec<String> = args.iter()
+                    let paths: Vec<String> = args
+                        .iter()
                         .filter(|a| !a.starts_with('-'))
                         .cloned()
                         .collect();
@@ -236,15 +243,22 @@ pub fn check_raw(raw: &str) -> SafetyResult {
         let has_rm = words.iter().any(|w| *w == "rm" || w.ends_with("/rm"));
         if has_rm {
             return SafetyResult::Blocked(
-                "Passthrough blocked: 'rm' detected. Use native mode for safe trash.".into()
+                "Passthrough blocked: 'rm' detected. Use native mode for safe trash.".into(),
             );
         }
 
-        // Check for sudo rm
-        if words.windows(2).any(|w| w[0] == "sudo" && (w[1] == "rm" || w[1].ends_with("/rm"))) {
-            return SafetyResult::Blocked(
-                "Passthrough blocked: 'sudo rm' detected. Use native mode for safe trash.".into()
-            );
+        // Check for sudo rm (scan all words after sudo, not just adjacent)
+        // Handles: sudo rm, sudo -u root rm, sudo --preserve-env rm
+        if let Some(sudo_pos) = words.iter().position(|w| *w == "sudo") {
+            if words[sudo_pos + 1..]
+                .iter()
+                .any(|w| *w == "rm" || w.ends_with("/rm"))
+            {
+                return SafetyResult::Blocked(
+                    "Passthrough blocked: 'sudo rm' detected. Use native mode for safe trash."
+                        .into(),
+                );
+            }
         }
     }
 
@@ -254,8 +268,8 @@ pub fn check_raw(raw: &str) -> SafetyResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use crate::cmd::test_helpers::EnvGuard;
+    use std::env;
 
     // === BASIC CHECK TESTS ===
 
@@ -337,7 +351,14 @@ mod tests {
     fn test_check_rm_multiple_files() {
         let _guard = EnvGuard::new();
         env::set_var("RTK_SAFE_COMMANDS", "1");
-        let result = check("rm", &["a.txt".to_string(), "b.txt".to_string(), "c.txt".to_string()]);
+        let result = check(
+            "rm",
+            &[
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "c.txt".to_string(),
+            ],
+        );
         match result {
             SafetyResult::TrashRequested(paths) => {
                 assert_eq!(paths, vec!["a.txt", "b.txt", "c.txt"]);
@@ -369,7 +390,7 @@ mod tests {
         let result = check("cat", &["file.txt".to_string()]);
         match result {
             SafetyResult::Blocked(msg) => {
-                assert!(msg.contains("Read"));
+                assert!(msg.contains("file-reading"), "msg: {}", msg);
             }
             _ => panic!("Expected Blocked"),
         }
@@ -390,7 +411,7 @@ mod tests {
         let result = check("sed", &["-i".to_string(), "s/old/new/g".to_string()]);
         match result {
             SafetyResult::Blocked(msg) => {
-                assert!(msg.contains("Edit"));
+                assert!(msg.contains("file-editing"), "msg: {}", msg);
             }
             _ => panic!("Expected Blocked"),
         }
@@ -399,10 +420,13 @@ mod tests {
     #[test]
     fn test_check_head_blocked() {
         let _guard = EnvGuard::new();
-        let result = check("head", &["-n".to_string(), "10".to_string(), "file.txt".to_string()]);
+        let result = check(
+            "head",
+            &["-n".to_string(), "10".to_string(), "file.txt".to_string()],
+        );
         match result {
             SafetyResult::Blocked(msg) => {
-                assert!(msg.contains("Read"));
+                assert!(msg.contains("file-reading"), "msg: {}", msg);
             }
             _ => panic!("Expected Blocked"),
         }
@@ -482,6 +506,16 @@ mod tests {
     }
 
     #[test]
+    fn test_check_raw_sudo_flags_rm_detected() {
+        let _guard = EnvGuard::new();
+        let result = check_raw("sudo -u root rm file.txt");
+        match result {
+            SafetyResult::Blocked(_) => {}
+            _ => panic!("Expected Blocked for sudo -u root rm"),
+        }
+    }
+
+    #[test]
     fn test_check_raw_safe_command() {
         let _guard = EnvGuard::new();
         let result = check_raw("ls -la");
@@ -536,7 +570,14 @@ mod tests {
     #[test]
     fn test_git_checkout_dashdash_stash_prepended() {
         let _guard = EnvGuard::new();
-        let result = check("git", &["checkout".to_string(), "--".to_string(), "file.txt".to_string()]);
+        let result = check(
+            "git",
+            &[
+                "checkout".to_string(),
+                "--".to_string(),
+                "file.txt".to_string(),
+            ],
+        );
         match result {
             SafetyResult::Rewritten(cmd) => {
                 assert!(cmd.contains("stash"));
@@ -583,7 +624,14 @@ mod tests {
     #[test]
     fn test_git_checkout_new_branch_safe() {
         let _guard = EnvGuard::new();
-        let result = check("git", &["checkout".to_string(), "-b".to_string(), "feature".to_string()]);
+        let result = check(
+            "git",
+            &[
+                "checkout".to_string(),
+                "-b".to_string(),
+                "feature".to_string(),
+            ],
+        );
         assert_eq!(result, SafetyResult::Safe);
     }
 
@@ -593,7 +641,11 @@ mod tests {
     fn test_no_false_positive_catalog() {
         let _guard = EnvGuard::new();
         let result = check("catalog", &["show".to_string()]);
-        assert_eq!(result, SafetyResult::Safe, "catalog must not match cat rule");
+        assert_eq!(
+            result,
+            SafetyResult::Safe,
+            "catalog must not match cat rule"
+        );
     }
 
     #[test]
@@ -607,7 +659,11 @@ mod tests {
     fn test_no_false_positive_headless() {
         let _guard = EnvGuard::new();
         let result = check("headless", &["chrome".to_string()]);
-        assert_eq!(result, SafetyResult::Safe, "headless must not match head rule");
+        assert_eq!(
+            result,
+            SafetyResult::Safe,
+            "headless must not match head rule"
+        );
     }
 
     #[test]
@@ -642,7 +698,10 @@ mod tests {
         let _guard = EnvGuard::new();
         std::env::set_var("RTK_SAFE_COMMANDS", "1");
         let result = check_raw("rm file.txt");
-        assert!(matches!(result, SafetyResult::Blocked(_)), "standalone rm must be caught");
+        assert!(
+            matches!(result, SafetyResult::Blocked(_)),
+            "standalone rm must be caught"
+        );
         std::env::remove_var("RTK_SAFE_COMMANDS");
     }
 }

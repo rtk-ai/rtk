@@ -4,7 +4,8 @@ use anyhow::Result;
 use std::path::Path;
 
 pub fn execute(paths: &[String]) -> Result<bool> {
-    let expanded: Vec<String> = paths.iter()
+    let expanded: Vec<String> = paths
+        .iter()
         .filter(|p| !p.is_empty())
         .map(|p| super::predicates::expand_tilde(p))
         .collect();
@@ -14,8 +15,8 @@ pub fn execute(paths: &[String]) -> Result<bool> {
         return Ok(false);
     }
 
-    let (existing, missing): (Vec<_>, Vec<_>) = expanded.iter()
-        .partition(|p| Path::new(p).exists());
+    let (existing, missing): (Vec<_>, Vec<_>) =
+        expanded.iter().partition(|p| Path::new(p).exists());
 
     // Report missing like rm does
     for p in &missing {
@@ -47,18 +48,29 @@ mod tests {
         fs::write(&p, "x").unwrap();
         p
     }
-    fn rm(p: &PathBuf) { let _ = fs::remove_file(p); }
+    fn rm(p: &PathBuf) {
+        let _ = fs::remove_file(p);
+    }
 
     #[test]
-    fn t_empty() { assert!(!execute(&[]).unwrap()); }
+    fn t_empty() {
+        assert!(!execute(&[]).unwrap());
+    }
     #[test]
-    fn t_missing() { assert!(!execute(&["/nope".into()]).unwrap()); }
+    fn t_missing() {
+        assert!(!execute(&["/nope".into()]).unwrap());
+    }
     #[test]
-    fn t_single() { let p = tmp("s"); assert!(execute(&[p.to_string_lossy().into()]).unwrap()); rm(&p); }
+    fn t_single() {
+        let p = tmp("s");
+        assert!(execute(&[p.to_string_lossy().into()]).unwrap());
+        rm(&p);
+    }
     #[test]
     fn t_multi() {
-        let (a,b) = (tmp("a"), tmp("b"));
+        let (a, b) = (tmp("a"), tmp("b"));
         assert!(execute(&[a.to_string_lossy().into(), b.to_string_lossy().into()]).unwrap());
-        rm(&a); rm(&b);
+        rm(&a);
+        rm(&b);
     }
 }

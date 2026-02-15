@@ -60,7 +60,12 @@ fn docker_ps(_verbose: u8) -> Result<()> {
         if parts.len() >= 4 {
             let id = &parts[0][..12.min(parts[0].len())];
             let name = parts[1];
-            let short_image = parts.get(3).unwrap_or(&"").split('/').next_back().unwrap_or("");
+            let short_image = parts
+                .get(3)
+                .unwrap_or(&"")
+                .split('/')
+                .next_back()
+                .unwrap_or("");
             let ports = compact_ports(parts.get(4).unwrap_or(&""));
             if ports == "-" {
                 rtk.push_str(&format!("  {} {} ({})\n", id, name, short_image));

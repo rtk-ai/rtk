@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::process::{Command, Stdio};
 
-use super::{analysis, lexer, safety, trash_cmd, builtins, filters};
+use super::{analysis, builtins, filters, lexer, safety, trash_cmd};
 use crate::tracking;
 
 /// Check if RTK is already active (recursion guard)
@@ -60,8 +60,8 @@ fn execute_inner(raw: &str, verbose: u8) -> Result<bool> {
     }
 
     // === STEP 2: Parse into native command chain ===
-    let commands = analysis::parse_chain(tokens)
-        .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
+    let commands =
+        analysis::parse_chain(tokens).map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
 
     // === STEP 3: Execute native chain ===
     run_native(&commands, verbose)
@@ -84,16 +84,20 @@ fn run_native(commands: &[analysis::NativeCommand], verbose: u8) -> Result<bool>
 
         // === RECURSION PREVENTION ===
         // Handle "rtk run" or "rtk" binary specially
-        if cmd.binary == "rtk"
-            && cmd.args.first().map(|s| s.as_str()) == Some("run") {
-                // Flatten: execute the inner command directly
-                let inner = cmd.args.get(1).cloned().unwrap_or_default();
-                if verbose > 0 {
-                    eprintln!("rtk: Flattening nested rtk run");
-                }
-                return execute(&inner, verbose);
+        if cmd.binary == "rtk" && cmd.args.first().map(|s| s.as_str()) == Some("run") {
+            // Flatten: execute the inner command directly
+            // rtk run -c "git status" → args = ["run", "-c", "git status"]
+            let inner = if cmd.args.get(1).map(|s| s.as_str()) == Some("-c") {
+                cmd.args.get(2).cloned().unwrap_or_default()
+            } else {
+                cmd.args.get(1).cloned().unwrap_or_default()
+            };
+            if verbose > 0 {
+                eprintln!("rtk: Flattening nested rtk run");
             }
-            // Other rtk commands: spawn as external (they have their own filters)
+            return execute(&inner, verbose);
+        }
+        // Other rtk commands: spawn as external (they have their own filters)
 
         // === SAFETY CHECK ===
         match safety::check(&cmd.binary, &cmd.args) {
@@ -145,42 +149,40 @@ fn spawn_with_filter(binary: &str, args: &[String], _verbose: u8) -> Result<bool
         }
     };
 
-    // Use piped stdout/stderr for filtering
-    let mut child = Command::new(&binary_path)
+    // Use wait_with_output() to avoid deadlock when child output exceeds
+    // pipe buffer (~64KB Linux, ~16KB macOS). This reads stdout/stderr in
+    // separate threads internally before calling wait().
+    let output = Command::new(&binary_path)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .with_context(|| format!("Failed to execute: {}", binary))?;
 
-    // Take streams for filtering
-    let mut stdout = child.stdout.take().expect("Failed to capture stdout");
-    let mut stderr = child.stderr.take().expect("Failed to capture stderr");
+    let raw_out = String::from_utf8_lossy(&output.stdout);
+    let raw_err = String::from_utf8_lossy(&output.stderr);
 
-    // Determine filter type
+    // Determine filter type and apply
     let filter_type = filters::get_filter_type(binary);
-
-    // Read and filter output
-    let (filtered_out, filtered_err) = filters::apply(filter_type, &mut stdout, &mut stderr)?;
+    let filtered_out = filters::apply_to_string(filter_type, &raw_out);
+    let filtered_err = crate::utils::strip_ansi(&raw_err);
 
     // Print filtered output
     print!("{}", filtered_out);
     eprint!("{}", filtered_err);
 
-    // Wait for process to complete
-    let status = child.wait()?;
-
-    // Track usage
-    let full_output = format!("{}{}", filtered_out, filtered_err);
+    // Track usage with raw vs filtered for accurate savings
+    let raw_output = format!("{}{}", raw_out, raw_err);
+    let filtered_output = format!("{}{}", filtered_out, filtered_err);
     timer.track(
         &format!("{} {}", binary, args.join(" ")),
         &format!("rtk run {} {}", binary, args.join(" ")),
-        &full_output,
-        &full_output,
+        &raw_output,
+        &filtered_output,
     );
 
-    Ok(status.success())
+    Ok(output.status.success())
 }
 
 /// Run command via system shell (passthrough mode)
@@ -203,15 +205,23 @@ pub fn run_passthrough(raw: &str, verbose: u8) -> Result<bool> {
         .output()
         .context("Failed to execute passthrough")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let full_output = format!("{}{}", stdout, stderr);
+    let raw_out = String::from_utf8_lossy(&output.stdout);
+    let raw_err = String::from_utf8_lossy(&output.stderr);
 
     // Basic filtering even in passthrough (strip ANSI)
-    let filtered = crate::utils::strip_ansi(&full_output);
-    print!("{}", filtered);
+    let filtered_out = crate::utils::strip_ansi(&raw_out);
+    let filtered_err = crate::utils::strip_ansi(&raw_err);
+    print!("{}", filtered_out);
+    eprint!("{}", filtered_err);
 
-    timer.track(raw, &format!("rtk passthrough {}", raw), &full_output, &filtered);
+    let raw_output = format!("{}{}", raw_out, raw_err);
+    let filtered_output = format!("{}{}", filtered_out, filtered_err);
+    timer.track(
+        raw,
+        &format!("rtk passthrough {}", raw),
+        &raw_output,
+        &filtered_output,
+    );
 
     Ok(output.status.success())
 }
@@ -219,35 +229,42 @@ pub fn run_passthrough(raw: &str, verbose: u8) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::test_helpers::EnvGuard;
 
     // === RAII GUARD TESTS ===
 
     #[test]
     fn test_is_rtk_active_default() {
-        std::env::remove_var("RTK_ACTIVE");
+        let _env = EnvGuard::new();
         assert!(!is_rtk_active());
     }
 
     #[test]
     fn test_raii_guard_sets_and_clears() {
-        std::env::remove_var("RTK_ACTIVE");
+        let _env = EnvGuard::new();
         {
             let _guard = RtkActiveGuard::new();
             assert!(is_rtk_active());
         }
-        assert!(!is_rtk_active(), "RTK_ACTIVE must be cleared when guard drops");
+        assert!(
+            !is_rtk_active(),
+            "RTK_ACTIVE must be cleared when guard drops"
+        );
     }
 
     #[test]
     fn test_raii_guard_clears_on_panic() {
-        std::env::remove_var("RTK_ACTIVE");
+        let _env = EnvGuard::new();
         let result = std::panic::catch_unwind(|| {
             let _guard = RtkActiveGuard::new();
             assert!(is_rtk_active());
             panic!("simulated panic");
         });
         assert!(result.is_err());
-        assert!(!is_rtk_active(), "RTK_ACTIVE must be cleared even after panic");
+        assert!(
+            !is_rtk_active(),
+            "RTK_ACTIVE must be cleared even after panic"
+        );
     }
 
     // === EXECUTE TESTS ===

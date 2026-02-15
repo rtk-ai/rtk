@@ -1,7 +1,7 @@
 mod cargo_cmd;
 mod cc_economics;
-mod cmd;
 mod ccusage;
+mod cmd;
 mod config;
 mod container;
 mod curl_cmd;

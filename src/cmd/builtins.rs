@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 
 /// Change directory (persists in RTK process)
 pub fn builtin_cd(args: &[String]) -> Result<bool> {
-    let target = args.first()
+    let target = args
+        .first()
         .map(|s| expand_tilde(s))
         .unwrap_or_else(get_home);
 
@@ -34,7 +35,10 @@ pub fn builtin_export(args: &[String]) -> Result<bool> {
 
 /// Check if a binary is a builtin
 pub fn is_builtin(binary: &str) -> bool {
-    matches!(binary, "cd" | "export" | "pwd" | "echo" | "true" | "false" | ":")
+    matches!(
+        binary,
+        "cd" | "export" | "pwd" | "echo" | "true" | "false" | ":"
+    )
 }
 
 /// Execute a builtin command
@@ -53,7 +57,9 @@ pub fn execute(binary: &str, args: &[String]) -> Result<bool> {
                 (args, false)
             };
             print!("{}", print_args.join(" "));
-            if !no_newline { println!(); }
+            if !no_newline {
+                println!();
+            }
             Ok(true)
         }
         "true" | ":" => Ok(true),
@@ -159,10 +165,7 @@ mod tests {
 
     #[test]
     fn test_export_multiple() {
-        builtin_export(&[
-            "RTK_TEST_A=1".to_string(),
-            "RTK_TEST_B=2".to_string(),
-        ]).unwrap();
+        builtin_export(&["RTK_TEST_A=1".to_string(), "RTK_TEST_B=2".to_string()]).unwrap();
         assert_eq!(env::var("RTK_TEST_A").unwrap(), "1");
         assert_eq!(env::var("RTK_TEST_B").unwrap(), "2");
         env::remove_var("RTK_TEST_A");
