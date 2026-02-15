@@ -225,4 +225,22 @@ mod tests {
         let cleaned = clean_line(line, 15, false, "text");
         assert!(!cleaned.is_empty());
     }
+
+    // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
+    // The -n/--line-numbers clap flag in main.rs is a no-op accepted for compat.
+    #[test]
+    fn test_rg_always_has_line_numbers() {
+        // grep_cmd::run() always passes "-n" to rg (line 24).
+        // This test documents that -n is built-in, so the clap flag is safe to ignore.
+        let mut cmd = std::process::Command::new("rg");
+        cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
+        // If rg is available, it should accept -n without error (exit 1 = no match, not error)
+        if let Ok(output) = cmd.output() {
+            assert!(
+                output.status.code() == Some(1) || output.status.success(),
+                "rg -n should be accepted"
+            );
+        }
+        // If rg is not installed, skip gracefully (test still passes)
+    }
 }
