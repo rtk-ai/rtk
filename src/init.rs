@@ -355,20 +355,21 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use_array.len() < original_len
 }
 
-/// Remove RTK hook from settings.json file
-/// Backs up before modification, returns true if hook was found and removed
-fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
-    let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join("settings.json");
-
+/// Shared: remove a hook from a settings.json file
+/// Reads, parses, applies `remover`, backs up, and atomically writes if changed.
+fn remove_hook_from_settings_file(
+    settings_path: &Path,
+    remover: impl FnOnce(&mut serde_json::Value) -> bool,
+    verbose: u8,
+) -> Result<bool> {
     if !settings_path.exists() {
         if verbose > 0 {
-            eprintln!("settings.json not found, nothing to remove");
+            eprintln!("{} not found, nothing to remove", settings_path.display());
         }
         return Ok(false);
     }
 
-    let content = fs::read_to_string(&settings_path)
+    let content = fs::read_to_string(settings_path)
         .with_context(|| format!("Failed to read {}", settings_path.display()))?;
 
     if content.trim().is_empty() {
@@ -378,25 +379,29 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     let mut root: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?;
 
-    let removed = remove_hook_from_json(&mut root);
+    let removed = remover(&mut root);
 
     if removed {
-        // Backup original
         let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
+        fs::copy(settings_path, &backup_path)
             .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
 
-        // Atomic write
         let serialized =
             serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
-        atomic_write(&settings_path, &serialized)?;
+        atomic_write(settings_path, &serialized)?;
 
         if verbose > 0 {
-            eprintln!("Removed RTK hook from settings.json");
+            eprintln!("Removed RTK hook from {}", settings_path.display());
         }
     }
 
     Ok(removed)
+}
+
+/// Remove RTK hook from Claude settings.json
+fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
+    let settings_path = resolve_claude_dir()?.join("settings.json");
+    remove_hook_from_settings_file(&settings_path, remove_hook_from_json, verbose)
 }
 
 /// Full uninstall: remove hook, RTK.md, @RTK.md reference, settings.json entry
@@ -471,18 +476,22 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Orchestrator: patch settings.json with RTK hook
-/// Handles reading, checking, prompting, merging, backing up, and atomic writing
-fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result<PatchResult> {
-    let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join("settings.json");
-    let hook_command = hook_path
-        .to_str()
-        .context("Hook path contains invalid UTF-8")?;
-
+/// Shared: patch a settings.json with an agent hook.
+/// Reads/creates JSON, checks idempotency, handles PatchMode, inserts hook,
+/// backs up, and atomically writes.
+fn patch_settings_shared(
+    settings_path: &Path,
+    is_present: impl Fn(&serde_json::Value) -> bool,
+    insert_hook: impl FnOnce(&mut serde_json::Value),
+    print_manual: impl Fn(),
+    mode: PatchMode,
+    label: &str,
+    restart_msg: &str,
+    verbose: u8,
+) -> Result<PatchResult> {
     // Read or create settings.json
     let mut root = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)
+        let content = fs::read_to_string(settings_path)
             .with_context(|| format!("Failed to read {}", settings_path.display()))?;
 
         if content.trim().is_empty() {
@@ -496,9 +505,9 @@ fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result
     };
 
     // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    if is_present(&root) {
         if verbose > 0 {
-            eprintln!("settings.json: hook already present");
+            eprintln!("{}: hook already present", label);
         }
         return Ok(PatchResult::AlreadyPresent);
     }
@@ -506,27 +515,25 @@ fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_path);
+            print_manual();
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
-            if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_path);
+            if !prompt_user_consent(settings_path)? {
+                print_manual();
                 return Ok(PatchResult::Declined);
             }
         }
-        PatchMode::Auto => {
-            // Proceed without prompting
-        }
+        PatchMode::Auto => {}
     }
 
     // Deep-merge hook
-    insert_hook_entry(&mut root, hook_command);
+    insert_hook(&mut root);
 
     // Backup original
     if settings_path.exists() {
         let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
+        fs::copy(settings_path, &backup_path)
             .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
         if verbose > 0 {
             eprintln!("Backup: {}", backup_path.display());
@@ -536,18 +543,38 @@ fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result
     // Atomic write
     let serialized =
         serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
-    atomic_write(&settings_path, &serialized)?;
+    atomic_write(settings_path, &serialized)?;
 
-    println!("\n  settings.json: hook added");
+    println!("\n  {}: hook added", label);
     if settings_path.with_extension("json.bak").exists() {
         println!(
             "  Backup: {}",
             settings_path.with_extension("json.bak").display()
         );
     }
-    println!("  Restart Claude Code. Test with: git status");
+    println!("  {}", restart_msg);
 
     Ok(PatchResult::Patched)
+}
+
+/// Patch Claude settings.json with RTK hook
+fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result<PatchResult> {
+    let settings_path = resolve_claude_dir()?.join("settings.json");
+    let hook_command = hook_path
+        .to_str()
+        .context("Hook path contains invalid UTF-8")?
+        .to_string();
+
+    patch_settings_shared(
+        &settings_path,
+        |root| hook_already_present(root, &hook_command),
+        |root| insert_hook_entry(root, &hook_command),
+        || print_manual_instructions(hook_path),
+        mode,
+        "settings.json",
+        "Restart Claude Code. Test with: git status",
+        verbose,
+    )
 }
 
 /// Clean up consecutive blank lines (collapse 3+ to 2)
@@ -978,7 +1005,7 @@ fn remove_gemini_hook_from_json(root: &mut serde_json::Value) -> bool {
     before_tool_array.len() < original_len
 }
 
-/// Orchestrator: patch Gemini settings.json with RTK hook
+/// Patch Gemini settings.json with RTK hook
 fn patch_gemini_settings(mode: PatchMode, verbose: u8) -> Result<PatchResult> {
     let gemini_dir = resolve_gemini_dir()?;
     fs::create_dir_all(&gemini_dir).with_context(|| {
@@ -989,75 +1016,16 @@ fn patch_gemini_settings(mode: PatchMode, verbose: u8) -> Result<PatchResult> {
     })?;
 
     let settings_path = gemini_dir.join("settings.json");
-
-    // Read or create settings.json
-    let mut root = if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)
-            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
-
-        if content.trim().is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?
-        }
-    } else {
-        serde_json::json!({})
-    };
-
-    // Check idempotency
-    if gemini_hook_already_present(&root) {
-        if verbose > 0 {
-            eprintln!("Gemini settings.json: hook already present");
-        }
-        return Ok(PatchResult::AlreadyPresent);
-    }
-
-    // Handle mode
-    match mode {
-        PatchMode::Skip => {
-            print_gemini_manual_instructions();
-            return Ok(PatchResult::Skipped);
-        }
-        PatchMode::Ask => {
-            if !prompt_user_consent(&settings_path)? {
-                print_gemini_manual_instructions();
-                return Ok(PatchResult::Declined);
-            }
-        }
-        PatchMode::Auto => {
-            // Proceed without prompting
-        }
-    }
-
-    // Deep-merge hook
-    insert_gemini_hook_entry(&mut root);
-
-    // Backup original
-    if settings_path.exists() {
-        let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Backup: {}", backup_path.display());
-        }
-    }
-
-    // Atomic write
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
-    atomic_write(&settings_path, &serialized)?;
-
-    println!("\n  Gemini settings.json: hook added");
-    if settings_path.with_extension("json.bak").exists() {
-        println!(
-            "  Backup: {}",
-            settings_path.with_extension("json.bak").display()
-        );
-    }
-    println!("  Restart Gemini CLI. Test with: gemini");
-
-    Ok(PatchResult::Patched)
+    patch_settings_shared(
+        &settings_path,
+        |root| gemini_hook_already_present(root),
+        insert_gemini_hook_entry,
+        print_gemini_manual_instructions,
+        mode,
+        "Gemini settings.json",
+        "Restart Gemini CLI. Test with: gemini",
+        verbose,
+    )
 }
 
 /// Print manual instructions for Gemini settings.json patching
@@ -1074,45 +1042,10 @@ fn print_gemini_manual_instructions() {
     println!("\n  Then restart Gemini CLI.\n");
 }
 
-/// Remove RTK hook from Gemini settings.json file
+/// Remove RTK hook from Gemini settings.json
 fn remove_gemini_hook_from_settings(verbose: u8) -> Result<bool> {
-    let gemini_dir = resolve_gemini_dir()?;
-    let settings_path = gemini_dir.join("settings.json");
-
-    if !settings_path.exists() {
-        if verbose > 0 {
-            eprintln!("Gemini settings.json not found, nothing to remove");
-        }
-        return Ok(false);
-    }
-
-    let content = fs::read_to_string(&settings_path)
-        .with_context(|| format!("Failed to read {}", settings_path.display()))?;
-
-    if content.trim().is_empty() {
-        return Ok(false);
-    }
-
-    let mut root: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?;
-
-    let removed = remove_gemini_hook_from_json(&mut root);
-
-    if removed {
-        let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-
-        let serialized =
-            serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
-        atomic_write(&settings_path, &serialized)?;
-
-        if verbose > 0 {
-            eprintln!("Removed RTK hook from Gemini settings.json");
-        }
-    }
-
-    Ok(removed)
+    let settings_path = resolve_gemini_dir()?.join("settings.json");
+    remove_hook_from_settings_file(&settings_path, remove_gemini_hook_from_json, verbose)
 }
 
 /// Public entry point for `rtk init --gemini`
@@ -1139,6 +1072,47 @@ pub fn run_gemini(patch_mode: PatchMode, verbose: u8) -> Result<()> {
 
     println!();
     Ok(())
+}
+
+/// Display hook status for one agent's settings.json.
+/// `prefix` is prepended to "settings.json" in output (e.g. "" for Claude, "Gemini " for Gemini).
+fn show_agent_hook_status(
+    prefix: &str,
+    settings_path: &Path,
+    is_present: impl Fn(&serde_json::Value) -> bool,
+    setup_hint: &str,
+) {
+    if !settings_path.exists() {
+        println!("⚪ {}settings.json: not found", prefix);
+        return;
+    }
+    let content = match fs::read_to_string(settings_path) {
+        Ok(c) => c,
+        Err(_) => {
+            println!("⚠️  {}settings.json: unreadable", prefix);
+            return;
+        }
+    };
+    if content.trim().is_empty() {
+        println!("⚪ {}settings.json: empty", prefix);
+        return;
+    }
+    match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(root) => {
+            if is_present(&root) {
+                println!("✅ {}settings.json: RTK hook configured", prefix);
+            } else {
+                println!(
+                    "⚠️  {}settings.json: exists but RTK hook not configured",
+                    prefix
+                );
+                println!("    Run: {}", setup_hint);
+            }
+        }
+        Err(_) => {
+            println!("⚠️  {}settings.json: exists but invalid JSON", prefix);
+        }
+    }
 }
 
 /// Show current rtk configuration
@@ -1219,54 +1193,26 @@ pub fn show_config() -> Result<()> {
         println!("⚪ Local (./CLAUDE.md): not found");
     }
 
-    // Check settings.json
+    // Check Claude settings.json
     let settings_path = claude_dir.join("settings.json");
-    if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)?;
-        if !content.trim().is_empty() {
-            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-                let hook_command = hook_path.display().to_string();
-                if hook_already_present(&root, &hook_command) {
-                    println!("✅ settings.json: RTK hook configured");
-                } else {
-                    println!("⚠️  settings.json: exists but RTK hook not configured");
-                    println!("    Run: rtk init -g --auto-patch");
-                }
-            } else {
-                println!("⚠️  settings.json: exists but invalid JSON");
-            }
-        } else {
-            println!("⚪ settings.json: empty");
-        }
-    } else {
-        println!("⚪ settings.json: not found");
-    }
+    let hook_command = hook_path.display().to_string();
+    show_agent_hook_status(
+        "",
+        &settings_path,
+        |root| hook_already_present(root, &hook_command),
+        "rtk init -g --auto-patch",
+    );
 
     // Check Gemini settings.json
     match resolve_gemini_dir() {
         Ok(gemini_dir) => {
             let gemini_settings = gemini_dir.join("settings.json");
-            if gemini_settings.exists() {
-                let content = fs::read_to_string(&gemini_settings)?;
-                if !content.trim().is_empty() {
-                    if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if gemini_hook_already_present(&root) {
-                            println!("✅ Gemini settings.json: RTK hook configured");
-                        } else {
-                            println!(
-                                "⚠️  Gemini settings.json: exists but RTK hook not configured"
-                            );
-                            println!("    Run: rtk init --gemini --auto-patch");
-                        }
-                    } else {
-                        println!("⚠️  Gemini settings.json: exists but invalid JSON");
-                    }
-                } else {
-                    println!("⚪ Gemini settings.json: empty");
-                }
-            } else {
-                println!("⚪ Gemini settings.json: not found");
-            }
+            show_agent_hook_status(
+                "Gemini ",
+                &gemini_settings,
+                |root| gemini_hook_already_present(root),
+                "rtk init --gemini --auto-patch",
+            );
         }
         Err(_) => {
             println!("⚪ Gemini: cannot determine home directory");

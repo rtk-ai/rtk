@@ -4,7 +4,7 @@
 use std::process::Command;
 
 /// Check if there are unstaged changes in the current git repo
-pub fn has_unstaged_changes() -> bool {
+pub(crate) fn has_unstaged_changes() -> bool {
     Command::new("git")
         .args(["diff", "--quiet"])
         .status()
@@ -13,13 +13,13 @@ pub fn has_unstaged_changes() -> bool {
 }
 
 /// Critical for token reduction: detect if output goes to human or agent
-pub fn is_interactive() -> bool {
+pub(crate) fn is_interactive() -> bool {
     use std::io::IsTerminal;
     std::io::stderr().is_terminal()
 }
 
 /// Expand ~ to $HOME, with fallback
-pub fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if path.starts_with("~") {
         // Try HOME first, then USERPROFILE (Windows)
         let home = std::env::var("HOME")
@@ -32,7 +32,7 @@ pub fn expand_tilde(path: &str) -> String {
 }
 
 /// Get HOME directory with fallback
-pub fn get_home() -> String {
+pub(crate) fn get_home() -> String {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| "/".to_string())

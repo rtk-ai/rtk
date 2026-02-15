@@ -173,28 +173,22 @@ mod tests {
             ("echo {a,b}.txt", "rtk run"), // brace expansion
             ("echo 'hello!@#$%^&*()'", "rtk run"), // special chars
             ("echo '日本語 🎉'", "rtk run"), // unicode
+            ("cd /tmp && git status", "rtk run"), // chain rewrite
         ];
         for (input, expected) in cases {
             assert_rewrite(input, expected);
         }
-    }
-
-    #[test]
-    fn test_chain_rewrite() {
-        let result = check_for_hook("cd /tmp && git status", "claude");
-        match result {
-            HookResult::Rewrite(cmd) => {
-                assert!(cmd.contains("rtk run"));
-                assert!(cmd.contains("&&"));
-            }
-            _ => panic!("Expected Rewrite for chain"),
+        // Chain rewrite preserves operator structure
+        match check_for_hook("cd /tmp && git status", "claude") {
+            HookResult::Rewrite(cmd) => assert!(
+                cmd.contains("&&"),
+                "Chain rewrite must preserve '&&', got '{}'",
+                cmd
+            ),
+            other => panic!("Expected Rewrite for chain, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn test_very_long_command() {
-        let long_arg = "a".repeat(1000);
-        assert_rewrite(&format!("echo {}", long_arg), "rtk run");
+        // Very long command
+        assert_rewrite(&format!("echo {}", "a".repeat(1000)), "rtk run");
     }
 
     // === COMMANDS THAT SHOULD BLOCK (table-driven) ===

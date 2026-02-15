@@ -1,7 +1,7 @@
 //! Filter Registry — basic token reduction for `rtk run` native execution.
 //!
 //! This module provides **basic filtering (20-40% savings)** for commands
-//! executed through the hybrid engine. It is a **fallback** for commands
+//! executed through rtk run. It is a **fallback** for commands
 //! without dedicated RTK implementations.
 //!
 //! For **specialized filtering (60-90% savings)**, use dedicated modules:

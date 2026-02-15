@@ -1,4 +1,4 @@
-//! RTK Command Engine - Hybrid Safe-Split Architecture
+//! RTK command interceptor — safety checks and token-optimized execution.
 //!
 //! This module provides:
 //! - Quote-aware lexing for shell commands
@@ -8,19 +8,17 @@
 //! - Token-optimized output filtering
 //! - Hook protocol support (Claude/Gemini)
 
-pub mod analysis;
-pub mod builtins;
+pub(crate) mod analysis;
+pub(crate) mod builtins;
 pub mod exec;
-pub mod filters;
+pub(crate) mod filters;
 pub mod gemini_hook;
 pub mod hook;
-pub mod lexer;
-pub mod predicates;
-pub mod safety;
-pub mod trash_cmd;
+pub(crate) mod lexer;
+pub(crate) mod predicates;
+pub(crate) mod safety;
+pub(crate) mod trash_cmd;
 
-#[cfg(test)]
-mod edge_cases;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 

@@ -5,8 +5,8 @@
 #
 # Environment Variables:
 #   RTK_HOOK_ENABLED=0|1       - Master toggle (default: 1)
-#   RTK_HOOK_HYBRID=0|1        - Use hybrid engine for all commands (default: 1)
-#   RTK_HOOK_FALLBACK=0|1      - Fallback to regex if hybrid fails (default: 1)
+#   RTK_HOOK_REWRITE=0|1       - Use rtk hook check for rewriting (default: 1)
+#   RTK_HOOK_FALLBACK=0|1      - Fallback to regex if rewrite mode fails (default: 1)
 
 # Guards: skip silently if dependencies missing
 if ! command -v rtk &>/dev/null || ! command -v jq &>/dev/null; then
@@ -45,9 +45,9 @@ case "$FIRST_CMD" in
   *'<<'*) exit 0 ;;
 esac
 
-# === HYBRID ENGINE MODE ===
-# Use rtk hook check for intelligent command analysis
-if [ "${RTK_HOOK_HYBRID:-1}" = "1" ]; then
+# === REWRITE MODE ===
+# Use rtk hook check for safety analysis and rewriting
+if [ "${RTK_HOOK_REWRITE:-1}" = "1" ]; then
   REWRITTEN=$(rtk hook check --agent claude "$CMD" 2>&1)
   EXIT_CODE=$?
 
@@ -63,7 +63,7 @@ if [ "${RTK_HOOK_HYBRID:-1}" = "1" ]; then
         "hookSpecificOutput": {
           "hookEventName": "PreToolUse",
           "permissionDecision": "allow",
-          "permissionDecisionReason": "RTK hybrid engine",
+          "permissionDecisionReason": "RTK safety rewrite",
           "updatedInput": $updated
         }
       }'
@@ -83,7 +83,7 @@ if [ "${RTK_HOOK_HYBRID:-1}" = "1" ]; then
 fi
 
 # === FALLBACK: REGEX MODE ===
-# Used when RTK_HOOK_HYBRID=0 or hybrid mode is disabled
+# Used when RTK_HOOK_REWRITE=0 or rewrite mode is disabled
 
 # Strip leading env var assignments for pattern matching
 ENV_PREFIX=$(echo "$FIRST_CMD" | grep -oE '^([A-Za-z_][A-Za-z0-9_]*=[^ ]* +)+' || echo "")

@@ -479,7 +479,7 @@ enum Commands {
         args: Vec<OsString>,
     },
 
-    /// Run command through hybrid engine (native + passthrough)
+    /// Run command with safety checks and token-optimized output
     Run {
         /// Command string to execute
         #[arg(short = 'c', long)]

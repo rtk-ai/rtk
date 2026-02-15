@@ -1,4 +1,4 @@
-//! Hybrid command executor: Native mode for 90%, Passthrough for 10%.
+//! Command executor: runs simple chains natively, delegates complex shell to /bin/sh.
 
 use anyhow::{Context, Result};
 use std::process::{Command, Stdio};
@@ -372,6 +372,68 @@ mod tests {
     fn test_execute_binary_not_found() {
         let result = execute("nonexistent_command_xyz_123", 0).unwrap();
         assert!(!result);
+    }
+
+    #[test]
+    fn test_execute_chain_and_three_commands() {
+        // 3-command chain: true succeeds, false fails, stops before third
+        let result = execute("true && false && true", 0).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_execute_chain_semicolon_last_wins() {
+        // Semicolon runs all; last result (true) determines outcome
+        let result = execute("false ; true", 0).unwrap();
+        assert!(result);
+    }
+
+    // === INTEGRATION TESTS (moved from edge_cases.rs) ===
+
+    #[test]
+    fn test_chain_mixed_operators() {
+        // false -> || runs true -> true && runs echo
+        let result = execute("false || true && echo works", 0).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_passthrough_redirect() {
+        let result = execute("echo test > /dev/null", 0).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_integration_cd_tilde() {
+        let original = std::env::current_dir().unwrap();
+        let result = execute("cd ~", 0).unwrap();
+        assert!(result);
+        let _ = std::env::set_current_dir(&original);
+    }
+
+    #[test]
+    fn test_integration_export() {
+        let result = execute("export TEST_VAR=value", 0).unwrap();
+        assert!(result);
+        std::env::remove_var("TEST_VAR");
+    }
+
+    #[test]
+    fn test_integration_env_prefix() {
+        let result = execute("TEST=1 echo hello", 0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_integration_dash_args() {
+        let result = execute("echo --help -v --version", 0).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_integration_quoted_empty() {
+        let result = execute(r#"echo """#, 0).unwrap();
+        assert!(result);
     }
 
     // === RECURRENCE PREVENTION TESTS ===

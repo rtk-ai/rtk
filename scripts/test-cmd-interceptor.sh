@@ -1,10 +1,10 @@
 #!/bin/bash
-# Integration tests for hybrid command engine
+# Integration tests for RTK command interceptor
 # Run from the rtk repository root
 
 set -e
 
-echo "=== RTK Hybrid Engine Integration Tests ==="
+echo "=== RTK Command Interceptor Tests ==="
 
 # Determine how to run rtk (prefer local builds)
 if [ -f "./target/debug/rtk" ]; then

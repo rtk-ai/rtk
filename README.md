@@ -160,7 +160,7 @@ rtk config                       # Show config (--create to generate)
 
 ### Safety & Execution
 ```bash
-# Execute command through hybrid engine (native + passthrough)
+# Execute command with safety checks and token-optimized output
 rtk run -c "git status"          # Safe execution with filtering
 
 # Hook protocol for Claude Code integration
