@@ -20,6 +20,7 @@ mod go_cmd;
 mod golangci_cmd;
 mod grep_cmd;
 mod hook_audit_cmd;
+mod hook_cmd;
 mod init;
 mod integrity;
 mod json_cmd;
@@ -612,6 +613,10 @@ enum Commands {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         cmd: String,
     },
+
+    /// Hook rewrite for Claude Code PreToolUse (internal, native cross-platform)
+    #[command(name = "hook-rewrite", hide = true)]
+    HookRewrite,
 }
 
 #[derive(Subcommand)]
@@ -1694,6 +1699,8 @@ fn main() -> Result<()> {
         Commands::Rewrite { cmd } => {
             rewrite_cmd::run(&cmd)?;
         }
+
+        Commands::HookRewrite => hook_cmd::run(),
 
         Commands::Proxy { args } => {
             use std::process::Command;
