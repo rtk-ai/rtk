@@ -18,6 +18,7 @@ mod git;
 mod go_cmd;
 mod golangci_cmd;
 mod grep_cmd;
+mod hook_audit_cmd;
 mod init;
 mod json_cmd;
 mod learn;
@@ -516,6 +517,14 @@ enum Commands {
         /// golangci-lint arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
+    #[command(name = "hook-audit")]
+    HookAudit {
+        /// Show entries from last N days (0 = all time)
+        #[arg(short, long, default_value = "7")]
+        since: u64,
     },
 }
 
@@ -1357,6 +1366,10 @@ fn main() -> Result<()> {
 
         Commands::GolangciLint { args } => {
             golangci_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::HookAudit { since } => {
+            hook_audit_cmd::run(since, cli.verbose)?;
         }
 
         Commands::Proxy { args } => {
