@@ -136,40 +136,9 @@ fn parse_deploy_output(output: &str) -> DeployResult {
             result.warnings.push(trimmed.to_string());
         }
 
-        // Extract binding types from warning context
-        // Lines like "  - KV Namespaces: MY_KV" or "  - D1 Databases: MY_DB"
-        if trimmed.starts_with("- ") && trimmed.contains(':') {
-            let binding = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-            if let Some(colon_idx) = binding.find(':') {
-                let binding_type = &binding[..colon_idx];
-                // Only capture known Cloudflare binding types
-                let known_bindings = [
-                    "KV Namespaces",
-                    "D1 Databases",
-                    "R2 Buckets",
-                    "Durable Objects",
-                    "Service Bindings",
-                    "Queue Producers",
-                    "Queue Consumers",
-                    "Analytics Engine",
-                    "Vectorize Indexes",
-                    "Hyperdrive Configs",
-                    "AI",
-                    "Browser",
-                    "mTLS Certificates",
-                    "Vars",
-                ];
-                if known_bindings
-                    .iter()
-                    .any(|b| binding_type.trim() == *b)
-                {
-                    // These get summarized in the warning line
-                }
-            }
-        }
-
         // Extract errors
-        if trimmed.contains("[ERROR]") || trimmed.starts_with("✘") || trimmed.starts_with("Error:") {
+        if trimmed.contains("[ERROR]") || trimmed.starts_with("✘") || trimmed.starts_with("Error:")
+        {
             result.errors.push(trimmed.to_string());
         }
     }
@@ -362,7 +331,8 @@ fn parse_pages_output(output: &str) -> PagesDeployResult {
         }
 
         // Errors
-        if trimmed.contains("[ERROR]") || trimmed.starts_with("✘") || trimmed.starts_with("Error:") {
+        if trimmed.contains("[ERROR]") || trimmed.starts_with("✘") || trimmed.starts_with("Error:")
+        {
             result.errors.push(trimmed.to_string());
         }
     }
@@ -724,10 +694,7 @@ Current Version ID: test789
         let result = parse_pages_output(output);
         assert_eq!(result.files_uploaded, Some(42));
         assert_eq!(result.upload_time, Some("5.67 sec".to_string()));
-        assert_eq!(
-            result.url,
-            Some("https://deploy.pages.dev".to_string())
-        );
+        assert_eq!(result.url, Some("https://deploy.pages.dev".to_string()));
         assert!(result.errors.is_empty());
     }
 }
