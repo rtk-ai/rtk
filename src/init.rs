@@ -471,9 +471,10 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
 fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result<PatchResult> {
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join("settings.json");
-    let hook_command = hook_path
-        .to_str()
-        .context("Hook path contains invalid UTF-8")?;
+    // Use binary command instead of .sh file path for PR 1 v2
+    // The rtk hook claude command is a compiled Rust binary
+    let hook_command = "rtk hook claude";
+    let _ = hook_path; // Suppress unused parameter warning (still passed for API compatibility)
 
     // Read or create settings.json
     let mut root = if settings_path.exists() {
@@ -1134,15 +1135,10 @@ mod tests {
 
     #[test]
     fn test_hook_has_guards() {
-        assert!(REWRITE_HOOK.contains("command -v rtk"));
-        assert!(REWRITE_HOOK.contains("command -v jq"));
-        // Guards must be BEFORE set -euo pipefail
-        let guard_pos = REWRITE_HOOK.find("command -v rtk").unwrap();
-        let set_pos = REWRITE_HOOK.find("set -euo pipefail").unwrap();
-        assert!(
-            guard_pos < set_pos,
-            "Guards must come before set -euo pipefail"
-        );
+        // PR 1 v2: Replaced bash hook with binary shim
+        // Old test checked for "command -v rtk" and "command -v jq" guards
+        // New shim just execs rtk hook claude binary (no bash guards needed)
+        assert!(REWRITE_HOOK.contains("exec rtk hook claude"));
     }
 
     #[test]

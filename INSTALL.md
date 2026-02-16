@@ -67,6 +67,34 @@ rtk gain  # MUST show token savings, not "command not found"
 
 ⚠️ **WARNING**: `cargo install rtk` from crates.io might install the wrong package. Always verify with `rtk gain`.
 
+### Windows Installation
+
+RTK compiles natively for Windows. Download from GitHub Releases or:
+
+```bash
+cargo install --path .
+```
+
+Configure Claude Code `settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": "rtk hook claude"
+      }]
+    }]
+  }
+}
+```
+
+No bash, node, or bun required — `rtk hook claude` is a native Windows binary.
+The exec.rs shell selection (`cfg!(windows)`) automatically uses `cmd /C` on Windows
+and `sh -c` on Unix for passthrough commands.
+
 ## Project Initialization
 
 ### Recommended: Global Hook-First Setup

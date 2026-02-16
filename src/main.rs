@@ -1,6 +1,7 @@
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
+mod cmd;
 mod config;
 mod container;
 mod curl_cmd;
@@ -526,6 +527,34 @@ enum Commands {
         #[arg(short, long, default_value = "7")]
         since: u64,
     },
+
+    /// Run command with safety checks and token-optimized output
+    Run {
+        /// Command string to execute
+        #[arg(short = 'c', long)]
+        command: String,
+    },
+
+    /// Hook protocol for Claude Code integration
+    Hook {
+        #[command(subcommand)]
+        command: HookCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookCommands {
+    /// Check command for safety and rewrite (text protocol for debugging)
+    Check {
+        /// Agent type: claude or gemini
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Command to check
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Claude Code JSON protocol handler (reads stdin, writes stdout)
+    Claude,
 }
 
 #[derive(Subcommand)]
@@ -1371,6 +1400,30 @@ fn main() -> Result<()> {
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
         }
+
+        Commands::Run { command } => {
+            let success = cmd::execute(&command, cli.verbose)?;
+            if !success {
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Hook { command } => match command {
+            HookCommands::Check { agent, command } => {
+                let cmd_str = command.join(" ");
+                let result = cmd::check_for_hook(&cmd_str, &agent);
+                let (output, _success, code) = cmd::hook::format_for_claude(result);
+                if code == 0 {
+                    println!("{}", output);
+                } else {
+                    eprintln!("{}", output);
+                    std::process::exit(code);
+                }
+            }
+            HookCommands::Claude => {
+                cmd::claude_hook::run()?;
+            }
+        },
 
         Commands::Proxy { args } => {
             use std::process::Command;
