@@ -51,8 +51,18 @@ where
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
     let filtered = filter_fn(&raw);
-    println!("{}", filtered);
+
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, &format!("cargo_{}", subcommand), exit_code)
+    {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
 
     timer.track(
         &format!("cargo {} {}", subcommand, args.join(" ")),
@@ -62,7 +72,7 @@ where
     );
 
     if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
+        std::process::exit(exit_code);
     }
 
     Ok(())

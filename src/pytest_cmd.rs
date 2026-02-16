@@ -53,7 +53,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     let filtered = filter_pytest_output(&stdout);
 
-    println!("{}", filtered);
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "pytest", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
 
     // Include stderr if present (import errors, etc.)
     if !stderr.trim().is_empty() {
@@ -69,7 +77,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     // Preserve exit code for CI/CD
     if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
+        std::process::exit(exit_code);
     }
 
     Ok(())

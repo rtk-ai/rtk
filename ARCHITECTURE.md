@@ -237,14 +237,15 @@ SYSTEM            init.rs           init                   N/A        ✓
 SHARED            utils.rs          Helpers                N/A        ✓
                   filter.rs         Language filters       N/A        ✓
                   tracking.rs       Token tracking         N/A        ✓
+                  tee.rs            Full output recovery   N/A        ✓
 ```
 
-**Total: 46 modules** (29 command modules + 17 infrastructure modules)
+**Total: 47 modules** (29 command modules + 18 infrastructure modules)
 
 ### Module Count Breakdown
 
 - **Command Modules**: 29 (directly exposed to users)
-- **Infrastructure Modules**: 17 (utils, filter, tracking, config, init, gain, etc.)
+- **Infrastructure Modules**: 18 (utils, filter, tracking, tee, config, init, gain, etc.)
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
