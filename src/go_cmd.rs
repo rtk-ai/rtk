@@ -58,9 +58,17 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
     let filtered = filter_go_test_json(&stdout);
 
-    println!("{}", filtered);
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "go_test", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
 
     // Include stderr if present (build errors, etc.)
     if !stderr.trim().is_empty() {
@@ -76,7 +84,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
 
     // Preserve exit code for CI/CD
     if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
+        std::process::exit(exit_code);
     }
 
     Ok(())
@@ -104,9 +112,19 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
     let filtered = filter_go_build(&raw);
 
-    if !filtered.is_empty() {
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "go_build", exit_code) {
+        if !filtered.is_empty() {
+            println!("{}\n{}", filtered, hint);
+        } else {
+            println!("{}", hint);
+        }
+    } else if !filtered.is_empty() {
         println!("{}", filtered);
     }
 
@@ -119,7 +137,7 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
 
     // Preserve exit code for CI/CD
     if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
+        std::process::exit(exit_code);
     }
 
     Ok(())
@@ -147,9 +165,19 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
     let filtered = filter_go_vet(&raw);
 
-    if !filtered.is_empty() {
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "go_vet", exit_code) {
+        if !filtered.is_empty() {
+            println!("{}\n{}", filtered, hint);
+        } else {
+            println!("{}", hint);
+        }
+    } else if !filtered.is_empty() {
         println!("{}", filtered);
     }
 
@@ -162,7 +190,7 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<()> {
 
     // Preserve exit code for CI/CD
     if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
+        std::process::exit(exit_code);
     }
 
     Ok(())

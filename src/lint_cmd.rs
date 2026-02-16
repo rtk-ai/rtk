@@ -173,7 +173,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         _ => filter_generic_lint(&raw),
     };
 
-    println!("{}", filtered);
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "lint", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
 
     timer.track(
         &format!("{} {}", linter, args.join(" ")),

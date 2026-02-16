@@ -96,8 +96,19 @@ pub fn run(
                 .unwrap_or(6)
                 .max(6);
 
-            let table_width =
-                3 + 2 + cmd_width + 2 + count_width + 2 + saved_width + 2 + 6 + 2 + time_width + 2 + impact_width;
+            let table_width = 3
+                + 2
+                + cmd_width
+                + 2
+                + count_width
+                + 2
+                + saved_width
+                + 2
+                + 6
+                + 2
+                + time_width
+                + 2
+                + impact_width;
             println!("{}", "─".repeat(table_width));
             println!(
                 "{:>3}  {:<cmd_width$}  {:>count_width$}  {:>saved_width$}  {:>6}  {:>time_width$}  {:<impact_width$}",

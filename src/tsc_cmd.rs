@@ -41,7 +41,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     let filtered = filter_tsc_output(&raw);
 
-    println!("{}", filtered);
+    let exit_code = output.status.code().unwrap_or(1);
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "tsc", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
 
     timer.track(
         &format!("tsc {}", args.join(" ")),
@@ -51,7 +56,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     );
 
     // Preserve tsc exit code for CI/CD compatibility
-    std::process::exit(output.status.code().unwrap_or(1));
+    std::process::exit(exit_code);
 }
 
 /// Filter TypeScript compiler output - group errors by file, show every error
