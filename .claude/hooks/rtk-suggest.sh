@@ -66,6 +66,8 @@ elif echo "$FIRST_CMD" | grep -qE '^cargo\s+check(\s|$)'; then
   SUGGESTION="rtk cargo check"
 elif echo "$FIRST_CMD" | grep -qE '^cargo\s+install(\s|$)'; then
   SUGGESTION="rtk cargo install"
+elif echo "$FIRST_CMD" | grep -qE '^cargo\s+nextest(\s|$)'; then
+  SUGGESTION="rtk cargo nextest"
 elif echo "$FIRST_CMD" | grep -qE '^cargo\s+fmt(\s|$)'; then
   SUGGESTION="rtk cargo fmt"
 
