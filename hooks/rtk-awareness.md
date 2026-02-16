@@ -26,4 +26,32 @@ which rtk             # Verify correct binary
 All other commands are automatically rewritten by the Claude Code hook.
 Example: `git status` → `rtk git status` (transparent, 0 tokens overhead)
 
+### Hook Installation
+
+**macOS/Linux (bash):**
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "~/.claude/hooks/rtk-rewrite.sh" }]
+    }]
+  }
+}
+```
+
+**Windows (Node.js/Bun):**
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "bun C:/Users/YOU/.claude/hooks/rtk-rewrite.js" }]
+    }]
+  }
+}
+```
+
+The JS version also handles chained commands: `cd "..." && git status` → `cd "..." && rtk git status`
+
 Refer to CLAUDE.md for full command reference.
