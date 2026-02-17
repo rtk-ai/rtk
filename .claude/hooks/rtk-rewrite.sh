@@ -58,29 +58,54 @@ fi
 
 REWRITTEN=""
 
+# --- Extract git global flags (-C <path>) before subcommand matching ---
+GIT_GLOBAL_FLAGS=""
+GIT_SUBCMD="$MATCH_CMD"
+GIT_SUBCMD_BODY="$CMD_BODY"
+if echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+-C[[:space:]]'; then
+  # Extract all -C <path> flags (may be repeated)
+  GIT_GLOBAL_FLAGS=$(echo "$MATCH_CMD" | sed -E 's/^git[[:space:]]+((-C[[:space:]]+[^[:space:]]+[[:space:]]+)+).*/\1/')
+  # Rebuild MATCH_CMD/CMD_BODY without the global flags for subcommand matching
+  GIT_SUBCMD="git $(echo "$MATCH_CMD" | sed -E 's/^git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)+//')"
+  GIT_SUBCMD_BODY="git $(echo "$CMD_BODY" | sed -E 's/^git[[:space:]]+(-C[[:space:]]+[^[:space:]]+[[:space:]]+)+//')"
+fi
+
+# Helper: rewrite git command preserving -C flags
+# Usage: _rtk_git_rewrite <subcmd>
+# Reads GIT_SUBCMD_BODY, GIT_GLOBAL_FLAGS, ENV_PREFIX from outer scope
+_rtk_git_rewrite() {
+  local subcmd="$1"
+  local rest="${GIT_SUBCMD_BODY#git ${subcmd}}"
+  if [ -n "$GIT_GLOBAL_FLAGS" ]; then
+    REWRITTEN="${ENV_PREFIX}rtk git ${GIT_GLOBAL_FLAGS}${subcmd}${rest}"
+  else
+    REWRITTEN="${ENV_PREFIX}rtk git ${subcmd}${rest}"
+  fi
+}
+
 # --- Git commands ---
-if echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+status([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git status/rtk git status/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+diff([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git diff/rtk git diff/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+log([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git log/rtk git log/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+add([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git add/rtk git add/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+commit([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git commit/rtk git commit/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+push([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git push/rtk git push/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+pull([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git pull/rtk git pull/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+branch([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git branch/rtk git branch/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+fetch([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git fetch/rtk git fetch/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+stash([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git stash/rtk git stash/')"
-elif echo "$MATCH_CMD" | grep -qE '^git[[:space:]]+show([[:space:]]|$)'; then
-  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^git show/rtk git show/')"
+if echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+status([[:space:]]|$)'; then
+  _rtk_git_rewrite "status"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+diff([[:space:]]|$)'; then
+  _rtk_git_rewrite "diff"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+log([[:space:]]|$)'; then
+  _rtk_git_rewrite "log"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+add([[:space:]]|$)'; then
+  _rtk_git_rewrite "add"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+commit([[:space:]]|$)'; then
+  _rtk_git_rewrite "commit"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+push([[:space:]]|$)'; then
+  _rtk_git_rewrite "push"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+pull([[:space:]]|$)'; then
+  _rtk_git_rewrite "pull"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+branch([[:space:]]|$)'; then
+  _rtk_git_rewrite "branch"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+fetch([[:space:]]|$)'; then
+  _rtk_git_rewrite "fetch"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+stash([[:space:]]|$)'; then
+  _rtk_git_rewrite "stash"
+elif echo "$GIT_SUBCMD" | grep -qE '^git[[:space:]]+show([[:space:]]|$)'; then
+  _rtk_git_rewrite "show"
 
 # --- GitHub CLI (added: api, release) ---
 elif echo "$MATCH_CMD" | grep -qE '^gh[[:space:]]+(pr|issue|run|api|release)([[:space:]]|$)'; then
