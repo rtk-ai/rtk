@@ -65,6 +65,12 @@ which rtk            # Check installation path
 
 If already installed and `rtk gain` works, **DO NOT reinstall**. Skip to Quick Start.
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew install rtk
+```
+
 ### Quick Install (Linux/macOS)
 
 ```bash
