@@ -171,7 +171,7 @@ Savings by ecosystem:
   GO (cmds/go/)            75-90%    go test/build/vet, golangci-lint
   RUBY (cmds/ruby/)        60-90%    rake, rspec, rubocop
   DOTNET (cmds/dotnet/)    70-85%    dotnet build/test, binlog
-  CLOUD (cmds/cloud/)      60-80%    aws, docker/kubectl, curl, wget, psql
+  CLOUD (cmds/cloud/)      60-90%    aws, docker/kubectl, curl, wget, psql, wrangler
   SYSTEM (cmds/system/)    50-90%    ls, tree, read, grep, find, json, log, env, deps
   RUST (cmds/rust/)        60-99%    cargo test/build/clippy, err
 ```
