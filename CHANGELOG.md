@@ -5,6 +5,13 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1](https://github.com/rtk-ai/rtk/compare/v0.20.0...v0.20.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* install to ~/.local/bin instead of /usr/local/bin (closes [#155](https://github.com/rtk-ai/rtk/issues/155)) ([#161](https://github.com/rtk-ai/rtk/issues/161)) ([0b34772](https://github.com/rtk-ai/rtk/commit/0b34772a679f3c6b5dd9609af2f6eec6d79e4a64))
+
 ## [0.20.0](https://github.com/rtk-ai/rtk/compare/v0.19.0...v0.20.0) (2026-02-16)
 
 
