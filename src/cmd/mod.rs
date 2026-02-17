@@ -25,6 +25,9 @@ pub mod hook;
 // Claude hook protocol (depends on hook)
 pub mod claude_hook;
 
+// Gemini hook protocol (depends on hook)
+pub mod gemini_hook;
+
 #[cfg(test)]
 pub(crate) mod test_helpers;
 

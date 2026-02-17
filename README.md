@@ -6,7 +6,7 @@
 
 [Website](https://www.rtk-ai.app) | [GitHub](https://github.com/rtk-ai/rtk) | [Install](INSTALL.md)
 
-rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens on common operations.
+rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens on common operations. Works with **Claude Code** and **Gemini CLI**.
 
 ## ⚠️ Important: Name Collision Warning
 
@@ -684,6 +684,68 @@ chmod +x ~/.claude/hooks/rtk-suggest.sh
 
 The suggest hook detects the same commands as the rewrite hook but outputs a `systemMessage` instead of `updatedInput`, informing Claude Code that an rtk alternative exists.
 
+## Gemini CLI Integration
+
+RTK also supports [Gemini CLI](https://github.com/google-gemini/gemini-cli) via its **BeforeTool** hook protocol. The same safety engine that powers the Claude Code hook is used for Gemini, providing consistent command rewriting and blocking across both agents.
+
+### Quick Install (Automated)
+
+```bash
+rtk init --gemini
+# → Patches ~/.gemini/settings.json with BeforeTool hook
+# → Prompts: "Patch settings.json? [y/N]"
+# → Creates backup (~/.gemini/settings.json.bak) if file exists
+
+# Options:
+rtk init --gemini --auto-patch    # Patch without prompting (CI/CD)
+rtk init --gemini --no-patch      # Skip patching, print manual JSON snippet
+
+# Verify installation
+rtk init --show
+```
+
+### Manual Install
+
+Add the following to `~/.gemini/settings.json`:
+
+```json
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rtk hook gemini"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### How It Works
+
+When Gemini CLI is about to execute a shell command, it sends a JSON payload to `rtk hook gemini` on stdin. RTK's safety engine evaluates the command and responds with:
+
+- **Allow + rewrite**: Rewrites the command to its `rtk run -c '...'` equivalent
+- **Block**: Returns `"deny"` with a reason explaining which native tool to use instead
+- **Passthrough**: Commands already using `rtk` pass through unchanged
+
+The `matcher` field (`run_shell_command`) identifies Gemini's shell execution tool (analogous to Claude Code's `Bash` matcher). Non-shell tool events pass through without inspection.
+
+### Uninstalling Gemini Hook
+
+```bash
+rtk init --gemini --uninstall
+# → Removes RTK hook entry from ~/.gemini/settings.json
+# → Preserves other hooks and settings
+```
+
+The global `rtk init -g --uninstall` also removes Gemini hooks alongside Claude Code hooks.
+
 ## Uninstalling RTK
 
 **Complete Removal (Global Only)**:
@@ -691,12 +753,12 @@ The suggest hook detects the same commands as the rewrite hook but outputs a `sy
 rtk init -g --uninstall
 
 # Removes:
-#   - ~/.claude/hooks/rtk-rewrite.sh
+#   - RTK hook from ~/.claude/settings.json
+#   - RTK hook from ~/.gemini/settings.json
 #   - ~/.claude/RTK.md
 #   - @RTK.md reference from ~/.claude/CLAUDE.md
-#   - RTK hook entry from ~/.claude/settings.json
 
-# Restart Claude Code after uninstall
+# Restart Claude Code / Gemini CLI after uninstall
 ```
 
 **Restore from Backup** (if needed):

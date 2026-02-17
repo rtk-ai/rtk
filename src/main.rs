@@ -292,6 +292,14 @@ enum Commands {
         /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
         #[arg(long)]
         uninstall: bool,
+
+        /// Initialize for Claude Code (default if neither --claude nor --gemini specified)
+        #[arg(long)]
+        claude: bool,
+
+        /// Initialize for Gemini CLI
+        #[arg(long)]
+        gemini: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -582,6 +590,8 @@ enum HookCommands {
     },
     /// Claude Code JSON protocol handler (reads stdin, writes stdout)
     Claude,
+    /// Gemini CLI JSON protocol handler (reads stdin, writes stdout)
+    Gemini,
 }
 
 #[derive(Subcommand)]
@@ -1160,11 +1170,22 @@ fn main() -> Result<()> {
             auto_patch,
             no_patch,
             uninstall,
+            claude,
+            gemini,
         } => {
             if show {
                 init::show_config()?;
             } else if uninstall {
-                init::uninstall(global, cli.verbose)?;
+                // Additive platform selection: true unless that platform alone is skipped
+                let uninstall_claude = !gemini || claude;
+                let uninstall_gemini = !claude || gemini;
+
+                if uninstall_claude {
+                    init::uninstall(global, cli.verbose)?;
+                }
+                if uninstall_gemini {
+                    init::uninstall_gemini(cli.verbose)?;
+                }
             } else {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1173,7 +1194,22 @@ fn main() -> Result<()> {
                 } else {
                     init::PatchMode::Ask
                 };
-                init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                // Additive platform selection: true unless that platform alone is skipped
+                let setup_claude = !gemini || claude;
+                let setup_gemini = !claude || gemini;
+
+                if setup_claude {
+                    init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                }
+                if setup_gemini {
+                    init::run_gemini(patch_mode, cli.verbose)?;
+                }
+
+                // Summary when both platforms set up
+                if setup_claude && setup_gemini {
+                    println!("\n✓ RTK installed for both Claude Code and Gemini CLI");
+                    println!("  Restart both CLIs to apply changes.");
+                }
             }
         }
 
@@ -1504,6 +1540,9 @@ fn main() -> Result<()> {
             }
             HookCommands::Claude => {
                 cmd::claude_hook::run()?;
+            }
+            HookCommands::Gemini => {
+                cmd::gemini_hook::run()?;
             }
         },
 

@@ -1094,6 +1094,412 @@ pub fn show_config() -> Result<()> {
     Ok(())
 }
 
+// ============================================================================
+// GEMINI CLI INTEGRATION
+// ============================================================================
+
+/// Resolve ~/.gemini directory with proper home expansion
+fn resolve_gemini_dir() -> Result<PathBuf> {
+    dirs::home_dir()
+        .map(|h| h.join(".gemini"))
+        .context("Cannot determine home directory. Is $HOME set?")
+}
+
+/// Shared: patch an instruction file (CLAUDE.md or GEMINI.md) to add @RTK.md reference.
+/// Migrates old RTK block if present. Returns true if migration occurred.
+fn patch_instruction_file(path: &Path, file_label: &str, verbose: u8) -> Result<bool> {
+    let mut content = if path.exists() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+
+    let mut migrated = false;
+
+    // Check for old block and migrate
+    if content.contains("<!-- rtk-instructions") {
+        let (new_content, did_migrate) = remove_rtk_block(&content);
+        if did_migrate {
+            content = new_content;
+            migrated = true;
+            if verbose > 0 {
+                eprintln!("Migrated: removed old RTK block from {}", file_label);
+            }
+        }
+    }
+
+    // Check if @RTK.md already present
+    if content.contains("@RTK.md") {
+        if verbose > 0 {
+            eprintln!("@RTK.md reference already present in {}", file_label);
+        }
+        if migrated {
+            fs::write(path, content)?;
+        }
+        return Ok(migrated);
+    }
+
+    // Add @RTK.md
+    let new_content = if content.is_empty() {
+        "@RTK.md\n".to_string()
+    } else {
+        format!("{}\n\n@RTK.md\n", content.trim())
+    };
+
+    fs::write(path, new_content)?;
+
+    if verbose > 0 {
+        eprintln!("Added @RTK.md reference to {}", file_label);
+    }
+
+    Ok(migrated)
+}
+
+/// Shared: Remove @RTK.md reference from an instruction file (CLAUDE.md or GEMINI.md).
+/// Returns true if the reference was found and removed.
+fn remove_rtk_reference_from_file(path: &Path, file_label: &str) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}: {}", file_label, path.display()))?;
+
+    if !content.contains("@RTK.md") {
+        return Ok(false);
+    }
+
+    let new_content = content
+        .lines()
+        .filter(|line| !line.trim().starts_with("@RTK.md"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let cleaned = clean_double_blanks(&new_content);
+
+    fs::write(path, cleaned)
+        .with_context(|| format!("Failed to write {}: {}", file_label, path.display()))?;
+
+    Ok(true)
+}
+
+/// Shared: Remove hook from a settings.json file using a remover function.
+fn remove_hook_from_settings_file(
+    settings_path: &Path,
+    remover: impl FnOnce(&mut serde_json::Value) -> bool,
+    verbose: u8,
+) -> Result<bool> {
+    if !settings_path.exists() {
+        if verbose > 0 {
+            eprintln!("{} not found, nothing to remove", settings_path.display());
+        }
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(settings_path)
+        .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?;
+
+    let removed = remover(&mut root);
+
+    if removed {
+        let backup_path = settings_path.with_extension("json.bak");
+        fs::copy(settings_path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+
+        let serialized =
+            serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+        atomic_write(settings_path, &serialized)?;
+
+        if verbose > 0 {
+            eprintln!("Removed RTK hook from {}", settings_path.display());
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Shared: Patch settings.json with RTK hook using generic functions.
+fn patch_settings_shared(
+    settings_path: &Path,
+    is_present: impl Fn(&serde_json::Value) -> bool,
+    insert_hook: impl FnOnce(&mut serde_json::Value),
+    print_manual: impl Fn(),
+    mode: PatchMode,
+    label: &str,
+    restart_msg: &str,
+    verbose: u8,
+) -> Result<PatchResult> {
+    // Read or create settings.json
+    let mut root = if settings_path.exists() {
+        let content = fs::read_to_string(settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    // Check idempotency
+    if is_present(&root) {
+        if verbose > 0 {
+            eprintln!("{}: hook already present", label);
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    // Handle mode
+    match mode {
+        PatchMode::Skip => {
+            print_manual();
+            return Ok(PatchResult::Skipped);
+        }
+        PatchMode::Ask => {
+            if !prompt_user_consent(settings_path)? {
+                print_manual();
+                return Ok(PatchResult::Declined);
+            }
+        }
+        PatchMode::Auto => {}
+    }
+
+    // Deep-merge hook
+    insert_hook(&mut root);
+
+    // Backup original
+    if settings_path.exists() {
+        let backup_path = settings_path.with_extension("json.bak");
+        fs::copy(settings_path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup_path.display());
+        }
+    }
+
+    // Atomic write
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+    atomic_write(settings_path, &serialized)?;
+
+    println!("\n  {}: hook added", label);
+    if settings_path.with_extension("json.bak").exists() {
+        println!(
+            "  Backup: {}",
+            settings_path.with_extension("json.bak").display()
+        );
+    }
+    println!("  {}", restart_msg);
+
+    Ok(PatchResult::Patched)
+}
+
+/// Patch GEMINI.md: add @RTK.md, migrate if old block exists
+fn patch_gemini_md(path: &Path, verbose: u8) -> Result<bool> {
+    patch_instruction_file(path, "GEMINI.md", verbose)
+}
+
+/// Check if RTK Gemini hook is already present in settings.json
+fn gemini_hook_already_present(root: &serde_json::Value) -> bool {
+    let before_tool_array = match root
+        .get("hooks")
+        .and_then(|h| h.get("BeforeTool"))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    before_tool_array
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd.contains("rtk hook gemini"))
+}
+
+/// Deep-merge RTK hook entry into Gemini settings.json
+fn insert_gemini_hook_entry(root: &mut serde_json::Value) {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut()
+                .expect("Just created object, must succeed")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .expect("hooks must be an object");
+
+    let before_tool = hooks
+        .entry("BeforeTool")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .expect("BeforeTool must be an array");
+
+    before_tool.push(serde_json::json!({
+        "matcher": "run_shell_command",
+        "hooks": [{
+            "type": "command",
+            "command": "rtk hook gemini"
+        }]
+    }));
+}
+
+/// Remove RTK Gemini hook entry from settings.json
+fn remove_gemini_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let hooks = match root.get_mut("hooks").and_then(|h| h.get_mut("BeforeTool")) {
+        Some(before_tool) => before_tool,
+        None => return false,
+    };
+
+    let before_tool_array = match hooks.as_array_mut() {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let original_len = before_tool_array.len();
+    before_tool_array.retain(|entry| {
+        if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
+            for hook in hooks_array {
+                if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
+                    if command.contains("rtk hook gemini") {
+                        return false; // Remove this entry
+                    }
+                }
+            }
+        }
+        true // Keep this entry
+    });
+
+    before_tool_array.len() < original_len
+}
+
+/// Print manual instructions for Gemini settings.json patching
+fn print_gemini_manual_instructions() {
+    println!("\n  MANUAL STEP: Add this to ~/.gemini/settings.json:");
+    println!("  {{");
+    println!("    \"hooks\": {{ \"BeforeTool\": [{{");
+    println!("      \"matcher\": \"run_shell_command\",");
+    println!("      \"hooks\": [{{ \"type\": \"command\",");
+    println!("        \"command\": \"rtk hook gemini\"");
+    println!("      }}]");
+    println!("    }}]}}");
+    println!("  }}");
+    println!("\n  Then restart Gemini CLI.\n");
+}
+
+/// Patch Gemini settings.json with RTK hook
+fn patch_gemini_settings(mode: PatchMode, verbose: u8) -> Result<PatchResult> {
+    let gemini_dir = resolve_gemini_dir()?;
+    fs::create_dir_all(&gemini_dir).with_context(|| {
+        format!(
+            "Failed to create Gemini directory: {}",
+            gemini_dir.display()
+        )
+    })?;
+
+    let settings_path = gemini_dir.join("settings.json");
+    patch_settings_shared(
+        &settings_path,
+        |root| gemini_hook_already_present(root),
+        insert_gemini_hook_entry,
+        print_gemini_manual_instructions,
+        mode,
+        "Gemini settings.json",
+        "Restart Gemini CLI. Test with: gemini",
+        verbose,
+    )
+}
+
+/// Remove RTK hook from Gemini settings.json
+fn remove_gemini_hook_from_settings(verbose: u8) -> Result<bool> {
+    let settings_path = resolve_gemini_dir()?.join("settings.json");
+    remove_hook_from_settings_file(&settings_path, remove_gemini_hook_from_json, verbose)
+}
+
+/// Public entry point for `rtk init --gemini`
+/// Mirrors Claude Code setup: RTK.md + GEMINI.md patching + settings.json hook
+pub fn run_gemini(patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    let gemini_dir = resolve_gemini_dir()?;
+    let rtk_md_path = gemini_dir.join("RTK.md");
+    let gemini_md_path = gemini_dir.join("GEMINI.md");
+
+    // 1. Write RTK.md (same content as Claude's RTK.md)
+    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
+
+    // 2. Patch GEMINI.md (add @RTK.md reference, migrate if needed)
+    let migrated = patch_gemini_md(&gemini_md_path, verbose)?;
+
+    // 3. Print success message
+    println!("\nRTK hook installed (Gemini CLI).\n");
+    println!("  Hook:      rtk hook gemini (direct binary)");
+    println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+    println!("  GEMINI.md: @RTK.md reference added");
+
+    if migrated {
+        println!("\n  Migrated: Removed old RTK block from GEMINI.md (now using @RTK.md)");
+    }
+
+    // 4. Patch settings.json
+    let _patch_result = patch_gemini_settings(patch_mode, verbose)?;
+
+    println!();
+    Ok(())
+}
+
+/// Full uninstall for Gemini: remove hook, RTK.md, @RTK.md reference, settings.json entry
+pub fn uninstall_gemini(verbose: u8) -> Result<()> {
+    let gemini_dir = resolve_gemini_dir()?;
+    let mut removed = Vec::new();
+
+    // 1. Remove RTK.md
+    let rtk_md_path = gemini_dir.join("RTK.md");
+    if rtk_md_path.exists() {
+        fs::remove_file(&rtk_md_path)
+            .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
+        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    }
+
+    // 2. Remove @RTK.md reference from GEMINI.md
+    let gemini_md_path = gemini_dir.join("GEMINI.md");
+    if remove_rtk_reference_from_file(&gemini_md_path, "GEMINI.md")? {
+        removed.push("GEMINI.md: removed @RTK.md reference".to_string());
+    }
+
+    // 3. Remove hook entry from Gemini settings.json
+    if remove_gemini_hook_from_settings(verbose)? {
+        removed.push("Gemini settings.json: removed RTK hook entry".to_string());
+    }
+
+    // Report results
+    if removed.is_empty() {
+        println!("RTK Gemini integration was not installed (nothing to remove)");
+    } else {
+        println!("RTK Gemini integration uninstalled:");
+        for item in removed {
+            println!("  - {}", item);
+        }
+        println!("\nRestart Gemini CLI to apply changes.");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
