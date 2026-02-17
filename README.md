@@ -71,6 +71,11 @@ If already installed and `rtk gain` works, **DO NOT reinstall**. Skip to Quick S
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 ```
 
+> **Note**: rtk installs to `~/.local/bin` by default. If this directory is not in your PATH, add it:
+> ```bash
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
+> ```
+
 After installation, **verify you have the correct rtk**:
 ```bash
 rtk gain  # Must show token savings stats (not "command not found")
