@@ -145,6 +145,7 @@ rtk git add                     # → "ok ✓"
 rtk git commit -m "msg"         # → "ok ✓ abc1234"
 rtk git push                    # → "ok ✓ main"
 rtk git pull                    # → "ok ✓ 3 files +10 -2"
+rtk git -C /path/to/repo status # Cross-directory operations
 ```
 
 ### Commands

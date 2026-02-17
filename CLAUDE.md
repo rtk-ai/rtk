@@ -192,6 +192,8 @@ rtk gain --history | grep proxy
 - Uses `trailing_var_arg = true` + `allow_hyphen_values = true` to properly handle git flags
 - Auto-detects `--merges` flag to avoid conflicting with `--no-merges` injection
 - Propagates git exit codes for CI/CD reliability (PR #5 fix)
+- Supports `git -C <path>` for cross-directory operations via `git_command()` helper
+- `git_dir` parameter threaded through all `run_*` functions to prepend `-C <path>` to git invocations
 
 **Output Filtering Strategy**
 - Compact mode: Show only summary/failures
@@ -377,6 +379,12 @@ pub fn execute_with_filter(cmd: &str, args: &[&str]) -> Result<()> {
 - **Shared Infrastructure**: utils.rs module for package manager auto-detection
 - **Features**: Exit code preservation, error grouping, consistent formatting
 - **Testing**: Validated on production T3 Stack project (methode-aristote/app)
+
+### PR #171: Git `-C <path>` Flag Support (2026-02-17)
+- **Feature**: Support `git -C <path>` flag for cross-directory git operations
+- **Implementation**: `git_command()` helper prepends `-C <path>` to all git invocations, `git_dir` threaded through all 12 `run_*` functions
+- **Hook**: `_rtk_git_rewrite()` helper extracts and preserves `-C` flags before subcommand matching
+- **Impact**: All git commands can now operate on repos outside the current directory (e.g., `rtk git -C /other/repo status`)
 
 ### Python & Go Support (2026-02-12)
 - **Python Commands**: 3 commands for Python development workflows

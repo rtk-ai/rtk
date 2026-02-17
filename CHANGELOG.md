@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 * add hook audit mode for verifiable rewrite metrics ([#151](https://github.com/rtk-ai/rtk/issues/151)) ([70c3786](https://github.com/rtk-ai/rtk/commit/70c37867e7282ee0ccf200022ecef8c6e4ab52f4))
+* support git `-C <path>` flag for cross-directory operations ([#171](https://github.com/rtk-ai/rtk/pull/171)) ([e9b02fe](https://github.com/rtk-ai/rtk/commit/e9b02fe))
 
 ## [0.19.0](https://github.com/rtk-ai/rtk/compare/v0.18.1...v0.19.0) (2026-02-16)
 
