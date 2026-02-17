@@ -692,14 +692,29 @@ fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     Ok(())
 }
 
-fn view_run(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
+/// Check if run view args should bypass filtering and pass through directly.
+/// Flags like --log-failed, --log, and --json produce output that the filter
+/// would incorrectly strip.
+fn should_passthrough_run_view(extra_args: &[String]) -> bool {
+    extra_args
+        .iter()
+        .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
+}
 
+fn view_run(args: &[String], _verbose: u8) -> Result<()> {
     if args.is_empty() {
         return Err(anyhow::anyhow!("Run ID required"));
     }
 
     let run_id = &args[0];
+    let extra_args = &args[1..];
+
+    // Pass through when user requests logs or JSON — the filter would strip them
+    if should_passthrough_run_view(extra_args) {
+        return run_passthrough_with_extra("gh", &["run", "view", run_id], extra_args);
+    }
+
+    let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
     cmd.args(["run", "view", run_id]);
@@ -1055,6 +1070,38 @@ fn run_api(args: &[String], _verbose: u8) -> Result<()> {
     Ok(())
 }
 
+/// Pass through a command with base args + extra args, tracking as passthrough.
+fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[String]) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut command = Command::new(cmd);
+    for arg in base_args {
+        command.arg(arg);
+    }
+    for arg in extra_args {
+        command.arg(arg);
+    }
+
+    let status =
+        command
+            .status()
+            .context(format!("Failed to run {} {}", cmd, base_args.join(" ")))?;
+
+    let full_cmd = format!(
+        "{} {} {}",
+        cmd,
+        base_args.join(" "),
+        tracking::args_display(&extra_args.iter().map(|s| s.into()).collect::<Vec<_>>())
+    );
+    timer.track_passthrough(&full_cmd, &format!("rtk {} (passthrough)", full_cmd));
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    Ok(())
+}
+
 fn run_passthrough(cmd: &str, subcommand: &str, args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
@@ -1134,5 +1181,33 @@ mod tests {
     fn test_ok_confirmation_pr_edit() {
         let result = ok_confirmation("edited", "#42");
         assert_eq!(result, "ok edited #42");
+    }
+
+    #[test]
+    fn test_run_view_passthrough_log_failed() {
+        assert!(should_passthrough_run_view(&["--log-failed".into()]));
+    }
+
+    #[test]
+    fn test_run_view_passthrough_log() {
+        assert!(should_passthrough_run_view(&["--log".into()]));
+    }
+
+    #[test]
+    fn test_run_view_passthrough_json() {
+        assert!(should_passthrough_run_view(&[
+            "--json".into(),
+            "jobs".into()
+        ]));
+    }
+
+    #[test]
+    fn test_run_view_no_passthrough_empty() {
+        assert!(!should_passthrough_run_view(&[]));
+    }
+
+    #[test]
+    fn test_run_view_no_passthrough_other_flags() {
+        assert!(!should_passthrough_run_view(&["--web".into()]));
     }
 }
