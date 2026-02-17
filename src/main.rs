@@ -363,9 +363,11 @@ enum Commands {
         format: String,
     },
 
-    /// Show or create configuration file
+    /// Show, create, or modify configuration
     Config {
-        /// Create default config file
+        #[command(subcommand)]
+        action: Option<ConfigCommands>,
+        /// Create default config file (backward compat)
         #[arg(long)]
         create: bool,
     },
@@ -582,6 +584,53 @@ enum HookCommands {
     },
     /// Claude Code JSON protocol handler (reads stdin, writes stdout)
     Claude,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Get a config value by key
+    Get {
+        /// Dotted key (e.g., "tracking.enabled")
+        key: String,
+    },
+    /// Set a config value or create a rule
+    Set {
+        /// Dotted key (e.g., "display.max_width" or "rules.my-alias")
+        key: String,
+        /// Value to set (for scalar config) or redirect template (for rules)
+        value: Option<String>,
+        /// Pattern for rule (e.g., "t" or "git reset --hard")
+        #[arg(long)]
+        pattern: Option<String>,
+        /// Action for rule: block, warn, rewrite, trash, suggest_tool
+        #[arg(long)]
+        action: Option<String>,
+        /// Write to project-local .rtk/config.toml
+        #[arg(long)]
+        local: bool,
+    },
+    /// List all config values
+    List {
+        /// Show where each value comes from
+        #[arg(long)]
+        origin: bool,
+    },
+    /// Remove a config key (reset to default)
+    Unset {
+        /// Dotted key to remove
+        key: String,
+        /// Remove from project-local .rtk/config.toml
+        #[arg(long)]
+        local: bool,
+    },
+    /// Create default config file
+    Create,
+    /// Export built-in rules as editable MD files
+    ExportRules {
+        /// Export to ~/.claude/ instead of ~/.config/rtk/
+        #[arg(long)]
+        claude: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1224,11 +1273,64 @@ fn main() -> Result<()> {
             cc_economics::run(daily, weekly, monthly, all, &format, cli.verbose)?;
         }
 
-        Commands::Config { create } => {
+        Commands::Config { action, create } => {
+            // Backward compat: --create flag
             if create {
                 let path = config::Config::create_default()?;
                 println!("Created: {}", path.display());
+            } else if let Some(action) = action {
+                match action {
+                    ConfigCommands::Get { key } => match config::get_value(&key) {
+                        Ok(val) => println!("{val}"),
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    },
+                    ConfigCommands::Set {
+                        key,
+                        value,
+                        pattern,
+                        action,
+                        local,
+                    } => {
+                        if key.starts_with("rules.") {
+                            let rule_name = key.strip_prefix("rules.").unwrap();
+                            config::set_rule(
+                                rule_name,
+                                pattern.as_deref(),
+                                action.as_deref(),
+                                value.as_deref(),
+                                local,
+                            )?;
+                        } else {
+                            let val = value.ok_or_else(|| {
+                                anyhow::anyhow!("Value required for scalar config key: {key}")
+                            })?;
+                            config::set_value(&key, &val, local)?;
+                        }
+                    }
+                    ConfigCommands::List { origin } => {
+                        config::list_values(origin)?;
+                    }
+                    ConfigCommands::Unset { key, local } => {
+                        if key.starts_with("rules.") {
+                            let rule_name = key.strip_prefix("rules.").unwrap();
+                            config::unset_rule(rule_name, local)?;
+                        } else {
+                            config::unset_value(&key, local)?;
+                        }
+                    }
+                    ConfigCommands::Create => {
+                        let path = config::Config::create_default()?;
+                        println!("Created: {}", path.display());
+                    }
+                    ConfigCommands::ExportRules { claude } => {
+                        config::export_rules(claude)?;
+                    }
+                }
             } else {
+                // No subcommand: show config (backward compat)
                 config::show_config()?;
             }
         }

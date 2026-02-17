@@ -36,8 +36,7 @@
 //! **Gemini CLI** (JSON protocol via `gemini_hook.rs`):
 //! - See `gemini_hook.rs` module documentation
 
-use super::{analysis, lexer};
-// PR 2 adds: use super::safety;
+use super::{analysis, lexer, safety};
 
 /// Hook check result
 #[derive(Debug, Clone)]
@@ -61,13 +60,20 @@ pub fn check_for_hook(raw: &str, _agent: &str) -> HookResult {
 
 fn check_for_hook_inner(raw: &str, depth: usize) -> HookResult {
     if depth >= MAX_REWRITE_DEPTH {
-        return HookResult::Blocked("Rewrite loop detected (max depth exceeded)".to_string());
+        return HookResult::Blocked(
+            "Safety rewrite loop detected (max depth exceeded)".to_string(),
+        );
     }
+
+    // Handle empty
     if raw.trim().is_empty() {
         return HookResult::Rewrite(raw.to_string());
     }
-    // PR 2 adds: crate::config::rules::try_remap() alias expansion
-    // PR 2 adds: safety::check_raw() and safety::check() dispatch
+
+    // Remap expansion (aliases like "t" → "cargo test")
+    if let Some(expanded) = crate::config::rules::try_remap(raw) {
+        return check_for_hook_inner(&expanded, depth + 1);
+    }
 
     let tokens = lexer::tokenize(raw);
 
@@ -81,12 +87,35 @@ fn check_for_hook_inner(raw: &str, depth: usize) -> HookResult {
 
     if analysis::needs_shell(&core_tokens) {
         // Core needs shell even after suffix stripping — full passthrough.
-        // (When suffix is empty, core_tokens == original tokens so this is unchanged.)
+        // Still check safety before passing through.
+        match safety::check_raw(raw) {
+            safety::SafetyResult::Blocked(msg) => return HookResult::Blocked(msg),
+            safety::SafetyResult::Safe => {}
+            safety::SafetyResult::Rewritten(_) | safety::SafetyResult::TrashRequested(_) => {}
+        }
         return HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(raw)));
     }
 
+    // Native mode: parse and check each command
     match analysis::parse_chain(core_tokens) {
         Ok(commands) => {
+            // Check safety on each command
+            for cmd in &commands {
+                match safety::check(&cmd.binary, &cmd.args) {
+                    safety::SafetyResult::Blocked(msg) => {
+                        return HookResult::Blocked(msg);
+                    }
+                    safety::SafetyResult::Rewritten(new_cmd) => {
+                        return check_for_hook_inner(&new_cmd, depth + 1);
+                    }
+                    safety::SafetyResult::TrashRequested(_) => {
+                        // Redirect to rtk run which handles trash
+                        return HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(raw)));
+                    }
+                    safety::SafetyResult::Safe => {}
+                }
+            }
+
             // Single command: route to optimized RTK subcommand.
             // Chained commands (&&, ||, ;): wrap entire chain in rtk run -c.
             if commands.len() == 1 {
@@ -127,7 +156,10 @@ fn check_for_hook_inner(raw: &str, depth: usize) -> HookResult {
                 HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(&inner)))
             }
         }
-        Err(_) => HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(raw))),
+        Err(_) => {
+            // Parse error - passthrough with wrapping
+            HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(raw)))
+        }
     }
 }
 
@@ -812,7 +844,18 @@ mod tests {
         }
     }
 
-    // PR 2 adds: test_compound_blocked_in_chain (safety-dependent test)
+    #[test]
+    fn test_compound_blocked_in_chain() {
+        // Safety rules catch dangerous commands even mid-chain
+        let cases = [
+            ("cd /tmp && cat file.txt", "file-reading"),
+            ("echo start && sed -i 's/x/y/' f", "file-editing"),
+            ("git add . && head -5 f.txt", "file-reading"),
+        ];
+        for (input, expected_msg) in cases {
+            assert_blocked(input, expected_msg);
+        }
+    }
 
     #[test]
     fn test_compound_quoted_operators_not_split() {
@@ -831,7 +874,20 @@ mod tests {
         }
     }
 
-    // PR 2 adds: test_blocked_commands (safety-dependent test)
+    // === COMMANDS THAT SHOULD BLOCK (table-driven) ===
+
+    #[test]
+    fn test_blocked_commands() {
+        let cases = [
+            ("cat file.txt", "file-reading"),
+            ("sed -i 's/old/new/' file.txt", "file-editing"),
+            ("head -n 10 file.txt", "file-reading"),
+            ("cd /tmp && cat file.txt", "file-reading"), // cat in chain
+        ];
+        for (input, expected_msg) in cases {
+            assert_blocked(input, expected_msg);
+        }
+    }
 
     // === SUFFIX-AWARE ROUTING: redirect/pipe suffix preserved, RTK filter applied ===
     // When a known RTK command has a "safe" redirect or pipe suffix, the hook should
@@ -1138,7 +1194,21 @@ mod tests {
         }
     }
 
-    // PR 2 adds: test_cross_protocol_blocked_command_denied_by_both (safety-dependent test)
+    #[test]
+    fn test_cross_protocol_blocked_command_denied_by_both() {
+        // Both Claude and Gemini must block the same unsafe commands
+        for cmd in ["cat file.txt", "head -n 10 file.txt"] {
+            let claude = check_for_hook(cmd, "claude");
+            let gemini = check_for_hook(cmd, "gemini");
+            match (&claude, &gemini) {
+                (HookResult::Blocked(_), HookResult::Blocked(_)) => {}
+                _ => panic!(
+                    "'{}': Claude={:?}, Gemini={:?} — both should Block",
+                    cmd, claude, gemini
+                ),
+            }
+        }
+    }
 
     // =====================================================================
     // ROUTING TESTS — verify route_native_command dispatch

@@ -7,6 +7,12 @@
 pub(crate) mod analysis;
 pub(crate) mod lexer;
 
+// Safety engine (depends on config::rules)
+pub(crate) mod safety;
+
+// Trash command (depends on trash crate)
+pub(crate) mod trash_cmd;
+
 // Predicates and utilities (no external deps)
 pub(crate) mod predicates;
 

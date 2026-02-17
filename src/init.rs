@@ -975,7 +975,7 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
 }
 
 /// Resolve ~/.claude directory with proper home expansion
-fn resolve_claude_dir() -> Result<PathBuf> {
+pub(crate) fn resolve_claude_dir() -> Result<PathBuf> {
     dirs::home_dir()
         .map(|h| h.join(".claude"))
         .context("Cannot determine home directory. Is $HOME set?")
