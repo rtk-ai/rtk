@@ -489,12 +489,12 @@ pub fn format_compose_build(raw: &str) -> String {
     }
 
     // Count build steps (lines starting with " => ")
-    let steps: Vec<&str> = raw
+    let step_count = raw
         .lines()
         .filter(|l| l.trim_start().starts_with("=> "))
-        .collect();
-    if !steps.is_empty() {
-        result.push_str(&format!("  Steps: {}", steps.len()));
+        .count();
+    if step_count > 0 {
+        result.push_str(&format!("  Steps: {}", step_count));
     }
 
     result.trim_end().to_string()
@@ -551,11 +551,17 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Raw output for token tracking
-    let raw = Command::new("docker")
+    let raw_output = Command::new("docker")
         .args(["compose", "ps"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
+        .context("Failed to run docker compose ps")?;
+
+    if !raw_output.status.success() {
+        let stderr = String::from_utf8_lossy(&raw_output.stderr);
+        eprintln!("{}", stderr);
+        std::process::exit(raw_output.status.code().unwrap_or(1));
+    }
+    let raw = String::from_utf8_lossy(&raw_output.stdout).to_string();
 
     // Structured output for parsing (same pattern as docker_ps)
     let output = Command::new("docker")
@@ -566,7 +572,13 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
             "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
         ])
         .output()
-        .context("Failed to run docker compose ps")?;
+        .context("Failed to run docker compose ps --format")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("{}", stderr);
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
     let structured = String::from_utf8_lossy(&output.stdout).to_string();
 
     if verbose > 0 {
@@ -590,6 +602,13 @@ pub fn run_compose_logs(service: Option<&str>, verbose: u8) -> Result<()> {
     }
 
     let output = cmd.output().context("Failed to run docker compose logs")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("{}", stderr);
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
@@ -621,6 +640,13 @@ pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<()> {
     }
 
     let output = cmd.output().context("Failed to run docker compose build")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("{}", stderr);
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
