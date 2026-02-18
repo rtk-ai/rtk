@@ -66,7 +66,7 @@ struct MypyError {
     context_lines: Vec<String>,
 }
 
-fn filter_mypy_output(output: &str) -> String {
+pub fn filter_mypy_output(output: &str) -> String {
     lazy_static::lazy_static! {
         // file.py:12: error: Message [error-code]
         // file.py:12:5: error: Message [error-code]
