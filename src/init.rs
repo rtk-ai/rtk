@@ -179,6 +179,16 @@ pub fn run(
     }
 }
 
+/// Check if the current shell environment supports bash hooks
+/// Returns true if bash is available and hooks can be installed
+fn is_bash_environment() -> bool {
+    // Check if bash is available in PATH
+    std::process::Command::new("bash")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
 /// Prepare hook directory and return paths (hook_dir, hook_path)
 fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     let claude_dir = resolve_claude_dir()?;
@@ -190,7 +200,6 @@ fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Write hook file if missing or outdated, return true if changed
-#[cfg(unix)]
 fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
     let changed = if hook_path.exists() {
         let existing = fs::read_to_string(hook_path)
@@ -218,10 +227,21 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
         true
     };
 
-    // Set executable permissions
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    // Set executable permissions (Unix-specific, gracefully skip on Windows)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
+
+    // On Windows with bash (Git Bash, WSL), the file system handles permissions automatically
+    #[cfg(not(unix))]
+    {
+        if verbose > 0 {
+            eprintln!("Note: File permissions managed by Windows file system");
+        }
+    }
 
     Ok(changed)
 }
@@ -558,7 +578,6 @@ fn clean_double_blanks(content: &str) -> String {
         if line.trim().is_empty() {
             // Count consecutive blank lines
             let mut blank_count = 0;
-            let start = i;
             while i < lines.len() && lines[i].trim().is_empty() {
                 blank_count += 1;
                 i += 1;
@@ -639,16 +658,15 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
-#[cfg(not(unix))]
-fn run_default_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
-    eprintln!("⚠️  Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose)
-}
-
-#[cfg(unix)]
 fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    // Check if bash is available (runtime check, works on Windows with Git Bash/WSL)
+    if !is_bash_environment() {
+        eprintln!("⚠️  Hook-based mode requires bash in PATH.");
+        eprintln!("    Windows users: Install Git Bash or WSL.");
+        eprintln!("    Alternative: use --claude-md mode for full injection.");
+        eprintln!("    Falling back to --claude-md mode.");
+        return run_claude_md_mode(global, verbose);
+    }
     if !global {
         // Local init: unchanged behavior (full injection into ./CLAUDE.md)
         return run_claude_md_mode(false, verbose);
@@ -702,13 +720,13 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
 }
 
 /// Hook-only mode: just the hook, no RTK.md
-#[cfg(not(unix))]
-fn run_hook_only_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
-    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
-}
-
-#[cfg(unix)]
 fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    // Check if bash is available (runtime check, works on Windows with Git Bash/WSL)
+    if !is_bash_environment() {
+        anyhow::bail!(
+            "Hook install requires bash in PATH. Windows users: Install Git Bash or WSL, or use --claude-md mode."
+        );
+    }
     if !global {
         eprintln!("⚠️  Warning: --hook-only only makes sense with --global");
         eprintln!("    For local projects, use default mode or --claude-md");
@@ -992,16 +1010,16 @@ pub fn show_config() -> Result<()> {
 
     // Check hook
     if hook_path.exists() {
+        let hook_content = fs::read_to_string(&hook_path)?;
+        let has_guards =
+            hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let metadata = fs::metadata(&hook_path)?;
             let perms = metadata.permissions();
             let is_executable = perms.mode() & 0o111 != 0;
-
-            let hook_content = fs::read_to_string(&hook_path)?;
-            let has_guards =
-                hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
 
             if is_executable && has_guards {
                 println!("✅ Hook: {} (executable, with guards)", hook_path.display());
@@ -1017,7 +1035,11 @@ pub fn show_config() -> Result<()> {
 
         #[cfg(not(unix))]
         {
-            println!("✅ Hook: {} (exists)", hook_path.display());
+            if has_guards {
+                println!("✅ Hook: {} (with guards)", hook_path.display());
+            } else {
+                println!("⚠️  Hook: {} (no guards - outdated)", hook_path.display());
+            }
         }
     } else {
         println!("⚪ Hook: not found");
@@ -1171,7 +1193,6 @@ More content"#;
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_default_mode_creates_hook_and_rtk_md() {
         let temp = TempDir::new().unwrap();
         let hook_path = temp.path().join("rtk-rewrite.sh");
@@ -1180,14 +1201,23 @@ More content"#;
         fs::write(&hook_path, REWRITE_HOOK).unwrap();
         fs::write(&rtk_md_path, RTK_SLIM).unwrap();
 
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+        // Set executable permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         assert!(hook_path.exists());
         assert!(rtk_md_path.exists());
 
-        let metadata = fs::metadata(&hook_path).unwrap();
-        assert!(metadata.permissions().mode() & 0o111 != 0);
+        // Verify executable permissions on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&hook_path).unwrap();
+            assert!(metadata.permissions().mode() & 0o111 != 0);
+        }
     }
 
     #[test]
