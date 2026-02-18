@@ -199,19 +199,29 @@ fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     Ok((hook_dir, hook_path))
 }
 
+/// Normalize line endings to LF (Unix-style) for bash scripts
+/// Critical on Windows where Git auto-converts to CRLF, breaking shebangs
+fn normalize_line_endings(content: &str) -> String {
+    content.replace("\r\n", "\n")
+}
+
 /// Write hook file if missing or outdated, return true if changed
 fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
+    // Normalize line endings to LF (critical for bash shebang on Windows)
+    let normalized_hook = normalize_line_endings(REWRITE_HOOK);
+
     let changed = if hook_path.exists() {
         let existing = fs::read_to_string(hook_path)
             .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+        let normalized_existing = normalize_line_endings(&existing);
 
-        if existing == REWRITE_HOOK {
+        if normalized_existing == normalized_hook {
             if verbose > 0 {
                 eprintln!("Hook already up to date: {}", hook_path.display());
             }
             false
         } else {
-            fs::write(hook_path, REWRITE_HOOK)
+            fs::write(hook_path, normalized_hook.as_bytes())
                 .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
             if verbose > 0 {
                 eprintln!("Updated hook: {}", hook_path.display());
@@ -219,7 +229,7 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
             true
         }
     } else {
-        fs::write(hook_path, REWRITE_HOOK)
+        fs::write(hook_path, normalized_hook.as_bytes())
             .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
         if verbose > 0 {
             eprintln!("Created hook: {}", hook_path.display());
@@ -1165,6 +1175,26 @@ mod tests {
             guard_pos < set_pos,
             "Guards must come before set -euo pipefail"
         );
+    }
+
+    #[test]
+    fn test_hook_has_lf_line_endings() {
+        // Embedded hook must use LF, not CRLF (critical for bash shebang)
+        assert!(
+            !REWRITE_HOOK.contains("\r\n"),
+            "Hook contains CRLF (\\r\\n) - must use LF only"
+        );
+        assert!(
+            REWRITE_HOOK.contains('\n'),
+            "Hook must contain newlines"
+        );
+    }
+
+    #[test]
+    fn test_normalize_line_endings() {
+        assert_eq!(normalize_line_endings("hello\r\nworld\r\n"), "hello\nworld\n");
+        assert_eq!(normalize_line_endings("no change\n"), "no change\n");
+        assert_eq!(normalize_line_endings("mixed\r\nand\njust\n"), "mixed\nand\njust\n");
     }
 
     #[test]

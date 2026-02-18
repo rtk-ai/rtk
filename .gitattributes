@@ -1,0 +1,14 @@
+# Ensure shell scripts always use LF line endings (critical for shebangs)
+*.sh text eol=lf
+
+# Ensure Rust source files use LF
+*.rs text eol=lf
+
+# Markdown files use LF
+*.md text eol=lf
+
+# TOML files use LF
+*.toml text eol=lf
+
+# JSON files use LF
+*.json text eol=lf
