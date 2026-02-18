@@ -45,6 +45,7 @@ mod tree;
 mod tsc_cmd;
 mod utils;
 mod vitest_cmd;
+mod wc_cmd;
 mod wget_cmd;
 
 use anyhow::{Context, Result};
@@ -291,6 +292,13 @@ enum Commands {
         #[arg(short = 'O', long)]
         stdout: bool,
         /// Additional wget arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Word/line/byte count with compact output (strips paths and padding)
+    Wc {
+        /// Arguments passed to wc (files, flags like -l, -w, -c)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1121,6 +1129,10 @@ fn main() -> Result<()> {
             } else {
                 wget_cmd::run(&url, &args, cli.verbose)?;
             }
+        }
+
+        Commands::Wc { args } => {
+            wc_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Gain {
