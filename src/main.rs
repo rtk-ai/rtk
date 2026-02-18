@@ -50,6 +50,7 @@ mod wc_cmd;
 mod wget_cmd;
 
 use anyhow::{Context, Result};
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -339,6 +340,9 @@ enum Commands {
         /// Output format: text, json, csv
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Show parse failure log (commands that fell back to raw execution)
+        #[arg(short = 'F', long)]
+        failures: bool,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -863,8 +867,59 @@ enum GoCommands {
     Other(Vec<OsString>),
 }
 
+fn run_fallback(parse_error: clap::Error) -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // No args → show Clap's error (user ran just "rtk" with bad syntax)
+    if args.is_empty() {
+        parse_error.exit();
+    }
+
+    eprintln!("[rtk: parse failed, running raw]");
+
+    let status = std::process::Command::new(&args[0])
+        .args(&args[1..])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+
+    let raw_command = args.join(" ");
+    let error_message = parse_error.to_string();
+
+    match status {
+        Ok(s) => {
+            // Track as passthrough
+            let timer = tracking::TimedExecution::start();
+            timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+
+            tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+
+            if !s.success() {
+                std::process::exit(s.code().unwrap_or(1));
+            }
+        }
+        Err(e) => {
+            tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+            // Command not found or other OS error — show Clap's original error
+            eprintln!("[rtk: fallback failed: {}]", e);
+            parse_error.exit();
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
+                e.exit();
+            }
+            return run_fallback(e);
+        }
+    };
 
     match cli.command {
         Commands::Ls { args } => {
@@ -1166,6 +1221,7 @@ fn main() -> Result<()> {
             monthly,
             all,
             format,
+            failures,
         } => {
             gain::run(
                 project, // added: pass project flag
@@ -1178,6 +1234,7 @@ fn main() -> Result<()> {
                 monthly,
                 all,
                 &format,
+                failures,
                 cli.verbose,
             )?;
         }
@@ -1561,6 +1618,75 @@ mod tests {
                 assert_eq!(message, vec!["title", "body", "footer"]);
             }
             _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_valid_git_status() {
+        let result = Cli::try_parse_from(["rtk", "git", "status"]);
+        assert!(result.is_ok(), "git status should parse successfully");
+    }
+
+    #[test]
+    fn test_try_parse_help_is_display_help() {
+        match Cli::try_parse_from(["rtk", "--help"]) {
+            Err(e) => assert_eq!(e.kind(), ErrorKind::DisplayHelp),
+            Ok(_) => panic!("Expected DisplayHelp error"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_version_is_display_version() {
+        match Cli::try_parse_from(["rtk", "--version"]) {
+            Err(e) => assert_eq!(e.kind(), ErrorKind::DisplayVersion),
+            Ok(_) => panic!("Expected DisplayVersion error"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_unknown_subcommand_is_error() {
+        match Cli::try_parse_from(["rtk", "nonexistent-command"]) {
+            Err(e) => assert!(!matches!(
+                e.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            )),
+            Ok(_) => panic!("Expected parse error for unknown subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_git_with_dash_c_fails() {
+        // This is the case that triggers fallback: git -C /path status
+        match Cli::try_parse_from(["rtk", "git", "-C", "/path", "status"]) {
+            Err(e) => assert!(!matches!(
+                e.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            )),
+            Ok(_) => panic!("Expected parse error for git -C"),
+        }
+    }
+
+    #[test]
+    fn test_gain_failures_flag_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--failures"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { failures, .. } => assert!(failures),
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_failures_short_flag_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "-F"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { failures, .. } => assert!(failures),
+                _ => panic!("Expected Gain command"),
+            }
         }
     }
 }
