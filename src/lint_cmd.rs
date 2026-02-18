@@ -190,6 +190,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
+    if !output.status.success() {
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
     Ok(())
 }
 
