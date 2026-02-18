@@ -35,7 +35,7 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
         "list" => list_prs(&args[1..], verbose, ultra_compact),
         "view" => view_pr(&args[1..], verbose, ultra_compact),
         "checks" => pr_checks(&args[1..], verbose, ultra_compact),
-        "status" => pr_status(verbose, ultra_compact),
+        "status" => pr_status(&args[1..], verbose, ultra_compact),
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
@@ -46,6 +46,10 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
 }
 
 fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
+    if has_output_format_flags(args) {
+        return run_passthrough_with_extra("gh", &["pr", "list"], args);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
@@ -130,31 +134,44 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
 }
 
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("PR number required"));
+    // When the caller supplies their own output-format flags, pass through so
+    // RTK doesn't clobber them with its hardcoded --json fields.
+    if has_output_format_flags(args) {
+        return run_passthrough_with_extra("gh", &["pr", "view"], args);
     }
 
-    let pr_number = &args[0];
+    let timer = tracking::TimedExecution::start();
+
+    // First non-flag arg is the PR identifier (number, URL, or branch).
+    // When omitted, gh defaults to the current branch's PR.
+    let (pr_ref, extra_args) = match args.first() {
+        Some(arg) if !arg.starts_with('-') => (Some(arg.as_str()), &args[1..]),
+        _ => (None, args.as_ref()),
+    };
 
     let mut cmd = Command::new("gh");
+    cmd.args(["pr", "view"]);
+    if let Some(pr) = pr_ref {
+        cmd.arg(pr);
+    }
     cmd.args([
-        "pr",
-        "view",
-        pr_number,
         "--json",
         "number,title,state,author,body,url,mergeable,reviews,statusCheckRollup",
     ]);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh pr view")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
 
+    let pr_label = pr_ref.unwrap_or("(current)");
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         timer.track(
-            &format!("gh pr view {}", pr_number),
-            &format!("rtk gh pr view {}", pr_number),
+            &format!("gh pr view {}", pr_label),
+            &format!("rtk gh pr view {}", pr_label),
             &stderr,
             &stderr,
         );
@@ -286,7 +303,7 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
                 }
             }
             if body.lines().count() > 3 {
-                let line = format!("  ... (gh pr view {} for full)\n", pr_number);
+                let line = format!("  ... (gh pr view {} for full)\n", pr_label);
                 filtered.push_str(&line);
                 print!("{}", line);
             }
@@ -294,8 +311,8 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     }
 
     timer.track(
-        &format!("gh pr view {}", pr_number),
-        &format!("rtk gh pr view {}", pr_number),
+        &format!("gh pr view {}", pr_label),
+        &format!("rtk gh pr view {}", pr_label),
         &raw,
         &filtered,
     );
@@ -388,7 +405,11 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> 
     Ok(())
 }
 
-fn pr_status(_verbose: u8, _ultra_compact: bool) -> Result<()> {
+fn pr_status(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> {
+    if has_output_format_flags(args) {
+        return run_passthrough_with_extra("gh", &["pr", "status"], args);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
@@ -445,6 +466,10 @@ fn run_issue(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
 }
 
 fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
+    if has_output_format_flags(args) {
+        return run_passthrough_with_extra("gh", &["issue", "list"], args);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
@@ -512,6 +537,10 @@ fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()>
 }
 
 fn view_issue(args: &[String], _verbose: u8) -> Result<()> {
+    if has_output_format_flags(args) {
+        return run_passthrough_with_extra("gh", &["issue", "view"], args);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     if args.is_empty() {
@@ -610,6 +639,10 @@ fn run_workflow(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()>
 }
 
 fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
+    if has_output_format_flags(args) {
+        return run_passthrough_with_extra("gh", &["run", "list"], args);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
@@ -692,13 +725,22 @@ fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     Ok(())
 }
 
+/// Check if args contain output-format flags (--json, --jq, --template) that
+/// indicate the caller wants specific unfiltered output.  When present, RTK
+/// should passthrough to gh directly instead of applying its own formatting.
+fn has_output_format_flags(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--json" || a == "--jq" || a == "-q" || a == "--template" || a == "-t")
+}
+
 /// Check if run view args should bypass filtering and pass through directly.
 /// Flags like --log-failed, --log, and --json produce output that the filter
 /// would incorrectly strip.
 fn should_passthrough_run_view(extra_args: &[String]) -> bool {
-    extra_args
-        .iter()
-        .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
+    has_output_format_flags(extra_args)
+        || extra_args
+            .iter()
+            .any(|a| a == "--log-failed" || a == "--log")
 }
 
 fn view_run(args: &[String], _verbose: u8) -> Result<()> {
@@ -776,6 +818,10 @@ fn view_run(args: &[String], _verbose: u8) -> Result<()> {
 }
 
 fn run_repo(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> {
+    if has_output_format_flags(args) {
+        return run_passthrough_with_extra("gh", &["repo"], args);
+    }
+
     // Parse subcommand (default to "view")
     let (subcommand, rest_args) = if args.is_empty() {
         ("view", args)
@@ -1209,5 +1255,50 @@ mod tests {
     #[test]
     fn test_run_view_no_passthrough_other_flags() {
         assert!(!should_passthrough_run_view(&["--web".into()]));
+    }
+
+    #[test]
+    fn test_has_output_format_flags_json() {
+        assert!(has_output_format_flags(&[
+            "--json".into(),
+            "number,title".into()
+        ]));
+    }
+
+    #[test]
+    fn test_has_output_format_flags_jq() {
+        assert!(has_output_format_flags(&[
+            "--jq".into(),
+            ".title".into()
+        ]));
+        assert!(has_output_format_flags(&["-q".into(), ".title".into()]));
+    }
+
+    #[test]
+    fn test_has_output_format_flags_template() {
+        assert!(has_output_format_flags(&[
+            "--template".into(),
+            "{{.title}}".into()
+        ]));
+        assert!(has_output_format_flags(&[
+            "-t".into(),
+            "{{.title}}".into()
+        ]));
+    }
+
+    #[test]
+    fn test_has_output_format_flags_none() {
+        assert!(!has_output_format_flags(&[]));
+        assert!(!has_output_format_flags(&["--web".into()]));
+        assert!(!has_output_format_flags(&["123".into()]));
+    }
+
+    #[test]
+    fn test_has_output_format_flags_mixed_with_other_args() {
+        assert!(has_output_format_flags(&[
+            "123".into(),
+            "--json".into(),
+            "number,title".into()
+        ]));
     }
 }
