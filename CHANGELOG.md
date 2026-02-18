@@ -5,6 +5,13 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0](https://github.com/rtk-ai/rtk/compare/v0.21.1...v0.22.0) (2026-02-18)
+
+
+### Features
+
+* add `rtk wc` command for compact word/line/byte counts ([#175](https://github.com/rtk-ai/rtk/issues/175)) ([393fa5b](https://github.com/rtk-ai/rtk/commit/393fa5ba2bda0eb1f8655a34084ea4c1e08070ae))
+
 ## [0.21.1](https://github.com/rtk-ai/rtk/compare/v0.21.0...v0.21.1) (2026-02-17)
 
 
