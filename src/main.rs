@@ -123,6 +123,22 @@ enum Commands {
 
     /// Git commands with compact output
     Git {
+        /// Change to directory before executing (like git -C <path>, can be repeated)
+        #[arg(short = 'C', action = clap::ArgAction::Append)]
+        directory: Vec<String>,
+
+        /// Git configuration override (like git -c key=value, can be repeated)
+        #[arg(short = 'c', action = clap::ArgAction::Append)]
+        config_override: Vec<String>,
+
+        /// Set the path to the .git directory
+        #[arg(long = "git-dir")]
+        git_dir: Option<String>,
+
+        /// Set the path to the working tree
+        #[arg(long = "work-tree")]
+        work_tree: Option<String>,
+
         #[command(subcommand)]
         command: GitCommands,
     },
@@ -896,57 +912,134 @@ fn main() -> Result<()> {
             local_llm::run(&file, &model, force_download, cli.verbose)?;
         }
 
-        Commands::Git { command } => match command {
-            GitCommands::Diff { args } => {
-                git::run(git::GitCommand::Diff, &args, None, cli.verbose)?;
+        Commands::Git {
+            directory,
+            config_override,
+            git_dir,
+            work_tree,
+            command,
+        } => {
+            // Build global git args (inserted between "git" and subcommand)
+            let mut global_args: Vec<String> = Vec::new();
+            for dir in &directory {
+                global_args.push("-C".to_string());
+                global_args.push(dir.clone());
             }
-            GitCommands::Log { args } => {
-                git::run(git::GitCommand::Log, &args, None, cli.verbose)?;
+            for cfg in &config_override {
+                global_args.push("-c".to_string());
+                global_args.push(cfg.clone());
             }
-            GitCommands::Status { args } => {
-                git::run(git::GitCommand::Status, &args, None, cli.verbose)?;
+            if let Some(ref dir) = git_dir {
+                global_args.push("--git-dir".to_string());
+                global_args.push(dir.clone());
             }
-            GitCommands::Show { args } => {
-                git::run(git::GitCommand::Show, &args, None, cli.verbose)?;
+            if let Some(ref tree) = work_tree {
+                global_args.push("--work-tree".to_string());
+                global_args.push(tree.clone());
             }
-            GitCommands::Add { args } => {
-                git::run(git::GitCommand::Add, &args, None, cli.verbose)?;
+
+            match command {
+                GitCommands::Diff { args } => {
+                    git::run(
+                        git::GitCommand::Diff,
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Log { args } => {
+                    git::run(git::GitCommand::Log, &args, None, cli.verbose, &global_args)?;
+                }
+                GitCommands::Status { args } => {
+                    git::run(
+                        git::GitCommand::Status,
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Show { args } => {
+                    git::run(
+                        git::GitCommand::Show,
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Add { args } => {
+                    git::run(git::GitCommand::Add, &args, None, cli.verbose, &global_args)?;
+                }
+                GitCommands::Commit { message } => {
+                    git::run(
+                        git::GitCommand::Commit { messages: message },
+                        &[],
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Push { args } => {
+                    git::run(
+                        git::GitCommand::Push,
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Pull { args } => {
+                    git::run(
+                        git::GitCommand::Pull,
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Branch { args } => {
+                    git::run(
+                        git::GitCommand::Branch,
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Fetch { args } => {
+                    git::run(
+                        git::GitCommand::Fetch,
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Stash { subcommand, args } => {
+                    git::run(
+                        git::GitCommand::Stash { subcommand },
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Worktree { args } => {
+                    git::run(
+                        git::GitCommand::Worktree,
+                        &args,
+                        None,
+                        cli.verbose,
+                        &global_args,
+                    )?;
+                }
+                GitCommands::Other(args) => {
+                    git::run_passthrough(&args, &global_args, cli.verbose)?;
+                }
             }
-            GitCommands::Commit { message } => {
-                git::run(
-                    git::GitCommand::Commit { messages: message },
-                    &[],
-                    None,
-                    cli.verbose,
-                )?;
-            }
-            GitCommands::Push { args } => {
-                git::run(git::GitCommand::Push, &args, None, cli.verbose)?;
-            }
-            GitCommands::Pull { args } => {
-                git::run(git::GitCommand::Pull, &args, None, cli.verbose)?;
-            }
-            GitCommands::Branch { args } => {
-                git::run(git::GitCommand::Branch, &args, None, cli.verbose)?;
-            }
-            GitCommands::Fetch { args } => {
-                git::run(git::GitCommand::Fetch, &args, None, cli.verbose)?;
-            }
-            GitCommands::Stash { subcommand, args } => {
-                git::run(
-                    git::GitCommand::Stash { subcommand },
-                    &args,
-                    None,
-                    cli.verbose,
-                )?;
-            }
-            GitCommands::Worktree { args } => {
-                git::run(git::GitCommand::Worktree, &args, None, cli.verbose)?;
-            }
-            GitCommands::Other(args) => {
-                git::run_passthrough(&args, cli.verbose)?;
-            }
-        },
+        }
 
         Commands::Gh { subcommand, args } => {
             gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?;
@@ -1511,6 +1604,7 @@ mod tests {
         match cli.command {
             Commands::Git {
                 command: GitCommands::Commit { message },
+                ..
             } => {
                 assert_eq!(message, vec!["fix: typo"]);
             }
@@ -1533,6 +1627,7 @@ mod tests {
         match cli.command {
             Commands::Git {
                 command: GitCommands::Commit { message },
+                ..
             } => {
                 assert_eq!(message, vec!["feat: add support", "Body paragraph here."]);
             }
@@ -1557,6 +1652,7 @@ mod tests {
         match cli.command {
             Commands::Git {
                 command: GitCommands::Commit { message },
+                ..
             } => {
                 assert_eq!(message, vec!["title", "body", "footer"]);
             }
