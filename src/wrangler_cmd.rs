@@ -66,8 +66,12 @@ pub fn run_deploy(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn parse_deploy_output(output: &str) -> DeployResult {
-    let clean = strip_ansi(output);
+    parse_deploy_output_clean(&strip_ansi(output))
+}
+
+fn parse_deploy_output_clean(clean: &str) -> DeployResult {
     let mut result = DeployResult {
         worker_name: None,
         upload_size: None,
@@ -146,8 +150,12 @@ fn parse_deploy_output(output: &str) -> DeployResult {
     result
 }
 
+#[cfg(test)]
 fn extract_binding_types(output: &str) -> Vec<String> {
-    let clean = strip_ansi(output);
+    extract_binding_types_clean(&strip_ansi(output))
+}
+
+fn extract_binding_types_clean(clean: &str) -> Vec<String> {
     let mut bindings = Vec::new();
     let known = [
         ("KV Namespaces", "KV"),
@@ -181,7 +189,8 @@ fn extract_binding_types(output: &str) -> Vec<String> {
 }
 
 fn filter_deploy_output(output: &str) -> String {
-    let result = parse_deploy_output(output);
+    let clean = strip_ansi(output);
+    let result = parse_deploy_output_clean(&clean);
 
     // If there are errors, show them prominently
     if !result.errors.is_empty() {
@@ -224,7 +233,7 @@ fn filter_deploy_output(output: &str) -> String {
     }
 
     // Warnings summary
-    let binding_types = extract_binding_types(output);
+    let binding_types = extract_binding_types_clean(&clean);
     let warning_count = result.warnings.len();
     if warning_count > 0 {
         let bindings_str = if binding_types.is_empty() {
