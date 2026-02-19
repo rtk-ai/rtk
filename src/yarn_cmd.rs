@@ -234,6 +234,32 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
+    let exit_code = output.status.code().unwrap_or(1);
+
+    // Early exit on failure: skip filter routing, show raw output
+    if !output.status.success() {
+        if !stdout.is_empty() {
+            print!("{}", stdout);
+        }
+        if !stderr.is_empty() {
+            eprint!("{}", stderr);
+        }
+
+        // Tee raw output for recovery
+        if let Some(hint) = tee::tee_and_hint(&raw, "yarn_workspace", exit_code) {
+            println!("{}", hint);
+        }
+
+        // Track with failure label
+        let original_cmd = format!(
+            "yarn workspace {} run {} {}",
+            package, script, extra_args_str
+        );
+        timer.track(&original_cmd, "rtk yarn workspace (failed)", &raw, &raw);
+
+        std::process::exit(exit_code);
+    }
+
     // Step 1: Strip yarn boilerplate (filters see clean output)
     let clean_stdout = filter_yarn_output(&stdout);
 
@@ -253,8 +279,6 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
             ),
         }
     };
-
-    let exit_code = output.status.code().unwrap_or(1);
 
     // Tee raw output for recovery on failure
     let final_output = if let Some(hint) = tee::tee_and_hint(&raw, "yarn_workspace", exit_code) {
