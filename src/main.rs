@@ -271,6 +271,10 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
+        /// Install RTK plugin for OpenCode instead of Claude Code
+        #[arg(long, group = "mode")]
+        opencode: bool,
+
         /// Auto-patch settings.json without prompting
         #[arg(long = "auto-patch", group = "patch")]
         auto_patch: bool,
@@ -441,7 +445,7 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Discover missed RTK savings from Claude Code history
+    /// Discover missed RTK savings from Claude Code or OpenCode history
     Discover {
         /// Filter by project path (substring match)
         #[arg(short, long)]
@@ -458,6 +462,9 @@ enum Commands {
         /// Output format: text, json
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Scan OpenCode sessions instead of Claude Code
+        #[arg(long)]
+        opencode: bool,
     },
 
     /// Learn CLI corrections from Claude Code error history
@@ -1108,14 +1115,25 @@ fn main() -> Result<()> {
             show,
             claude_md,
             hook_only,
+            opencode,
             auto_patch,
             no_patch,
             uninstall,
         } => {
             if show {
-                init::show_config()?;
+                if opencode {
+                    init::show_opencode_config()?;
+                } else {
+                    init::show_config()?;
+                }
             } else if uninstall {
-                init::uninstall(global, cli.verbose)?;
+                if opencode {
+                    init::uninstall_opencode(global, cli.verbose)?;
+                } else {
+                    init::uninstall(global, cli.verbose)?;
+                }
+            } else if opencode {
+                init::run_opencode(global, cli.verbose)?;
             } else {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1290,8 +1308,17 @@ fn main() -> Result<()> {
             all,
             since,
             format,
+            opencode,
         } => {
-            discover::run(project.as_deref(), all, since, limit, &format, cli.verbose)?;
+            discover::run(
+                project.as_deref(),
+                all,
+                since,
+                limit,
+                &format,
+                cli.verbose,
+                opencode,
+            )?;
         }
 
         Commands::Learn {
