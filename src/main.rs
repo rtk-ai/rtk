@@ -19,8 +19,8 @@ mod git;
 mod go_cmd;
 mod golangci_cmd;
 mod grep_cmd;
+mod hook;
 mod hook_audit_cmd;
-mod hook_cmd;
 mod init;
 mod integrity;
 mod json_cmd;
@@ -1700,7 +1700,7 @@ fn main() -> Result<()> {
             rewrite_cmd::run(&cmd)?;
         }
 
-        Commands::HookRewrite => hook_cmd::run(),
+        Commands::HookRewrite => hook::run(),
 
         Commands::Proxy { args } => {
             use std::process::Command;
