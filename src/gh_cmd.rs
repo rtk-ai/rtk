@@ -227,11 +227,17 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
 }
 
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
     if args.is_empty() {
-        return Err(anyhow::anyhow!("PR number required"));
+        // No args at all — let gh default to current branch
+        return run_passthrough("gh", "pr", &prepend_arg("view", args));
     }
+
+    // Pass through when args contain flags rtk can't filter
+    if should_passthrough_gh_view(args) {
+        return run_passthrough("gh", "pr", &prepend_arg("view", args));
+    }
+
+    let timer = tracking::TimedExecution::start();
 
     let pr_number = &args[0];
 
@@ -605,11 +611,16 @@ fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()>
 }
 
 fn view_issue(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
     if args.is_empty() {
         return Err(anyhow::anyhow!("Issue number required"));
     }
+
+    // Pass through when args contain flags rtk can't filter
+    if should_passthrough_gh_view(args) {
+        return run_passthrough("gh", "issue", &prepend_arg("view", args));
+    }
+
+    let timer = tracking::TimedExecution::start();
 
     let issue_number = &args[0];
 
@@ -786,13 +797,24 @@ fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     Ok(())
 }
 
-/// Check if run view args should bypass filtering and pass through directly.
-/// Flags like --log-failed, --log, and --json produce output that the filter
-/// would incorrectly strip.
-fn should_passthrough_run_view(extra_args: &[String]) -> bool {
-    extra_args
-        .iter()
-        .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
+/// Check if `gh <resource> view` args should bypass rtk filtering.
+///
+/// Returns true when:
+/// - The first arg is a flag (starts with `--`), meaning no identifier was given
+///   and gh will default to the current branch/context
+/// - Any arg is `--json`, `--log`, or `--log-failed`, which produce output
+///   incompatible with rtk's summary filter
+fn should_passthrough_gh_view(args: &[String]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+    // No identifier given — first arg is a flag
+    if args[0].starts_with("--") {
+        return true;
+    }
+    // User-supplied flags that override rtk's filtering
+    args.iter()
+        .any(|a| a == "--json" || a == "--log" || a == "--log-failed")
 }
 
 fn view_run(args: &[String], _verbose: u8) -> Result<()> {
@@ -800,13 +822,13 @@ fn view_run(args: &[String], _verbose: u8) -> Result<()> {
         return Err(anyhow::anyhow!("Run ID required"));
     }
 
+    // Pass through when args contain flags rtk can't filter
+    if should_passthrough_gh_view(args) {
+        return run_passthrough("gh", "run", &prepend_arg("view", args));
+    }
+
     let run_id = &args[0];
     let extra_args = &args[1..];
-
-    // Pass through when user requests logs or JSON — the filter would strip them
-    if should_passthrough_run_view(extra_args) {
-        return run_passthrough_with_extra("gh", &["run", "view", run_id], extra_args);
-    }
 
     let timer = tracking::TimedExecution::start();
 
@@ -1164,36 +1186,12 @@ fn run_api(args: &[String], _verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Pass through a command with base args + extra args, tracking as passthrough.
-fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[String]) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut command = Command::new(cmd);
-    for arg in base_args {
-        command.arg(arg);
-    }
-    for arg in extra_args {
-        command.arg(arg);
-    }
-
-    let status =
-        command
-            .status()
-            .context(format!("Failed to run {} {}", cmd, base_args.join(" ")))?;
-
-    let full_cmd = format!(
-        "{} {} {}",
-        cmd,
-        base_args.join(" "),
-        tracking::args_display(&extra_args.iter().map(|s| s.into()).collect::<Vec<_>>())
-    );
-    timer.track_passthrough(&full_cmd, &format!("rtk {} (passthrough)", full_cmd));
-
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-
-    Ok(())
+/// Prepend a subcommand to an args slice, returning a new Vec.
+fn prepend_arg(subcmd: &str, args: &[String]) -> Vec<String> {
+    let mut v = Vec::with_capacity(args.len() + 1);
+    v.push(subcmd.to_string());
+    v.extend_from_slice(args);
+    v
 }
 
 fn run_passthrough(cmd: &str, subcommand: &str, args: &[String]) -> Result<()> {
@@ -1277,32 +1275,56 @@ mod tests {
         assert_eq!(result, "ok edited #42");
     }
 
-    #[test]
-    fn test_run_view_passthrough_log_failed() {
-        assert!(should_passthrough_run_view(&["--log-failed".into()]));
-    }
+    // --- should_passthrough_gh_view tests ---
 
     #[test]
-    fn test_run_view_passthrough_log() {
-        assert!(should_passthrough_run_view(&["--log".into()]));
-    }
-
-    #[test]
-    fn test_run_view_passthrough_json() {
-        assert!(should_passthrough_run_view(&[
+    fn test_gh_view_passthrough_json_as_first_arg() {
+        // gh pr view --json fields (no PR number, current branch)
+        assert!(should_passthrough_gh_view(&[
             "--json".into(),
-            "jobs".into()
+            "number,title".into()
         ]));
     }
 
     #[test]
-    fn test_run_view_no_passthrough_empty() {
-        assert!(!should_passthrough_run_view(&[]));
+    fn test_gh_view_passthrough_json_after_id() {
+        // gh pr view 42 --json fields (user-supplied --json overrides rtk's)
+        assert!(should_passthrough_gh_view(&[
+            "42".into(),
+            "--json".into(),
+            "number".into()
+        ]));
     }
 
     #[test]
-    fn test_run_view_no_passthrough_other_flags() {
-        assert!(!should_passthrough_run_view(&["--web".into()]));
+    fn test_gh_view_passthrough_log_failed() {
+        // gh run view 123 --log-failed
+        assert!(should_passthrough_gh_view(&[
+            "123".into(),
+            "--log-failed".into()
+        ]));
+    }
+
+    #[test]
+    fn test_gh_view_passthrough_log() {
+        assert!(should_passthrough_gh_view(&["123".into(), "--log".into()]));
+    }
+
+    #[test]
+    fn test_gh_view_passthrough_flag_as_first_arg() {
+        // gh pr view --web (no PR number, flag first)
+        assert!(should_passthrough_gh_view(&["--web".into()]));
+    }
+
+    #[test]
+    fn test_gh_view_no_passthrough_id_only() {
+        // gh pr view 42 (just a number, let rtk filter)
+        assert!(!should_passthrough_gh_view(&["42".into()]));
+    }
+
+    #[test]
+    fn test_gh_view_no_passthrough_empty() {
+        assert!(!should_passthrough_gh_view(&[]));
     }
 
     // --- filter_markdown_body tests ---
