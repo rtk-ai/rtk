@@ -90,7 +90,7 @@ const PREFIX_EXCLUSIONS: &[&str] = &["test:e2e", "test:playwright", "test:cypres
 /// Per locked decision: exact match only, hardcoded table, no fuzzy/alias matching.
 fn route_script(script: &str) -> Option<FilterRoute> {
     // 1. Check prefix exclusions first (block known-bad prefix matches)
-    if PREFIX_EXCLUSIONS.iter().any(|&excl| script == excl) {
+    if PREFIX_EXCLUSIONS.contains(&script) {
         return None;
     }
 
@@ -234,8 +234,26 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    // Filter stdout only -- stderr passes through as-is (locked decision)
-    let filtered = filter_yarn_output(&stdout);
+    // Step 1: Strip yarn boilerplate (filters see clean output)
+    let clean_stdout = filter_yarn_output(&stdout);
+
+    // Step 2: Route to specialized filter or passthrough
+    // Guard: if boilerplate stripping consumed everything, skip routing
+    let (filtered, tracking_label) = if clean_stdout == "ok \u{2713}" {
+        (
+            clean_stdout.clone(),
+            "yarn workspace (passthrough)".to_string(),
+        )
+    } else {
+        match route_script(script) {
+            Some(route) => apply_filter(route, &clean_stdout, package, script, verbose),
+            None => (
+                clean_stdout.clone(),
+                "yarn workspace (passthrough)".to_string(),
+            ),
+        }
+    };
+
     let exit_code = output.status.code().unwrap_or(1);
 
     // Tee raw output for recovery on failure
@@ -252,15 +270,12 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
         eprint!("{}", stderr);
     }
 
-    // Track token savings
+    // Track with routing-aware labels
     let original_cmd = format!(
         "yarn workspace {} run {} {}",
         package, script, extra_args_str
     );
-    let rtk_cmd = format!(
-        "rtk yarn workspace {} run {} {}",
-        package, script, extra_args_str
-    );
+    let rtk_cmd = format!("rtk yarn {}", tracking_label);
     timer.track(&original_cmd, &rtk_cmd, &raw, &final_output);
 
     // Preserve exit code -- must be AFTER tracking and printing
@@ -424,6 +439,185 @@ mod tests {
             savings,
             input_tokens,
             output_tokens
+        );
+    }
+
+    // --- Routing tests ---
+
+    #[test]
+    fn test_route_script_exact_matches() {
+        assert!(matches!(route_script("vitest"), Some(FilterRoute::Vitest)));
+        assert!(matches!(route_script("typecheck"), Some(FilterRoute::Tsc)));
+        assert!(matches!(route_script("tsc"), Some(FilterRoute::Tsc)));
+        assert!(matches!(
+            route_script("prettier"),
+            Some(FilterRoute::Prettier)
+        ));
+        assert!(matches!(
+            route_script("format"),
+            Some(FilterRoute::Prettier)
+        ));
+        assert!(matches!(route_script("lint"), Some(FilterRoute::Lint)));
+        assert!(matches!(
+            route_script("test"),
+            Some(FilterRoute::TestRunner)
+        ));
+    }
+
+    #[test]
+    fn test_route_script_unknown_returns_none() {
+        assert!(route_script("build").is_none());
+        assert!(route_script("dev").is_none());
+        assert!(route_script("start").is_none());
+        assert!(route_script("custom-script").is_none());
+        assert!(route_script("deploy").is_none());
+    }
+
+    #[test]
+    fn test_route_script_prefix_matching() {
+        // test: prefix routes to TestRunner
+        assert!(matches!(
+            route_script("test:unit"),
+            Some(FilterRoute::TestRunner)
+        ));
+        assert!(matches!(
+            route_script("test:integration"),
+            Some(FilterRoute::TestRunner)
+        ));
+        // lint: prefix routes to Lint
+        assert!(matches!(
+            route_script("lint:check"),
+            Some(FilterRoute::Lint)
+        ));
+        assert!(matches!(route_script("lint:ci"), Some(FilterRoute::Lint)));
+    }
+
+    #[test]
+    fn test_route_script_prefix_exclusions() {
+        // These should NOT route despite matching a prefix
+        assert!(route_script("test:e2e").is_none());
+        assert!(route_script("test:playwright").is_none());
+        assert!(route_script("test:cypress").is_none());
+        assert!(route_script("lint:fix").is_none());
+    }
+
+    // --- apply_filter integration tests ---
+
+    #[test]
+    fn test_apply_filter_vitest_produces_label_and_output() {
+        let vitest_text = " Test Files  2 passed (2)\n\
+                            Tests  13 passed (13)\n\
+                            Duration  1.23s";
+        let (filtered, label) =
+            apply_filter(FilterRoute::Vitest, vitest_text, "@server", "vitest", 0);
+        assert_eq!(label, "vitest (via yarn workspace)");
+        assert!(
+            !filtered.is_empty(),
+            "Filter should produce non-empty output"
+        );
+    }
+
+    #[test]
+    fn test_apply_filter_tsc_produces_label_and_output() {
+        let tsc_text = "src/api.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.\n\
+                         src/api.ts(20,5): error TS2345: Argument of type 'number' is not assignable.";
+        let (filtered, label) = apply_filter(FilterRoute::Tsc, tsc_text, "@server", "typecheck", 0);
+        assert_eq!(label, "tsc (via yarn workspace)");
+        assert!(
+            !filtered.is_empty(),
+            "Filter should produce non-empty output"
+        );
+        // Filter groups by file and adds headers -- verify it processed the errors
+        assert!(
+            filtered.contains("TS2322") || filtered.contains("TypeScript"),
+            "Filter should contain structured tsc output"
+        );
+    }
+
+    #[test]
+    fn test_apply_filter_lint_produces_label_and_output() {
+        let lint_text = "src/utils.ts:10: warning - Unexpected any.\n\
+                          src/api.ts:20: error - Missing return type.";
+        let (filtered, label) = apply_filter(FilterRoute::Lint, lint_text, "@server", "lint", 0);
+        assert_eq!(label, "lint (via yarn workspace)");
+        assert!(
+            !filtered.is_empty(),
+            "Filter should produce non-empty output"
+        );
+    }
+
+    #[test]
+    fn test_apply_filter_prettier_produces_label_and_output() {
+        let prettier_text = "Checking formatting...\n\
+                              src/utils.ts\n\
+                              src/api.ts\n\
+                              Code style issues found.";
+        let (filtered, label) = apply_filter(
+            FilterRoute::Prettier,
+            prettier_text,
+            "@server",
+            "prettier",
+            0,
+        );
+        assert_eq!(label, "prettier (via yarn workspace)");
+        assert!(
+            !filtered.is_empty(),
+            "Filter should produce non-empty output"
+        );
+    }
+
+    #[test]
+    fn test_apply_filter_test_runner_produces_label_and_output() {
+        let jest_text = "PASS src/auth.test.ts\n\
+                          FAIL src/users.test.ts\n\
+                          Test Suites: 1 failed, 1 passed, 2 total\n\
+                          Tests:       1 failed, 5 passed, 6 total";
+        let (filtered, label) =
+            apply_filter(FilterRoute::TestRunner, jest_text, "@server", "test", 0);
+        assert_eq!(label, "test (via yarn workspace)");
+        assert!(
+            !filtered.is_empty(),
+            "Filter should produce non-empty output"
+        );
+    }
+
+    #[test]
+    fn test_ok_checkmark_guard_skips_routing() {
+        // When filter_yarn_output returns "ok checkmark" (all boilerplate),
+        // routing should be skipped
+        let all_boilerplate = "\u{27a4} YN0000: Done\n\
+                                Resolution step 1/1";
+        let clean = filter_yarn_output(all_boilerplate);
+        assert_eq!(clean, "ok \u{2713}");
+        // In the run() flow, this would skip route_script entirely
+    }
+
+    #[test]
+    fn test_filter_then_route_integration() {
+        // Simulate full flow: yarn boilerplate + vitest text output
+        let yarn_vitest_output = "\u{27a4} YN0000: \u{2502} @server/api (vitest)\n\
+                                   Resolution step 1/1\n\
+                                   \n\
+                                   Test Files  1 passed (1)\n\
+                                   Tests  5 passed (5)\n\
+                                   Duration  450ms\n\
+                                   \n\
+                                   \u{27a4} YN0000: Done in 2s";
+        // Step 1: strip boilerplate
+        let clean = filter_yarn_output(yarn_vitest_output);
+        assert!(!clean.contains("YN0000"));
+        assert!(clean.contains("Test Files"));
+
+        // Step 2: route
+        let route = route_script("vitest");
+        assert!(matches!(route, Some(FilterRoute::Vitest)));
+
+        // Step 3: apply filter -- assert on label and non-empty output
+        let (filtered, label) = apply_filter(route.unwrap(), &clean, "@server", "vitest", 0);
+        assert_eq!(label, "vitest (via yarn workspace)");
+        assert!(
+            !filtered.is_empty(),
+            "Vitest filter should produce non-empty output from cleaned input"
         );
     }
 }
