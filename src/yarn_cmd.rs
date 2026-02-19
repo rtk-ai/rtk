@@ -90,10 +90,7 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
 
     // Always use explicit "run" when constructing the command to avoid ambiguity
     let mut cmd = Command::new("yarn");
-    cmd.arg("workspace")
-        .arg(package)
-        .arg("run")
-        .arg(script);
+    cmd.arg("workspace").arg(package).arg("run").arg(script);
     for arg in &extra_args {
         cmd.arg(arg);
     }

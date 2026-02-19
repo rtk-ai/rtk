@@ -1569,9 +1569,8 @@ mod tests {
 
     #[test]
     fn test_yarn_workspace_scoped_package_with_slash() {
-        let cli =
-            Cli::try_parse_from(["rtk", "yarn", "workspace", "@myorg/server", "run", "lint"])
-                .unwrap();
+        let cli = Cli::try_parse_from(["rtk", "yarn", "workspace", "@myorg/server", "run", "lint"])
+            .unwrap();
         match cli.command {
             Commands::Yarn { args } => {
                 assert_eq!(args, vec!["workspace", "@myorg/server", "run", "lint"]);
