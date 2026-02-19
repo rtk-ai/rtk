@@ -225,8 +225,11 @@ fi
 
 # If no rewrite needed, approve as-is
 if [ -z "$REWRITTEN" ]; then
+  [ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "No rewrite pattern matched, exiting" >&2
   exit 0
 fi
+
+[ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "REWRITTEN: $REWRITTEN" >&2
 
 # Build the updated tool_input with all original fields preserved, only command changed
 ORIGINAL_INPUT=$(echo "$INPUT" | jq -c '.tool_input')
