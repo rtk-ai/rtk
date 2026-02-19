@@ -247,13 +247,49 @@ function rewriteCommand(cmd: string): string | null {
  * (hooks/rtk-rewrite.sh).
  */
 export const RTKPlugin: Plugin = async ({ $ }) => {
-  // Guard: skip if rtk binary is not installed
-  const check = await $`which rtk`.quiet().nothrow()
-  if (check.exitCode !== 0) {
-    return {}
+  // Find rtk binary. Check common install paths since Bun's shell
+  // and OpenCode's bash tool may not have ~/.cargo/bin in PATH.
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? ""
+  const candidatePaths = [
+    `${home}/.cargo/bin/rtk`,
+    `${home}/.local/bin/rtk`,
+    "/usr/local/bin/rtk",
+    "/usr/bin/rtk",
+  ]
+
+  let rtkDir = ""
+  for (const p of candidatePaths) {
+    try {
+      const exists = await Bun.file(p).exists()
+      if (exists) {
+        rtkDir = p.replace(/\/rtk$/, "")
+        break
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Fallback: try command -v in case rtk is on a non-standard PATH
+  if (!rtkDir) {
+    const check = await $`command -v rtk`.quiet().nothrow()
+    if (check.exitCode === 0) {
+      const rtkPath = check.text().trim()
+      rtkDir = rtkPath.replace(/\/rtk$/, "")
+    } else {
+      return {}
+    }
   }
 
   return {
+    // Ensure rtk's directory is in PATH for all shell executions
+    "shell.env": async (_input, output) => {
+      const currentPath = output.env.PATH ?? process.env.PATH ?? ""
+      if (!currentPath.split(":").includes(rtkDir)) {
+        output.env.PATH = `${rtkDir}:${currentPath}`
+      }
+    },
+
     "tool.execute.before": async (input, output) => {
       // Only intercept bash tool calls
       if (input.tool !== "bash") return
