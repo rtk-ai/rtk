@@ -3,17 +3,53 @@
 # Transparently rewrites raw commands to their rtk equivalents.
 # Outputs JSON with updatedInput to modify the command before execution.
 
+# Enable debug logging only if RTK_HOOK_DEBUG is set
+if [ "${RTK_HOOK_DEBUG:-}" = "1" ]; then
+  LOG_FILE="${HOME:-/c/Users/micah.loftin}/.claude/hooks/rtk-rewrite.log"
+
+  # Log IMMEDIATELY before anything else
+  {
+    echo "=== HOOK INVOKED $(date '+%Y-%m-%d %H:%M:%S') ==="
+    echo "PWD: $(pwd)"
+    echo "BASH_VERSION: $BASH_VERSION"
+    echo "SHELL: ${SHELL:-not set}"
+    echo "HOME: ${HOME:-not set}"
+    echo "USER: ${USER:-not set}"
+  } >> "$LOG_FILE" 2>&1
+
+  # Trap errors and log them
+  trap 'echo "ERROR at line $LINENO: $BASH_COMMAND" >> "$LOG_FILE" 2>&1' ERR
+
+  # Redirect stderr to log file
+  exec 2>>"$LOG_FILE"
+fi
+
+# Add common tool locations to PATH
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+[ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "PATH: $PATH" >&2
+
 # Guards: skip silently if dependencies missing
-if ! command -v rtk &>/dev/null || ! command -v jq &>/dev/null; then
+if ! command -v rtk &>/dev/null; then
+  [ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "ERROR: rtk not found in PATH" >&2
   exit 0
 fi
+if ! command -v jq &>/dev/null; then
+  [ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "ERROR: jq not found in PATH" >&2
+  exit 0
+fi
+
+[ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "rtk: $(command -v rtk)" >&2
+[ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "jq: $(command -v jq)" >&2
 
 set -euo pipefail
 
 INPUT=$(cat)
+[ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "INPUT: $INPUT" >&2
 CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+[ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "CMD: $CMD" >&2
 
 if [ -z "$CMD" ]; then
+  [ "${RTK_HOOK_DEBUG:-}" = "1" ] && echo "CMD is empty, exiting" >&2
   exit 0
 fi
 
