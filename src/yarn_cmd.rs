@@ -644,4 +644,61 @@ mod tests {
             "Vitest filter should produce non-empty output from cleaned input"
         );
     }
+
+    // --- Early-exit on failure tests ---
+
+    #[test]
+    fn test_failed_command_should_not_route_to_filter() {
+        // Simulates what happens when yarn fails with "script not found"
+        // The error text passes through filter_yarn_output (it's not boilerplate)
+        // and then would be routed to tsc_cmd which returns misleading success
+        let yarn_error = "Usage Error: Couldn't find a script named \"typecheck\"";
+        let clean = filter_yarn_output(yarn_error);
+        // The error message survives boilerplate stripping (correct)
+        assert!(
+            clean.contains("Couldn't find a script"),
+            "Error message should survive boilerplate filtering"
+        );
+        assert_ne!(
+            clean, "ok \u{2713}",
+            "Error message should NOT become ok checkmark"
+        );
+        // This is why early-exit is needed: without it, this error text
+        // would be sent to tsc_cmd::filter_tsc_output which returns
+        // "TypeScript compilation completed" -- masking the error
+        let misled = tsc_cmd::filter_tsc_output(&clean);
+        assert!(
+            misled.contains("TypeScript compilation completed") || misled.contains("TypeScript"),
+            "Without early-exit, tsc filter masks yarn errors with success message"
+        );
+    }
+
+    #[test]
+    fn test_successful_command_still_routes_through_filters() {
+        // Simulate successful tsc output wrapped in yarn boilerplate
+        let yarn_tsc_output = "\u{27a4} YN0000: \u{2502} Starting tsc\n\
+                               src/api.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.\n\
+                               src/api.ts(20,3): error TS2345: Argument of type 'number' is not assignable.\n\
+                               Found 2 errors in 1 file.\n\
+                               \u{27a4} YN0000: Done in 2s";
+        // Step 1: strip boilerplate
+        let clean = filter_yarn_output(yarn_tsc_output);
+        assert!(!clean.contains("YN0000"), "Boilerplate should be stripped");
+        assert!(
+            clean.contains("TS2322"),
+            "TSC errors should survive stripping"
+        );
+
+        // Step 2: route
+        let route = route_script("typecheck");
+        assert!(matches!(route, Some(FilterRoute::Tsc)));
+
+        // Step 3: apply filter (would only happen if command succeeded)
+        let (filtered, label) = apply_filter(route.unwrap(), &clean, "@server", "typecheck", 0);
+        assert_eq!(label, "tsc (via yarn workspace)");
+        assert!(
+            filtered.contains("TS2322"),
+            "TSC filter should preserve error codes"
+        );
+    }
 }
