@@ -1,5 +1,197 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+// ---------------------------------------------------------------------------
+// Hook routing table — used by `cmd::hook` for O(1) command rewriting.
+// This is the single source of truth for which external binaries route through
+// RTK and exactly which subcommands are covered.
+//
+// # Adding a new command
+// 1. Add one `Route` entry to `ROUTES`.
+// 2. Add a discover entry (PATTERNS + RULES) below if needed.
+// 3. Done — hook routing is automatic.
+// ---------------------------------------------------------------------------
+
+/// Subcommand filter for a route entry.
+#[derive(Debug, Clone, Copy)]
+pub enum Subcmds {
+    /// Route ALL subcommands of this binary (e.g., ls, curl, prettier).
+    Any,
+    /// Route ONLY these specific subcommands; others fall through to `rtk run -c`.
+    Only(&'static [&'static str]),
+}
+
+/// One row in the static routing table.
+///
+/// - `binaries`: one or more external binary names mapping to the same RTK subcommand.
+/// - `subcmds`: subcommand filter — `Any` matches everything, `Only` restricts to a list.
+/// - `rtk_cmd`: the RTK subcommand name (e.g., `"grep"`, `"lint"`, `"git"`).
+///
+/// For direct routes where `binary == rtk_cmd`, the hook uses `format!("rtk {raw}")`.
+/// For renames (`rg` → `grep`, `eslint` → `lint`), it uses `replace_first_word`.
+#[derive(Debug, Clone, Copy)]
+pub struct Route {
+    pub binaries: &'static [&'static str],
+    pub subcmds: Subcmds,
+    pub rtk_cmd: &'static str,
+}
+
+/// Static routing table. Single source of truth for hook routing.
+///
+/// Order does not matter — lookups use a HashMap built once at startup (O(1) per call).
+///
+/// Complex cases (vitest bare invocation, `uv pip`, `python -m pytest`, pnpm, npx)
+/// require Rust logic and stay as match arms in `cmd::hook::route_native_command`.
+pub const ROUTES: &[Route] = &[
+    // Version control
+    Route {
+        binaries: &["git"],
+        subcmds: Subcmds::Only(&[
+            "status", "diff", "log", "add", "commit", "push", "pull", "branch", "fetch", "stash",
+            "show",
+        ]),
+        rtk_cmd: "git",
+    },
+    // GitHub CLI
+    Route {
+        binaries: &["gh"],
+        subcmds: Subcmds::Only(&["pr", "issue", "run"]),
+        rtk_cmd: "gh",
+    },
+    // Rust build tools
+    Route {
+        binaries: &["cargo"],
+        subcmds: Subcmds::Only(&["test", "build", "clippy", "check"]),
+        rtk_cmd: "cargo",
+    },
+    // Search — two binaries, one RTK subcommand (rename)
+    Route {
+        binaries: &["rg", "grep"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "grep",
+    },
+    // JavaScript linting — rename
+    Route {
+        binaries: &["eslint"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "lint",
+    },
+    // File system
+    Route {
+        binaries: &["ls"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "ls",
+    },
+    // TypeScript compiler
+    Route {
+        binaries: &["tsc"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "tsc",
+    },
+    // JavaScript formatting
+    Route {
+        binaries: &["prettier"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "prettier",
+    },
+    // E2E testing
+    Route {
+        binaries: &["playwright"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "playwright",
+    },
+    // Database ORM
+    Route {
+        binaries: &["prisma"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "prisma",
+    },
+    // Network
+    Route {
+        binaries: &["curl"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "curl",
+    },
+    // Python testing
+    Route {
+        binaries: &["pytest"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "pytest",
+    },
+    // Go linting
+    Route {
+        binaries: &["golangci-lint"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "golangci-lint",
+    },
+    // Containers — read-only subcommands only
+    Route {
+        binaries: &["docker"],
+        subcmds: Subcmds::Only(&["ps", "images", "logs"]),
+        rtk_cmd: "docker",
+    },
+    // Kubernetes — read-only subcommands only
+    Route {
+        binaries: &["kubectl"],
+        subcmds: Subcmds::Only(&["get", "logs"]),
+        rtk_cmd: "kubectl",
+    },
+    // Go build tools
+    Route {
+        binaries: &["go"],
+        subcmds: Subcmds::Only(&["test", "build", "vet"]),
+        rtk_cmd: "go",
+    },
+    // Python linting/formatting
+    Route {
+        binaries: &["ruff"],
+        subcmds: Subcmds::Only(&["check", "format"]),
+        rtk_cmd: "ruff",
+    },
+    // Python package management
+    Route {
+        binaries: &["pip"],
+        subcmds: Subcmds::Only(&["list", "outdated", "install", "show"]),
+        rtk_cmd: "pip",
+    },
+];
+
+/// Look up the routing entry for a binary + subcommand.
+///
+/// Returns `Some(route)` if the binary is in the table AND the subcommand matches
+/// the entry's filter. Returns `None` if unrecognised or subcommand not in `Only` list.
+///
+/// The HashMap is built once per process (OnceLock). Each binary maps to the index of
+/// its `Route` in `ROUTES`. Multiple binaries from the same entry (e.g., `rg`/`grep`)
+/// both point to the same index.
+pub fn lookup(binary: &str, sub: &str) -> Option<&'static Route> {
+    static MAP: OnceLock<HashMap<&'static str, usize>> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        let mut m = HashMap::new();
+        for (i, route) in ROUTES.iter().enumerate() {
+            for &bin in route.binaries {
+                m.entry(bin).or_insert(i);
+            }
+        }
+        m
+    });
+
+    let idx = *map.get(binary)?;
+    let route = &ROUTES[idx];
+
+    let matches = match route.subcmds {
+        Subcmds::Any => true,
+        Subcmds::Only(subs) => subs.contains(&sub),
+    };
+
+    if matches {
+        Some(route)
+    } else {
+        None
+    }
+}
 
 /// A rule mapping a shell command pattern to its RTK equivalent.
 struct RtkRule {
@@ -70,6 +262,12 @@ const PATTERNS: &[&str] = &[
     r"^kubectl\s+(get|logs)",
     r"^curl\s+",
     r"^wget\s+",
+    // Python/Go tooling (added with Python & Go support)
+    r"^pytest(\s|$)",
+    r"^go\s+(test|build|vet)(\s|$)",
+    r"^ruff\s+(check|format)(\s|$)",
+    r"^(pip|pip3)\s+(list|outdated|install|show)(\s|$)",
+    r"^golangci-lint(\s|$)",
 ];
 
 const RULES: &[RtkRule] = &[
@@ -222,6 +420,42 @@ const RULES: &[RtkRule] = &[
         rtk_cmd: "rtk wget",
         category: "Network",
         savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Python/Go tooling (added with Python & Go support)
+    RtkRule {
+        rtk_cmd: "rtk pytest",
+        category: "Tests",
+        savings_pct: 90.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk go",
+        category: "Build",
+        savings_pct: 85.0,
+        subcmd_savings: &[("test", 90.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk ruff",
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk pip",
+        category: "PackageManager",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk golangci-lint",
+        category: "Build",
+        savings_pct: 85.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
