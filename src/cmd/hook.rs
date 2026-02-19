@@ -775,9 +775,64 @@ mod tests {
             ("uv pip list", "rtk pip list"),
             // Go
             ("go test ./...", "rtk go test ./..."),
+            ("go build ./...", "rtk go build ./..."),
+            ("go vet ./...", "rtk go vet ./..."),
+            // All ROUTES entries not yet covered above
+            ("eslint src/", "rtk lint src/"), // rename: eslint → lint
+            ("tsc --noEmit", "rtk tsc --noEmit"), // bare tsc (not npx tsc)
+            ("prettier src/", "rtk prettier src/"),
+            ("playwright test", "rtk playwright test"),
+            ("prisma migrate dev", "rtk prisma migrate dev"),
+            (
+                "curl https://api.example.com",
+                "rtk curl https://api.example.com",
+            ),
+            ("pytest tests/", "rtk pytest tests/"), // bare pytest (not python -m pytest)
+            ("pytest -x tests/unit", "rtk pytest -x tests/unit"),
+            ("golangci-lint run ./...", "rtk golangci-lint run ./..."),
+            ("docker ps", "rtk docker ps"),
+            ("docker images", "rtk docker images"),
+            ("docker logs mycontainer", "rtk docker logs mycontainer"),
+            ("kubectl get pods", "rtk kubectl get pods"),
+            ("kubectl logs mypod", "rtk kubectl logs mypod"),
+            ("ruff check src/", "rtk ruff check src/"),
+            ("ruff format src/", "rtk ruff format src/"),
+            ("pip list", "rtk pip list"),
+            ("pip install requests", "rtk pip install requests"),
+            ("pip outdated", "rtk pip outdated"),
+            ("pip show requests", "rtk pip show requests"),
+            ("gh issue list", "rtk gh issue list"),
+            ("gh run view 123", "rtk gh run view 123"),
+            ("git stash pop", "rtk git stash pop"),
+            ("git fetch origin", "rtk git fetch origin"),
         ];
         for (input, expected) in cases {
             assert_rewrite(input, expected);
+        }
+    }
+
+    #[test]
+    fn test_routing_subcommand_filter_fallback() {
+        // Commands where binary is in ROUTES but subcommand is NOT in the Only list
+        // must fall through to `rtk run -c '...'`.
+        let cases = [
+            "docker build .",            // docker Only: ps, images, logs
+            "docker run -it nginx",      // docker Only: ps, images, logs
+            "kubectl apply -f dep.yaml", // kubectl Only: get, logs
+            "kubectl delete pod mypod",  // kubectl Only: get, logs
+            "go mod tidy",               // go Only: test, build, vet
+            "go generate ./...",         // go Only: test, build, vet
+            "ruff lint src/",            // ruff Only: check, format
+            "pip freeze",                // pip Only: list, outdated, install, show
+            "pip uninstall requests",    // pip Only: list, outdated, install, show
+            "cargo publish",             // cargo Only: test, build, clippy, check
+            "cargo run",                 // cargo Only: test, build, clippy, check
+            "git rebase -i HEAD~3",      // git Only list (rebase not included)
+            "git cherry-pick abc123",    // git Only list
+            "gh repo clone foo/bar",     // gh Only: pr, issue, run
+        ];
+        for input in cases {
+            assert_rewrite(input, "rtk run -c");
         }
     }
 

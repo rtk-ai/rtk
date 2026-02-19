@@ -896,6 +896,129 @@ mod tests {
         );
     }
 
+    // --- Tests for commands added in Python/Go support (must be in both ROUTES and PATTERNS) ---
+
+    #[test]
+    fn test_classify_pytest_bare() {
+        match classify_command("pytest tests/") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk pytest")
+            }
+            other => panic!("pytest should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_pytest_flags() {
+        match classify_command("pytest -x tests/unit") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk pytest")
+            }
+            other => panic!("pytest -x should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_go_test() {
+        match classify_command("go test ./...") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk go")
+            }
+            other => panic!("go test should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_go_build() {
+        match classify_command("go build ./...") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk go")
+            }
+            other => panic!("go build should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_go_vet() {
+        match classify_command("go vet ./...") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk go")
+            }
+            other => panic!("go vet should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_go_unsupported_subcommand_not_matched() {
+        // go mod tidy is not in the Only list; should not be classified as rtk go
+        match classify_command("go mod tidy") {
+            Classification::Unsupported { .. } | Classification::Ignored => {}
+            Classification::Supported { rtk_equivalent, .. } => {
+                panic!("go mod should not match, but got rtk_equivalent={rtk_equivalent}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_classify_ruff_check() {
+        match classify_command("ruff check src/") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk ruff")
+            }
+            other => panic!("ruff check should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_ruff_format() {
+        match classify_command("ruff format src/") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk ruff")
+            }
+            other => panic!("ruff format should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_pip_list() {
+        match classify_command("pip list") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk pip")
+            }
+            other => panic!("pip list should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_pip_install() {
+        match classify_command("pip install requests") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk pip")
+            }
+            other => panic!("pip install should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_pip3_list() {
+        match classify_command("pip3 list") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk pip")
+            }
+            other => panic!("pip3 list should be Supported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_golangci_lint() {
+        match classify_command("golangci-lint run ./...") {
+            Classification::Supported { rtk_equivalent, .. } => {
+                assert_eq!(rtk_equivalent, "rtk golangci-lint")
+            }
+            other => panic!("golangci-lint should be Supported, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_patterns_rules_length_match() {
         assert_eq!(
@@ -965,5 +1088,90 @@ mod tests {
     fn test_split_heredoc_no_split() {
         let cmd = "cat <<'EOF'\nhello && world\nEOF";
         assert_eq!(split_command_chain(cmd), vec![cmd]);
+    }
+
+    // --- Route lookup tests ---
+
+    #[test]
+    fn test_lookup_direct_route() {
+        let r = lookup("git", "status").unwrap();
+        assert_eq!(r.rtk_cmd, "git");
+    }
+
+    #[test]
+    fn test_lookup_git_unknown_subcommand_returns_none() {
+        assert!(lookup("git", "rebase").is_none());
+        assert!(lookup("git", "bisect").is_none());
+    }
+
+    #[test]
+    fn test_lookup_rename_rg_to_grep() {
+        let r = lookup("rg", "").unwrap();
+        assert_eq!(r.rtk_cmd, "grep");
+    }
+
+    #[test]
+    fn test_lookup_rename_grep_to_grep() {
+        let r = lookup("grep", "-r").unwrap();
+        assert_eq!(r.rtk_cmd, "grep");
+    }
+
+    #[test]
+    fn test_lookup_rename_eslint_to_lint() {
+        let r = lookup("eslint", "src/").unwrap();
+        assert_eq!(r.rtk_cmd, "lint");
+    }
+
+    #[test]
+    fn test_lookup_any_subcommand() {
+        let r = lookup("ls", "-la").unwrap();
+        assert_eq!(r.rtk_cmd, "ls");
+        let r2 = lookup("ls", "").unwrap();
+        assert_eq!(r2.rtk_cmd, "ls");
+    }
+
+    #[test]
+    fn test_lookup_unknown_binary_returns_none() {
+        assert!(lookup("unknownbinary99", "").is_none());
+        // These stay as complex Rust match arms, not in ROUTES
+        assert!(lookup("vitest", "").is_none());
+        assert!(lookup("pnpm", "list").is_none());
+        assert!(lookup("npx", "tsc").is_none());
+        assert!(lookup("uv", "pip").is_none());
+    }
+
+    #[test]
+    fn test_lookup_docker_subcommand_filter() {
+        assert!(lookup("docker", "ps").is_some());
+        assert!(lookup("docker", "images").is_some());
+        assert!(lookup("docker", "build").is_none());
+        assert!(lookup("docker", "run").is_none());
+    }
+
+    #[test]
+    fn test_lookup_cargo_subcommand_filter() {
+        assert!(lookup("cargo", "test").is_some());
+        assert!(lookup("cargo", "clippy").is_some());
+        assert!(lookup("cargo", "publish").is_none());
+    }
+
+    #[test]
+    fn test_no_duplicate_binaries_in_routes() {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for route in ROUTES {
+            for &bin in route.binaries {
+                assert!(
+                    seen.insert(bin),
+                    "Binary '{bin}' appears in multiple ROUTES entries"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_lookup_is_o1_consistent() {
+        let r1 = lookup("git", "status");
+        let r2 = lookup("git", "status");
+        assert_eq!(r1.map(|r| r.rtk_cmd), r2.map(|r| r.rtk_cmd));
     }
 }
