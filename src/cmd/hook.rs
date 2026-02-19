@@ -890,4 +890,118 @@ mod tests {
             }
         }
     }
+
+    // ── End-to-end token savings tests ───────────────────────────────────────
+    // These tests simulate the full hook pipeline from the start:
+    //   raw command → check_for_hook (lexer + router) → rewritten rtk cmd
+    //   → execute both → compare token counts
+    //
+    // Run with: cargo test e2e -- --ignored
+    // Requires: `cargo install --path .` (rtk binary on PATH) + git repo
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    fn exec(cmd: &str) -> String {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let out = std::process::Command::new(parts[0])
+            .args(&parts[1..])
+            .output()
+            .unwrap_or_else(|e| panic!("failed to exec '{cmd}': {e}"));
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    #[ignore = "requires installed rtk binary (cargo install --path .) and git repo"]
+    fn test_e2e_git_status_saves_tokens() {
+        // Step 1: route through the full hook pipeline (lexer → router)
+        let raw_cmd = "git status";
+        let rtk_cmd = match check_for_hook(raw_cmd, "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite for '{raw_cmd}', got {other:?}"),
+        };
+        assert!(
+            rtk_cmd.starts_with("rtk git"),
+            "lexer+router should produce rtk git status, got: {rtk_cmd}"
+        );
+
+        // Step 2: execute both and compare token counts
+        let raw_out = exec(raw_cmd);
+        let rtk_out = exec(&rtk_cmd);
+        let raw_tok = count_tokens(&raw_out);
+        let rtk_tok = count_tokens(&rtk_out);
+        assert!(raw_tok > 0, "raw git status produced no output");
+
+        let savings = 100.0 * (1.0 - rtk_tok as f64 / raw_tok as f64);
+        assert!(
+            savings >= 40.0,
+            "rtk git status should save ≥40% tokens vs raw git status, \
+             got {savings:.1}% ({raw_tok} raw → {rtk_tok} rtk tokens)"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires installed rtk binary (cargo install --path .) and directory with files"]
+    fn test_e2e_ls_saves_tokens() {
+        // Step 1: route through the full hook pipeline (lexer → router)
+        let raw_cmd = "ls -la .";
+        let rtk_cmd = match check_for_hook(raw_cmd, "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite for '{raw_cmd}', got {other:?}"),
+        };
+        assert!(
+            rtk_cmd.starts_with("rtk ls"),
+            "lexer+router should produce rtk ls, got: {rtk_cmd}"
+        );
+
+        // Step 2: execute both and compare token counts
+        let raw_out = exec(raw_cmd);
+        let rtk_out = exec(&rtk_cmd);
+        let raw_tok = count_tokens(&raw_out);
+        let rtk_tok = count_tokens(&rtk_out);
+        assert!(raw_tok > 0, "raw ls -la produced no output");
+
+        let savings = 100.0 * (1.0 - rtk_tok as f64 / raw_tok as f64);
+        assert!(
+            savings >= 40.0,
+            "rtk ls should save ≥40% tokens vs raw ls -la, \
+             got {savings:.1}% ({raw_tok} raw → {rtk_tok} rtk tokens)"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires installed rtk binary (cargo install --path .) and git repo with history"]
+    fn test_e2e_git_log_saves_tokens() {
+        // Step 1: route through the full hook pipeline (lexer → router)
+        let raw_cmd = "git log --oneline -20";
+        let rtk_cmd = match check_for_hook(raw_cmd, "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite for '{raw_cmd}', got {other:?}"),
+        };
+        assert!(
+            rtk_cmd.starts_with("rtk git"),
+            "lexer+router should produce rtk git log, got: {rtk_cmd}"
+        );
+
+        // Step 2: execute both and compare token counts
+        let raw_out = exec(raw_cmd);
+        let rtk_out = exec(&rtk_cmd);
+        let raw_tok = count_tokens(&raw_out);
+        let rtk_tok = count_tokens(&rtk_out);
+        assert!(
+            raw_tok > 0,
+            "raw git log produced no output — need a repo with commits"
+        );
+
+        // git log --oneline is already compact; rtk may not save much beyond
+        // line-length capping.  Truncating long lines with "..." can add a
+        // marginal token.  Allow ≤5% overhead to account for this artefact.
+        let ratio = rtk_tok as f64 / raw_tok.max(1) as f64;
+        assert!(
+            ratio <= 1.05,
+            "rtk git log must not significantly bloat output vs raw git log \
+             ({raw_tok} raw → {rtk_tok} rtk, ratio {ratio:.2})"
+        );
+    }
 }
