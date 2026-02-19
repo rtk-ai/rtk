@@ -55,18 +55,18 @@ for cmd in "${PYTHON_GO_CMDS[@]}"; do
 done
 echo "✅ Python/Go commands: documented in README.md and CLAUDE.md"
 
-# 4. Hooks cohérents avec doc
-HOOK_FILE=".claude/hooks/rtk-rewrite.sh"
-if [ -f "$HOOK_FILE" ]; then
-  echo "🪝 Checking hook rewrites..."
+# 4. Hooks cohérents avec doc (native hook module)
+HOOK_DIR="src/hook"
+if [ -d "$HOOK_DIR" ]; then
+  echo "🪝 Checking native hook rewrites..."
   for cmd in "${PYTHON_GO_CMDS[@]}"; do
-    if ! grep -q "$cmd" "$HOOK_FILE"; then
-      echo "⚠️  Hook may not rewrite $cmd (verify manually)"
+    if ! grep -rq "$cmd" "$HOOK_DIR"; then
+      echo "⚠️  Hook module may not rewrite $cmd (verify manually)"
     fi
   done
-  echo "✅ Hook file exists and mentions Python/Go commands"
+  echo "✅ Hook module exists and mentions Python/Go commands"
 else
-  echo "⚠️  Hook file not found: $HOOK_FILE"
+  echo "⚠️  Hook module directory not found: $HOOK_DIR"
 fi
 
 echo ""

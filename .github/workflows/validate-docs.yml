@@ -6,7 +6,6 @@ on:
       - 'src/**/*.rs'
       - 'Cargo.toml'
       - '**.md'
-      - '.claude/hooks/*.sh'
   push:
     branches:
       - master
@@ -54,9 +53,10 @@ jobs:
 
       - name: Verify hook coverage
         run: |
-          HOOK_FILE=".claude/hooks/rtk-rewrite.sh"
-          if [ ! -f "$HOOK_FILE" ]; then
-            echo "❌ Hook file not found: $HOOK_FILE"
+          # Check native hook module (src/hook/) for command coverage
+          HOOK_DIR="src/hook"
+          if [ ! -d "$HOOK_DIR" ]; then
+            echo "❌ Hook module directory not found: $HOOK_DIR"
             exit 1
           fi
 
@@ -68,7 +68,6 @@ jobs:
           fi
 
           # Verify all Python/Go commands are covered in the registry
-          # Since PR #241, constants live in src/discover/rules.rs (extracted from registry.rs)
           for cmd in ruff pytest pip golangci; do
             if ! grep -qr "\"$cmd\"" src/discover/; then
               echo "❌ Registry missing rewrite_prefixes for: $cmd"
