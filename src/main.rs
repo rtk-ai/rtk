@@ -47,6 +47,7 @@ mod utils;
 mod vitest_cmd;
 mod wc_cmd;
 mod wget_cmd;
+mod yarn_cmd;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -430,6 +431,13 @@ enum Commands {
     /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
     Npx {
         /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Yarn workspace commands with filtered output
+    Yarn {
+        /// Yarn arguments (workspace <pkg> [run] <script> [args...])
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1392,6 +1400,10 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Yarn { args } => {
+            yarn_cmd::run(&args, cli.verbose, cli.skip_env)?;
+        }
+
         Commands::Ruff { args } => {
             ruff_cmd::run(&args, cli.verbose)?;
         }
@@ -1540,6 +1552,87 @@ mod tests {
                 assert_eq!(message, vec!["title", "body", "footer"]);
             }
             _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_yarn_workspace_basic() {
+        let cli =
+            Cli::try_parse_from(["rtk", "yarn", "workspace", "@server", "run", "test"]).unwrap();
+        match cli.command {
+            Commands::Yarn { args } => {
+                assert_eq!(args, vec!["workspace", "@server", "run", "test"]);
+            }
+            _ => panic!("Expected Yarn command"),
+        }
+    }
+
+    #[test]
+    fn test_yarn_workspace_scoped_package_with_slash() {
+        let cli =
+            Cli::try_parse_from(["rtk", "yarn", "workspace", "@myorg/server", "run", "lint"])
+                .unwrap();
+        match cli.command {
+            Commands::Yarn { args } => {
+                assert_eq!(args, vec!["workspace", "@myorg/server", "run", "lint"]);
+            }
+            _ => panic!("Expected Yarn command"),
+        }
+    }
+
+    #[test]
+    fn test_yarn_workspace_without_run() {
+        let cli =
+            Cli::try_parse_from(["rtk", "yarn", "workspace", "@server", "test", "--coverage"])
+                .unwrap();
+        match cli.command {
+            Commands::Yarn { args } => {
+                assert_eq!(args, vec!["workspace", "@server", "test", "--coverage"]);
+            }
+            _ => panic!("Expected Yarn command"),
+        }
+    }
+
+    #[test]
+    fn test_yarn_workspace_extra_args() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "yarn",
+            "workspace",
+            "@server",
+            "run",
+            "vitest",
+            "--reporter=verbose",
+            "--coverage",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Yarn { args } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "workspace",
+                        "@server",
+                        "run",
+                        "vitest",
+                        "--reporter=verbose",
+                        "--coverage"
+                    ]
+                );
+            }
+            _ => panic!("Expected Yarn command"),
+        }
+    }
+
+    #[test]
+    fn test_yarn_workspace_simple_package() {
+        let cli =
+            Cli::try_parse_from(["rtk", "yarn", "workspace", "server", "run", "build"]).unwrap();
+        match cli.command {
+            Commands::Yarn { args } => {
+                assert_eq!(args, vec!["workspace", "server", "run", "build"]);
+            }
+            _ => panic!("Expected Yarn command"),
         }
     }
 }
