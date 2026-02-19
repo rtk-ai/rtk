@@ -1,5 +1,7 @@
+use crate::parser::{FormatMode, OutputParser, ParseResult, TokenFormatter};
 use crate::tee;
 use crate::tracking;
+use crate::{lint_cmd, prettier_cmd, runner, tsc_cmd, vitest_cmd};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::Command;
@@ -60,6 +62,122 @@ pub(crate) fn filter_yarn_output(output: &str) -> String {
         "ok \u{2713}".to_string()
     } else {
         result.join("\n")
+    }
+}
+
+/// Which specialized filter to apply to captured yarn workspace output
+enum FilterRoute {
+    /// runner::extract_test_summary (generic test runner -- jest/cargo/pytest/go)
+    TestRunner,
+    /// vitest_cmd::VitestParser::parse (three-tier vitest parser)
+    Vitest,
+    /// lint_cmd::filter_generic_lint (text-based warning/error extraction)
+    Lint,
+    /// tsc_cmd::filter_tsc_output (TypeScript errors grouped by file/code)
+    Tsc,
+    /// prettier_cmd::filter_prettier_output (files needing formatting)
+    Prettier,
+}
+
+/// Prefix exclusions -- compound scripts that should NOT match their prefix route.
+/// These are explicitly excluded because their output format differs from what
+/// the prefix route's filter expects (e.g., test:e2e is likely Playwright, not jest).
+const PREFIX_EXCLUSIONS: &[&str] = &["test:e2e", "test:playwright", "test:cypress", "lint:fix"];
+
+/// Route a yarn workspace script name to a specialized filter.
+///
+/// Priority: prefix exclusions > exact match > prefix match > None (passthrough).
+/// Per locked decision: exact match only, hardcoded table, no fuzzy/alias matching.
+fn route_script(script: &str) -> Option<FilterRoute> {
+    // 1. Check prefix exclusions first (block known-bad prefix matches)
+    if PREFIX_EXCLUSIONS.iter().any(|&excl| script == excl) {
+        return None;
+    }
+
+    // 2. Exact matches (highest priority)
+    match script {
+        "vitest" => return Some(FilterRoute::Vitest),
+        "typecheck" | "tsc" => return Some(FilterRoute::Tsc),
+        "prettier" | "format" => return Some(FilterRoute::Prettier),
+        "lint" => return Some(FilterRoute::Lint),
+        "test" => return Some(FilterRoute::TestRunner),
+        _ => {}
+    }
+
+    // 3. Prefix matches (lower priority, after exclusions)
+    if script.starts_with("test:") {
+        return Some(FilterRoute::TestRunner);
+    }
+    if script.starts_with("lint:") {
+        return Some(FilterRoute::Lint);
+    }
+
+    None
+}
+
+/// Apply a specialized filter to boilerplate-stripped yarn output.
+///
+/// Returns (filtered_output, tracking_label).
+/// On filter panic or empty-output, falls back to clean_stdout with stderr warning (graceful degradation).
+fn apply_filter(
+    route: FilterRoute,
+    clean_stdout: &str,
+    package: &str,
+    script: &str,
+    verbose: u8,
+) -> (String, String) {
+    let clean_owned = clean_stdout.to_string();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match route {
+        FilterRoute::Vitest => {
+            let mode = FormatMode::from_verbosity(verbose);
+            let parse_result = vitest_cmd::VitestParser::parse(clean_stdout);
+            let filtered = match parse_result {
+                ParseResult::Full(data) => data.format(mode),
+                ParseResult::Degraded(data, _warnings) => data.format(mode),
+                ParseResult::Passthrough(raw) => raw,
+            };
+            (filtered, "vitest (via yarn workspace)".to_string())
+        }
+        FilterRoute::Tsc => {
+            let filtered = tsc_cmd::filter_tsc_output(clean_stdout);
+            (filtered, "tsc (via yarn workspace)".to_string())
+        }
+        FilterRoute::Lint => {
+            let filtered = lint_cmd::filter_generic_lint(clean_stdout);
+            (filtered, "lint (via yarn workspace)".to_string())
+        }
+        FilterRoute::Prettier => {
+            let filtered = prettier_cmd::filter_prettier_output(clean_stdout);
+            (filtered, "prettier (via yarn workspace)".to_string())
+        }
+        FilterRoute::TestRunner => {
+            let cmd_hint = format!("yarn workspace {} run {}", package, script);
+            let filtered = runner::extract_test_summary(clean_stdout, &cmd_hint);
+            (filtered, "test (via yarn workspace)".to_string())
+        }
+    }));
+
+    match result {
+        Ok((filtered, label)) => {
+            // Empty-output guard: if filter produced empty but input was non-empty,
+            // the filter ate everything -- fall back to passthrough
+            if filtered.is_empty() && !clean_owned.is_empty() {
+                eprintln!(
+                    "[RTK] Filter returned empty output for '{}', falling back to stripped output",
+                    script
+                );
+                (clean_owned, "yarn workspace (passthrough)".to_string())
+            } else {
+                (filtered, label)
+            }
+        }
+        Err(_) => {
+            eprintln!(
+                "[RTK] Filter panicked for '{}', falling back to stripped output",
+                script
+            );
+            (clean_owned, "yarn workspace (passthrough)".to_string())
+        }
     }
 }
 
