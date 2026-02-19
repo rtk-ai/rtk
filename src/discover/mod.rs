@@ -5,7 +5,7 @@ mod report;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, OpenCodeProvider, SessionProvider};
 use registry::{category_avg_tokens, classify_command, split_command_chain, Classification};
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -33,8 +33,14 @@ pub fn run(
     limit: usize,
     format: &str,
     verbose: u8,
+    opencode: bool,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
+    // Select provider based on --opencode flag
+    let provider: Box<dyn SessionProvider> = if opencode {
+        Box::new(OpenCodeProvider)
+    } else {
+        Box::new(ClaudeProvider)
+    };
 
     // Determine project filter
     let project_filter = if all {
@@ -45,7 +51,11 @@ pub fn run(
         // Default: current working directory
         let cwd = std::env::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
+        let encoded = if opencode {
+            OpenCodeProvider::encode_project_path(&cwd_str)
+        } else {
+            ClaudeProvider::encode_project_path(&cwd_str)
+        };
         Some(encoded)
     };
 

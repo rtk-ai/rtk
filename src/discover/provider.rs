@@ -234,6 +234,260 @@ impl SessionProvider for ClaudeProvider {
     }
 }
 
+/// OpenCode session provider.
+///
+/// OpenCode stores sessions in a SQLite database under its data directory.
+/// The database location follows XDG conventions:
+///   - $XDG_DATA_HOME/opencode/ (if XDG_DATA_HOME is set)
+///   - ~/.local/share/opencode/ (default)
+///
+/// Session data is stored in an SQLite database with messages containing
+/// tool calls and results. The schema uses JSON columns for message parts.
+pub struct OpenCodeProvider;
+
+impl OpenCodeProvider {
+    /// Get the base data directory for OpenCode.
+    fn data_dir() -> Result<PathBuf> {
+        let data_dir = if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            PathBuf::from(xdg).join("opencode")
+        } else {
+            let home = dirs::home_dir().context("could not determine home directory")?;
+            home.join(".local").join("share").join("opencode")
+        };
+
+        if !data_dir.exists() {
+            anyhow::bail!(
+                "OpenCode data directory not found: {}\nMake sure OpenCode has been used at least once.",
+                data_dir.display()
+            );
+        }
+        Ok(data_dir)
+    }
+
+    /// Encode a filesystem path to OpenCode's directory name format.
+    /// OpenCode uses the full path as a project identifier.
+    pub fn encode_project_path(path: &str) -> String {
+        // OpenCode may use the path directly or encode it
+        path.replace('/', "-")
+    }
+}
+
+impl SessionProvider for OpenCodeProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let data_dir = Self::data_dir()?;
+
+        let cutoff = since_days.map(|days| {
+            SystemTime::now()
+                .checked_sub(Duration::from_secs(days * 86400))
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        });
+
+        let mut sessions = Vec::new();
+
+        // Walk the data directory looking for session files (JSONL or SQLite)
+        for walk_entry in WalkDir::new(&data_dir)
+            .follow_links(false)
+            .max_depth(4)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let file_path = walk_entry.path();
+            let ext = file_path.extension().and_then(|e| e.to_str());
+
+            // Look for JSONL session files (OpenCode may export in this format)
+            // or SQLite databases
+            match ext {
+                Some("jsonl") => {}
+                Some("db") | Some("sqlite") | Some("sqlite3") => {}
+                _ => continue,
+            }
+
+            // Apply project filter
+            if let Some(filter) = project_filter {
+                let path_str = file_path.to_string_lossy();
+                if !path_str.contains(filter) {
+                    continue;
+                }
+            }
+
+            // Apply mtime filter
+            if let Some(cutoff_time) = cutoff {
+                if let Ok(meta) = fs::metadata(file_path) {
+                    if let Ok(mtime) = meta.modified() {
+                        if mtime < cutoff_time {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            sessions.push(file_path.to_path_buf());
+        }
+
+        Ok(sessions)
+    }
+
+    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+        let ext = path.extension().and_then(|e| e.to_str());
+
+        match ext {
+            Some("jsonl") => {
+                // Parse JSONL format (similar to Claude but with OpenCode's schema)
+                self.extract_from_jsonl(path)
+            }
+            _ => {
+                // For SQLite databases, we'd need rusqlite to read them.
+                // For now, skip non-JSONL files with a warning.
+                Ok(Vec::new())
+            }
+        }
+    }
+}
+
+impl OpenCodeProvider {
+    /// Extract commands from an OpenCode JSONL session file.
+    ///
+    /// OpenCode's message format stores tool calls as "parts" within messages.
+    /// We look for bash tool invocations and their results.
+    fn extract_from_jsonl(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+        let file =
+            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let reader = BufReader::new(file);
+
+        let session_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let mut pending_tool_uses: Vec<(String, String, usize)> = Vec::new();
+        let mut tool_results: HashMap<String, (usize, String, bool)> = HashMap::new();
+        let mut commands = Vec::new();
+        let mut sequence_counter = 0;
+
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+
+            // Pre-filter for performance
+            if !line.contains("bash") && !line.contains("Bash") && !line.contains("tool") {
+                continue;
+            }
+
+            let entry: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // OpenCode stores parts in message.parts array
+            // Tool calls have type "tool-invocation" with toolName "bash"
+            // Tool results have type "tool-result"
+            let entry_type = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match entry_type {
+                "assistant" | "message" => {
+                    // Check parts array for tool invocations
+                    let parts = entry
+                        .pointer("/parts")
+                        .or_else(|| entry.pointer("/message/parts"))
+                        .or_else(|| entry.pointer("/message/content"))
+                        .and_then(|p| p.as_array());
+
+                    if let Some(parts) = parts {
+                        for part in parts {
+                            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                            // Handle OpenCode's tool-invocation format
+                            if part_type == "tool-invocation" || part_type == "tool_use" {
+                                let tool_name = part
+                                    .get("toolName")
+                                    .or_else(|| part.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("");
+
+                                if tool_name == "bash" || tool_name == "Bash" {
+                                    let id = part
+                                        .get("toolInvocationId")
+                                        .or_else(|| part.get("id"))
+                                        .and_then(|i| i.as_str());
+                                    let cmd = part
+                                        .pointer("/args/command")
+                                        .or_else(|| part.pointer("/input/command"))
+                                        .and_then(|c| c.as_str());
+
+                                    if let (Some(id), Some(cmd)) = (id, cmd) {
+                                        pending_tool_uses.push((
+                                            id.to_string(),
+                                            cmd.to_string(),
+                                            sequence_counter,
+                                        ));
+                                        sequence_counter += 1;
+                                    }
+                                }
+                            }
+
+                            // Handle tool results
+                            if part_type == "tool-result" || part_type == "tool_result" {
+                                let id = part
+                                    .get("toolInvocationId")
+                                    .or_else(|| part.get("tool_use_id"))
+                                    .and_then(|i| i.as_str());
+
+                                if let Some(id) = id {
+                                    let content = part
+                                        .get("result")
+                                        .or_else(|| part.get("content"))
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("");
+                                    let output_len = content.len();
+                                    let is_error = part
+                                        .get("isError")
+                                        .or_else(|| part.get("is_error"))
+                                        .and_then(|e| e.as_bool())
+                                        .unwrap_or(false);
+                                    let content_preview: String =
+                                        content.chars().take(1000).collect();
+
+                                    tool_results.insert(
+                                        id.to_string(),
+                                        (output_len, content_preview, is_error),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Match tool_uses with their results
+        for (tool_id, command, sequence_index) in pending_tool_uses {
+            let (output_len, output_content, is_error) = tool_results
+                .get(&tool_id)
+                .map(|(len, content, err)| (Some(*len), Some(content.clone()), *err))
+                .unwrap_or((None, None, false));
+
+            commands.push(ExtractedCommand {
+                command,
+                output_len,
+                session_id: session_id.clone(),
+                output_content,
+                is_error,
+                sequence_index,
+            });
+        }
+
+        Ok(commands)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

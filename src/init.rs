@@ -10,6 +10,15 @@ const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 
+// Embedded OpenCode plugin (TypeScript)
+const OPENCODE_PLUGIN: &str = include_str!("../hooks/opencode-rtk-plugin.ts");
+
+// Embedded OpenCode awareness instructions
+const OPENCODE_AWARENESS: &str = include_str!("../hooks/opencode-rtk-awareness.md");
+
+// Embedded OpenCode rules file
+const OPENCODE_RULES: &str = include_str!("../hooks/opencode-rtk-rules.md");
+
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
@@ -980,6 +989,216 @@ fn resolve_claude_dir() -> Result<PathBuf> {
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
+// ============================================================================
+// OpenCode integration
+// ============================================================================
+
+/// Resolve OpenCode config directory (~/.config/opencode or XDG_CONFIG_HOME/opencode)
+fn resolve_opencode_config_dir() -> Result<PathBuf> {
+    // Respect XDG_CONFIG_HOME if set, otherwise default to ~/.config
+    let config_dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg)
+    } else {
+        dirs::home_dir()
+            .context("Cannot determine home directory. Is $HOME set?")?
+            .join(".config")
+    };
+    Ok(config_dir.join("opencode"))
+}
+
+/// Resolve OpenCode project-local config directory (.opencode/)
+fn resolve_opencode_project_dir() -> Result<PathBuf> {
+    Ok(PathBuf::from(".opencode"))
+}
+
+/// Install RTK for OpenCode
+///
+/// Global mode (--global --opencode):
+///   - Writes plugin to ~/.config/opencode/plugins/rtk.ts
+///   - Writes rules to ~/.config/opencode/rules/rtk.md
+///
+/// Local mode (--opencode):
+///   - Writes plugin to .opencode/plugins/rtk.ts
+///   - Writes rules to .opencode/rules/rtk.md
+pub fn run_opencode(global: bool, verbose: u8) -> Result<()> {
+    let base_dir = if global {
+        resolve_opencode_config_dir()?
+    } else {
+        resolve_opencode_project_dir()?
+    };
+
+    let plugins_dir = base_dir.join("plugins");
+    let rules_dir = base_dir.join("rules");
+
+    // Create directories
+    fs::create_dir_all(&plugins_dir).with_context(|| {
+        format!(
+            "Failed to create plugins directory: {}",
+            plugins_dir.display()
+        )
+    })?;
+    fs::create_dir_all(&rules_dir)
+        .with_context(|| format!("Failed to create rules directory: {}", rules_dir.display()))?;
+
+    // Write plugin
+    let plugin_path = plugins_dir.join("rtk.ts");
+    let plugin_changed = write_if_changed(&plugin_path, OPENCODE_PLUGIN, "RTK plugin", verbose)?;
+
+    // Write rules
+    let rules_path = rules_dir.join("rtk.md");
+    let rules_changed = write_if_changed(&rules_path, OPENCODE_RULES, "RTK rules", verbose)?;
+
+    // Write awareness doc (RTK.md for reference)
+    let awareness_path = base_dir.join("RTK.md");
+    let awareness_changed =
+        write_if_changed(&awareness_path, OPENCODE_AWARENESS, "RTK.md", verbose)?;
+
+    // Report
+    let scope = if global { "global" } else { "local" };
+    println!("\nRTK installed for OpenCode ({scope}).\n");
+    println!("  Plugin: {}", plugin_path.display());
+    if plugin_changed {
+        println!("          (written)");
+    } else {
+        println!("          (already up to date)");
+    }
+    println!("  Rules:  {}", rules_path.display());
+    if rules_changed {
+        println!("          (written)");
+    } else {
+        println!("          (already up to date)");
+    }
+    println!("  RTK.md: {}", awareness_path.display());
+    if awareness_changed {
+        println!("          (written)");
+    } else {
+        println!("          (already up to date)");
+    }
+
+    println!("\n  Restart OpenCode to activate. Test with: git status");
+    println!();
+
+    Ok(())
+}
+
+/// Uninstall RTK from OpenCode
+pub fn uninstall_opencode(global: bool, verbose: u8) -> Result<()> {
+    let base_dir = if global {
+        resolve_opencode_config_dir()?
+    } else {
+        resolve_opencode_project_dir()?
+    };
+
+    let mut removed = Vec::new();
+
+    // Remove plugin
+    let plugin_path = base_dir.join("plugins").join("rtk.ts");
+    if plugin_path.exists() {
+        fs::remove_file(&plugin_path)
+            .with_context(|| format!("Failed to remove plugin: {}", plugin_path.display()))?;
+        removed.push(format!("Plugin: {}", plugin_path.display()));
+    }
+
+    // Remove rules
+    let rules_path = base_dir.join("rules").join("rtk.md");
+    if rules_path.exists() {
+        fs::remove_file(&rules_path)
+            .with_context(|| format!("Failed to remove rules: {}", rules_path.display()))?;
+        removed.push(format!("Rules: {}", rules_path.display()));
+    }
+
+    // Remove awareness doc
+    let awareness_path = base_dir.join("RTK.md");
+    if awareness_path.exists() {
+        fs::remove_file(&awareness_path)
+            .with_context(|| format!("Failed to remove RTK.md: {}", awareness_path.display()))?;
+        removed.push(format!("RTK.md: {}", awareness_path.display()));
+    }
+
+    if removed.is_empty() {
+        println!("RTK was not installed for OpenCode (nothing to remove)");
+    } else {
+        println!("RTK uninstalled from OpenCode:");
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        println!("\nRestart OpenCode to apply changes.");
+    }
+
+    if verbose > 0 {
+        eprintln!("Checked base dir: {}", base_dir.display());
+    }
+
+    Ok(())
+}
+
+/// Show current OpenCode RTK configuration
+pub fn show_opencode_config() -> Result<()> {
+    println!("RTK Configuration (OpenCode):\n");
+
+    // Check global plugin
+    let global_dir = resolve_opencode_config_dir()?;
+    let global_plugin = global_dir.join("plugins").join("rtk.ts");
+    if global_plugin.exists() {
+        let content = fs::read_to_string(&global_plugin)?;
+        if content.contains("RTKPlugin") {
+            println!("  Global plugin: {} (installed)", global_plugin.display());
+        } else {
+            println!(
+                "  Global plugin: {} (exists but may be outdated)",
+                global_plugin.display()
+            );
+        }
+    } else {
+        println!("  Global plugin: not found");
+    }
+
+    // Check global rules
+    let global_rules = global_dir.join("rules").join("rtk.md");
+    if global_rules.exists() {
+        println!("  Global rules:  {} (installed)", global_rules.display());
+    } else {
+        println!("  Global rules:  not found");
+    }
+
+    // Check global awareness doc
+    let global_awareness = global_dir.join("RTK.md");
+    if global_awareness.exists() {
+        println!(
+            "  Global RTK.md: {} (installed)",
+            global_awareness.display()
+        );
+    } else {
+        println!("  Global RTK.md: not found");
+    }
+
+    // Check local plugin
+    let local_dir = resolve_opencode_project_dir()?;
+    let local_plugin = local_dir.join("plugins").join("rtk.ts");
+    if local_plugin.exists() {
+        println!("  Local plugin:  {} (installed)", local_plugin.display());
+    } else {
+        println!("  Local plugin:  not found");
+    }
+
+    // Check local rules
+    let local_rules = local_dir.join("rules").join("rtk.md");
+    if local_rules.exists() {
+        println!("  Local rules:   {} (installed)", local_rules.display());
+    } else {
+        println!("  Local rules:   not found");
+    }
+
+    println!("\nUsage:");
+    println!("  rtk init --opencode              # Install for current project");
+    println!("  rtk init --opencode -g           # Install globally for all projects");
+    println!("  rtk init --opencode --show       # Show this status");
+    println!("  rtk init --opencode --uninstall  # Remove local RTK artifacts");
+    println!("  rtk init --opencode --uninstall -g  # Remove global RTK artifacts");
+
+    Ok(())
+}
+
 /// Show current rtk configuration
 pub fn show_config() -> Result<()> {
     let claude_dir = resolve_claude_dir()?;
@@ -1510,5 +1729,107 @@ More notes
 
         let removed = remove_hook_from_json(&mut json_content);
         assert!(!removed);
+    }
+
+    // ==========================================
+    // OpenCode integration tests
+    // ==========================================
+
+    #[test]
+    fn test_opencode_plugin_embedded() {
+        // Verify the OpenCode plugin is properly embedded
+        assert!(OPENCODE_PLUGIN.contains("RTKPlugin"));
+        assert!(OPENCODE_PLUGIN.contains("tool.execute.before"));
+        assert!(OPENCODE_PLUGIN.contains("rewriteCommand"));
+    }
+
+    #[test]
+    fn test_opencode_plugin_has_all_rewrite_rules() {
+        // Verify the plugin covers the same command categories as the bash hook
+        for keyword in [
+            "git",
+            "cargo",
+            "cat",
+            "grep",
+            "pytest",
+            "docker",
+            "kubectl",
+            "curl",
+            "go test",
+            "golangci-lint",
+            "vitest",
+            "eslint",
+            "prettier",
+            "playwright",
+            "prisma",
+            "ruff",
+            "pip",
+        ] {
+            assert!(
+                OPENCODE_PLUGIN.contains(keyword),
+                "Missing rewrite rule for '{}' in OpenCode plugin",
+                keyword
+            );
+        }
+    }
+
+    #[test]
+    fn test_opencode_rules_embedded() {
+        assert!(OPENCODE_RULES.contains("RTK"));
+        assert!(OPENCODE_RULES.contains("rtk gain"));
+    }
+
+    #[test]
+    fn test_opencode_awareness_embedded() {
+        assert!(OPENCODE_AWARENESS.contains("RTK"));
+        assert!(OPENCODE_AWARENESS.contains("rtk gain"));
+        assert!(OPENCODE_AWARENESS.contains("OpenCode"));
+    }
+
+    #[test]
+    fn test_opencode_install_creates_files() {
+        let temp = TempDir::new().unwrap();
+        let plugins_dir = temp.path().join("plugins");
+        let rules_dir = temp.path().join("rules");
+
+        fs::create_dir_all(&plugins_dir).unwrap();
+        fs::create_dir_all(&rules_dir).unwrap();
+
+        let plugin_path = plugins_dir.join("rtk.ts");
+        let rules_path = rules_dir.join("rtk.md");
+        let awareness_path = temp.path().join("RTK.md");
+
+        // Write files (simulating what run_opencode does)
+        write_if_changed(&plugin_path, OPENCODE_PLUGIN, "RTK plugin", 0).unwrap();
+        write_if_changed(&rules_path, OPENCODE_RULES, "RTK rules", 0).unwrap();
+        write_if_changed(&awareness_path, OPENCODE_AWARENESS, "RTK.md", 0).unwrap();
+
+        assert!(plugin_path.exists());
+        assert!(rules_path.exists());
+        assert!(awareness_path.exists());
+
+        // Verify content
+        let plugin_content = fs::read_to_string(&plugin_path).unwrap();
+        assert!(plugin_content.contains("RTKPlugin"));
+
+        let rules_content = fs::read_to_string(&rules_path).unwrap();
+        assert!(rules_content.contains("rtk gain"));
+    }
+
+    #[test]
+    fn test_opencode_install_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let plugins_dir = temp.path().join("plugins");
+        fs::create_dir_all(&plugins_dir).unwrap();
+
+        let plugin_path = plugins_dir.join("rtk.ts");
+
+        // First write
+        let changed1 = write_if_changed(&plugin_path, OPENCODE_PLUGIN, "RTK plugin", 0).unwrap();
+        assert!(changed1);
+
+        // Second write (same content)
+        let changed2 = write_if_changed(&plugin_path, OPENCODE_PLUGIN, "RTK plugin", 0).unwrap();
+        assert!(!changed2); // Should not write again
     }
 }

@@ -128,6 +128,47 @@ rtk init --show # Verify hook is installed and executable
 
 **New in v0.9.5**: Hook-first installation eliminates ~2000 tokens from Claude's context while maintaining full RTK functionality through transparent command rewriting.
 
+## OpenCode Support
+
+RTK also supports [OpenCode](https://opencode.ai) as an alternative to Claude Code. The integration uses OpenCode's native plugin system for transparent command rewriting.
+
+### Quick Start (OpenCode)
+
+```bash
+# 1. Verify rtk is installed
+rtk gain  # Must show token stats
+
+# 2. Initialize for OpenCode (global)
+rtk init --opencode --global
+# → Installs plugin to ~/.config/opencode/plugins/rtk.ts
+# → Installs rules to ~/.config/opencode/rules/rtk.md
+# → Creates RTK.md reference doc
+
+# 3. Restart OpenCode, then test
+git status  # Plugin transparently rewrites to: rtk git status
+
+# Alternative: per-project install
+rtk init --opencode
+# → Installs to .opencode/plugins/ and .opencode/rules/
+```
+
+### OpenCode Commands
+
+```bash
+rtk init --opencode --global        # Install globally for all OpenCode projects
+rtk init --opencode                  # Install for current project only
+rtk init --opencode --show           # Show current OpenCode RTK configuration
+rtk init --opencode --uninstall      # Remove local RTK artifacts
+rtk init --opencode --uninstall -g   # Remove global RTK artifacts
+rtk discover --opencode              # Scan OpenCode sessions for missed savings
+```
+
+### How It Works (OpenCode)
+
+RTK's OpenCode integration uses the [plugin system](https://opencode.ai/docs/plugins). The plugin hooks into the `tool.execute.before` event to intercept bash commands and rewrite them to their rtk equivalents before execution. This is the same approach as Claude Code's PreToolUse hook, but implemented natively in TypeScript using OpenCode's plugin API.
+
+No configuration file patching is needed — OpenCode automatically discovers plugins in its plugins directory.
+
 ## Global Flags
 
 ```bash
@@ -342,6 +383,8 @@ FAILED: 2/15 tests
 
 ### Installation Modes
 
+#### Claude Code
+
 | Command | Scope | Hook | RTK.md | CLAUDE.md | Tokens in Context | Use Case |
 |---------|-------|------|--------|-----------|-------------------|----------|
 | `rtk init -g` | Global | ✅ | ✅ (10 lines) | @RTK.md | ~10 | **Recommended**: All projects, automatic |
@@ -349,11 +392,20 @@ FAILED: 2/15 tests
 | `rtk init -g --hook-only` | Global | ✅ | ❌ | Nothing | 0 | Minimal setup, hook-only |
 | `rtk init` | Local | ❌ | ❌ | Full (137 lines) | ~2000 | Single project, no hook |
 
+#### OpenCode
+
+| Command | Scope | Plugin | Rules | RTK.md | Use Case |
+|---------|-------|--------|-------|--------|----------|
+| `rtk init --opencode -g` | Global | ✅ | ✅ | ✅ | **Recommended**: All OpenCode projects |
+| `rtk init --opencode` | Local | ✅ | ✅ | ✅ | Single project |
+
 ```bash
 rtk init --show         # Show current configuration
-rtk init -g             # Install hook + RTK.md (recommended)
+rtk init -g             # Install hook + RTK.md (recommended, Claude Code)
 rtk init -g --claude-md # Legacy: full injection into CLAUDE.md
 rtk init                # Local project: full injection into ./CLAUDE.md
+rtk init --opencode -g  # Install plugin for OpenCode (global)
+rtk init --opencode     # Install plugin for OpenCode (local)
 ```
 
 ### Installation Flags
@@ -656,6 +708,19 @@ cp ~/.claude/settings.json.bak ~/.claude/settings.json
 ```
 
 **Local Projects**: Manually remove RTK instructions from `./CLAUDE.md`
+
+**OpenCode Removal**:
+```bash
+rtk init --opencode -g --uninstall    # Global
+rtk init --opencode --uninstall       # Local project
+
+# Removes:
+#   - plugins/rtk.ts
+#   - rules/rtk.md
+#   - RTK.md
+
+# Restart OpenCode after uninstall
+```
 
 **Binary Removal**:
 ```bash
