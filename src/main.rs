@@ -570,9 +570,9 @@ enum GitCommands {
     },
     /// Commit → "ok ✓ \<hash\>"
     Commit {
-        /// Commit message
+        /// Commit message (can be repeated for multi-paragraph)
         #[arg(short, long)]
-        message: String,
+        message: Vec<String>,
     },
     /// Push → "ok ✓ \<branch\>"
     Push {
@@ -899,7 +899,12 @@ fn main() -> Result<()> {
                 git::run(git::GitCommand::Add, &args, None, cli.verbose)?;
             }
             GitCommands::Commit { message } => {
-                git::run(git::GitCommand::Commit { message }, &[], None, cli.verbose)?;
+                git::run(
+                    git::GitCommand::Commit { messages: message },
+                    &[],
+                    None,
+                    cli.verbose,
+                )?;
             }
             GitCommands::Push { args } => {
                 git::run(git::GitCommand::Push, &args, None, cli.verbose)?;
@@ -1472,4 +1477,69 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_git_commit_single_message() {
+        let cli = Cli::try_parse_from(["rtk", "git", "commit", "-m", "fix: typo"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["fix: typo"]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_multiple_messages() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "git",
+            "commit",
+            "-m",
+            "feat: add support",
+            "-m",
+            "Body paragraph here.",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["feat: add support", "Body paragraph here."]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_long_flag_multiple() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "git",
+            "commit",
+            "--message",
+            "title",
+            "--message",
+            "body",
+            "--message",
+            "footer",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["title", "body", "footer"]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
 }

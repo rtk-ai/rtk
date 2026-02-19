@@ -10,7 +10,7 @@ pub enum GitCommand {
     Status,
     Show,
     Add,
-    Commit { message: String },
+    Commit { messages: Vec<String> },
     Push,
     Pull,
     Branch,
@@ -26,7 +26,7 @@ pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: 
         GitCommand::Status => run_status(args, verbose),
         GitCommand::Show => run_show(args, max_lines, verbose),
         GitCommand::Add => run_add(args, verbose),
-        GitCommand::Commit { message } => run_commit(&message, verbose),
+        GitCommand::Commit { messages } => run_commit(&messages, verbose),
         GitCommand::Push => run_push(args, verbose),
         GitCommand::Pull => run_pull(args, verbose),
         GitCommand::Branch => run_branch(args, verbose),
@@ -657,15 +657,30 @@ fn run_add(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn run_commit(message: &str, verbose: u8) -> Result<()> {
+fn build_commit_command(messages: &[String]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("commit");
+    for msg in messages {
+        cmd.args(["-m", msg]);
+    }
+    cmd
+}
+
+fn run_commit(messages: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
+    let original_cmd = messages
+        .iter()
+        .map(|m| format!("-m \"{}\"", m))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let original_cmd = format!("git commit {}", original_cmd);
+
     if verbose > 0 {
-        eprintln!("git commit -m \"{}\"", message);
+        eprintln!("{}", original_cmd);
     }
 
-    let output = Command::new("git")
-        .args(["commit", "-m", message])
+    let output = build_commit_command(messages)
         .output()
         .context("Failed to run git commit")?;
 
@@ -692,17 +707,12 @@ fn run_commit(message: &str, verbose: u8) -> Result<()> {
 
         println!("{}", compact);
 
-        timer.track(
-            &format!("git commit -m \"{}\"", message),
-            "rtk git commit",
-            &raw_output,
-            &compact,
-        );
+        timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
     } else {
         if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
             println!("ok (nothing to commit)");
             timer.track(
-                &format!("git commit -m \"{}\"", message),
+                &original_cmd,
                 "rtk git commit",
                 &raw_output,
                 "ok (nothing to commit)",
@@ -1586,5 +1596,65 @@ no changes added to commit (use "git add" and/or "git commit -a")
             branch
         );
         let _ = Command::new("git").args(["branch", "-d", branch]).output();
+    }
+
+    #[test]
+    fn test_commit_single_message() {
+        let messages = vec!["fix: typo".to_string()];
+        let cmd = build_commit_command(&messages);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["commit", "-m", "fix: typo"]);
+    }
+
+    #[test]
+    fn test_commit_multiple_messages() {
+        let messages = vec![
+            "feat: add multi-paragraph support".to_string(),
+            "This allows git commit -m \"title\" -m \"body\".".to_string(),
+        ];
+        let cmd = build_commit_command(&messages);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "commit",
+                "-m",
+                "feat: add multi-paragraph support",
+                "-m",
+                "This allows git commit -m \"title\" -m \"body\"."
+            ]
+        );
+    }
+
+    #[test]
+    fn test_commit_three_messages() {
+        let messages = vec![
+            "title".to_string(),
+            "body".to_string(),
+            "footer: refs #202".to_string(),
+        ];
+        let cmd = build_commit_command(&messages);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "commit",
+                "-m",
+                "title",
+                "-m",
+                "body",
+                "-m",
+                "footer: refs #202"
+            ]
+        );
     }
 }
