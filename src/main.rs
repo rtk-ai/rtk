@@ -18,6 +18,7 @@ mod git;
 mod go_cmd;
 mod golangci_cmd;
 mod grep_cmd;
+mod hook_audit_cmd;
 mod init;
 mod json_cmd;
 mod learn;
@@ -38,11 +39,13 @@ mod read;
 mod ruff_cmd;
 mod runner;
 mod summary;
+mod tee;
 mod tracking;
 mod tree;
 mod tsc_cmd;
 mod utils;
 mod vitest_cmd;
+mod wc_cmd;
 mod wget_cmd;
 
 use anyhow::{Context, Result};
@@ -296,6 +299,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Word/line/byte count with compact output (strips paths and padding)
+    Wc {
+        /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show token savings summary and history
     Gain {
         /// Show ASCII graph of daily savings
@@ -519,6 +529,14 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
+    #[command(name = "hook-audit")]
+    HookAudit {
+        /// Show entries from last N days (0 = all time)
+        #[arg(short, long, default_value = "7")]
+        since: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -555,9 +573,9 @@ enum GitCommands {
     },
     /// Commit → "ok ✓ \<hash\>"
     Commit {
-        /// Commit message
+        /// Commit message (can be repeated for multi-paragraph)
         #[arg(short, long)]
-        message: String,
+        message: Vec<String>,
     },
     /// Push → "ok ✓ \<branch\>"
     Push {
@@ -652,7 +670,31 @@ enum DockerCommands {
     Images,
     /// Show container logs (deduplicated)
     Logs { container: String },
+    /// Docker Compose commands with compact output
+    Compose {
+        #[command(subcommand)]
+        command: ComposeCommands,
+    },
     /// Passthrough: runs any unsupported docker subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum ComposeCommands {
+    /// List compose services (compact)
+    Ps,
+    /// Show compose logs (deduplicated)
+    Logs {
+        /// Optional service name
+        service: Option<String>,
+    },
+    /// Build compose services (summary)
+    Build {
+        /// Optional service name
+        service: Option<String>,
+    },
+    /// Passthrough: runs any unsupported compose subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -860,7 +902,12 @@ fn main() -> Result<()> {
                 git::run(git::GitCommand::Add, &args, None, cli.verbose)?;
             }
             GitCommands::Commit { message } => {
-                git::run(git::GitCommand::Commit { message }, &[], None, cli.verbose)?;
+                git::run(
+                    git::GitCommand::Commit { messages: message },
+                    &[],
+                    None,
+                    cli.verbose,
+                )?;
             }
             GitCommands::Push { args } => {
                 git::run(git::GitCommand::Push, &args, None, cli.verbose)?;
@@ -980,6 +1027,20 @@ fn main() -> Result<()> {
             DockerCommands::Logs { container: c } => {
                 container::run(container::ContainerCmd::DockerLogs, &[c], cli.verbose)?;
             }
+            DockerCommands::Compose { command: compose } => match compose {
+                ComposeCommands::Ps => {
+                    container::run_compose_ps(cli.verbose)?;
+                }
+                ComposeCommands::Logs { service } => {
+                    container::run_compose_logs(service.as_deref(), cli.verbose)?;
+                }
+                ComposeCommands::Build { service } => {
+                    container::run_compose_build(service.as_deref(), cli.verbose)?;
+                }
+                ComposeCommands::Other(args) => {
+                    container::run_compose_passthrough(&args, cli.verbose)?;
+                }
+            },
             DockerCommands::Other(args) => {
                 container::run_docker_passthrough(&args, cli.verbose)?;
             }
@@ -1077,6 +1138,10 @@ fn main() -> Result<()> {
             } else {
                 wget_cmd::run(&url, &args, cli.verbose)?;
             }
+        }
+
+        Commands::Wc { args } => {
+            wc_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Gain {
@@ -1362,6 +1427,10 @@ fn main() -> Result<()> {
             golangci_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::HookAudit { since } => {
+            hook_audit_cmd::run(since, cli.verbose)?;
+        }
+
         Commands::Proxy { args } => {
             use std::process::Command;
 
@@ -1412,4 +1481,69 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_git_commit_single_message() {
+        let cli = Cli::try_parse_from(["rtk", "git", "commit", "-m", "fix: typo"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["fix: typo"]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_multiple_messages() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "git",
+            "commit",
+            "-m",
+            "feat: add support",
+            "-m",
+            "Body paragraph here.",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["feat: add support", "Body paragraph here."]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_long_flag_multiple() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "git",
+            "commit",
+            "--message",
+            "title",
+            "--message",
+            "body",
+            "--message",
+            "footer",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["title", "body", "footer"]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
 }

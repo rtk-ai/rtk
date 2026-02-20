@@ -4,7 +4,7 @@
 #
 # Usage: bash ~/.claude/hooks/test-rtk-rewrite.sh
 
-HOOK="$HOME/.claude/hooks/rtk-rewrite.sh"
+HOOK="${HOOK:-$HOME/.claude/hooks/rtk-rewrite.sh}"
 PASS=0
 FAIL=0
 TOTAL=0
@@ -278,6 +278,101 @@ test_rewrite "python3 (no pattern)" \
 test_rewrite "node (no pattern)" \
   "node -e 'console.log(1)'" \
   ""
+
+echo ""
+
+# ---- SECTION 6: Audit logging ----
+echo "--- Audit logging (RTK_HOOK_AUDIT=1) ---"
+
+AUDIT_TMPDIR=$(mktemp -d)
+trap "rm -rf $AUDIT_TMPDIR" EXIT
+
+test_audit_log() {
+  local description="$1"
+  local input_cmd="$2"
+  local expected_action="$3"
+  TOTAL=$((TOTAL + 1))
+
+  # Clean log
+  rm -f "$AUDIT_TMPDIR/hook-audit.log"
+
+  local input_json
+  input_json=$(jq -n --arg cmd "$input_cmd" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
+  echo "$input_json" | RTK_HOOK_AUDIT=1 RTK_AUDIT_DIR="$AUDIT_TMPDIR" bash "$HOOK" 2>/dev/null || true
+
+  if [ ! -f "$AUDIT_TMPDIR/hook-audit.log" ]; then
+    printf "  ${RED}FAIL${RESET} %s (no log file created)\n" "$description"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+
+  local log_line
+  log_line=$(head -1 "$AUDIT_TMPDIR/hook-audit.log")
+  local actual_action
+  actual_action=$(echo "$log_line" | cut -d'|' -f2 | tr -d ' ')
+
+  if [ "$actual_action" = "$expected_action" ]; then
+    printf "  ${GREEN}PASS${RESET} %s ${DIM}→ %s${RESET}\n" "$description" "$actual_action"
+    PASS=$((PASS + 1))
+  else
+    printf "  ${RED}FAIL${RESET} %s\n" "$description"
+    printf "       expected action: %s\n" "$expected_action"
+    printf "       actual action:   %s\n" "$actual_action"
+    printf "       log line:        %s\n" "$log_line"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+test_audit_log "audit: rewrite git status" \
+  "git status" \
+  "rewrite"
+
+test_audit_log "audit: skip already_rtk" \
+  "rtk git status" \
+  "skip:already_rtk"
+
+test_audit_log "audit: skip heredoc" \
+  "cat <<'EOF'
+hello
+EOF" \
+  "skip:heredoc"
+
+test_audit_log "audit: skip no_match" \
+  "echo hello world" \
+  "skip:no_match"
+
+test_audit_log "audit: rewrite cargo test" \
+  "cargo test" \
+  "rewrite"
+
+# Test log format (4 pipe-separated fields)
+rm -f "$AUDIT_TMPDIR/hook-audit.log"
+input_json=$(jq -n --arg cmd "git status" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
+echo "$input_json" | RTK_HOOK_AUDIT=1 RTK_AUDIT_DIR="$AUDIT_TMPDIR" bash "$HOOK" 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+log_line=$(cat "$AUDIT_TMPDIR/hook-audit.log" 2>/dev/null || echo "")
+field_count=$(echo "$log_line" | awk -F' \\| ' '{print NF}')
+if [ "$field_count" = "4" ]; then
+  printf "  ${GREEN}PASS${RESET} audit: log format has 4 fields ${DIM}→ %s${RESET}\n" "$log_line"
+  PASS=$((PASS + 1))
+else
+  printf "  ${RED}FAIL${RESET} audit: log format (expected 4 fields, got %s)\n" "$field_count"
+  printf "       log line: %s\n" "$log_line"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test no log when RTK_HOOK_AUDIT is unset
+rm -f "$AUDIT_TMPDIR/hook-audit.log"
+input_json=$(jq -n --arg cmd "git status" '{"tool_name":"Bash","tool_input":{"command":$cmd}}')
+echo "$input_json" | RTK_AUDIT_DIR="$AUDIT_TMPDIR" bash "$HOOK" 2>/dev/null || true
+TOTAL=$((TOTAL + 1))
+if [ ! -f "$AUDIT_TMPDIR/hook-audit.log" ]; then
+  printf "  ${GREEN}PASS${RESET} audit: no log when RTK_HOOK_AUDIT unset\n"
+  PASS=$((PASS + 1))
+else
+  printf "  ${RED}FAIL${RESET} audit: log created when RTK_HOOK_AUDIT unset\n"
+  FAIL=$((FAIL + 1))
+fi
 
 echo ""
 

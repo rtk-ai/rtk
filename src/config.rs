@@ -10,6 +10,8 @@ pub struct Config {
     pub display: DisplayConfig,
     #[serde(default)]
     pub filters: FilterConfig,
+    #[serde(default)]
+    pub tee: crate::tee::TeeConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
