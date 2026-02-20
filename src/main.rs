@@ -47,6 +47,7 @@ mod utils;
 mod vitest_cmd;
 mod wc_cmd;
 mod wget_cmd;
+mod xcodebuild_cmd;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -536,6 +537,13 @@ enum Commands {
         /// Show entries from last N days (0 = all time)
         #[arg(short, long, default_value = "7")]
         since: u64,
+    },
+
+    /// Xcode build with compact output (strips verbose build internals)
+    Xcodebuild {
+        /// xcodebuild arguments (supports all xcodebuild flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -1429,6 +1437,10 @@ fn main() -> Result<()> {
 
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
+        }
+
+        Commands::Xcodebuild { args } => {
+            xcodebuild_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Proxy { args } => {
