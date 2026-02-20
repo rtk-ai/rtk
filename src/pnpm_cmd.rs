@@ -1,5 +1,7 @@
 use crate::tracking;
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -512,6 +514,267 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ─── pnpm run <script> support ───────────────────────────────────────────────
+
+/// Filter route for specialized script output processing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FilterRoute {
+    TestRunner,
+    Vitest,
+    Lint,
+    Tsc,
+    Prettier,
+    Playwright,
+}
+
+/// Strip pnpm-specific boilerplate from script output
+pub(crate) fn filter_pnpm_run_output(output: &str) -> String {
+    lazy_static! {
+        // > my-project@1.0.0 test /path/to/project
+        static ref LIFECYCLE_HEADER: Regex = Regex::new(r"^>\s+\S+@\S+\s+").unwrap();
+        // $ vitest run --reporter=json
+        static ref SCRIPT_ECHO: Regex = Regex::new(r"^\$\s+").unwrap();
+        // Done in 3.4s
+        static ref DONE_MSG: Regex = Regex::new(r"^Done in \d").unwrap();
+        // ELIFECYCLE  Command failed with exit code 1.
+        static ref ELIFECYCLE: Regex = Regex::new(r"(?i)ELIFECYCLE|ERR_PNPM").unwrap();
+        // Progress: resolved 123, reused 120, downloaded 3
+        static ref PROGRESS: Regex = Regex::new(r"^Progress:").unwrap();
+    }
+
+    let mut result = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if LIFECYCLE_HEADER.is_match(trimmed) {
+            continue;
+        }
+        if SCRIPT_ECHO.is_match(trimmed) {
+            continue;
+        }
+        if DONE_MSG.is_match(trimmed) {
+            continue;
+        }
+        if ELIFECYCLE.is_match(trimmed) {
+            continue;
+        }
+        if PROGRESS.is_match(trimmed) {
+            continue;
+        }
+        result.push(line.to_string());
+    }
+
+    if result.is_empty() {
+        "ok ✓".to_string()
+    } else {
+        result.join("\n")
+    }
+}
+
+/// Route a script name to a specialized filter (static rules + package.json detection)
+pub(crate) fn route_script(script: &str) -> Option<FilterRoute> {
+    // Tier 1: Static routing (exact match)
+    match script {
+        "vitest" => return Some(FilterRoute::Vitest),
+        "typecheck" | "tsc" => return Some(FilterRoute::Tsc),
+        "prettier" | "format" | "format:check" => return Some(FilterRoute::Prettier),
+        "lint" => return Some(FilterRoute::Lint),
+        "test" => return Some(FilterRoute::TestRunner),
+        _ => {}
+    }
+
+    // Tier 1b: Prefix matching
+    if let Some(suffix) = script.strip_prefix("test:") {
+        match suffix {
+            "e2e" | "playwright" | "cypress" => {} // defer to package.json
+            _ => return Some(FilterRoute::TestRunner),
+        }
+    }
+    if let Some(suffix) = script.strip_prefix("lint:") {
+        if suffix != "fix" {
+            return Some(FilterRoute::Lint);
+        }
+    }
+
+    // Tier 2: Auto-detect from package.json
+    detect_tool_from_package_json(script)
+}
+
+/// Read package.json scripts[name] and detect the underlying tool
+pub(crate) fn detect_tool_from_package_json(script: &str) -> Option<FilterRoute> {
+    let content = std::fs::read_to_string("package.json").ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let scripts = json.get("scripts")?.as_object()?;
+    let command = scripts.get(script)?.as_str()?;
+    let cmd_lower = command.to_lowercase();
+
+    if cmd_lower.contains("playwright") {
+        Some(FilterRoute::Playwright)
+    } else if cmd_lower.contains("vitest") {
+        Some(FilterRoute::Vitest)
+    } else if cmd_lower.contains("jest") {
+        Some(FilterRoute::TestRunner)
+    } else if cmd_lower.contains("tsc") || cmd_lower.contains("typescript") {
+        Some(FilterRoute::Tsc)
+    } else if cmd_lower.contains("eslint") || cmd_lower.contains("biome") {
+        Some(FilterRoute::Lint)
+    } else if cmd_lower.contains("prettier") {
+        Some(FilterRoute::Prettier)
+    } else {
+        None
+    }
+}
+
+/// Check if a name is a known pnpm script (static routing or package.json)
+pub fn is_pnpm_script(name: &str) -> bool {
+    if route_script(name).is_some() {
+        return true;
+    }
+    // Check package.json scripts
+    if let Ok(content) = std::fs::read_to_string("package.json") {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(scripts) = json.get("scripts").and_then(|s| s.as_object()) {
+                return scripts.contains_key(name);
+            }
+        }
+    }
+    false
+}
+
+/// Apply a specialized filter to script output
+pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> (String, &'static str) {
+    use crate::parser::{OutputParser, TokenFormatter};
+
+    let result = std::panic::catch_unwind(|| match route {
+        FilterRoute::Vitest => {
+            let parse_result = crate::vitest_cmd::VitestParser::parse(output);
+            match parse_result {
+                ParseResult::Full(data) => data.format(FormatMode::Compact),
+                ParseResult::Degraded(data, _) => data.format(FormatMode::Compact),
+                ParseResult::Passthrough(raw) => raw,
+            }
+        }
+        FilterRoute::Playwright => {
+            let parse_result = crate::playwright_cmd::PlaywrightParser::parse(output);
+            match parse_result {
+                ParseResult::Full(data) => data.format(FormatMode::Compact),
+                ParseResult::Degraded(data, _) => data.format(FormatMode::Compact),
+                ParseResult::Passthrough(raw) => raw,
+            }
+        }
+        FilterRoute::Tsc => crate::tsc_cmd::filter_tsc_output(output),
+        FilterRoute::Lint => crate::lint_cmd::filter_generic_lint(output),
+        FilterRoute::Prettier => crate::prettier_cmd::filter_prettier_output(output),
+        FilterRoute::TestRunner => crate::runner::extract_test_summary(output, "npm test"),
+    });
+
+    let label = match route {
+        FilterRoute::Vitest => "vitest (via pnpm run)",
+        FilterRoute::Playwright => "playwright (via pnpm run)",
+        FilterRoute::Tsc => "tsc (via pnpm run)",
+        FilterRoute::Lint => "lint (via pnpm run)",
+        FilterRoute::Prettier => "prettier (via pnpm run)",
+        FilterRoute::TestRunner => "test (via pnpm run)",
+    };
+
+    match result {
+        Ok(filtered) if !filtered.trim().is_empty() => (filtered, label),
+        _ => (output.to_string(), label),
+    }
+}
+
+/// Execute `pnpm run <script>` with smart routing to specialized filters
+pub fn run_script(script: &str, args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("pnpm");
+    cmd.arg("run");
+    cmd.arg(script);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if skip_env {
+        cmd.env("SKIP_ENV_VALIDATION", "1");
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: pnpm run {} {}", script, args.join(" "));
+    }
+
+    let output = cmd
+        .output()
+        .context(format!("Failed to run pnpm run {}", script))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+    let exit_code = output.status.code().unwrap_or(1);
+
+    // On failure: show raw output + tee hint, exit
+    if !output.status.success() {
+        let stripped = filter_pnpm_run_output(&raw);
+        if let Some(hint) =
+            crate::tee::tee_and_hint(&raw, &format!("pnpm-run-{}", script), exit_code)
+        {
+            println!("{}\n{}", stripped, hint);
+        } else {
+            println!("{}", stripped);
+        }
+        timer.track(
+            &format!("pnpm run {} {}", script, args.join(" ")),
+            &format!("rtk pnpm run {} {}", script, args.join(" ")),
+            &raw,
+            &stripped,
+        );
+        std::process::exit(exit_code);
+    }
+
+    // Strip pnpm boilerplate
+    let stripped = filter_pnpm_run_output(&raw);
+
+    // If all output was boilerplate, just show ok
+    if stripped == "ok ✓" {
+        println!("{}", stripped);
+        timer.track(
+            &format!("pnpm run {} {}", script, args.join(" ")),
+            &format!("rtk pnpm run {} {}", script, args.join(" ")),
+            &raw,
+            &stripped,
+        );
+        return Ok(());
+    }
+
+    // Route to specialized filter
+    let filtered = match route_script(script) {
+        Some(route) => {
+            let (result, label) = apply_filter(route, &stripped);
+            if verbose > 0 {
+                eprintln!("Routed to: {}", label);
+            }
+            result
+        }
+        None => stripped.clone(),
+    };
+
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, &format!("pnpm-run-{}", script), exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
+
+    timer.track(
+        &format!("pnpm run {} {}", script, args.join(" ")),
+        &format!("rtk pnpm run {} {}", script, args.join(" ")),
+        &raw,
+        &filtered,
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +832,209 @@ mod tests {
         // Test that run_passthrough compiles and has correct signature
         let _args: Vec<OsString> = vec![OsString::from("help")];
         // Compile-time verification that the function exists with correct signature
+    }
+
+    // ─── filter_pnpm_run_output tests ────────────────────────────────────
+
+    #[test]
+    fn test_filter_pnpm_run_output_clean() {
+        // Real tool output should be preserved
+        let input = "PASS src/utils.test.ts\nTests: 5 passed, 5 total";
+        let result = filter_pnpm_run_output(input);
+        assert!(result.contains("PASS"));
+        assert!(result.contains("Tests: 5 passed"));
+    }
+
+    #[test]
+    fn test_filter_pnpm_run_output_lifecycle() {
+        let input = "> my-project@1.0.0 test /path/to/project\nPASS tests";
+        let result = filter_pnpm_run_output(input);
+        assert!(!result.contains("> my-project@"));
+        assert!(result.contains("PASS tests"));
+    }
+
+    #[test]
+    fn test_filter_pnpm_run_output_script_echo() {
+        let input = "$ vitest run --reporter=json\nactual output here";
+        let result = filter_pnpm_run_output(input);
+        assert!(!result.contains("$ vitest"));
+        assert!(result.contains("actual output here"));
+    }
+
+    #[test]
+    fn test_filter_pnpm_run_output_done_msg() {
+        let input = "Tests passed\nDone in 3.4s";
+        let result = filter_pnpm_run_output(input);
+        assert!(!result.contains("Done in"));
+        assert!(result.contains("Tests passed"));
+    }
+
+    #[test]
+    fn test_filter_pnpm_run_output_empty() {
+        let input = "> pkg@1.0.0 test\n$ vitest run\n\nDone in 2.1s\n";
+        let result = filter_pnpm_run_output(input);
+        assert_eq!(result, "ok ✓");
+    }
+
+    #[test]
+    fn test_filter_pnpm_run_output_mixed() {
+        let input = r#"> my-project@1.0.0 test
+$ vitest run --reporter=json
+
+{"numTotalTests":10,"numPassedTests":9,"numFailedTests":1,"numPendingTests":0,"testResults":[]}
+
+ ELIFECYCLE  Command failed with exit code 1.
+Done in 5.2s
+"#;
+        let result = filter_pnpm_run_output(input);
+        assert!(!result.contains("> my-project@"));
+        assert!(!result.contains("$ vitest"));
+        assert!(!result.contains("ELIFECYCLE"));
+        assert!(!result.contains("Done in"));
+        assert!(result.contains("numTotalTests"));
+
+        fn count_tokens(text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+        let savings = 100.0 - (count_tokens(&result) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(
+            savings >= 40.0,
+            "Expected ≥40% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    // ─── route_script tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_route_script_exact_matches() {
+        assert_eq!(route_script("vitest"), Some(FilterRoute::Vitest));
+        assert_eq!(route_script("tsc"), Some(FilterRoute::Tsc));
+        assert_eq!(route_script("typecheck"), Some(FilterRoute::Tsc));
+        assert_eq!(route_script("lint"), Some(FilterRoute::Lint));
+        assert_eq!(route_script("prettier"), Some(FilterRoute::Prettier));
+        assert_eq!(route_script("format"), Some(FilterRoute::Prettier));
+        assert_eq!(route_script("test"), Some(FilterRoute::TestRunner));
+    }
+
+    #[test]
+    fn test_route_script_unknown_returns_none() {
+        // These don't match static rules and no package.json in test env
+        assert_eq!(route_script("build"), None);
+        assert_eq!(route_script("dev"), None);
+        assert_eq!(route_script("start"), None);
+    }
+
+    #[test]
+    fn test_route_script_prefix_matching() {
+        assert_eq!(route_script("test:unit"), Some(FilterRoute::TestRunner));
+        assert_eq!(
+            route_script("test:integration"),
+            Some(FilterRoute::TestRunner)
+        );
+        assert_eq!(route_script("lint:check"), Some(FilterRoute::Lint));
+        assert_eq!(route_script("lint:ci"), Some(FilterRoute::Lint));
+    }
+
+    #[test]
+    fn test_route_script_prefix_exclusions() {
+        // These are deferred to package.json (no package.json in test → None)
+        assert_eq!(route_script("test:e2e"), None);
+        assert_eq!(route_script("test:playwright"), None);
+        assert_eq!(route_script("test:cypress"), None);
+        assert_eq!(route_script("lint:fix"), None);
+    }
+
+    // ─── detect_tool_from_package_json tests ─────────────────────────────
+
+    #[test]
+    fn test_detect_missing_script_returns_none() {
+        // No package.json in test CWD → None
+        assert_eq!(detect_tool_from_package_json("nonexistent"), None);
+    }
+
+    // ─── apply_filter tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_filter_tsc_label() {
+        let (_, label) = apply_filter(FilterRoute::Tsc, "some output");
+        assert_eq!(label, "tsc (via pnpm run)");
+    }
+
+    #[test]
+    fn test_apply_filter_vitest_label() {
+        let (_, label) = apply_filter(FilterRoute::Vitest, "some output");
+        assert_eq!(label, "vitest (via pnpm run)");
+    }
+
+    #[test]
+    fn test_apply_filter_lint_label() {
+        let (_, label) = apply_filter(FilterRoute::Lint, "some output");
+        assert_eq!(label, "lint (via pnpm run)");
+    }
+
+    #[test]
+    fn test_apply_filter_prettier_label() {
+        let (_, label) = apply_filter(FilterRoute::Prettier, "some output");
+        assert_eq!(label, "prettier (via pnpm run)");
+    }
+
+    #[test]
+    fn test_apply_filter_test_runner_label() {
+        let (_, label) = apply_filter(FilterRoute::TestRunner, "some output");
+        assert_eq!(label, "test (via pnpm run)");
+    }
+
+    #[test]
+    fn test_apply_filter_playwright_label() {
+        let (_, label) = apply_filter(FilterRoute::Playwright, "some output");
+        assert_eq!(label, "playwright (via pnpm run)");
+    }
+
+    // ─── integration tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_then_route_integration() {
+        let raw = r#"> app@1.0.0 lint
+$ eslint .
+
+src/file.ts: warning no-unused-vars
+
+Done in 1.2s"#;
+        let stripped = filter_pnpm_run_output(raw);
+        assert!(!stripped.contains("> app@"));
+        assert!(!stripped.contains("Done in"));
+
+        let route = route_script("lint");
+        assert_eq!(route, Some(FilterRoute::Lint));
+
+        let (filtered, label) = apply_filter(route.unwrap(), &stripped);
+        assert_eq!(label, "lint (via pnpm run)");
+        assert!(!filtered.is_empty());
+    }
+
+    #[test]
+    fn test_ok_checkmark_guard_skips_routing() {
+        // When all output is boilerplate, we get "ok ✓" and skip routing
+        let raw = "> pkg@1.0.0 test\n$ vitest run\n\nDone in 2s\n";
+        let stripped = filter_pnpm_run_output(raw);
+        assert_eq!(stripped, "ok ✓");
+        // In run_script, this would skip routing
+    }
+
+    // ─── is_pnpm_script tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_is_pnpm_script_static() {
+        assert!(is_pnpm_script("test"));
+        assert!(is_pnpm_script("lint"));
+        assert!(is_pnpm_script("vitest"));
+    }
+
+    #[test]
+    fn test_is_pnpm_script_unknown() {
+        // Not a known script name and no package.json in test env
+        assert!(!is_pnpm_script("store"));
+        assert!(!is_pnpm_script("prune"));
     }
 }

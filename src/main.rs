@@ -726,6 +726,14 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run a script with smart routing to specialized filters
+    Run {
+        /// Script name (e.g., test, lint, typecheck)
+        script: String,
+        /// Additional script arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported pnpm subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1209,8 +1217,20 @@ fn main() -> Result<()> {
             PnpmCommands::Typecheck { args } => {
                 tsc_cmd::run(&args, cli.verbose)?;
             }
+            PnpmCommands::Run { script, args } => {
+                pnpm_cmd::run_script(&script, &args, cli.verbose, cli.skip_env)?;
+            }
             PnpmCommands::Other(args) => {
-                pnpm_cmd::run_passthrough(&args, cli.verbose)?;
+                let first = args.first().and_then(|a| a.to_str()).unwrap_or("");
+                if pnpm_cmd::is_pnpm_script(first) {
+                    let str_args: Vec<String> = args[1..]
+                        .iter()
+                        .filter_map(|a| a.to_str().map(String::from))
+                        .collect();
+                    pnpm_cmd::run_script(first, &str_args, cli.verbose, cli.skip_env)?;
+                } else {
+                    pnpm_cmd::run_passthrough(&args, cli.verbose)?;
+                }
             }
         },
 
@@ -1990,6 +2010,62 @@ mod tests {
                 "Meta-command {:?} should parse successfully",
                 args
             );
+        }
+    }
+
+    #[test]
+    fn test_pnpm_run_basic() {
+        let cli = Cli::try_parse_from(["rtk", "pnpm", "run", "test"]).unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                command: PnpmCommands::Run { script, args },
+            } => {
+                assert_eq!(script, "test");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Pnpm Run command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_run_with_args() {
+        let cli =
+            Cli::try_parse_from(["rtk", "pnpm", "run", "vitest", "--reporter=verbose"]).unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                command: PnpmCommands::Run { script, args },
+            } => {
+                assert_eq!(script, "vitest");
+                assert_eq!(args, vec!["--reporter=verbose"]);
+            }
+            _ => panic!("Expected Pnpm Run command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_run_colon_script() {
+        let cli = Cli::try_parse_from(["rtk", "pnpm", "run", "test:e2e"]).unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                command: PnpmCommands::Run { script, args },
+            } => {
+                assert_eq!(script, "test:e2e");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Pnpm Run command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_shorthand_falls_to_other() {
+        let cli = Cli::try_parse_from(["rtk", "pnpm", "test"]).unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                command: PnpmCommands::Other(args),
+            } => {
+                assert_eq!(args[0], "test");
+            }
+            _ => panic!("Expected Pnpm Other command"),
         }
     }
 }
