@@ -382,6 +382,10 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
                     filtered.push_str(&formatted);
                     print!("{}", formatted);
                 }
+            } else {
+                let note = "  (body contained only badges/images/comments)\n";
+                filtered.push_str(note);
+                print!("{}", note);
             }
         }
     }
@@ -678,6 +682,10 @@ fn view_issue(args: &[String], _verbose: u8) -> Result<()> {
                     filtered.push_str(&formatted);
                     print!("{}", formatted);
                 }
+            } else {
+                let note = "  (body contained only badges/images/comments)\n";
+                filtered.push_str(note);
+                print!("{}", note);
             }
         }
     }
@@ -1147,14 +1155,18 @@ fn run_api(args: &[String], _verbose: u8) -> Result<()> {
         }
         Err(_) => {
             // Not JSON, print truncated raw output
+            let all_lines: Vec<&str> = raw.lines().collect();
+            let total = all_lines.len();
             let mut result = String::new();
-            let lines: Vec<&str> = raw.lines().take(20).collect();
-            let joined = lines.join("\n");
-            result.push_str(&joined);
-            print!("{}", joined);
-            if raw.lines().count() > 20 {
-                result.push_str("\n... (truncated)");
-                println!("\n... (truncated)");
+            for line in all_lines.iter().take(20) {
+                result.push_str(line);
+                result.push('\n');
+                println!("{}", line);
+            }
+            if total > 20 {
+                let note = format!("... {} more lines (use gh api for full output)\n", total - 20);
+                result.push_str(&note);
+                print!("{}", note);
             }
             result
         }
