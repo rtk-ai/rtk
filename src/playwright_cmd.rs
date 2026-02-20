@@ -1,5 +1,5 @@
 use crate::tracking;
-use crate::utils::{package_manager_exec, strip_ansi};
+use crate::utils::{detect_package_manager, strip_ansi};
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
@@ -9,57 +9,62 @@ use crate::parser::{
     ParseResult, TestFailure, TestResult, TokenFormatter,
 };
 
-/// Playwright JSON output structures (tool-specific format)
+/// Matches real Playwright JSON reporter output (suites → specs → tests → results)
 #[derive(Debug, Deserialize)]
 struct PlaywrightJsonOutput {
-    #[serde(rename = "stats")]
     stats: PlaywrightStats,
-    #[serde(rename = "suites")]
+    #[serde(default)]
     suites: Vec<PlaywrightSuite>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PlaywrightStats {
-    #[serde(rename = "expected")]
     expected: usize,
-    #[serde(rename = "unexpected")]
     unexpected: usize,
-    #[serde(rename = "skipped")]
     skipped: usize,
-    #[serde(rename = "duration", default)]
-    duration: u64,
+    #[serde(default)]
+    duration: f64, // Playwright emits float ms, not integer
 }
 
 #[derive(Debug, Deserialize)]
 struct PlaywrightSuite {
     title: String,
-    #[serde(rename = "tests")]
-    tests: Vec<PlaywrightTest>,
-    #[serde(rename = "suites", default)]
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    specs: Vec<PlaywrightSpec>,
+    #[serde(default)]
     suites: Vec<PlaywrightSuite>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PlaywrightTest {
+struct PlaywrightSpec {
     title: String,
-    #[serde(rename = "status")]
-    status: String,
-    #[serde(rename = "results")]
-    results: Vec<PlaywrightTestResult>,
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    tests: Vec<PlaywrightExecution>,
 }
 
 #[derive(Debug, Deserialize)]
-struct PlaywrightTestResult {
-    #[serde(rename = "status")]
+struct PlaywrightExecution {
+    #[serde(default)]
     status: String,
-    #[serde(rename = "error")]
-    error: Option<PlaywrightError>,
-    #[serde(rename = "duration", default)]
-    duration: u64,
+    #[serde(default)]
+    results: Vec<PlaywrightAttempt>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlaywrightAttempt {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    errors: Vec<PlaywrightError>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PlaywrightError {
+    #[serde(default)]
     message: String,
 }
 
@@ -82,7 +87,7 @@ impl OutputParser for PlaywrightParser {
                     passed: json.stats.expected,
                     failed: json.stats.unexpected,
                     skipped: json.stats.skipped,
-                    duration_ms: Some(json.stats.duration),
+                    duration_ms: Some(json.stats.duration as u64),
                     failures,
                 };
 
@@ -104,27 +109,34 @@ impl OutputParser for PlaywrightParser {
     }
 }
 
-/// Recursively collect test results from suites
 fn collect_test_results(
     suites: &[PlaywrightSuite],
     total: &mut usize,
     failures: &mut Vec<TestFailure>,
 ) {
     for suite in suites {
-        for test in &suite.tests {
+        let file_path = suite.file.as_deref().unwrap_or(&suite.title);
+
+        for spec in &suite.specs {
             *total += 1;
 
-            if test.status == "failed" || test.status == "timedOut" {
-                let error_msg = test
-                    .results
-                    .first()
-                    .and_then(|r| r.error.as_ref())
+            if !spec.ok {
+                let error_msg = spec
+                    .tests
+                    .iter()
+                    .find(|t| t.status == "unexpected")
+                    .and_then(|t| {
+                        t.results
+                            .iter()
+                            .find(|r| r.status == "failed" || r.status == "timedOut")
+                    })
+                    .and_then(|r| r.errors.first())
                     .map(|e| e.message.clone())
-                    .unwrap_or_else(|| "Unknown error".to_string());
+                    .unwrap_or_else(|| "Test failed".to_string());
 
                 failures.push(TestFailure {
-                    test_name: test.title.clone(),
-                    file_path: suite.title.clone(),
+                    test_name: spec.title.clone(),
+                    file_path: file_path.to_string(),
                     error_message: error_msg,
                     stack_trace: None,
                 });
@@ -219,13 +231,42 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = package_manager_exec("playwright");
+    // Skip `which playwright` — it can find pyenv shims or other non-Node
+    // binaries. Always resolve through the package manager.
+    let pm = detect_package_manager();
+    let mut cmd = match pm {
+        "pnpm" => {
+            let mut c = std::process::Command::new("pnpm");
+            c.arg("exec").arg("--").arg("playwright");
+            c
+        }
+        "yarn" => {
+            let mut c = std::process::Command::new("yarn");
+            c.arg("exec").arg("--").arg("playwright");
+            c
+        }
+        _ => {
+            let mut c = std::process::Command::new("npx");
+            c.arg("--no-install").arg("--").arg("playwright");
+            c
+        }
+    };
 
-    // Add JSON reporter for structured output
-    cmd.arg("--reporter=json");
-
-    for arg in args {
-        cmd.arg(arg);
+    // Only inject --reporter=json for `playwright test` runs
+    let is_test = args.first().map(|a| a == "test").unwrap_or(false);
+    if is_test {
+        cmd.arg("test");
+        cmd.arg("--reporter=json");
+        // Strip user's --reporter to avoid conflicts with our forced JSON
+        for arg in &args[1..] {
+            if !arg.starts_with("--reporter") {
+                cmd.arg(arg);
+            }
+        }
+    } else {
+        for arg in args {
+            cmd.arg(arg);
+        }
     }
 
     if verbose > 0 {
@@ -287,25 +328,40 @@ mod tests {
     #[test]
     fn test_playwright_parser_json() {
         let json = r#"{
+            "config": {},
             "stats": {
-                "expected": 3,
+                "startTime": "2026-01-01T00:00:00Z",
+                "expected": 1,
                 "unexpected": 0,
                 "skipped": 0,
-                "duration": 7300
+                "flaky": 0,
+                "duration": 7300.5
             },
             "suites": [
                 {
-                    "title": "auth/login.spec.ts",
-                    "tests": [
+                    "title": "auth",
+                    "specs": [],
+                    "suites": [
                         {
-                            "title": "should login",
-                            "status": "passed",
-                            "results": [{"status": "passed", "duration": 2300}]
+                            "title": "login.spec.ts",
+                            "specs": [
+                                {
+                                    "title": "should login",
+                                    "ok": true,
+                                    "tests": [
+                                        {
+                                            "status": "expected",
+                                            "results": [{"status": "passed", "errors": [], "duration": 2300}]
+                                        }
+                                    ]
+                                }
+                            ],
+                            "suites": []
                         }
-                    ],
-                    "suites": []
+                    ]
                 }
-            ]
+            ],
+            "errors": []
         }"#;
 
         let result = PlaywrightParser::parse(json);
@@ -313,9 +369,80 @@ mod tests {
         assert!(result.is_ok());
 
         let data = result.unwrap();
-        assert_eq!(data.passed, 3);
+        assert_eq!(data.passed, 1);
         assert_eq!(data.failed, 0);
         assert_eq!(data.duration_ms, Some(7300));
+    }
+
+    #[test]
+    fn test_playwright_parser_json_float_duration() {
+        let json = r#"{
+            "stats": {
+                "startTime": "2026-02-18T10:17:53.187Z",
+                "expected": 4,
+                "unexpected": 0,
+                "skipped": 0,
+                "flaky": 0,
+                "duration": 3519.7039999999997
+            },
+            "suites": [],
+            "errors": []
+        }"#;
+
+        let result = PlaywrightParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.passed, 4);
+        assert_eq!(data.duration_ms, Some(3519));
+    }
+
+    #[test]
+    fn test_playwright_parser_json_with_failure() {
+        let json = r#"{
+            "stats": {
+                "expected": 0,
+                "unexpected": 1,
+                "skipped": 0,
+                "duration": 1500.0
+            },
+            "suites": [
+                {
+                    "title": "my.spec.ts",
+                    "specs": [
+                        {
+                            "title": "should work",
+                            "ok": false,
+                            "tests": [
+                                {
+                                    "status": "unexpected",
+                                    "results": [
+                                        {
+                                            "status": "failed",
+                                            "errors": [{"message": "Expected true to be false"}],
+                                            "duration": 500
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ],
+                    "suites": []
+                }
+            ],
+            "errors": []
+        }"#;
+
+        let result = PlaywrightParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        assert!(result.is_ok());
+
+        let data = result.unwrap();
+        assert_eq!(data.failed, 1);
+        assert_eq!(data.failures.len(), 1);
+        assert_eq!(data.failures[0].test_name, "should work");
+        assert_eq!(data.failures[0].error_message, "Expected true to be false");
     }
 
     #[test]
