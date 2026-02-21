@@ -272,17 +272,15 @@ const IGNORED_PREFIXES: &[&str] = &[
     "then ",
     "else\n",
     "else ",
-    "fi",
     "do\n",
     "do ",
-    "done",
     "for ",
     "while ",
     "if ",
     "case ",
 ];
 
-const IGNORED_EXACT: &[&str] = &["cd", "echo", "true", "false", "wait", "pwd", "bash", "sh"];
+const IGNORED_EXACT: &[&str] = &["cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done"];
 
 lazy_static! {
     static ref REGEX_SET: RegexSet = RegexSet::new(PATTERNS).expect("invalid regex patterns");
@@ -697,6 +695,33 @@ mod tests {
                 other => panic!("git {subcmd} should be Supported, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_classify_find_not_blocked_by_fi() {
+        // Regression: "fi" in IGNORED_PREFIXES used to shadow "find" commands
+        // because "find".starts_with("fi") is true. "fi" should only match exactly.
+        assert_eq!(
+            classify_command("find . -name foo"),
+            Classification::Supported {
+                rtk_equivalent: "rtk find",
+                category: "Files",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_fi_still_ignored_exact() {
+        // Bare "fi" (shell keyword) should still be ignored
+        assert_eq!(classify_command("fi"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_done_still_ignored_exact() {
+        // Bare "done" (shell keyword) should still be ignored
+        assert_eq!(classify_command("done"), Classification::Ignored);
     }
 
     #[test]
