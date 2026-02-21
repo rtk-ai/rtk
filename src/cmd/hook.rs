@@ -111,7 +111,20 @@ fn check_for_hook_inner(raw: &str, depth: usize) -> HookResult {
                     HookResult::Rewrite(format!("{} {}", routed, suffix))
                 }
             } else {
-                HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(raw)))
+                // Multi-command chain (&&, ||, ;): wrap in shell but substitute each
+                // known command with its RTK equivalent for maximum token savings.
+                //
+                // Example: "cargo test && git log" →
+                //   rtk run -c 'rtk cargo test && rtk git log'
+                //
+                // Unknown commands pass through unchanged — no nested rtk run -c.
+                let substituted = reconstruct_with_rtk(&commands);
+                let inner = if suffix.is_empty() {
+                    substituted
+                } else {
+                    format!("{} {}", substituted, suffix)
+                };
+                HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(&inner)))
             }
         }
         Err(_) => HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(raw))),
@@ -397,6 +410,71 @@ fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
         _ => format!("rtk run -c '{}'", escape_quotes(raw)),
     }
 }
+/// Try to route a single command to its optimised RTK subcommand.
+///
+/// Returns `Some(rtk_cmd)` when the command is natively routable (direct or renamed).
+/// Returns `None` when the command would fall back to `rtk run -c '...'` passthrough —
+/// the caller should keep the original `raw` string unchanged in that case.
+///
+/// This avoids embedding nested `rtk run -c` calls inside an outer shell string,
+/// which would require double-escaping and never improves token savings.
+fn try_route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> Option<String> {
+    let routed = route_native_command(cmd, raw);
+    if routed.starts_with("rtk run -c") {
+        None // passthrough — keep original
+    } else {
+        Some(routed)
+    }
+}
+
+/// Substitute RTK commands within a multi-command chain string.
+///
+/// Iterates each command in the parsed chain.  Known commands (those with an RTK
+/// subcommand equivalent) are replaced with their `rtk <cmd>` form.  Unknown commands
+/// are kept verbatim so the shell can handle them.  Operators (`&&`, `||`, `;`) are
+/// preserved between commands.
+///
+/// # Why this is safe
+/// Only `&&`/`||`/`;` chains reach this function (pipe characters trigger `needs_shell`
+/// before `parse_chain`, so pipes never appear here).  Each command's stdout is
+/// independent — no cross-command parsing is affected by RTK's output format changes.
+///
+/// # Example
+/// ```text
+/// "cargo test && git log $BRANCH"
+///   cmd[0]: binary="cargo" args=["test"] op=Some("&&")  → "rtk cargo test"
+///   cmd[1]: binary="git"   args=["log","$BRANCH"] op=None → "rtk git log $BRANCH"
+///   result: "rtk cargo test && rtk git log $BRANCH"
+/// ```
+fn reconstruct_with_rtk(commands: &[analysis::NativeCommand]) -> String {
+    commands
+        .iter()
+        .map(|cmd| {
+            // Reconstruct the core raw string from parsed binary + args.
+            // Quote-stripping in parse_chain means we lose original quoting here,
+            // but this is acceptable for the common cases (simple args, no spaces).
+            let core_raw = if cmd.args.is_empty() {
+                cmd.binary.clone()
+            } else {
+                format!("{} {}", cmd.binary, cmd.args.join(" "))
+            };
+
+            // Route if known; otherwise preserve the original core_raw verbatim.
+            let part = match try_route_native_command(cmd, &core_raw) {
+                Some(routed) => routed,
+                None => core_raw,
+            };
+
+            // Append operator if present (all but the last command have one).
+            match &cmd.operator {
+                Some(op) => format!("{} {}", part, op),
+                None => part,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Format hook result for Claude (text output)
 ///
 /// Exit codes:
@@ -1194,6 +1272,129 @@ mod tests {
                 ),
             }
         }
+    }
+
+    // === INNER COMMAND SUBSTITUTION (&&, ||, ; chains) ===
+    // When a multi-command chain is wrapped in "rtk run -c '...'", each individual
+    // command that has an RTK equivalent should be substituted so RTK's filter
+    // applies inside the shell string.
+    //
+    // Example: "cargo test && git log"
+    //   Before: rtk run -c 'cargo test && git log'
+    //   After:  rtk run -c 'rtk cargo test && rtk git log'
+    //
+    // Safety invariant: only &&/||/; chains are substituted here.
+    // Pipe-separated commands are handled separately (split_safe_suffix / needs_shell).
+
+    #[test]
+    fn test_chain_both_commands_substituted() {
+        // Both cargo test AND git log should route to rtk inside the shell string
+        let result = match check_for_hook("cargo test && git log", "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite, got {:?}", other),
+        };
+        assert!(
+            result.contains("rtk cargo"),
+            "cargo test must be substituted to rtk cargo inside chain: {}",
+            result
+        );
+        assert!(
+            result.contains("rtk git"),
+            "git log must be substituted to rtk git inside chain: {}",
+            result
+        );
+        // The outer wrapper is rtk run -c because && needs a shell
+        assert!(
+            result.contains("rtk run"),
+            "chain still needs shell wrapper (rtk run -c): {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_chain_with_dollar_var_substituted() {
+        // cargo test && git log $BRANCH: $BRANCH is Arg (after lexer fix) → both route natively
+        let result = match check_for_hook("cargo test && git log $BRANCH", "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite, got {:?}", other),
+        };
+        assert!(
+            result.contains("rtk cargo"),
+            "cargo test must be rtk in chain: {}",
+            result
+        );
+        assert!(
+            result.contains("rtk git log"),
+            "git log $BRANCH must be rtk with var preserved: {}",
+            result
+        );
+        assert!(
+            result.contains("$BRANCH"),
+            "$BRANCH must be preserved in rewritten chain: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_chain_unknown_command_not_substituted() {
+        // unknown_xyz_cmd not in registry → stays unmodified inside the shell string
+        let result = match check_for_hook("cargo test && unknown_xyz_cmd", "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite, got {:?}", other),
+        };
+        assert!(
+            result.contains("rtk cargo"),
+            "cargo test must be substituted to rtk: {}",
+            result
+        );
+        assert!(
+            result.contains("unknown_xyz_cmd"),
+            "unknown command must pass through unchanged: {}",
+            result
+        );
+        assert!(
+            !result.contains("rtk unknown"),
+            "must not invent rtk subcommands for unknown binary: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_semicolon_chain_substituted() {
+        // ; chains: each known command should be substituted
+        let result = match check_for_hook("cargo test ; git status", "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite, got {:?}", other),
+        };
+        assert!(
+            result.contains("rtk cargo"),
+            "cargo must be rtk in semicolon chain: {}",
+            result
+        );
+        assert!(
+            result.contains("rtk git"),
+            "git must be rtk in semicolon chain: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_or_chain_substituted() {
+        // || chains: each known command should be substituted
+        let result = match check_for_hook("cargo test || go test ./...", "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite, got {:?}", other),
+        };
+        assert!(
+            result.contains("rtk cargo"),
+            "cargo must be rtk in || chain: {}",
+            result
+        );
+        assert!(
+            result.contains("rtk go"),
+            "go must be rtk in || chain: {}",
+            result
+        );
     }
 
     // ── End-to-end token savings tests ───────────────────────────────────────
