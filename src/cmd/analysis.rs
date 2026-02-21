@@ -213,6 +213,75 @@ mod tests {
         assert!(cmds.is_empty());
     }
 
+    // === PIPE/FIND/GREP ROUTING TESTS ===
+    // These verify that piped invocations of find/grep/rg correctly trigger
+    // needs_shell(), so the hook routes them to /bin/sh instead of native mode.
+
+    #[test]
+    fn test_needs_shell_find_piped_to_grep() {
+        // `find . -name "*.rs" | grep pattern` must go through shell (has Pipe)
+        let tokens = tokenize("find . -name \"*.rs\" | grep pattern");
+        assert!(
+            needs_shell(&tokens),
+            "find | grep must trigger shell (Pipe token present)"
+        );
+    }
+
+    #[test]
+    fn test_needs_shell_rg_piped_to_head() {
+        let tokens = tokenize("rg pattern src/ | head -20");
+        assert!(needs_shell(&tokens), "rg | head must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_grep_with_redirect() {
+        let tokens = tokenize("grep -r pattern . > results.txt");
+        assert!(needs_shell(&tokens), "grep > file must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_find_with_glob_arg() {
+        // find . -name *.rs — glob in arg triggers Shellism
+        let tokens = tokenize("find . -name *.rs");
+        assert!(needs_shell(&tokens), "unquoted glob arg must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_quoted_pipe_in_grep_arg_no_shell() {
+        // grep "a|b" file — pipe inside quotes is an Arg, not a Pipe token
+        let tokens = tokenize("grep \"a|b\" src/");
+        assert!(
+            !needs_shell(&tokens),
+            "pipe inside quoted arg must NOT trigger shell"
+        );
+    }
+
+    #[test]
+    fn test_parse_chain_find_with_quoted_name() {
+        // `find . -name "*.rs"` with quoted glob → no shellism; parses natively
+        let tokens = tokenize("find . -name \"*.rs\"");
+        assert!(!needs_shell(&tokens), "quoted glob should not need shell");
+        let cmds = parse_chain(tokens).unwrap();
+        assert_eq!(cmds[0].binary, "find");
+        assert!(cmds[0].args.contains(&"-name".to_string()));
+        // strip_quotes removes the outer quotes
+        assert!(
+            cmds[0].args.iter().any(|a| a == "*.rs"),
+            "quoted glob stripped to bare glob in args: {:?}",
+            cmds[0].args
+        );
+    }
+
+    #[test]
+    fn test_parse_chain_grep_native_no_pipe() {
+        // `grep pattern file` — no pipe/redirect, parses natively
+        let tokens = tokenize("grep pattern file.rs");
+        assert!(!needs_shell(&tokens));
+        let cmds = parse_chain(tokens).unwrap();
+        assert_eq!(cmds[0].binary, "grep");
+        assert_eq!(cmds[0].args, vec!["pattern", "file.rs"]);
+    }
+
     // === SHOULD_RUN TESTS ===
 
     #[test]

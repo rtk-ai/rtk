@@ -31,6 +31,7 @@ mod next_cmd;
 mod npm_cmd;
 mod parser;
 mod pip_cmd;
+mod pipe_cmd;
 mod playwright_cmd;
 mod pnpm_cmd;
 mod prettier_cmd;
@@ -39,6 +40,7 @@ mod pytest_cmd;
 mod read;
 mod ruff_cmd;
 mod runner;
+mod stream;
 mod summary;
 mod tee;
 mod tracking;
@@ -75,6 +77,10 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Passthrough mode: emit raw output without RTK filtering
+    #[arg(long, global = true)]
+    passthrough: bool,
 }
 
 #[derive(Subcommand)]
@@ -483,6 +489,16 @@ enum Commands {
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
+    },
+
+    /// Read stdin and reduce tokens (pipe-as-filter mode)
+    Pipe {
+        /// Filter to apply (cargo-test, pytest, go-test, go-build, tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status)
+        #[arg(long, short = 'f')]
+        filter: Option<String>,
+        /// Emit stdin unchanged (no filtering)
+        #[arg(long)]
+        passthrough: bool,
     },
 
     /// Ruff linter/formatter with compact output
@@ -1402,10 +1418,17 @@ fn main() -> Result<()> {
         }
 
         Commands::Run { command } => {
-            let success = cmd::execute(&command, cli.verbose)?;
-            if !success {
-                std::process::exit(1);
+            let code = cmd::execute(&command, cli.verbose)?;
+            if code != 0 {
+                std::process::exit(code);
             }
+        }
+
+        Commands::Pipe {
+            filter,
+            passthrough,
+        } => {
+            pipe_cmd::run(filter.as_deref(), passthrough)?;
         }
 
         Commands::Hook { command } => match command {

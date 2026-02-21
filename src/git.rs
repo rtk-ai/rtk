@@ -307,9 +307,9 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
     });
 
     // Check if user provided limit flag
-    let has_limit_flag = args.iter().any(|arg| {
-        arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
-    });
+    let has_limit_flag = args
+        .iter()
+        .any(|arg| arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()));
 
     // Apply RTK defaults only if user didn't specify them
     if !has_format_flag {
@@ -323,7 +323,7 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
         // Extract limit from args if provided
         args.iter()
             .find(|arg| {
-                arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+                arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
             })
             .and_then(|arg| arg[1..].parse::<usize>().ok())
             .unwrap_or(10)
@@ -372,7 +372,7 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
 }
 
 /// Filter git log output: truncate long messages, cap lines
-fn filter_log_output(output: &str, limit: usize) -> String {
+pub(crate) fn filter_log_output(output: &str, limit: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let capped: Vec<String> = lines
         .iter()
@@ -391,7 +391,7 @@ fn filter_log_output(output: &str, limit: usize) -> String {
 }
 
 /// Format porcelain output into compact RTK status display
-fn format_status_output(porcelain: &str) -> String {
+pub(crate) fn format_status_output(porcelain: &str) -> String {
     let lines: Vec<&str> = porcelain.lines().collect();
 
     if lines.is_empty() {
@@ -677,7 +677,7 @@ fn run_commit(message: &str, verbose: u8) -> Result<()> {
         // Extract commit hash from output like "[main abc1234] message"
         let compact = if let Some(line) = stdout.lines().next() {
             if let Some(hash_start) = line.find(' ') {
-                let hash = line[1..hash_start].split(' ').last().unwrap_or("");
+                let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
                 if !hash.is_empty() && hash.len() >= 7 {
                     format!("ok ✓ {}", &hash[..7.min(hash.len())])
                 } else {
@@ -698,23 +698,21 @@ fn run_commit(message: &str, verbose: u8) -> Result<()> {
             &raw_output,
             &compact,
         );
+    } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
+        println!("ok (nothing to commit)");
+        timer.track(
+            &format!("git commit -m \"{}\"", message),
+            "rtk git commit",
+            &raw_output,
+            "ok (nothing to commit)",
+        );
     } else {
-        if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
-            println!("ok (nothing to commit)");
-            timer.track(
-                &format!("git commit -m \"{}\"", message),
-                "rtk git commit",
-                &raw_output,
-                "ok (nothing to commit)",
-            );
-        } else {
-            eprintln!("FAILED: git commit");
-            if !stderr.trim().is_empty() {
-                eprintln!("{}", stderr);
-            }
-            if !stdout.trim().is_empty() {
-                eprintln!("{}", stdout);
-            }
+        eprintln!("FAILED: git commit");
+        if !stderr.trim().is_empty() {
+            eprintln!("{}", stderr);
+        }
+        if !stdout.trim().is_empty() {
+            eprintln!("{}", stdout);
         }
     }
 

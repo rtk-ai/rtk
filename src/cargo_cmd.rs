@@ -1,3 +1,4 @@
+use crate::stream::{FilterMode, StdinMode, StreamFilter};
 use crate::tracking;
 use crate::utils::truncate;
 use anyhow::{Context, Result};
@@ -82,8 +83,189 @@ fn run_build(args: &[String], verbose: u8) -> Result<()> {
     run_cargo_filtered("build", args, verbose, filter_cargo_build)
 }
 
+/// Progressive streaming filter for `cargo test` output.
+///
+/// Replicates `filter_cargo_test` logic line-by-line. Defers all output to
+/// `flush()` so the full failure+summary picture is available before emitting.
+pub struct CargoTestStreamFilter {
+    failures: Vec<String>,
+    summary_lines: Vec<String>,
+    in_failure_section: bool,
+    current_failure: Vec<String>,
+}
+
+impl CargoTestStreamFilter {
+    pub fn new() -> Self {
+        Self {
+            failures: Vec::new(),
+            summary_lines: Vec::new(),
+            in_failure_section: false,
+            current_failure: Vec::new(),
+        }
+    }
+}
+
+impl Default for CargoTestStreamFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamFilter for CargoTestStreamFilter {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        // Skip compilation lines
+        if line.trim_start().starts_with("Compiling")
+            || line.trim_start().starts_with("Downloading")
+            || line.trim_start().starts_with("Downloaded")
+            || line.trim_start().starts_with("Finished")
+        {
+            return None;
+        }
+
+        // Skip "running N tests" and individual "test ... ok" lines
+        if line.starts_with("running ") || (line.starts_with("test ") && line.ends_with("... ok")) {
+            return None;
+        }
+
+        // Detect failures section
+        if line == "failures:" {
+            self.in_failure_section = true;
+            return None;
+        }
+
+        if self.in_failure_section {
+            if line.starts_with("test result:") {
+                self.in_failure_section = false;
+                self.summary_lines.push(line.to_string());
+            } else if line.starts_with("    ") || line.starts_with("---- ") {
+                self.current_failure.push(line.to_string());
+            } else if line.trim().is_empty() && !self.current_failure.is_empty() {
+                let block = self.current_failure.join("\n");
+                self.failures.push(block);
+                self.current_failure.clear();
+            } else if !line.trim().is_empty() {
+                self.current_failure.push(line.to_string());
+            }
+        }
+
+        // Capture test result summary outside failure section
+        if !self.in_failure_section && line.starts_with("test result:") {
+            self.summary_lines.push(line.to_string());
+        }
+
+        None
+    }
+
+    fn flush(&mut self) -> String {
+        // Close any open failure block
+        if !self.current_failure.is_empty() {
+            let block = self.current_failure.join("\n");
+            self.failures.push(block);
+            self.current_failure.clear();
+        }
+
+        build_cargo_test_summary(&self.failures, &self.summary_lines)
+    }
+}
+
+/// Build the formatted cargo test output from accumulated failures + summaries.
+///
+/// Shared by `filter_cargo_test` (buffered) and `CargoTestStreamFilter`
+/// (streaming) to ensure identical output format.
+fn build_cargo_test_summary(failures: &[String], summary_lines: &[String]) -> String {
+    let mut result = String::new();
+
+    if failures.is_empty() && !summary_lines.is_empty() {
+        // All passed - try to aggregate
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        if all_parsed {
+            if let Some(agg) = aggregated {
+                if agg.suites > 0 {
+                    return agg.format_compact();
+                }
+            }
+        }
+
+        // Fallback: use original behavior if regex failed
+        for line in summary_lines {
+            result.push_str(&format!("✓ {}\n", line));
+        }
+        return result.trim().to_string();
+    }
+
+    if !failures.is_empty() {
+        result.push_str(&format!("FAILURES ({}):\n", failures.len()));
+        result.push_str("═══════════════════════════════════════\n");
+        for (i, failure) in failures.iter().enumerate().take(10) {
+            result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
+        }
+        if failures.len() > 10 {
+            result.push_str(&format!("\n... +{} more failures\n", failures.len() - 10));
+        }
+        result.push('\n');
+    }
+
+    for line in summary_lines {
+        result.push_str(&format!("{}\n", line));
+    }
+
+    result.trim().to_string()
+}
+
 fn run_test(args: &[String], verbose: u8) -> Result<()> {
-    run_cargo_filtered("test", args, verbose, filter_cargo_test)
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("cargo");
+    cmd.arg("test");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: cargo test {}", args.join(" "));
+    }
+
+    let filter = CargoTestStreamFilter::new();
+    let result = crate::stream::run_streaming(
+        &mut cmd,
+        StdinMode::Inherit,
+        FilterMode::Streaming(Box::new(filter)),
+    )
+    .context("Failed to run cargo test")?;
+
+    if let Some(hint) = crate::tee::tee_and_hint(&result.raw, "cargo_test", result.exit_code) {
+        println!("{}\n{}", result.filtered, hint);
+    } else {
+        println!("{}", result.filtered);
+    }
+
+    timer.track(
+        &format!("cargo test {}", args.join(" ")),
+        &format!("rtk cargo test {}", args.join(" ")),
+        &result.raw,
+        &result.filtered,
+    );
+
+    if result.exit_code != 0 {
+        std::process::exit(result.exit_code);
+    }
+
+    Ok(())
 }
 
 fn run_clippy(args: &[String], verbose: u8) -> Result<()> {
@@ -708,122 +890,30 @@ impl AggregatedTestResult {
     }
 }
 
-/// Filter cargo test output - show failures + summary only
-fn filter_cargo_test(output: &str) -> String {
-    let mut failures: Vec<String> = Vec::new();
-    let mut summary_lines: Vec<String> = Vec::new();
-    let mut in_failure_section = false;
-    let mut current_failure = Vec::new();
-
+/// Filter cargo test output - show failures + summary only.
+///
+/// Buffered variant — for use when input is already fully accumulated (e.g.
+/// `rtk pipe --filter cargo-test`). For live subprocess output, prefer
+/// `CargoTestStreamFilter` with `run_streaming`.
+pub(crate) fn filter_cargo_test(output: &str) -> String {
+    let mut filter = CargoTestStreamFilter::new();
     for line in output.lines() {
-        // Skip compilation lines
-        if line.trim_start().starts_with("Compiling")
-            || line.trim_start().starts_with("Downloading")
-            || line.trim_start().starts_with("Downloaded")
-            || line.trim_start().starts_with("Finished")
-        {
-            continue;
-        }
-
-        // Skip "running N tests" and individual "test ... ok" lines
-        if line.starts_with("running ") || (line.starts_with("test ") && line.ends_with("... ok")) {
-            continue;
-        }
-
-        // Detect failures section
-        if line == "failures:" {
-            in_failure_section = true;
-            continue;
-        }
-
-        if in_failure_section {
-            if line.starts_with("test result:") {
-                in_failure_section = false;
-                summary_lines.push(line.to_string());
-            } else if line.starts_with("    ") || line.starts_with("---- ") {
-                current_failure.push(line.to_string());
-            } else if line.trim().is_empty() && !current_failure.is_empty() {
-                failures.push(current_failure.join("\n"));
-                current_failure.clear();
-            } else if !line.trim().is_empty() {
-                current_failure.push(line.to_string());
-            }
-        }
-
-        // Capture test result summary
-        if !in_failure_section && line.starts_with("test result:") {
-            summary_lines.push(line.to_string());
-        }
+        filter.feed_line(line);
     }
-
-    if !current_failure.is_empty() {
-        failures.push(current_failure.join("\n"));
-    }
-
-    let mut result = String::new();
-
-    if failures.is_empty() && !summary_lines.is_empty() {
-        // All passed - try to aggregate
-        let mut aggregated: Option<AggregatedTestResult> = None;
-        let mut all_parsed = true;
-
-        for line in &summary_lines {
-            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
-                if let Some(ref mut agg) = aggregated {
-                    agg.merge(&parsed);
-                } else {
-                    aggregated = Some(parsed);
-                }
-            } else {
-                all_parsed = false;
-                break;
-            }
-        }
-
-        // If all lines parsed successfully and we have at least one suite, return compact format
-        if all_parsed {
-            if let Some(agg) = aggregated {
-                if agg.suites > 0 {
-                    return agg.format_compact();
-                }
-            }
-        }
-
-        // Fallback: use original behavior if regex failed
-        for line in &summary_lines {
-            result.push_str(&format!("✓ {}\n", line));
-        }
-        return result.trim().to_string();
-    }
-
-    if !failures.is_empty() {
-        result.push_str(&format!("FAILURES ({}):\n", failures.len()));
-        result.push_str("═══════════════════════════════════════\n");
-        for (i, failure) in failures.iter().enumerate().take(10) {
-            result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
-        }
-        if failures.len() > 10 {
-            result.push_str(&format!("\n... +{} more failures\n", failures.len() - 10));
-        }
-        result.push('\n');
-    }
-
-    for line in &summary_lines {
-        result.push_str(&format!("{}\n", line));
-    }
-
+    // Handle fallback: if filter produced nothing meaningful, show last lines
+    let result = filter.flush();
     if result.trim().is_empty() {
-        // Fallback: show last meaningful lines
         let meaningful: Vec<&str> = output
             .lines()
             .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
             .collect();
+        let mut fallback = String::new();
         for line in meaningful.iter().rev().take(5).rev() {
-            result.push_str(&format!("{}\n", line));
+            fallback.push_str(&format!("{}\n", line));
         }
+        return fallback.trim().to_string();
     }
-
-    result.trim().to_string()
+    result
 }
 
 /// Filter cargo clippy output - group warnings by lint rule
@@ -1618,5 +1708,89 @@ error: test run failed
             "should fall back to raw summary: {}",
             result
         );
+    }
+
+    // ── CargoTestStreamFilter tests ────────────────────────────────────────────
+
+    const CARGO_ALL_PASS: &str = r#"   Compiling rtk v0.5.0
+    Finished test [unoptimized + debuginfo] target(s) in 2.53s
+     Running target/debug/deps/rtk-abc123
+
+running 15 tests
+test utils::tests::test_truncate_short_string ... ok
+test utils::tests::test_truncate_long_string ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+"#;
+
+    const CARGO_WITH_FAILURE: &str = r#"running 5 tests
+test foo::test_a ... ok
+test foo::test_b ... FAILED
+test foo::test_c ... ok
+
+failures:
+
+---- foo::test_b stdout ----
+thread 'foo::test_b' panicked at 'assert_eq!(1, 2)'
+
+failures:
+    foo::test_b
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"#;
+
+    #[test]
+    fn test_cargo_test_stream_filter_feed_and_flush_all_pass() {
+        let mut f = CargoTestStreamFilter::new();
+        for line in CARGO_ALL_PASS.lines() {
+            assert_eq!(
+                f.feed_line(line),
+                None,
+                "streaming filter must defer output"
+            );
+        }
+        let output = f.flush();
+        assert!(output.contains("✓ cargo test"), "output={}", output);
+        assert!(output.contains("15 passed"), "output={}", output);
+    }
+
+    #[test]
+    fn test_cargo_test_stream_filter_feed_and_flush_with_failure() {
+        let mut f = CargoTestStreamFilter::new();
+        for line in CARGO_WITH_FAILURE.lines() {
+            f.feed_line(line);
+        }
+        let output = f.flush();
+        assert!(output.contains("FAILURES"), "output={}", output);
+        assert!(output.contains("test_b"), "output={}", output);
+    }
+
+    #[test]
+    fn test_cargo_test_stream_filter_matches_buffered_all_pass() {
+        let buffered = filter_cargo_test(CARGO_ALL_PASS);
+        let mut f = CargoTestStreamFilter::new();
+        for line in CARGO_ALL_PASS.lines() {
+            f.feed_line(line);
+        }
+        let streamed = f.flush();
+        assert_eq!(streamed.trim(), buffered.trim());
+    }
+
+    #[test]
+    fn test_cargo_test_stream_filter_matches_buffered_with_failures() {
+        let buffered = filter_cargo_test(CARGO_WITH_FAILURE);
+        let mut f = CargoTestStreamFilter::new();
+        for line in CARGO_WITH_FAILURE.lines() {
+            f.feed_line(line);
+        }
+        let streamed = f.flush();
+        assert_eq!(streamed.trim(), buffered.trim());
+    }
+
+    #[test]
+    fn test_cargo_test_stream_filter_default_equals_new() {
+        let mut f1 = CargoTestStreamFilter::new();
+        let mut f2 = CargoTestStreamFilter::default();
+        assert_eq!(f1.flush(), f2.flush());
     }
 }

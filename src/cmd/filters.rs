@@ -10,6 +10,7 @@
 //! - `src/grep_cmd.rs` — code search (grep, ripgrep)
 //! - `src/pnpm_cmd.rs` — package managers
 
+use crate::stream::{FilterMode, LineFilter};
 use crate::utils;
 
 /// Filter types for different command categories
@@ -76,6 +77,37 @@ fn filter_test_output(output: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Map a binary name to a [`FilterMode`] for use with [`crate::stream::run_streaming`].
+///
+/// This is the streaming counterpart to [`get_filter_type`] + [`apply_to_string`].
+/// Used by `spawn_with_filter` in exec.rs for external commands without dedicated modules.
+pub fn get_filter_mode(binary: &str) -> FilterMode {
+    match binary {
+        // Streaming: per-line ANSI strip + line truncation (low savings, low overhead)
+        "ls" | "find" | "grep" | "rg" | "fd" => {
+            FilterMode::Streaming(Box::new(LineFilter::new(|l| {
+                let stripped = utils::strip_ansi(l);
+                let truncated = if stripped.len() > 120 {
+                    format!("{}...", &stripped[..117])
+                } else {
+                    stripped
+                };
+                Some(format!("{}\n", truncated))
+            })))
+        }
+        // Buffered: cargo, git, and test runners use simple filters here
+        // (dedicated modules like cargo_cmd.rs / go_cmd.rs provide 60-90% savings)
+        "cargo" => FilterMode::Buffered(filter_cargo_output),
+        "pytest" | "jest" | "mocha" | "vitest" => FilterMode::Buffered(filter_test_output),
+        // git: ANSI strip per-line (dedicated git.rs handles git subcommands)
+        "git" => FilterMode::Streaming(Box::new(LineFilter::new(|l| {
+            Some(format!("{}\n", utils::strip_ansi(l)))
+        }))),
+        // Unknown commands: passthrough (no filtering, preserves all output)
+        _ => FilterMode::Passthrough,
+    }
 }
 
 /// Truncate output to max lines
@@ -208,5 +240,100 @@ mod tests {
         let input = "\x1b[32mgreen\x1b[0m";
         let output = apply_to_string(FilterType::Git, input);
         assert_eq!(output, "green");
+    }
+
+    // === GET_FILTER_MODE TESTS ===
+
+    #[test]
+    fn test_get_filter_mode_grep_is_streaming() {
+        matches!(get_filter_mode("grep"), FilterMode::Streaming(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_rg_is_streaming() {
+        matches!(get_filter_mode("rg"), FilterMode::Streaming(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_find_is_streaming() {
+        matches!(get_filter_mode("find"), FilterMode::Streaming(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_fd_is_streaming() {
+        matches!(get_filter_mode("fd"), FilterMode::Streaming(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_ls_is_streaming() {
+        matches!(get_filter_mode("ls"), FilterMode::Streaming(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_cargo_is_buffered() {
+        matches!(get_filter_mode("cargo"), FilterMode::Buffered(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_unknown_is_passthrough() {
+        matches!(get_filter_mode("unknowncmd"), FilterMode::Passthrough);
+    }
+
+    #[test]
+    fn test_get_filter_mode_grep_strips_ansi_and_emits() {
+        // Feed a line with ANSI codes; the streaming filter must strip them and emit.
+        let mut mode = get_filter_mode("grep");
+        if let FilterMode::Streaming(ref mut filter) = mode {
+            let result = filter.feed_line("\x1b[32msrc/main.rs:42:fn main\x1b[0m");
+            assert!(result.is_some(), "streaming filter must emit a line");
+            let out = result.unwrap();
+            assert!(
+                out.contains("src/main.rs"),
+                "ANSI stripped, path preserved: {}",
+                out
+            );
+            assert!(
+                !out.contains("\x1b["),
+                "ANSI codes must be stripped: {}",
+                out
+            );
+        } else {
+            panic!("Expected FilterMode::Streaming for 'grep'");
+        }
+    }
+
+    #[test]
+    fn test_get_filter_mode_find_truncates_long_lines() {
+        // Feed a line > 120 chars; the streaming filter must truncate it.
+        let long_line = "a".repeat(200);
+        let mut mode = get_filter_mode("find");
+        if let FilterMode::Streaming(ref mut filter) = mode {
+            let result = filter.feed_line(&long_line);
+            assert!(result.is_some());
+            let out = result.unwrap();
+            // Truncated content should end with "..." and be ≤ 120+3+1 ("\n") chars
+            assert!(
+                out.len() <= 125,
+                "line must be truncated: len={}",
+                out.len()
+            );
+            assert!(out.contains("..."), "truncated line must contain '...'");
+        } else {
+            panic!("Expected FilterMode::Streaming for 'find'");
+        }
+    }
+
+    #[test]
+    fn test_get_filter_mode_rg_short_line_passes_through() {
+        let short_line = "src/foo.rs:10:hello";
+        let mut mode = get_filter_mode("rg");
+        if let FilterMode::Streaming(ref mut filter) = mode {
+            let result = filter.feed_line(short_line);
+            assert!(result.is_some());
+            let out = result.unwrap();
+            assert!(out.contains("src/foo.rs"), "out={}", out);
+        } else {
+            panic!("Expected FilterMode::Streaming for 'rg'");
+        }
     }
 }

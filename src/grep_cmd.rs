@@ -117,6 +117,170 @@ pub fn run(
     Ok(())
 }
 
+/// Filter raw rg/grep output into compact grouped display.
+///
+/// Handles two formats:
+/// - Three-part `file:line_num:content` — produced by `rg -n` or `grep -n`
+/// - Two-part `file:content` — produced by `grep` without `-n` or BSD grep
+///
+/// Suitable for `rtk pipe --filter grep` / `rtk pipe --filter rg`.
+/// Uses defaults: max_line_len=80, max_results=50.
+pub(crate) fn filter_grep_raw(input: &str) -> String {
+    if input.trim().is_empty() {
+        return "🔍 0 matches\n".to_string();
+    }
+
+    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    let mut total = 0;
+    const MAX_RESULTS: usize = 50;
+    const MAX_LINE_LEN: usize = 80;
+
+    for line in input.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        // Three-part: file:line_num:content  (rg -n / grep -n)
+        // Two-part:   file:content           (grep without -n)
+        let (file, line_num, content) = if parts.len() == 3 {
+            if let Ok(ln) = parts[1].parse::<usize>() {
+                // Confirmed three-part with numeric line number
+                (parts[0].to_string(), ln, parts[2])
+            } else {
+                // parts[1] is not a number; treat as two-part with ':' in content
+                let content = &line[parts[0].len() + 1..]; // everything after first ':'
+                (parts[0].to_string(), 0, content)
+            }
+        } else if parts.len() == 2 {
+            // Two-part: file:content
+            (parts[0].to_string(), 0, parts[1])
+        } else {
+            continue;
+        };
+
+        total += 1;
+        let cleaned = clean_line(content, MAX_LINE_LEN, false, "");
+        by_file.entry(file).or_default().push((line_num, cleaned));
+    }
+
+    if total == 0 {
+        return "🔍 0 matches\n".to_string();
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("🔍 {} in {}F:\n\n", total, by_file.len()));
+
+    let mut shown = 0;
+    let mut files: Vec<_> = by_file.iter().collect();
+    files.sort_by_key(|(f, _)| *f);
+
+    for (file, matches) in files {
+        if shown >= MAX_RESULTS {
+            break;
+        }
+        let file_display = compact_path(file);
+        out.push_str(&format!("📄 {} ({}):\n", file_display, matches.len()));
+        for (line_num, content) in matches.iter().take(10) {
+            out.push_str(&format!("  {:>4}: {}\n", line_num, content));
+            shown += 1;
+            if shown >= MAX_RESULTS {
+                break;
+            }
+        }
+        if matches.len() > 10 {
+            out.push_str(&format!("  +{}\n", matches.len() - 10));
+        }
+        out.push('\n');
+    }
+
+    if total > shown {
+        out.push_str(&format!("... +{}\n", total - shown));
+    }
+
+    out
+}
+
+/// Filter `find`/`fd` output (one path per line) into a compact summary.
+///
+/// Groups results by parent directory and counts files by extension.
+/// Suitable for `rtk pipe --filter find` and `rtk pipe --filter fd`.
+pub(crate) fn filter_find_output(input: &str) -> String {
+    if input.trim().is_empty() {
+        return "find: 0 results\n".to_string();
+    }
+
+    let mut by_dir: HashMap<String, usize> = HashMap::new();
+    let mut by_ext: HashMap<String, usize> = HashMap::new();
+    let mut total = 0usize;
+
+    for line in input.lines() {
+        let path = line.trim();
+        if path.is_empty() {
+            continue;
+        }
+        total += 1;
+
+        // Parent directory
+        let dir = if let Some(pos) = path.rfind('/') {
+            &path[..pos]
+        } else {
+            "."
+        };
+        *by_dir.entry(dir.to_string()).or_insert(0) += 1;
+
+        // Extension
+        let ext = if let Some(pos) = path.rfind('.') {
+            let candidate = &path[pos + 1..];
+            // Only treat as extension if no '/' after the dot (i.e. it's in the filename)
+            if candidate.contains('/') {
+                "(no ext)"
+            } else {
+                candidate
+            }
+        } else {
+            "(no ext)"
+        };
+        *by_ext.entry(ext.to_string()).or_insert(0) += 1;
+    }
+
+    if total == 0 {
+        return "find: 0 results\n".to_string();
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("find: {} files\n", total));
+
+    // Top directories (up to 10)
+    let mut dirs: Vec<_> = by_dir.iter().collect();
+    dirs.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    out.push_str("Dirs:\n");
+    for (dir, count) in dirs.iter().take(10) {
+        out.push_str(&format!("  {} ({})\n", dir, count));
+    }
+    if dirs.len() > 10 {
+        out.push_str(&format!("  ... +{} more dirs\n", dirs.len() - 10));
+    }
+
+    // Extension breakdown (up to 8)
+    let mut exts: Vec<_> = by_ext.iter().collect();
+    exts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    if !exts.is_empty() {
+        out.push_str("Types: ");
+        let ext_parts: Vec<String> = exts
+            .iter()
+            .take(8)
+            .map(|(ext, count)| format!(".{} ({})", ext, count))
+            .collect();
+        out.push_str(&ext_parts.join(", "));
+        if exts.len() > 8 {
+            out.push_str(&format!(", +{} more", exts.len() - 8));
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
 fn clean_line(line: &str, max_len: usize, context_only: bool, pattern: &str) -> String {
     let trimmed = line.trim();
 
@@ -224,5 +388,133 @@ mod tests {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
         let cleaned = clean_line(line, 15, false, "text");
         assert!(!cleaned.is_empty());
+    }
+
+    // ── filter_grep_raw: 3-part format (rg -n / grep -n) ─────────────────────
+
+    #[test]
+    fn test_filter_grep_raw_three_part() {
+        let input = "src/main.rs:42:fn main() {\nsrc/lib.rs:10:pub fn helper() {}\n";
+        let out = filter_grep_raw(input);
+        assert!(out.contains("main.rs"), "out={}", out);
+        assert!(out.contains("lib.rs"), "out={}", out);
+        assert!(out.contains("2 in"), "expected 2 matches: out={}", out);
+    }
+
+    #[test]
+    fn test_filter_grep_raw_empty() {
+        let out = filter_grep_raw("");
+        assert!(out.contains("0 matches"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_grep_raw_whitespace_only() {
+        let out = filter_grep_raw("   \n\t\n");
+        assert!(out.contains("0 matches"), "out={}", out);
+    }
+
+    // ── filter_grep_raw: 2-part format (grep without -n) ─────────────────────
+
+    #[test]
+    fn test_filter_grep_raw_two_part_no_line_number() {
+        // grep without -n produces "file:content" (no line number)
+        let input = "src/main.rs:fn main() {\nsrc/lib.rs:pub fn helper() {}\n";
+        let out = filter_grep_raw(input);
+        assert!(out.contains("main.rs"), "2-part: out={}", out);
+        assert!(out.contains("lib.rs"), "2-part: out={}", out);
+        assert!(
+            out.contains("2 in"),
+            "2-part: expected 2 matches: out={}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_filter_grep_raw_two_part_content_with_colon() {
+        // Two-part where content itself contains ':' (e.g. URL or time)
+        let input = "config.yaml:server: http://localhost:8080\n";
+        let out = filter_grep_raw(input);
+        // Should not panic and should show config.yaml
+        assert!(out.contains("config.yaml"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_grep_raw_mixed_two_and_three_part() {
+        // Some lines have line numbers, some don't — both should be counted
+        let input = "src/a.rs:10:fn foo() {}\nsrc/b.rs:fn bar() {}\n";
+        let out = filter_grep_raw(input);
+        assert!(out.contains("a.rs"), "out={}", out);
+        assert!(out.contains("b.rs"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_grep_raw_three_part_nonnumeric_middle() {
+        // Three-part split but middle is not a number (e.g. Windows path C:\file:content)
+        // Should fall back gracefully — either include or skip, but not panic
+        let input = "C:\\path\\file.rs:some content\n";
+        let out = filter_grep_raw(input); // must not panic
+        assert!(!out.is_empty());
+    }
+
+    // ── filter_find_output ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_find_output_empty() {
+        let out = filter_find_output("");
+        assert!(out.contains("0 results"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_find_output_basic() {
+        let input = "./src/main.rs\n./src/lib.rs\n./src/cmd/mod.rs\n";
+        let out = filter_find_output(input);
+        assert!(out.contains("3 files"), "out={}", out);
+        // Extension breakdown
+        assert!(out.contains(".rs"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_find_output_groups_by_dir() {
+        let input = "./src/a.rs\n./src/b.rs\n./tests/c.rs\n";
+        let out = filter_find_output(input);
+        assert!(out.contains("./src"), "out={}", out);
+        assert!(out.contains("./tests"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_find_output_extension_counts() {
+        let input = "./a.rs\n./b.rs\n./c.toml\n./d.md\n";
+        let out = filter_find_output(input);
+        // .rs appears twice, toml and md once each
+        assert!(out.contains(".rs (2)"), "out={}", out);
+        assert!(
+            out.contains(".toml (1)") || out.contains(".md (1)"),
+            "out={}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_filter_find_output_no_extension() {
+        let input = "./Makefile\n./Dockerfile\n";
+        let out = filter_find_output(input);
+        assert!(out.contains("2 files"), "out={}", out);
+        assert!(out.contains("(no ext)"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_find_output_many_dirs_truncated() {
+        // More than 10 unique dirs — should show "+N more dirs"
+        let mut input = String::new();
+        for i in 0..15 {
+            input.push_str(&format!("./dir{}/file.rs\n", i));
+        }
+        let out = filter_find_output(&input);
+        assert!(out.contains("15 files"), "out={}", out);
+        assert!(
+            out.contains("more dirs"),
+            "should truncate dirs: out={}",
+            out
+        );
     }
 }

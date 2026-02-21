@@ -208,6 +208,19 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
+/// Filter vitest output (JSON or text) for use with `rtk pipe --filter vitest`.
+///
+/// Adapts `VitestParser` (which uses the `OutputParser` trait) to a simple
+/// `fn(&str) -> String` interface for pipe filtering.
+pub(crate) fn filter_vitest_output(input: &str) -> String {
+    let mode = FormatMode::Compact;
+    match VitestParser::parse(input) {
+        ParseResult::Full(data) => data.format(mode),
+        ParseResult::Degraded(data, _) => data.format(mode),
+        ParseResult::Passthrough(raw) => raw,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum VitestCommand {
     Run,
