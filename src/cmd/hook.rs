@@ -883,6 +883,43 @@ mod tests {
         assert_eq!(code, 2); // Exit 2 = blocking error per Claude Code spec
     }
 
+    // === $VAR LEXER FIX: NATIVE ROUTING ===
+    // After the lexer fix, simple $IDENT vars are Arg tokens, not Shellisms.
+    // This enables native RTK routing for commands with simple variable references.
+
+    #[test]
+    fn test_dollar_var_routes_natively() {
+        // git log $BRANCH: $BRANCH should be Arg → routes to rtk git, not rtk run -c
+        let result = match check_for_hook("git log $BRANCH", "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite, got {:?}", other),
+        };
+        assert!(
+            result.contains("rtk git"),
+            "Expected rtk git routing for 'git log $BRANCH', got: {}",
+            result
+        );
+        assert!(
+            !result.contains("rtk run"),
+            "Should not fall to passthrough for simple $VAR, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_dollar_subshell_still_passthrough() {
+        // git log $(git rev-parse HEAD): $(…) needs shell — must passthrough
+        let result = match check_for_hook("git log $(git rev-parse HEAD)", "claude") {
+            HookResult::Rewrite(cmd) => cmd,
+            other => panic!("Expected Rewrite, got {:?}", other),
+        };
+        assert!(
+            result.contains("rtk run"),
+            "Subshell $(…) must route to passthrough, got: {}",
+            result
+        );
+    }
+
     // === RECURSION DEPTH LIMIT ===
 
     #[test]
