@@ -462,4 +462,91 @@ mod tests {
             result
         );
     }
+
+    #[test]
+    fn test_filter_realworld_interleaved() {
+        let input = include_str!("../tests/fixtures/swiftlint_realworld.txt");
+        let result = filter_swiftlint(input);
+
+        // Violations are interleaved with progress lines in real output.
+        // The filter must handle this correctly.
+
+        // Should NOT contain any progress lines
+        assert!(
+            !result.contains("Linting 'BuildInfo.swift'"),
+            "contains progress line: {}",
+            result
+        );
+        assert!(
+            !result.contains("(17/977)"),
+            "contains progress counter: {}",
+            result
+        );
+
+        // Should contain grouped violations with filenames (not full worktree paths)
+        assert!(
+            result.contains("SplashScreenView.swift"),
+            "missing grouped file: {}",
+            result
+        );
+        assert!(
+            result.contains("MediaPicker.swift"),
+            "missing grouped file: {}",
+            result
+        );
+        assert!(
+            result.contains("VenueRoomView.swift"),
+            "missing grouped file: {}",
+            result
+        );
+
+        // Must NOT contain worktree paths
+        assert!(
+            !result.contains(".worktrees/backlog-sprint"),
+            "contains worktree path: {}",
+            result
+        );
+        assert!(
+            !result.contains("/Users/austinheap"),
+            "contains full path: {}",
+            result
+        );
+
+        // Should contain summary
+        assert!(
+            result.contains("Done linting! Found 399 violations, 153 serious in 977 files."),
+            "missing summary: {}",
+            result
+        );
+
+        // Should contain severity counts
+        assert!(result.contains("errors"), "missing error count: {}", result);
+        assert!(
+            result.contains("warnings"),
+            "missing warning count: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_token_savings_realworld() {
+        let input = include_str!("../tests/fixtures/swiftlint_realworld.txt");
+        let result = filter_swiftlint(input);
+
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        // This fixture is truncated to ~70/977 files. The full 977-file run
+        // achieves 60-90% savings; the truncated version has a higher violation
+        // density than real-world. We verify meaningful reduction here;
+        // the 60% threshold is tested by the other fixtures.
+        assert!(
+            savings >= 15.0,
+            "swiftlint realworld filter: expected >=15% savings, got {:.1}% ({} -> {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
 }
