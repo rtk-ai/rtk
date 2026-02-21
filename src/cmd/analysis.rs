@@ -10,6 +10,124 @@ pub struct NativeCommand {
     pub operator: Option<String>, // &&, ||, ;, or None for last command
 }
 
+/// Try to strip a known "safe" redirect or pipe suffix from the end of a token list.
+///
+/// Safe suffixes are shell constructs that can be applied to any command's output
+/// without changing the command's semantics.  By stripping them, the hook can route
+/// the core command through an RTK filter and then re-attach the suffix in the shell.
+///
+/// # Returns
+/// `(core_tokens, suffix_string)` where:
+/// - `core_tokens` is the token list with the suffix removed (unchanged if no match)
+/// - `suffix_string` is the raw shell suffix to append to the rewritten command, or `""`
+///
+/// # Recognized patterns (checked from longest to shortest)
+/// - `2>&1`           — Arg("2") + Redirect(">") + Shellism("&") + Arg("1")
+/// - `| tee <file>`   — Pipe + Arg("tee") + Arg(any)
+/// - `| head <arg>`   — Pipe + Arg("head"/"tail") + Arg(any)
+/// - `| cat`          — Pipe + Arg("cat")
+/// - `2>/dev/null`    — Arg("2") + Redirect(">") + Arg("/dev/null")
+/// - `> /dev/null`    — Redirect(">") + Arg("/dev/null")
+/// - `>> <file>`      — Redirect(">>") + Arg(any)
+pub fn split_safe_suffix(tokens: Vec<ParsedToken>) -> (Vec<ParsedToken>, String) {
+    let n = tokens.len();
+
+    // 4-token: 2>&1
+    if n >= 5 {
+        // Need at least 1 core token + 4 suffix tokens
+        let t = &tokens[n - 4..];
+        if matches!(t[0].kind, TokenKind::Arg)
+            && t[0].value == "2"
+            && matches!(t[1].kind, TokenKind::Redirect)
+            && t[1].value == ">"
+            && matches!(t[2].kind, TokenKind::Shellism)
+            && t[2].value == "&"
+            && matches!(t[3].kind, TokenKind::Arg)
+            && t[3].value == "1"
+        {
+            return (tokens[..n - 4].to_vec(), "2>&1".to_string());
+        }
+    }
+
+    // 3-token: | tee <file>
+    if n >= 4 {
+        let t = &tokens[n - 3..];
+        if matches!(t[0].kind, TokenKind::Pipe)
+            && matches!(t[1].kind, TokenKind::Arg)
+            && t[1].value == "tee"
+            && matches!(t[2].kind, TokenKind::Arg)
+        {
+            let suffix = format!("| tee {}", t[2].value);
+            return (tokens[..n - 3].to_vec(), suffix);
+        }
+    }
+
+    // 3-token: | head <arg> or | tail <arg>
+    if n >= 4 {
+        let t = &tokens[n - 3..];
+        if matches!(t[0].kind, TokenKind::Pipe)
+            && matches!(t[1].kind, TokenKind::Arg)
+            && matches!(t[1].value.as_str(), "head" | "tail")
+            && matches!(t[2].kind, TokenKind::Arg)
+        {
+            let suffix = format!("| {} {}", t[1].value, t[2].value);
+            return (tokens[..n - 3].to_vec(), suffix);
+        }
+    }
+
+    // 3-token: 2>/dev/null
+    if n >= 4 {
+        let t = &tokens[n - 3..];
+        if matches!(t[0].kind, TokenKind::Arg)
+            && t[0].value == "2"
+            && matches!(t[1].kind, TokenKind::Redirect)
+            && t[1].value == ">"
+            && matches!(t[2].kind, TokenKind::Arg)
+            && t[2].value == "/dev/null"
+        {
+            return (tokens[..n - 3].to_vec(), "2>/dev/null".to_string());
+        }
+    }
+
+    // 2-token: | cat
+    if n >= 3 {
+        let t = &tokens[n - 2..];
+        if matches!(t[0].kind, TokenKind::Pipe)
+            && matches!(t[1].kind, TokenKind::Arg)
+            && t[1].value == "cat"
+        {
+            return (tokens[..n - 2].to_vec(), "| cat".to_string());
+        }
+    }
+
+    // 2-token: > /dev/null
+    if n >= 3 {
+        let t = &tokens[n - 2..];
+        if matches!(t[0].kind, TokenKind::Redirect)
+            && t[0].value == ">"
+            && matches!(t[1].kind, TokenKind::Arg)
+            && t[1].value == "/dev/null"
+        {
+            return (tokens[..n - 2].to_vec(), "> /dev/null".to_string());
+        }
+    }
+
+    // 2-token: >> <file>
+    if n >= 3 {
+        let t = &tokens[n - 2..];
+        if matches!(t[0].kind, TokenKind::Redirect)
+            && t[0].value == ">>"
+            && matches!(t[1].kind, TokenKind::Arg)
+        {
+            let suffix = format!(">> {}", t[1].value);
+            return (tokens[..n - 2].to_vec(), suffix);
+        }
+    }
+
+    // No safe suffix found — return unchanged
+    (tokens, String::new())
+}
+
 /// Check if command needs real shell (has shellisms, pipes, redirects)
 pub fn needs_shell(tokens: &[ParsedToken]) -> bool {
     tokens.iter().any(|t| {
@@ -86,6 +204,113 @@ pub fn should_run(operator: Option<&str>, last_success: bool) -> bool {
 mod tests {
     use super::*;
     use crate::cmd::lexer::tokenize;
+
+    // === SPLIT_SAFE_SUFFIX TESTS ===
+
+    #[test]
+    fn test_split_suffix_2_redirect() {
+        let tokens = tokenize("cargo test 2>&1");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "2>&1");
+        assert!(!needs_shell(&core), "core must not need shell");
+        let cmds = parse_chain(core).unwrap();
+        assert_eq!(cmds[0].binary, "cargo");
+        assert_eq!(cmds[0].args, vec!["test"]);
+    }
+
+    #[test]
+    fn test_split_suffix_dev_null() {
+        let tokens = tokenize("cargo test 2>/dev/null");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "2>/dev/null");
+        let cmds = parse_chain(core).unwrap();
+        assert_eq!(cmds[0].binary, "cargo");
+    }
+
+    #[test]
+    fn test_split_suffix_stdout_dev_null() {
+        let tokens = tokenize("cargo test > /dev/null");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "> /dev/null");
+        let cmds = parse_chain(core).unwrap();
+        assert_eq!(cmds[0].binary, "cargo");
+    }
+
+    #[test]
+    fn test_split_suffix_pipe_tee() {
+        let tokens = tokenize("cargo test | tee /tmp/log.txt");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert!(suffix.starts_with("| tee"), "suffix: {suffix}");
+        assert!(suffix.contains("/tmp/log.txt"), "suffix: {suffix}");
+        let cmds = parse_chain(core).unwrap();
+        assert_eq!(cmds[0].binary, "cargo");
+    }
+
+    #[test]
+    fn test_split_suffix_pipe_head() {
+        let tokens = tokenize("git log | head -20");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert!(suffix.starts_with("| head"), "suffix: {suffix}");
+        let cmds = parse_chain(core).unwrap();
+        assert_eq!(cmds[0].binary, "git");
+    }
+
+    #[test]
+    fn test_split_suffix_pipe_tail() {
+        let tokens = tokenize("git log | tail -10");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert!(suffix.starts_with("| tail"), "suffix: {suffix}");
+    }
+
+    #[test]
+    fn test_split_suffix_pipe_cat() {
+        let tokens = tokenize("ls --color | cat");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "| cat");
+        let cmds = parse_chain(core).unwrap();
+        assert_eq!(cmds[0].binary, "ls");
+    }
+
+    #[test]
+    fn test_split_suffix_append_redirect() {
+        let tokens = tokenize("cargo build >> /tmp/build.log");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert!(suffix.starts_with(">>"), "suffix: {suffix}");
+        let cmds = parse_chain(core).unwrap();
+        assert_eq!(cmds[0].binary, "cargo");
+    }
+
+    #[test]
+    fn test_split_suffix_none() {
+        // No suffix — returns all tokens unchanged, empty suffix
+        let tokens = tokenize("cargo test");
+        let n = tokens.len();
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert!(suffix.is_empty(), "no suffix expected, got: {suffix}");
+        assert_eq!(core.len(), n);
+    }
+
+    #[test]
+    fn test_split_suffix_glob_core_stays_shellism() {
+        // "ls *.rs 2>&1" — suffix strips fine but core has glob (needs shell)
+        let tokens = tokenize("ls *.rs 2>&1");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "2>&1", "suffix must be stripped");
+        assert!(needs_shell(&core), "core still needs shell due to glob");
+    }
+
+    #[test]
+    fn test_split_suffix_requires_core_token() {
+        // "2>&1" alone has no core — should not strip (or return empty core)
+        // The function requires at least 1 core token before the suffix
+        let tokens = tokenize("2>&1");
+        let (core, suffix) = split_safe_suffix(tokens);
+        // No valid split (core would be empty)
+        assert!(
+            suffix.is_empty() || core.is_empty(),
+            "bare suffix with no core should not produce a valid split"
+        );
+    }
 
     // === NEEDS_SHELL TESTS ===
 

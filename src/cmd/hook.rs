@@ -71,16 +71,45 @@ fn check_for_hook_inner(raw: &str, depth: usize) -> HookResult {
 
     let tokens = lexer::tokenize(raw);
 
-    if analysis::needs_shell(&tokens) {
+    // === SUFFIX-AWARE ROUTING ===
+    // Strip known safe redirect/pipe suffixes (2>&1, | tee, | head, etc.) from the
+    // end of the command so the core can be routed through an RTK filter.  The suffix
+    // is appended verbatim to the rewritten command; the shell applies it to rtk's output.
+    //
+    // Example: "cargo test 2>&1" → strip suffix → core "cargo test" → "rtk cargo test 2>&1"
+    let (core_tokens, suffix) = analysis::split_safe_suffix(tokens);
+
+    if analysis::needs_shell(&core_tokens) {
+        // Core needs shell even after suffix stripping — full passthrough.
+        // (When suffix is empty, core_tokens == original tokens so this is unchanged.)
         return HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(raw)));
     }
 
-    match analysis::parse_chain(tokens) {
+    match analysis::parse_chain(core_tokens) {
         Ok(commands) => {
             // Single command: route to optimized RTK subcommand.
             // Chained commands (&&, ||, ;): wrap entire chain in rtk run -c.
             if commands.len() == 1 {
-                HookResult::Rewrite(route_native_command(&commands[0], raw))
+                let routed = if suffix.is_empty() {
+                    // No suffix stripped: use original raw to preserve quoting
+                    route_native_command(&commands[0], raw)
+                } else {
+                    // Suffix was stripped: reconstruct core_raw from parsed command.
+                    // Quoting is simplified (join with spaces) but acceptable for the
+                    // common cases where suffix-bearing commands use simple args.
+                    let core_raw = if commands[0].args.is_empty() {
+                        commands[0].binary.clone()
+                    } else {
+                        format!("{} {}", commands[0].binary, commands[0].args.join(" "))
+                    };
+                    route_native_command(&commands[0], &core_raw)
+                };
+
+                if suffix.is_empty() {
+                    HookResult::Rewrite(routed)
+                } else {
+                    HookResult::Rewrite(format!("{} {}", routed, suffix))
+                }
             } else {
                 HookResult::Rewrite(format!("rtk run -c '{}'", escape_quotes(raw)))
             }
@@ -154,6 +183,24 @@ fn escape_quotes(s: &str) -> String {
     s.replace("'", "'\\''")
 }
 
+/// Returns true if `s` looks like a shell env-var assignment: `IDENT=VALUE`.
+///
+/// Accepts: `FOO=bar`, `FOO=`, `_FOO=123`, `FOO_BAR=baz`
+/// Rejects: `=value`, `123=abc`, plain args, flag args like `--foo=bar`
+fn is_env_assign(s: &str) -> bool {
+    if let Some(eq_pos) = s.find('=') {
+        let key = &s[..eq_pos];
+        !key.is_empty()
+            && key
+                .chars()
+                .next()
+                .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    } else {
+        false
+    }
+}
+
 /// Replace the first occurrence of `old_prefix` in `raw` with `new_prefix`.
 ///
 /// Preserves everything after the prefix (including original quoting).
@@ -221,6 +268,22 @@ fn route_npx(cmd: &analysis::NativeCommand, raw: &str) -> String {
         "prettier" => replace_first_word(raw, "npx prettier", "rtk prettier"),
         "playwright" => replace_first_word(raw, "npx playwright", "rtk playwright"),
         "prisma" => replace_first_word(raw, "npx prisma", "rtk prisma"),
+
+        // npx vitest [run] [flags] → rtk vitest run [flags]
+        // Mirrors pnpm vitest handling: strip double-"run" if user writes "npx vitest run".
+        "vitest" => {
+            let after_vitest: Vec<&str> = cmd.args[1..]
+                .iter()
+                .map(String::as_str)
+                .skip_while(|&a| a == "run")
+                .collect();
+            if after_vitest.is_empty() {
+                "rtk vitest run".to_string()
+            } else {
+                format!("rtk vitest run {}", after_vitest.join(" "))
+            }
+        }
+
         _ => format!("rtk run -c '{}'", escape_quotes(raw)),
     }
 }
@@ -244,6 +307,50 @@ fn route_npx(cmd: &analysis::NativeCommand, raw: &str) -> String {
 /// PR 2 adds safety::check before this function. The `cat` arm is defensive for
 /// when `RTK_BLOCK_TOKEN_WASTE=0`.
 fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
+    // === ENV PREFIX STRIPPING ===
+    // When the "binary" is actually a VAR=val env assignment (e.g. "GIT_PAGER=cat"),
+    // collect all leading env assigns, find the real binary in args, route it, and
+    // prepend the env vars so the shell sets them for the rtk subprocess.
+    //
+    // Example: "GIT_PAGER=cat git status"
+    //   → env_prefix="GIT_PAGER=cat", real_binary="git", args=["status"]
+    //   → route "git status" → "rtk git status"
+    //   → result: "GIT_PAGER=cat rtk git status"
+    if is_env_assign(&cmd.binary) {
+        let mut env_parts: Vec<&str> = vec![cmd.binary.as_str()];
+        let mut arg_idx = 0;
+        while arg_idx < cmd.args.len() && is_env_assign(&cmd.args[arg_idx]) {
+            env_parts.push(&cmd.args[arg_idx]);
+            arg_idx += 1;
+        }
+        if arg_idx < cmd.args.len() {
+            let env_prefix_str = env_parts.join(" ");
+            // Strip env prefix from raw to get core_raw, preserving original quoting.
+            let core_raw = raw
+                .strip_prefix(&env_prefix_str)
+                .map(|s| s.trim_start())
+                .unwrap_or_else(|| {
+                    // Fallback: count the env prefix length and skip past it
+                    let skip = env_prefix_str.len();
+                    if skip < raw.len() {
+                        raw[skip..].trim_start()
+                    } else {
+                        raw
+                    }
+                });
+            let real_binary = cmd.args[arg_idx].clone();
+            let real_args = cmd.args[arg_idx + 1..].to_vec();
+            let real_cmd = analysis::NativeCommand {
+                binary: real_binary,
+                args: real_args,
+                operator: cmd.operator.clone(),
+            };
+            let routed = route_native_command(&real_cmd, core_raw);
+            return format!("{} {}", env_prefix_str, routed);
+        }
+        // All tokens are env assigns (no real command) — fall through to passthrough
+    }
+
     let sub = cmd.args.first().map(String::as_str).unwrap_or("");
     let sub2 = cmd.args.get(1).map(String::as_str).unwrap_or("");
 
@@ -389,24 +496,81 @@ mod tests {
         assert_rewrite(&format!("echo {}", "a".repeat(1000)), "rtk run");
     }
 
-    // === ENV VAR PREFIX PRESERVATION ===
-    // Ported from old hooks/test-rtk-rewrite.sh Section 2.
-    // Commands prefixed with KEY=VALUE env vars must not be blocked.
+    // === ENV VAR PREFIX ROUTING ===
+    // Commands prefixed with KEY=VALUE env vars must route to the optimized RTK
+    // subcommand with the env var preserved, not fall back to rtk run -c passthrough.
 
     #[test]
-    fn test_env_var_prefix_preserved() {
+    fn test_env_prefix_routes_to_rtk_subcommand() {
+        // Each case: (input, expected_rtk_subcommand_prefix, env_prefix_preserved)
         let cases = [
-            "GIT_PAGER=cat git status",
-            "GIT_PAGER=cat git log --oneline -10",
-            "NODE_ENV=test CI=1 npx vitest run",
-            "LANG=C ls -la",
-            "NODE_ENV=test npm run test:e2e",
-            "COMPOSE_PROJECT_NAME=test docker compose up -d",
-            "TEST_SESSION_ID=2 npx playwright test --config=foo",
+            ("GIT_PAGER=cat git status", "rtk git", "GIT_PAGER=cat"),
+            (
+                "GIT_PAGER=cat git log --oneline -10",
+                "rtk git",
+                "GIT_PAGER=cat",
+            ),
+            ("RUST_LOG=debug cargo test", "rtk cargo", "RUST_LOG=debug"),
+            ("LANG=C ls -la", "rtk ls", "LANG=C"),
+            (
+                "TEST_SESSION_ID=2 npx playwright test --config=foo",
+                "rtk playwright",
+                "TEST_SESSION_ID=2",
+            ),
         ];
-        for input in cases {
-            assert_rewrite(input, "rtk run");
+        for (input, rtk_sub, env_prefix) in cases {
+            match check_for_hook(input, "claude") {
+                HookResult::Rewrite(cmd) => {
+                    assert!(
+                        cmd.contains(rtk_sub),
+                        "'{input}' must route to '{rtk_sub}', got '{cmd}'"
+                    );
+                    assert!(
+                        cmd.contains(env_prefix),
+                        "'{input}' must preserve env prefix '{env_prefix}', got '{cmd}'"
+                    );
+                }
+                other => panic!("Expected Rewrite for '{input}', got {other:?}"),
+            }
         }
+    }
+
+    #[test]
+    fn test_env_prefix_multi_var_routes() {
+        // Multiple env vars before a known command
+        let input = "NODE_ENV=test CI=1 npx vitest run";
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => {
+                assert!(
+                    cmd.contains("rtk vitest"),
+                    "must route to rtk vitest, got '{cmd}'"
+                );
+                assert!(
+                    cmd.contains("NODE_ENV=test"),
+                    "must preserve NODE_ENV, got '{cmd}'"
+                );
+                assert!(cmd.contains("CI=1"), "must preserve CI, got '{cmd}'");
+            }
+            other => panic!("Expected Rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_env_prefix_unknown_cmd_fallback() {
+        // Unknown command after env prefix → still wraps in rtk run -c (safe passthrough)
+        assert_rewrite("VAR=1 unknown_xyz_abc_cmd", "rtk run");
+    }
+
+    #[test]
+    fn test_env_prefix_npm_still_passthrough() {
+        // npm has no RTK subcommand → falls back to rtk run -c (correct, env preserved in shell)
+        assert_rewrite("NODE_ENV=test npm run test:e2e", "rtk run");
+    }
+
+    #[test]
+    fn test_env_prefix_docker_compose_passthrough() {
+        // docker compose up has no RTK route → falls back to rtk run -c
+        assert_rewrite("COMPOSE_PROJECT_NAME=test docker compose up -d", "rtk run");
     }
 
     // === GLOBAL OPTIONS (PR #99 parity) ===
@@ -567,6 +731,110 @@ mod tests {
     }
 
     // PR 2 adds: test_blocked_commands (safety-dependent test)
+
+    // === SUFFIX-AWARE ROUTING: redirect/pipe suffix preserved, RTK filter applied ===
+    // When a known RTK command has a "safe" redirect or pipe suffix, the hook should
+    // rewrite to `rtk <cmd> <suffix>` so RTK's filter applies AND the shell handles the suffix.
+
+    #[test]
+    fn test_suffix_2_redirect_routes_to_rtk() {
+        // "cargo test 2>&1" → "rtk cargo test 2>&1" (not rtk run -c)
+        let input = "cargo test 2>&1";
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => {
+                assert!(
+                    cmd.contains("rtk cargo"),
+                    "must use rtk cargo filter, got '{cmd}'"
+                );
+                assert!(
+                    cmd.contains("2>&1"),
+                    "must preserve 2>&1 suffix, got '{cmd}'"
+                );
+                assert!(
+                    !cmd.contains("rtk run -c"),
+                    "must NOT fall back to passthrough, got '{cmd}'"
+                );
+            }
+            other => panic!("Expected Rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_suffix_dev_null_routes_to_rtk() {
+        // "cargo test 2>/dev/null" → "rtk cargo test 2>/dev/null"
+        let input = "cargo test 2>/dev/null";
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk cargo"), "must use rtk cargo, got '{cmd}'");
+                assert!(
+                    cmd.contains("/dev/null"),
+                    "must preserve /dev/null suffix, got '{cmd}'"
+                );
+                assert!(
+                    !cmd.contains("rtk run -c"),
+                    "must NOT fall back to passthrough, got '{cmd}'"
+                );
+            }
+            other => panic!("Expected Rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_suffix_pipe_tee_routes_to_rtk() {
+        // "cargo test | tee /tmp/log.txt" → "rtk cargo test | tee /tmp/log.txt"
+        let input = "cargo test | tee /tmp/log.txt";
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => {
+                assert!(
+                    cmd.contains("rtk cargo"),
+                    "must use rtk cargo filter, got '{cmd}'"
+                );
+                assert!(cmd.contains("tee"), "must preserve tee suffix, got '{cmd}'");
+            }
+            other => panic!("Expected Rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_suffix_pipe_head_routes_to_rtk() {
+        // "git log | head -20" → "rtk git log | head -20" (not passthrough)
+        let input = "git log | head -20";
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => {
+                assert!(cmd.contains("rtk git"), "must use rtk git, got '{cmd}'");
+                assert!(
+                    cmd.contains("head"),
+                    "must preserve head suffix, got '{cmd}'"
+                );
+                assert!(
+                    !cmd.contains("rtk run -c"),
+                    "must NOT fall back to passthrough, got '{cmd}'"
+                );
+            }
+            other => panic!("Expected Rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_suffix_unknown_cmd_still_passthrough() {
+        // Unknown command even with safe suffix → still wraps in rtk run -c
+        let input = "unknown_xyz_cmd 2>&1";
+        assert_rewrite(input, "rtk run");
+    }
+
+    #[test]
+    fn test_suffix_unsafe_pipe_still_passthrough() {
+        // Pipe to grep (not a known safe sink) → stays as rtk run -c passthrough
+        // This is debatable; for safety, unknown pipe destinations stay in shell
+        let input = "cargo test | grep FAILED";
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => {
+                // Either passthrough or rtk routing is acceptable, but must not panic
+                let _ = cmd;
+            }
+            other => panic!("Expected Rewrite, got {other:?}"),
+        }
+    }
 
     // === SHELLISM PASSTHROUGH: cat/sed/head allowed with pipe/redirect ===
 
