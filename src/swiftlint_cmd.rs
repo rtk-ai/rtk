@@ -27,7 +27,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let filtered = if verbose > 0 {
         filter_swiftlint_verbose(&raw)
     } else {
-        filter_swiftlint(&raw)
+        let result = filter_swiftlint(&raw);
+        // Fallback to raw output if filter produces empty result
+        if result.is_empty() && !raw.trim().is_empty() {
+            eprintln!("rtk: swiftlint filter produced empty output, showing raw");
+            raw.trim().to_string()
+        } else {
+            result
+        }
     };
 
     let exit_code = output
@@ -128,7 +135,7 @@ pub fn filter_swiftlint(output: &str) -> String {
                 _ => {}
             }
 
-            let formatted = format!("  :{}:{} {}: {}", line_num, col, severity, message);
+            let formatted = format!("  {}:{} {}: {}", line_num, col, severity, message);
             by_file
                 .entry(filename.to_string())
                 .or_default()
@@ -173,9 +180,8 @@ pub fn filter_swiftlint(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Verbose mode: keep progress lines (for debugging), but still group violations.
+/// Verbose mode: returns raw swiftlint output unchanged for debugging.
 fn filter_swiftlint_verbose(output: &str) -> String {
-    // In verbose mode, return the raw output as-is
     output.trim().to_string()
 }
 
@@ -255,7 +261,7 @@ mod tests {
 
         // Should contain summary
         assert!(
-            result.contains("Done linting! Found 17 violations, 2 serious in 25 files."),
+            result.contains("Done linting! Found 17 violations, 2 serious in 200 files."),
             "missing summary: {}",
             result
         );
@@ -394,7 +400,7 @@ mod tests {
         // The next lines should be indented violations
         let mut violation_count = 0;
         for line in &lines[nm_idx + 1..] {
-            if line.starts_with("  :") {
+            if line.starts_with("  ") && line.len() > 2 && line.as_bytes()[2].is_ascii_digit() {
                 violation_count += 1;
             } else {
                 break;
@@ -435,23 +441,12 @@ mod tests {
         let output_tokens = count_tokens(&result);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-        // With 25 progress lines stripped but 17 violations preserved, savings
-        // are lower in this test fixture (~17%). In real-world use (962 progress
-        // lines), savings would be 60-90%. We verify meaningful reduction here.
         assert!(
-            savings >= 10.0,
-            "swiftlint violations filter: expected >=10% savings, got {:.1}% ({} -> {} tokens)",
+            savings >= 60.0,
+            "swiftlint violations filter: expected >=60% savings, got {:.1}% ({} -> {} tokens)",
             savings,
             input_tokens,
             output_tokens
-        );
-
-        // Verify output is smaller than input (progress lines stripped)
-        assert!(
-            output_tokens < input_tokens,
-            "filtered output should be smaller than input: {} >= {}",
-            output_tokens,
-            input_tokens
         );
     }
 

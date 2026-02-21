@@ -24,7 +24,18 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    let filtered = filter_xcodebuild(&raw);
+    let filtered = if verbose > 0 {
+        raw.trim().to_string()
+    } else {
+        let result = filter_xcodebuild(&raw);
+        // Fallback to raw output if filter produces empty result
+        if result.is_empty() && !raw.trim().is_empty() {
+            eprintln!("rtk: xcodebuild filter produced empty output, showing raw");
+            raw.trim().to_string()
+        } else {
+            result
+        }
+    };
 
     let exit_code = output
         .status
@@ -114,7 +125,9 @@ pub fn filter_xcodebuild(output: &str) -> String {
             continue;
         }
         if in_failed_section {
-            if trimmed.starts_with('(') && trimmed.ends_with("failures)") {
+            if trimmed.starts_with('(')
+                && (trimmed.ends_with("failures)") || trimmed.ends_with("failure)"))
+            {
                 failure_count = Some(trimmed.to_string());
                 in_failed_section = false;
             } else if line.starts_with('\t') || line.starts_with("    ") {
@@ -178,13 +191,14 @@ pub fn filter_xcodebuild(output: &str) -> String {
         if let Some(caps) = error_re.captures(trimmed) {
             let file_path = &caps[1];
             let line_num = &caps[2];
+            let col = &caps[3];
             let severity = &caps[4];
             let message = &caps[5];
 
-            // Extract just the filename from full path
+            // swiftlint/xcodebuild are macOS-only; forward-slash path splitting is intentional
             let filename = file_path.rsplit('/').next().unwrap_or(file_path);
 
-            let formatted = format!("  {}:{}: {}", filename, line_num, message);
+            let formatted = format!("  {}:{}:{}: {}", filename, line_num, col, message);
 
             if severity == "error" {
                 errors.push(formatted);
@@ -489,7 +503,7 @@ mod tests {
 
         // Must show errors with filenames (not full paths)
         assert!(
-            result.contains("AppDelegate.swift:15"),
+            result.contains("AppDelegate.swift:15:9"),
             "missing error location: {}",
             result
         );
@@ -499,12 +513,12 @@ mod tests {
             result
         );
         assert!(
-            result.contains("MainView.swift:45"),
+            result.contains("MainView.swift:45:13"),
             "missing error location: {}",
             result
         );
         assert!(
-            result.contains("NetworkManager.swift:67"),
+            result.contains("NetworkManager.swift:67:20"),
             "missing error location: {}",
             result
         );
@@ -716,6 +730,26 @@ SwiftCompile normal arm64 Compiling\\ File7.swift /path/File7.swift (in target '
         assert!(
             result.contains("File5.swift"),
             "should show up to 5 files: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_single_failure_count() {
+        let input = "\
+The following build commands failed:\n\
+\tSwiftCompile normal arm64 Compiling Foo.swift\n\
+(1 failure)\n\
+** BUILD FAILED **\n";
+        let result = filter_xcodebuild(input);
+        assert!(
+            result.contains("(1 failure)"),
+            "should show singular failure count: {}",
+            result
+        );
+        assert!(
+            result.contains("Failed:"),
+            "should show failed section: {}",
             result
         );
     }
