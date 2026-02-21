@@ -1,0 +1,225 @@
+Loading configuration from '.swiftlint.yml'
+configuration error: 'conditional_binding_cascade' is not a valid rule identifier
+Valid rule identifiers:
+opening_brace
+empty_count
+colon
+comma
+control_statement
+closing_brace
+empty_parentheses_with_trailing_closure
+force_cast
+force_try
+force_unwrapping
+function_body_length
+leading_whitespace
+legacy_cggeometry_functions
+legacy_constant
+legacy_constructor
+legacy_nsgeometry_functions
+line_length
+mark
+nesting
+operator_whitespace
+return_arrow_whitespace
+statement_position
+todo
+trailing_newline
+trailing_semicolon
+trailing_whitespace
+type_body_length
+type_name
+valid_docs
+variable_name
+Linting Swift files in current working directory
+Linting 'AppDelegate.swift' (1/370)
+configuration error: 'conditional_binding_cascade' is not a valid rule identifier
+Valid rule identifiers:
+opening_brace
+empty_count
+colon
+comma
+control_statement
+closing_brace
+empty_parentheses_with_trailing_closure
+force_cast
+force_try
+force_unwrapping
+function_body_length
+leading_whitespace
+legacy_cggeometry_functions
+legacy_constant
+legacy_constructor
+legacy_nsgeometry_functions
+line_length
+mark
+nesting
+operator_whitespace
+return_arrow_whitespace
+statement_position
+todo
+trailing_newline
+trailing_semicolon
+trailing_whitespace
+type_body_length
+type_name
+valid_docs
+variable_name
+Linting 'BankViewController.swift' (2/370)
+configuration error: 'conditional_binding_cascade' is not a valid rule identifier
+Valid rule identifiers:
+opening_brace
+empty_count
+colon
+comma
+control_statement
+closing_brace
+empty_parentheses_with_trailing_closure
+force_cast
+force_try
+force_unwrapping
+function_body_length
+leading_whitespace
+legacy_cggeometry_functions
+legacy_constant
+legacy_constructor
+legacy_nsgeometry_functions
+line_length
+mark
+nesting
+operator_whitespace
+return_arrow_whitespace
+statement_position
+todo
+trailing_newline
+trailing_semicolon
+trailing_whitespace
+type_body_length
+type_name
+valid_docs
+variable_name
+Linting 'TransactionListViewController.swift' (3/370)
+/Users/developer/BankApp/Sources/BankViewController.swift:23:1: warning: Line Length Violation: Line should be 120 characters or less; currently it has 156 characters (line_length)
+/Users/developer/BankApp/Sources/BankViewController.swift:45:5: warning: Force Cast Violation: Force casts should be avoided (force_cast)
+/Users/developer/BankApp/Sources/BankViewController.swift:67:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+Linting 'AccountModel.swift' (4/370)
+configuration error: 'conditional_binding_cascade' is not a valid rule identifier
+Valid rule identifiers:
+opening_brace
+empty_count
+colon
+comma
+control_statement
+closing_brace
+empty_parentheses_with_trailing_closure
+force_cast
+force_try
+force_unwrapping
+function_body_length
+leading_whitespace
+legacy_cggeometry_functions
+legacy_constant
+legacy_constructor
+legacy_nsgeometry_functions
+line_length
+mark
+nesting
+operator_whitespace
+return_arrow_whitespace
+statement_position
+todo
+trailing_newline
+trailing_semicolon
+trailing_whitespace
+type_body_length
+type_name
+valid_docs
+variable_name
+Linting 'PaymentService.swift' (5/370)
+/Users/developer/BankApp/Sources/TransactionListViewController.swift:12:1: warning: Line Length Violation: Line should be 120 characters or less; currently it has 189 characters (line_length)
+/Users/developer/BankApp/Sources/TransactionListViewController.swift:34:5: warning: Identifier Name Violation: Variable name 'tx' should be between 3 and 40 characters long (identifier_name)
+/Users/developer/BankApp/Sources/TransactionListViewController.swift:89:9: error: Function Body Length Violation: Function body should span 50 lines or less: currently spans 92 (function_body_length)
+/Users/developer/BankApp/Sources/TransactionListViewController.swift:134:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+/Users/developer/BankApp/Sources/TransactionListViewController.swift:200:5: warning: Force Try Violation: Force tries should be avoided (force_try)
+Linting 'NetworkClient.swift' (6/370)
+Linting 'CryptoUtils.swift' (7/370)
+/Users/developer/BankApp/Sources/AccountModel.swift:8:5: warning: Identifier Name Violation: Variable name 'id' should be between 3 and 40 characters long (identifier_name)
+/Users/developer/BankApp/Sources/AccountModel.swift:15:5: warning: Identifier Name Violation: Variable name 'no' should be between 3 and 40 characters long (identifier_name)
+Linting 'SettingsViewController.swift' (8/370)
+/Users/developer/BankApp/Sources/PaymentService.swift:45:9: warning: Large Tuple Violation: Tuples should have at most 3 members (large_tuple)
+/Users/developer/BankApp/Sources/PaymentService.swift:78:5: error: Cyclomatic Complexity Violation: Function should have complexity 10 or less; currently complexity is 18 (cyclomatic_complexity)
+/Users/developer/BankApp/Sources/PaymentService.swift:123:9: warning: Force Unwrapping Violation: Force unwrapping should be avoided (force_unwrapping)
+/Users/developer/BankApp/Sources/PaymentService.swift:156:9: warning: Force Unwrapping Violation: Force unwrapping should be avoided (force_unwrapping)
+/Users/developer/BankApp/Sources/PaymentService.swift:189:1: warning: File Length Violation: File should contain 400 lines or less: currently it contains 567 (file_length)
+Linting 'LoginCoordinator.swift' (9/370)
+Linting 'BiometricAuthManager.swift' (10/370)
+/Users/developer/BankApp/Sources/CryptoUtils.swift:34:5: warning: Force Cast Violation: Force casts should be avoided (force_cast)
+/Users/developer/BankApp/Sources/CryptoUtils.swift:56:5: warning: Force Cast Violation: Force casts should be avoided (force_cast)
+/Users/developer/BankApp/Sources/CryptoUtils.swift:78:5: warning: Force Cast Violation: Force casts should be avoided (force_cast)
+/Users/developer/BankApp/Sources/CryptoUtils.swift:99:5: warning: Force Cast Violation: Force casts should be avoided (force_cast)
+Linting 'CardViewController.swift' (11/370)
+/Users/developer/BankApp/Sources/NetworkClient.swift:12:1: warning: Line Length Violation: Line should be 120 characters or less; currently it has 203 characters (line_length)
+/Users/developer/BankApp/Sources/NetworkClient.swift:45:1: warning: Line Length Violation: Line should be 120 characters or less; currently it has 178 characters (line_length)
+/Users/developer/BankApp/Sources/NetworkClient.swift:67:9: warning: Closure Body Length Violation: Closure body should span 30 lines or less: currently it spans 52 (closure_body_length)
+/Users/developer/BankApp/Sources/NetworkClient.swift:120:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+Linting 'TransferViewController.swift' (12/370)
+Linting 'BudgetTracker.swift' (13/370)
+/Users/developer/BankApp/Sources/SettingsViewController.swift:234:1: warning: Type Body Length Violation: Type body should span 250 lines or less: currently it spans 345 (type_body_length)
+Linting 'NotificationService.swift' (14/370)
+/Users/developer/BankApp/Sources/LoginCoordinator.swift:12:9: warning: Vertical Whitespace Violation: Limit vertical whitespace to a single empty line; currently 3 (vertical_whitespace)
+/Users/developer/BankApp/Sources/LoginCoordinator.swift:45:5: warning: Control Statement Violation: `if`, `for`, `guard`, `switch`, `while`, and `catch` statements shouldn't unnecessarily wrap their conditionals or arguments in parentheses (control_statement)
+Linting 'AnalyticsTracker.swift' (15/370)
+/Users/developer/BankApp/Sources/CardViewController.swift:56:1: warning: Line Length Violation: Line should be 120 characters or less; currently it has 134 characters (line_length)
+/Users/developer/BankApp/Sources/CardViewController.swift:89:5: warning: Todo Violation: TODOs should be resolved (Fix card animation glitch) (todo)
+/Users/developer/BankApp/Sources/CardViewController.swift:123:5: warning: Todo Violation: TODOs should be resolved (Implement 3D Secure flow) (todo)
+/Users/developer/BankApp/Sources/CardViewController.swift:167:9: warning: Opening Brace Spacing Violation: Opening braces should be preceded by a single space and on the same line as the declaration (opening_brace)
+Linting 'Extensions/UIView+Extensions.swift' (16/370)
+Linting 'Extensions/String+Validation.swift' (17/370)
+Linting 'Extensions/Date+Formatting.swift' (18/370)
+/Users/developer/BankApp/Sources/TransferViewController.swift:45:9: warning: Force Unwrapping Violation: Force unwrapping should be avoided (force_unwrapping)
+/Users/developer/BankApp/Sources/TransferViewController.swift:78:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+/Users/developer/BankApp/Sources/TransferViewController.swift:134:5: error: Cyclomatic Complexity Violation: Function should have complexity 10 or less; currently complexity is 14 (cyclomatic_complexity)
+Linting 'Models/UserProfile.swift' (19/370)
+Linting 'Models/Transaction.swift' (20/370)
+/Users/developer/BankApp/Sources/BudgetTracker.swift:23:5: warning: Identifier Name Violation: Variable name 'v' should be between 3 and 40 characters long (identifier_name)
+/Users/developer/BankApp/Sources/BudgetTracker.swift:56:9: warning: Nesting Violation: Types should be nested at most 1 level deep (nesting)
+/Users/developer/BankApp/Sources/BudgetTracker.swift:89:5: warning: Legacy Constructor Violation: Swift constructors are preferred over legacy convenience functions (legacy_constructor)
+/Users/developer/BankApp/Sources/BudgetTracker.swift:112:1: warning: Line Length Violation: Line should be 120 characters or less; currently it has 167 characters (line_length)
+Linting 'Models/Card.swift' (21/370)
+Linting 'Services/PushNotificationHandler.swift' (22/370)
+/Users/developer/BankApp/Sources/AnalyticsTracker.swift:34:5: warning: Force Cast Violation: Force casts should be avoided (force_cast)
+/Users/developer/BankApp/Sources/AnalyticsTracker.swift:78:9: warning: Comma Spacing Violation: There should be no space before and one after any comma (comma)
+/Users/developer/BankApp/Sources/AnalyticsTracker.swift:123:9: warning: Colon Spacing Violation: Colons should be next to the identifier when specifying a type and next to the key in a dictionary literal with no space before (colon)
+Linting 'Services/KeychainManager.swift' (23/370)
+Linting 'Views/AmountInputView.swift' (24/370)
+Linting 'Views/BalanceCardView.swift' (25/370)
+/Users/developer/BankApp/Sources/Extensions/UIView+Extensions.swift:12:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+/Users/developer/BankApp/Sources/Extensions/UIView+Extensions.swift:34:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+/Users/developer/BankApp/Sources/Extensions/UIView+Extensions.swift:56:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+/Users/developer/BankApp/Sources/Extensions/String+Validation.swift:23:5: warning: Statement Position Violation: Else and catch should be on the same line, one space after the previous } (statement_position)
+/Users/developer/BankApp/Sources/Extensions/Date+Formatting.swift:45:1: warning: Trailing Newline Violation: Files should have a single trailing newline (trailing_newline)
+Linting 'Views/TransactionCell.swift' (26/370)
+Linting 'Views/PinEntryView.swift' (27/370)
+/Users/developer/BankApp/Sources/Models/UserProfile.swift:8:5: warning: Identifier Name Violation: Variable name 'id' should be between 3 and 40 characters long (identifier_name)
+/Users/developer/BankApp/Sources/Models/Transaction.swift:8:5: warning: Identifier Name Violation: Variable name 'id' should be between 3 and 40 characters long (identifier_name)
+/Users/developer/BankApp/Sources/Models/Transaction.swift:23:1: warning: Line Length Violation: Line should be 120 characters or less; currently it has 145 characters (line_length)
+/Users/developer/BankApp/Sources/Models/Card.swift:8:5: warning: Identifier Name Violation: Variable name 'id' should be between 3 and 40 characters long (identifier_name)
+/Users/developer/BankApp/Sources/Models/Card.swift:15:5: warning: Identifier Name Violation: Variable name 'no' should be between 3 and 40 characters long (identifier_name)
+Linting 'Coordinators/AppCoordinator.swift' (28/370)
+Linting 'Coordinators/DashboardCoordinator.swift' (29/370)
+/Users/developer/BankApp/Sources/Services/PushNotificationHandler.swift:56:9: warning: Force Unwrapping Violation: Force unwrapping should be avoided (force_unwrapping)
+/Users/developer/BankApp/Sources/Services/PushNotificationHandler.swift:89:5: warning: Operator Usage Whitespace Violation: Operators should be surrounded by a single whitespace when they are being used (operator_whitespace)
+/Users/developer/BankApp/Sources/Services/KeychainManager.swift:34:5: warning: Force Try Violation: Force tries should be avoided (force_try)
+/Users/developer/BankApp/Sources/Services/KeychainManager.swift:67:5: warning: Force Try Violation: Force tries should be avoided (force_try)
+Linting 'Coordinators/PaymentCoordinator.swift' (30/370)
+Linting 'Utilities/CurrencyFormatter.swift' (31/370)
+/Users/developer/BankApp/Sources/Views/AmountInputView.swift:45:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+/Users/developer/BankApp/Sources/Views/BalanceCardView.swift:78:1: warning: Line Length Violation: Line should be 120 characters or less; currently it has 198 characters (line_length)
+/Users/developer/BankApp/Sources/Views/TransactionCell.swift:23:9: warning: Return Arrow Whitespace Violation: Return arrow and return type should be separated by a single space or on a separate line (return_arrow_whitespace)
+/Users/developer/BankApp/Sources/Views/PinEntryView.swift:89:5: error: Function Body Length Violation: Function body should span 50 lines or less: currently spans 67 (function_body_length)
+Linting 'Utilities/Logger.swift' (32/370)
+Linting 'Utilities/FeatureFlags.swift' (33/370)
+/Users/developer/BankApp/Sources/Coordinators/AppCoordinator.swift:123:9: warning: Control Statement Violation: `if`, `for`, `guard`, `switch`, `while`, and `catch` statements shouldn't unnecessarily wrap their conditionals or arguments in parentheses (control_statement)
+/Users/developer/BankApp/Sources/Coordinators/DashboardCoordinator.swift:56:1: warning: Trailing Whitespace Violation: Lines should not have trailing whitespace (trailing_whitespace)
+/Users/developer/BankApp/Sources/Coordinators/PaymentCoordinator.swift:89:9: warning: Empty Parentheses with Trailing Closure Violation: When using trailing closures, empty parentheses should be avoided after the method call (empty_parentheses_with_trailing_closure)
+Done linting! Found 58 violations, 4 serious in 370 files.

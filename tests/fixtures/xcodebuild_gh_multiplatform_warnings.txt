@@ -1,0 +1,144 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -workspace WeatherApp.xcworkspace -scheme WeatherApp -sdk iphoneos -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=17.2' build
+
+User defaults from command line:
+    IDEPackageSupportUseBuiltinSCM = YES
+
+Resolve Package Graph
+Fetching from https://github.com/Alamofire/Alamofire.git (cached)
+Fetching from https://github.com/onevcat/Kingfisher.git (cached)
+Fetching from https://github.com/SnapKit/SnapKit.git (cached)
+Fetching from https://github.com/realm/realm-swift.git (cached)
+Fetching from https://github.com/ReactiveX/RxSwift.git (cached)
+Fetching from https://github.com/CombineCommunity/CombineExt.git (cached)
+Fetching from https://github.com/pointfreeco/swift-composable-architecture (cached)
+Resolved source packages:
+  Alamofire: https://github.com/Alamofire/Alamofire.git @ 5.9.1
+  Kingfisher: https://github.com/onevcat/Kingfisher.git @ 7.12.0
+  SnapKit: https://github.com/SnapKit/SnapKit.git @ 5.7.1
+  realm-swift: https://github.com/realm/realm-swift.git @ 10.46.0
+  RxSwift: https://github.com/ReactiveX/RxSwift.git @ 6.7.1
+  CombineExt: https://github.com/CombineCommunity/CombineExt.git @ 1.8.1
+  swift-composable-architecture: https://github.com/pointfreeco/swift-composable-architecture @ 1.9.3
+ComputePackagePrebuildTargetDependencyGraph
+Prepare packages
+CreateBuildRequest
+SendProjectDescription
+CreateBuildOperation
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (15 targets)
+    Target 'WeatherApp' in project 'WeatherApp'
+        ➜ Explicit dependency on target 'Alamofire' in project 'Alamofire'
+        ➜ Explicit dependency on target 'Kingfisher' in project 'Kingfisher'
+        ➜ Explicit dependency on target 'SnapKit' in project 'SnapKit'
+        ➜ Explicit dependency on target 'RealmSwift' in project 'realm-swift'
+        ➜ Implicit dependency on target 'Realm' in project 'realm-swift'
+        ➜ Explicit dependency on target 'RxSwift' in project 'RxSwift'
+        ➜ Explicit dependency on target 'RxCocoa' in project 'RxSwift'
+        ➜ Explicit dependency on target 'CombineExt' in project 'CombineExt'
+        ➜ Explicit dependency on target 'ComposableArchitecture' in project 'swift-composable-architecture'
+GatherProvisioningInputs
+CreateBuildDescription
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator17.2.sdk -x c -c /dev/null
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc --version
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -version_details
+Build description signature: 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d
+Build description path: /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/XCBuildData/1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d.xcbuilddata
+
+SwiftCompile normal x86_64 Compiling\ Alamofire.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/Alamofire/Source/Alamofire.swift (in target 'Alamofire' from project 'Alamofire')
+SwiftCompile normal x86_64 Compiling\ Session.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/Alamofire/Source/Session.swift (in target 'Alamofire' from project 'Alamofire')
+SwiftCompile normal x86_64 Compiling\ Request.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/Alamofire/Source/Request.swift (in target 'Alamofire' from project 'Alamofire')
+
+SwiftCompile normal x86_64 Compiling\ SnapKit.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/SnapKit/Sources/SnapKit.swift (in target 'SnapKit' from project 'SnapKit')
+SwiftCompile normal x86_64 Compiling\ ConstraintMaker.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/SnapKit/Sources/ConstraintMaker.swift (in target 'SnapKit' from project 'SnapKit')
+
+SwiftCompile normal x86_64 Compiling\ KingfisherManager.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/Kingfisher/Sources/General/KingfisherManager.swift (in target 'Kingfisher' from project 'Kingfisher')
+
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Views/WeatherDetailView.swift:23:9: warning: string interpolation produces a debug description for an optional value; did you mean to make this explicit?
+        let text = "Temperature: \(temperature)"
+                                  ^
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Views/WeatherDetailView.swift:45:9: warning: result of call to 'publisher(for:options:)' is unused
+        NotificationCenter.default.publisher(for: .weatherDidUpdate)
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Views/ForecastCollectionViewCell.swift:67:5: warning: 'class' keyword is deprecated for protocol constraints; use 'AnyObject' instead
+    weak var delegate: ForecastCellDelegate?
+    ^~~~
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Models/WeatherResponse.swift:34:9: warning: variable 'json' was written to, but never read
+        var json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            ^~~~
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Models/WeatherResponse.swift:56:1: warning: file has no trailing newline
+
+SwiftCompile normal x86_64 Compiling\ Observable.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/RxSwift/RxSwift/Observable.swift (in target 'RxSwift' from project 'RxSwift')
+SwiftCompile normal x86_64 Compiling\ ObservableType.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/RxSwift/RxSwift/ObservableType.swift (in target 'RxSwift' from project 'RxSwift')
+SwiftCompile normal x86_64 Compiling\ DisposeBag.swift /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/SourcePackages/checkouts/RxSwift/RxSwift/DisposeBag.swift (in target 'RxSwift' from project 'RxSwift')
+
+SwiftCompile normal x86_64 Compiling\ AppDelegate.swift /Users/runner/work/WeatherApp/WeatherApp/Sources/AppDelegate.swift (in target 'WeatherApp' from project 'WeatherApp')
+SwiftCompile normal x86_64 Compiling\ SceneDelegate.swift /Users/runner/work/WeatherApp/WeatherApp/Sources/SceneDelegate.swift (in target 'WeatherApp' from project 'WeatherApp')
+SwiftCompile normal x86_64 Compiling\ MainViewController.swift /Users/runner/work/WeatherApp/WeatherApp/Sources/Controllers/MainViewController.swift (in target 'WeatherApp' from project 'WeatherApp')
+SwiftCompile normal x86_64 Compiling\ WeatherService.swift /Users/runner/work/WeatherApp/WeatherApp/Sources/Services/WeatherService.swift (in target 'WeatherApp' from project 'WeatherApp')
+SwiftCompile normal x86_64 Compiling\ LocationManager.swift /Users/runner/work/WeatherApp/WeatherApp/Sources/Services/LocationManager.swift (in target 'WeatherApp' from project 'WeatherApp')
+SwiftCompile normal x86_64 Compiling\ NetworkClient.swift /Users/runner/work/WeatherApp/WeatherApp/Sources/Networking/NetworkClient.swift (in target 'WeatherApp' from project 'WeatherApp')
+
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Services/WeatherService.swift:89:9: warning: expression implicitly coerced from 'URLSessionDataTask?' to 'Any'
+        let task = session.dataTask(with: request)
+            ^~~~
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Services/LocationManager.swift:34:5: warning: '@objc' attribute used without importing module 'Foundation'; this will be an error in future Swift versions
+    @objc func locationDidUpdate(_ notification: Notification) {
+    ^~~~~
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Networking/NetworkClient.swift:56:9: warning: initialization of 'UnsafeMutablePointer<Int8>' results in a dangling pointer
+        let ptr = UnsafeMutablePointer<Int8>(mutating: string)
+                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/runner/work/WeatherApp/WeatherApp/Sources/Networking/NetworkClient.swift:78:17: warning: 'URLSession' was deprecated in iOS 17.0: Use URLSession with async/await instead
+        URLSession.shared.dataTask(with: request) { data, response, error in
+                         ^
+
+SwiftEmitModule normal x86_64 Emitting\ module\ for\ WeatherApp (in target 'WeatherApp' from project 'WeatherApp')
+EmitSwiftModule normal x86_64 (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+
+Ld /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app/WeatherApp normal (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -Xlinker -reproducible -target x86_64-apple-ios17.2-simulator
+
+CompileAssetCatalog /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app /Users/runner/work/WeatherApp/WeatherApp/Assets.xcassets (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+    /Applications/Xcode.app/Contents/Developer/usr/bin/actool --output-format human-readable-text --notices --warnings --export-dependency-info /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Intermediates.noindex/WeatherApp.build/Debug-iphonesimulator/WeatherApp.build/assetcatalog_dependencies --output-partial-info-plist /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Intermediates.noindex/WeatherApp.build/Debug-iphonesimulator/WeatherApp.build/assetcatalog_generated_info.plist --app-icon AppIcon --compress-pngs --enable-on-demand-resources YES --target-device iphone --target-device ipad --minimum-deployment-target 17.0 --platform iphonesimulator --product-type com.apple.product-type.application --compile /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app /Users/runner/work/WeatherApp/WeatherApp/Assets.xcassets
+
+CompileStoryboard /Users/runner/work/WeatherApp/WeatherApp/Base.lproj/Main.storyboard (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+    /Applications/Xcode.app/Contents/Developer/usr/bin/ibtool --errors --warnings --notices --module WeatherApp --output-partial-info-plist /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Intermediates.noindex/WeatherApp.build/Debug-iphonesimulator/WeatherApp.build/Base.lproj/Main-SBPartialInfo.plist --auto-activate-custom-fonts --target-device iphone --target-device ipad --minimum-deployment-target 17.0 --output-format human-readable-text --compilation-directory /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Intermediates.noindex/WeatherApp.build/Debug-iphonesimulator/WeatherApp.build/Base.lproj /Users/runner/work/WeatherApp/WeatherApp/Base.lproj/Main.storyboard
+
+CompileStoryboard /Users/runner/work/WeatherApp/WeatherApp/Base.lproj/LaunchScreen.storyboard (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+    /Applications/Xcode.app/Contents/Developer/usr/bin/ibtool --errors --warnings --notices --module WeatherApp --target-device iphone --target-device ipad --minimum-deployment-target 17.0 --output-format human-readable-text --compilation-directory /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Intermediates.noindex/WeatherApp.build/Debug-iphonesimulator/WeatherApp.build/Base.lproj /Users/runner/work/WeatherApp/WeatherApp/Base.lproj/LaunchScreen.storyboard
+
+ProcessInfoPlistFile /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app/Info.plist /Users/runner/work/WeatherApp/WeatherApp/Info.plist (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+    builtin-infoPlistUtility /Users/runner/work/WeatherApp/WeatherApp/Info.plist -genpkginfo /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app/PkgInfo -expandbuildsettings -format binary -platform iphonesimulator -requiredArchitecture x86_64 -o /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app/Info.plist
+
+LinkStoryboards (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+    /Applications/Xcode.app/Contents/Developer/usr/bin/ibtool --errors --warnings --notices --module WeatherApp --target-device iphone --target-device ipad --minimum-deployment-target 17.0 --output-format human-readable-text --link /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Intermediates.noindex/WeatherApp.build/Debug-iphonesimulator/WeatherApp.build/Base.lproj/LaunchScreen.storyboardc /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Intermediates.noindex/WeatherApp.build/Debug-iphonesimulator/WeatherApp.build/Base.lproj/Main.storyboardc
+
+CodeSign /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+
+    Signing Identity:     "-"
+
+    /usr/bin/codesign --force --sign - --entitlements /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Intermediates.noindex/WeatherApp.build/Debug-iphonesimulator/WeatherApp.build/WeatherApp.app.xcent --timestamp=none --generate-entitlement-der /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app
+
+Touch /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app (in target 'WeatherApp' from project 'WeatherApp')
+    cd /Users/runner/work/WeatherApp/WeatherApp
+    /usr/bin/touch -c /Users/runner/Library/Developer/Xcode/DerivedData/WeatherApp-xyzabc123456/Build/Products/Debug-iphonesimulator/WeatherApp.app
+
+Build Timing Summary
+CompileSwiftSources (12 tasks)   | 34.567 seconds
+CompileAssetCatalog (1 tasks)    | 2.345 seconds
+CompileStoryboard (2 tasks)      | 1.234 seconds
+Ld (1 tasks)                     | 0.567 seconds
+CodeSign (1 tasks)               | 0.234 seconds
+LinkStoryboards (1 tasks)        | 0.123 seconds
+Touch (1 tasks)                  | 0.001 seconds
+
+** BUILD SUCCEEDED ** [39.071 sec]

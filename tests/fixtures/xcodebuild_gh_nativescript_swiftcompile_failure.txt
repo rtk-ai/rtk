@@ -1,0 +1,96 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -workspace platforms/ios/NativeScriptApp.xcworkspace -scheme NativeScriptApp -sdk iphoneos -configuration Debug -destination 'generic/platform=iOS' ONLY_ACTIVE_ARCH=NO build
+
+User defaults from command line:
+    IDEPackageSupportUseBuiltinSCM = YES
+
+note: Using new build system
+note: Planning build
+note: Constructing build description
+Build system information
+warning: Traditional headermap style is no longer supported; please migrate to using separate headermaps and set 'ALWAYS_SEARCH_USER_PATHS' to NO. (in target 'NativeScriptApp' from project 'NativeScriptApp')
+
+CreateBuildDirectory /Users/runner/Library/Developer/Xcode/DerivedData/NativeScriptApp-bghijklmnop/Build/Products (in target: NativeScriptApp)
+CreateBuildDirectory /Users/runner/Library/Developer/Xcode/DerivedData/NativeScriptApp-bghijklmnop/Build/Intermediates.noindex (in target: NativeScriptApp)
+
+CompileSwift normal arm64 /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/views/HomeView.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+    cd /Users/runner/work/NativeScriptApp/platforms/ios
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift -frontend -c -primary-file /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/views/HomeView.swift
+
+CompileSwift normal arm64 /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/services/APIService.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+    cd /Users/runner/work/NativeScriptApp/platforms/ios
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift -frontend -c -primary-file /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/services/APIService.swift
+
+CompileSwift normal arm64 /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/models/UserModel.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+CompileSwift normal arm64 /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/helpers/DateHelper.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+CompileSwift normal arm64 /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/helpers/NetworkHelper.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+CompileSwift normal arm64 /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/delegates/AppDelegate.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/views/HomeView.swift:15:19: error: cannot find type 'TNSView' in scope
+class HomeView: TNSView {
+                ^~~~~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/views/HomeView.swift:23:9: error: use of unresolved identifier 'TNSRuntime'
+        TNSRuntime.current.evaluateScript("require('./home-view-model')")
+        ^~~~~~~~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/views/HomeView.swift:34:25: error: value of type 'String' has no member 'toNativeScript'
+        let nsValue = text.toNativeScript()
+                           ^~~~~~~~~~~~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/services/APIService.swift:12:15: error: cannot find 'NativeScriptHTTPClient' in scope
+        let client = NativeScriptHTTPClient()
+                     ^~~~~~~~~~~~~~~~~~~~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/services/APIService.swift:34:9: error: use of unresolved identifier 'TNSLog'
+        TNSLog("API request failed: \(error)")
+        ^~~~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/services/APIService.swift:56:25: error: type 'APIResponse' does not conform to protocol 'Decodable'
+struct APIResponse: Codable {
+                    ^~~~~~~
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/services/APIService.swift:58:9: note: cannot automatically synthesize 'Decodable' because 'TNSValue' does not conform to 'Decodable'
+    var data: TNSValue
+        ^
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/models/UserModel.swift:8:5: warning: variable 'name' was never mutated; consider changing to 'let' constant
+    var name: String
+    ^~~
+    let
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/models/UserModel.swift:23:25: error: value of type 'Any' has no member 'stringValue'
+        self.name = json["name"].stringValue
+                                 ^~~~~~~~~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/helpers/DateHelper.swift:15:9: warning: 'DateFormatter' initializer is deprecated: Use ISO8601DateFormatter instead
+        let formatter = DateFormatter()
+                        ^~~~~~~~~~~~~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/helpers/NetworkHelper.swift:23:25: error: cannot convert value of type 'String' to expected argument type 'URL'
+        let task = session.dataTask(with: urlString) { data, response, error in
+                                          ^~~~~~~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/helpers/NetworkHelper.swift:45:9: warning: capture of 'self' with non-sendable type 'NetworkHelper' in a `@Sendable` closure; this is an error in the Swift 6 language mode
+        session.dataTask(with: url) { [self] data, response, error in
+                                       ^~~~
+
+/Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/delegates/AppDelegate.swift:12:10: error: method does not override any method from its superclass
+    override func applicationDidFinishLaunching(_ application: UIApplication) {
+                  ^
+
+SwiftEmitModule normal arm64 Emitting\ module\ for\ NativeScriptApp (in target 'NativeScriptApp' from project 'NativeScriptApp')
+
+note: Using the first of multiple matching destinations:
+{ platform:iOS, id:dvtdevice-DVTiPhonePlaceholder-iphoneos:placeholder, name:Any iOS Device, error:iPhoneOS17.2.sdk cannot be located }
+{ platform:iOS Simulator, id:D3BCBB97-2F4A-4A5B-A1AF-41D3A0D7B3FC, OS:17.2, name:iPhone 15 Pro }
+
+** BUILD FAILED **
+
+The following build commands failed:
+	SwiftCompile normal arm64 Compiling HomeView.swift /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/views/HomeView.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+	SwiftCompile normal arm64 Compiling APIService.swift /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/services/APIService.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+	SwiftCompile normal arm64 Compiling UserModel.swift /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/models/UserModel.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+	SwiftCompile normal arm64 Compiling NetworkHelper.swift /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/helpers/NetworkHelper.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+	SwiftCompile normal arm64 Compiling AppDelegate.swift /Users/runner/work/NativeScriptApp/platforms/ios/NativeScriptApp/app/delegates/AppDelegate.swift (in target 'NativeScriptApp' from project 'NativeScriptApp')
+	SwiftEmitModule normal arm64 Emitting module for NativeScriptApp (in target 'NativeScriptApp' from project 'NativeScriptApp')
+(6 failures)

@@ -1,0 +1,107 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -workspace MyApp.xcworkspace -scheme MyApp -sdk iphoneos -configuration Release -destination 'generic/platform=iOS' build
+
+User defaults from command line:
+    IDEPackageSupportUseBuiltinSCM = YES
+
+Resolve Package Graph
+Fetching from https://github.com/firebase/firebase-ios-sdk.git
+Fetching from https://github.com/google/GoogleSignIn-iOS.git
+Fetching from https://github.com/google/gtm-session-fetcher.git
+Fetching from https://github.com/google/promises.git
+Fetching from https://github.com/google/GoogleDataTransport.git
+Fetching from https://github.com/google/GoogleUtilities.git
+Fetching from https://github.com/AliSoftware/OHHTTPStubs.git
+Fetching from https://github.com/apple/swift-protobuf.git
+Fetching from https://github.com/nicklockwood/SwiftFormat.git
+Fetching from https://github.com/google/abseil-cpp-binary.git
+Fetching from https://github.com/google/grpc-binary.git
+Fetching from https://github.com/nicklockwood/SwiftFormat.git (cached)
+Fetching from https://github.com/firebase/firebase-ios-sdk.git (cached)
+Fetching from https://github.com/google/GoogleSignIn-iOS.git (cached)
+Fetching from https://github.com/google/gtm-session-fetcher.git (cached)
+Fetching from https://github.com/google/promises.git (cached)
+Fetching from https://github.com/google/GoogleDataTransport.git (cached)
+Fetching from https://github.com/google/GoogleUtilities.git (cached)
+Fetching from https://github.com/apple/swift-protobuf.git (cached)
+Fetching from https://github.com/google/abseil-cpp-binary.git (cached)
+Fetching from https://github.com/google/grpc-binary.git (cached)
+Fetching from https://github.com/google/nanopb.git
+Fetching from https://github.com/google/nanopb.git (cached)
+Fetching from https://github.com/google/leveldb.git
+Fetching from https://github.com/google/leveldb.git (cached)
+Creating working copy of package 'firebase-ios-sdk'
+Checking out 10.10.0 of package 'firebase-ios-sdk'
+Creating working copy of package 'GoogleSignIn-iOS'
+Checking out 7.0.0 of package 'GoogleSignIn-iOS'
+Creating working copy of package 'gtm-session-fetcher'
+Checking out 3.1.1 of package 'gtm-session-fetcher'
+Creating working copy of package 'promises'
+Checking out 2.3.1 of package 'promises'
+Creating working copy of package 'GoogleDataTransport'
+Checking out 9.2.5 of package 'GoogleDataTransport'
+Creating working copy of package 'GoogleUtilities'
+Checking out 7.11.5 of package 'GoogleUtilities'
+Creating working copy of package 'swift-protobuf'
+Checking out 1.25.2 of package 'swift-protobuf'
+Creating working copy of package 'nanopb'
+Checking out 2.30909.1 of package 'nanopb'
+Creating working copy of package 'abseil-cpp-binary'
+Checking out 1.2024011602.0 of package 'abseil-cpp-binary'
+Creating working copy of package 'grpc-binary'
+Checking out 1.62.2 of package 'grpc-binary'
+Creating working copy of package 'leveldb'
+Checking out 1.22.4 of package 'leveldb'
+Resolved source packages:
+  firebase-ios-sdk: https://github.com/firebase/firebase-ios-sdk.git @ 10.10.0
+  GoogleSignIn-iOS: https://github.com/google/GoogleSignIn-iOS.git @ 7.0.0
+  gtm-session-fetcher: https://github.com/google/gtm-session-fetcher.git @ 3.1.1
+  promises: https://github.com/google/promises.git @ 2.3.1
+  GoogleDataTransport: https://github.com/google/GoogleDataTransport.git @ 9.2.5
+  GoogleUtilities: https://github.com/google/GoogleUtilities.git @ 7.11.5
+  swift-protobuf: https://github.com/apple/swift-protobuf.git @ 1.25.2
+  nanopb: https://github.com/google/nanopb.git @ 2.30909.1
+  abseil-cpp-binary: https://github.com/google/abseil-cpp-binary.git @ 1.2024011602.0
+  grpc-binary: https://github.com/google/grpc-binary.git @ 1.62.2
+  leveldb: https://github.com/google/leveldb.git @ 1.22.4
+  SwiftFormat: https://github.com/nicklockwood/SwiftFormat.git @ 0.54.3
+  OHHTTPStubs: https://github.com/AliSoftware/OHHTTPStubs.git @ 9.1.0
+ComputePackagePrebuildTargetDependencyGraph
+Prepare packages
+warning: 'OHHTTPStubs': found 1 file(s) which are unhandled; explicitly declare them as resources or exclude from the target
+    /checkouts/OHHTTPStubs/Sources/OHHTTPStubs/README.md
+Build system information
+warning: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to 13.0, but the range of supported deployment target versions is 14.0 to 18.2.99. (in target 'nanopb' from project 'nanopb')
+warning: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to 12.0, but the range of supported deployment target versions is 14.0 to 18.2.99. (in target 'leveldb-library' from project 'leveldb')
+CreateBuildRequest
+SendProjectDescription
+CreateBuildOperation
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (28 targets)
+    Target 'MyApp' in project 'MyApp'
+        ➜ Explicit dependency on target 'FirebaseAnalytics' in project 'firebase-ios-sdk'
+        ➜ Explicit dependency on target 'FirebaseAuth' in project 'firebase-ios-sdk'
+        ➜ Explicit dependency on target 'FirebaseFirestore' in project 'firebase-ios-sdk'
+        ➜ Explicit dependency on target 'FirebaseMessaging' in project 'firebase-ios-sdk'
+        ➜ Explicit dependency on target 'FirebaseCrashlytics' in project 'firebase-ios-sdk'
+        ➜ Explicit dependency on target 'GoogleSignIn' in project 'GoogleSignIn-iOS'
+GatherProvisioningInputs
+CreateBuildDescription
+Build description signature: ef7a2b1c3d4e5f6a7b8c9d0e1f2a3b4c
+Build description path: /Users/ci/Library/Developer/Xcode/DerivedData/MyApp-abcdef1234567890/Build/XCBuildData/ef7a2b1c3d4e5f6a7b8c9d0e1f2a3b4c.xcbuilddata
+
+error: unable to create directory '/Users/ci/Library/Developer/Xcode/DerivedData/MyApp-abcdef1234567890/SourcePackages/checkouts/nanopb/build/Release': File exists but is not a directory (17)
+
+error: unable to create directory '/Users/ci/Library/Developer/Xcode/DerivedData/MyApp-abcdef1234567890/SourcePackages/checkouts/nanopb/build/EagerLinkingTBDs/Release': File exists but is not a directory (17)
+
+warning: Run script build phase 'Run SwiftLint' will be run during every build because it does not specify any outputs. To address this warning, either add output dependencies to the script phase, or configure it to run in every build by unchecking "Based on dependency analysis" in the script phase. (in target 'MyApp' from project 'MyApp')
+
+warning: Run script build phase 'Firebase Crashlytics Upload dSYMs' will be run during every build because it does not specify any outputs. To address this warning, either add output dependencies to the script phase, or configure it to run in every build by unchecking "Based on dependency analysis" in the script phase. (in target 'MyApp' from project 'MyApp')
+
+** BUILD FAILED **
+
+The following build commands failed:
+	CreateBuildDirectory /Users/ci/Library/Developer/Xcode/DerivedData/MyApp-abcdef1234567890/SourcePackages/checkouts/nanopb/build/Release (in target 'nanopb' from project 'nanopb')
+	CreateBuildDirectory /Users/ci/Library/Developer/Xcode/DerivedData/MyApp-abcdef1234567890/SourcePackages/checkouts/nanopb/build/EagerLinkingTBDs/Release (in target 'nanopb' from project 'nanopb')
+(2 failures)

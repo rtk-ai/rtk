@@ -1,0 +1,121 @@
+Build settings from command line:
+    CODE_SIGN_IDENTITY =
+    CODE_SIGNING_REQUIRED = NO
+    OTHER_SWIFT_FLAGS = -Xfrontend -debug-time-function-bodies
+
+note: Using new build system
+
+** CLEAN SUCCEEDED **
+
+note: Using new build system
+note: Planning build
+note: Constructing build description
+Build system information
+warning: TestProject isn't code signed but requires entitlements. It is not possible to add entitlements to a binary without signing it. (in target 'TestProject')
+
+CreateBuildDirectory /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    builtin-create-build-directory /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products
+
+CreateBuildDirectory /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    builtin-create-build-directory /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex
+
+MkDir /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    /bin/mkdir -p /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app
+
+WriteAuxiliaryFile /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/TestProject-all-target-headers.hmap (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    write-file /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/TestProject-all-target-headers.hmap
+
+WriteAuxiliaryFile /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/TestProject.hmap (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    write-file /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/TestProject.hmap
+
+WriteAuxiliaryFile /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/TestProject-OutputFileMap.json (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    write-file /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/TestProject-OutputFileMap.json
+
+WriteAuxiliaryFile /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/TestProject.LinkFileList (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    write-file /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/TestProject.LinkFileList
+
+CompileSwiftSources normal arm64 com.apple.xcode.tools.swift.compiler (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+    export SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS12.1.sdk
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -incremental -module-name TestProject -Onone -enable-batch-mode -enforce-exclusivity=checked -DDEBUG -Xfrontend -debug-time-function-bodies -sdk /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS12.1.sdk -target arm64-apple-ios12.1 -g -module-cache-path /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/ModuleCache.noindex -swift-version 4.2 -I /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos -F /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos -c -j8 /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/ViewController.swift /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift -output-file-map /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/TestProject-OutputFileMap.json -parseable-output -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/TestProject.swiftmodule -module-name TestProject -o /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/ViewController.o -embed-bitcode-marker
+
+CompileSwift normal arm64 /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/ViewController.swift (in target: TestProject)
+566.37ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/ViewController.swift:13:19	instance method viewDidLoad()
+0.38ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/ViewController.swift:11:40	initializer init(nibName:bundle:)
+0.33ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/ViewController.swift:11:40	initializer init(coder:)
+
+CompileSwift normal arm64 /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift (in target: TestProject)
+0.23ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:17:10	instance method application(_:didFinishLaunchingWithOptions:)
+0.15ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:14:9	getter window
+0.06ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:14:9	setter window
+0.01ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:22:10	instance method applicationWillResignActive(_:)
+0.01ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:27:10	instance method applicationDidEnterBackground(_:)
+0.01ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:32:10	instance method applicationWillEnterForeground(_:)
+0.01ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:36:10	instance method applicationDidBecomeActive(_:)
+0.01ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:40:10	instance method applicationWillTerminate(_:)
+0.28ms	/Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/AppDelegate.swift:12:55	initializer init()
+
+MergeSwiftModule normal arm64 (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift -frontend -merge-modules -emit-module /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/ViewController~partial.swiftmodule /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/AppDelegate~partial.swiftmodule -parse-as-library -sil-merge-partial-modules -target arm64-apple-ios12.1 -sdk /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS12.1.sdk -module-name TestProject -o /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/TestProject.swiftmodule
+
+Ld /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app/TestProject normal arm64 (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    export IPHONEOS_DEPLOYMENT_TARGET=12.1
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS12.1.sdk -L/Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos -filelist /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Objects-normal/arm64/TestProject.LinkFileList -Xlinker -rpath -Xlinker @executable_path/Frameworks -miphoneos-version-min=12.1 -dead_strip -fembed-bitcode-marker -fobjc-link-runtime -L/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos -o /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app/TestProject
+
+CompileAssetCatalog /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/Assets.xcassets (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    /Applications/Xcode.app/Contents/Developer/usr/bin/actool --output-format human-readable-text --notices --warnings --export-dependency-info /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/assetcatalog_dependencies --output-partial-info-plist /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/assetcatalog_generated_info.plist --app-icon AppIcon --compress-pngs --enable-on-demand-resources YES --target-device iphone --target-device ipad --minimum-deployment-target 12.1 --platform iphoneos --product-type com.apple.product-type.application --compile /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/Assets.xcassets
+/* com.apple.actool.compilation-results */
+/Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/assetcatalog_generated_info.plist
+
+CompileStoryboard /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/Base.lproj/Main.storyboard (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    /Applications/Xcode.app/Contents/Developer/usr/bin/ibtool --errors --warnings --notices --module TestProject --output-partial-info-plist /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Base.lproj/Main-SBPartialInfo.plist --auto-activate-custom-fonts --target-device iphone --target-device ipad --minimum-deployment-target 12.1 --output-format human-readable-text --compilation-directory /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Base.lproj /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/Base.lproj/Main.storyboard
+
+CompileStoryboard /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/Base.lproj/LaunchScreen.storyboard (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    /Applications/Xcode.app/Contents/Developer/usr/bin/ibtool --errors --warnings --notices --module TestProject --output-partial-info-plist /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Base.lproj/LaunchScreen-SBPartialInfo.plist --auto-activate-custom-fonts --target-device iphone --target-device ipad --minimum-deployment-target 12.1 --output-format human-readable-text --compilation-directory /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Base.lproj /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/Base.lproj/LaunchScreen.storyboard
+
+ProcessInfoPlistFile /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app/Info.plist /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/Info.plist (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    builtin-infoPlistUtility /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject/TestProject/Info.plist -genpkginfo /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app/PkgInfo -expandbuildsettings -format binary -platform iphoneos -requiredArchitecture arm64 -o /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app/Info.plist
+
+LinkStoryboards (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    /Applications/Xcode.app/Contents/Developer/usr/bin/ibtool --errors --warnings --notices --module TestProject --target-device iphone --target-device ipad --minimum-deployment-target 12.1 --output-format human-readable-text --link /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Base.lproj/LaunchScreen.storyboardc /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Intermediates.noindex/TestProject.build/Debug-iphoneos/TestProject.build/Base.lproj/Main.storyboardc
+
+CopySwiftLibs /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app/TestProject --scan-folder /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app/Frameworks --platform iphoneos --toolchain /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app/Frameworks --strip-bitcode
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftCore.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftFoundation.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftUIKit.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftDarwin.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftDispatch.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftCoreFoundation.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftCoreGraphics.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftCoreImage.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftMetal.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftObjectiveC.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftQuartzCore.dylib
+Copying /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos/libswiftos.dylib
+
+Touch /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    /usr/bin/touch -c /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app
+
+Validate /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app (in target: TestProject)
+    cd /Users/i.v.vasilenko/Dev/fastlane-plugin-compilation-time-report/TestProject
+    builtin-validationUtility /Users/i.v.vasilenko/Library/Developer/Xcode/DerivedData/TestProject-fmwqnfznksdcotgrlycmmfvrdwim/Build/Products/Debug-iphoneos/TestProject.app
+
+** BUILD SUCCEEDED **

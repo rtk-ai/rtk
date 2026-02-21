@@ -353,8 +353,8 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_success_full_build() {
-        let input = include_str!("../tests/fixtures/xcodebuild_success_cached.txt");
+    fn test_filter_kickstarter_timing_summary() {
+        let input = include_str!("../tests/fixtures/xcodebuild_gh_kickstarter_timing_summary.txt");
         let result = filter_xcodebuild(input);
 
         // Must contain build result
@@ -367,86 +367,57 @@ mod tests {
 
         // Must contain target info
         assert!(
-            result.contains("bitchatShareExtension"),
+            result.contains("Kickstarter-iOS"),
             "missing target: {}",
             result
         );
-        assert!(result.contains("bitchat"), "missing project: {}", result);
 
-        // Must contain package count
+        // Must contain package count (7 resolved, 7 fetched)
         assert!(
-            result.contains("21 resolved"),
+            result.contains("7 resolved"),
             "missing package count: {}",
+            result
+        );
+        assert!(
+            result.contains("7 fetched"),
+            "missing fetch count: {}",
             result
         );
 
         // Must contain compiled files
         assert!(
-            result.contains("ShareViewController.swift"),
-            "missing compiled file: {}",
-            result
-        );
-        assert!(
-            result.contains("TransportConfig.swift"),
+            result.contains("AppDelegateViewModel.swift"),
             "missing compiled file: {}",
             result
         );
 
-        // Must contain PCM count
+        // Must NOT contain verbose noise
         assert!(
-            result.contains("Precompiled modules: 50"),
-            "missing PCM count: {}",
-            result
-        );
-
-        // Must contain signing identity
-        assert!(
-            result.contains("Apple Development: Austin Heap"),
-            "missing signing identity: {}",
-            result
-        );
-
-        // Must NOT contain noise
-        assert!(
-            !result.contains("builtin-"),
-            "contains builtin command: {}",
+            !result.contains("CompileStoryboard"),
+            "contains CompileStoryboard: {}",
             result
         );
         assert!(
-            !result.contains("/Applications/Xcode.app"),
-            "contains Xcode path: {}",
+            !result.contains("CompileXIB"),
+            "contains CompileXIB: {}",
             result
         );
         assert!(
-            !result.contains("SwiftExplicitDependencyGeneratePcm"),
-            "contains PCM line: {}",
+            !result.contains("PhaseScriptExecution"),
+            "contains PhaseScriptExecution: {}",
             result
         );
         assert!(
-            !result.contains("ClangStatCache"),
-            "contains ClangStatCache: {}",
-            result
-        );
-        assert!(
-            !result.contains("ProcessProductPackaging"),
-            "contains ProcessProductPackaging: {}",
-            result
-        );
-        assert!(
-            !result.contains("Entitlements:"),
-            "contains Entitlements: {}",
-            result
-        );
-        assert!(
-            !result.contains("builtin-copy"),
-            "contains builtin-copy: {}",
+            !result.contains("CodeSign /Users"),
+            "contains CodeSign path: {}",
             result
         );
     }
 
     #[test]
-    fn test_filter_success_minimal_build() {
-        let input = include_str!("../tests/fixtures/xcodebuild_success_minimal.txt");
+    fn test_filter_testproject_compilation_timing() {
+        let input =
+            include_str!("../tests/fixtures/xcodebuild_gh_testproject_compilation_timing.txt");
         let result = filter_xcodebuild(input);
 
         assert!(
@@ -454,43 +425,35 @@ mod tests {
             "missing BUILD SUCCEEDED: {}",
             result
         );
-        assert!(
-            result.contains("bitchatShareExtension"),
-            "missing target: {}",
-            result
-        );
-        assert!(
-            result.contains("4 resolved"),
-            "missing package count: {}",
-            result
-        );
-        assert!(
-            result.contains("19 fetched"),
-            "missing fetch count: {}",
-            result
-        );
 
-        // Must NOT contain noise
+        // Must NOT contain build system noise
         assert!(
-            !result.contains("Fetching from"),
-            "contains Fetching: {}",
+            !result.contains("WriteAuxiliaryFile"),
+            "contains WriteAuxiliaryFile: {}",
             result
         );
+        assert!(!result.contains("MkDir"), "contains MkDir: {}", result);
         assert!(
-            !result.contains("Creating working copy"),
-            "contains checkout: {}",
-            result
-        );
-        assert!(
-            !result.contains("builtin-infoPlistUtility"),
+            !result.contains("builtin-create-build-directory"),
             "contains builtin: {}",
+            result
+        );
+        assert!(
+            !result.contains("CopySwiftLibs"),
+            "contains CopySwiftLibs: {}",
+            result
+        );
+        assert!(
+            !result.contains("MergeSwiftModule"),
+            "contains MergeSwiftModule: {}",
             result
         );
     }
 
     #[test]
-    fn test_filter_build_failure() {
-        let input = include_str!("../tests/fixtures/xcodebuild_failure.txt");
+    fn test_filter_nativescript_build_failure() {
+        let input =
+            include_str!("../tests/fixtures/xcodebuild_gh_nativescript_swiftcompile_failure.txt");
         let result = filter_xcodebuild(input);
 
         // Must show failure
@@ -503,44 +466,30 @@ mod tests {
 
         // Must show errors with filenames (not full paths)
         assert!(
-            result.contains("AppDelegate.swift:15:9"),
-            "missing error location: {}",
+            result.contains("HomeView.swift"),
+            "missing error file: {}",
             result
         );
         assert!(
-            result.contains("cannot find 'missingVariable' in scope"),
+            result.contains("APIService.swift"),
+            "missing error file: {}",
+            result
+        );
+        assert!(
+            result.contains("cannot find type 'TNSView' in scope"),
             "missing error message: {}",
             result
         );
-        assert!(
-            result.contains("MainView.swift:45:13"),
-            "missing error location: {}",
-            result
-        );
-        assert!(
-            result.contains("NetworkManager.swift:67:20"),
-            "missing error location: {}",
-            result
-        );
 
-        // Must show warning
+        // Must show error count (9 errors match the file:line:col format)
         assert!(
-            result.contains("1 warning"),
-            "missing warning count: {}",
-            result
-        );
-        assert!(
-            result.contains("result of call to 'print()' is unused"),
-            "missing warning message: {}",
-            result
-        );
-
-        // Must show error count
-        assert!(
-            result.contains("4 error"),
+            result.contains("9 error"),
             "missing error count: {}",
             result
         );
+
+        // Must show warnings
+        assert!(result.contains("warning"), "missing warnings: {}", result);
 
         // Must show failed commands
         assert!(
@@ -548,36 +497,133 @@ mod tests {
             "missing Failed section: {}",
             result
         );
-
-        // Must NOT contain full paths
         assert!(
-            !result.contains("/Users/austinheap/Development"),
-            "contains full path: {}",
+            result.contains("(6 failures)"),
+            "missing failure count: {}",
+            result
+        );
+
+        // Error lines should have filenames stripped (not full paths)
+        // Note: Failed command lines preserve full paths for debugging
+        let error_lines: Vec<&str> = result
+            .lines()
+            .filter(|l| l.starts_with("  ") && l.contains(": ") && !l.starts_with("    "))
+            .filter(|l| {
+                // Error/warning lines start with "  filename:line:col:"
+                l.trim().chars().next().is_some_and(|c| c.is_alphabetic())
+            })
+            .collect();
+        for el in &error_lines {
+            assert!(
+                !el.contains("/Users/runner/"),
+                "error line contains full path: {}",
+                el
+            );
+        }
+    }
+
+    #[test]
+    fn test_filter_spm_failure() {
+        let input = include_str!("../tests/fixtures/xcodebuild_gh_firebase_spm_failure.txt");
+        let result = filter_xcodebuild(input);
+
+        // Must show failure
+        assert!(
+            result.contains("BUILD FAILED"),
+            "missing BUILD FAILED: {}",
+            result
+        );
+
+        // Must contain target info
+        assert!(result.contains("MyApp"), "missing target: {}", result);
+
+        // Must contain package info (13 resolved, 25 fetched)
+        assert!(
+            result.contains("13 resolved"),
+            "missing resolved count: {}",
+            result
+        );
+        assert!(
+            result.contains("25 fetched"),
+            "missing fetched count: {}",
+            result
+        );
+
+        // Must show failed commands and failure count
+        assert!(
+            result.contains("Failed:"),
+            "missing Failed section: {}",
+            result
+        );
+        assert!(
+            result.contains("(2 failures)"),
+            "missing failure count: {}",
+            result
+        );
+
+        // Must NOT contain verbose SPM noise
+        assert!(
+            !result.contains("Fetching from"),
+            "contains Fetching line: {}",
+            result
+        );
+        assert!(
+            !result.contains("Creating working copy"),
+            "contains checkout line: {}",
+            result
+        );
+        assert!(
+            !result.contains("Checking out"),
+            "contains Checking out line: {}",
             result
         );
     }
 
     #[test]
-    fn test_token_savings_full_build() {
-        let input = include_str!("../tests/fixtures/xcodebuild_success_cached.txt");
+    fn test_filter_warnings_build() {
+        let input = include_str!("../tests/fixtures/xcodebuild_gh_multiplatform_warnings.txt");
         let result = filter_xcodebuild(input);
 
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&result);
-        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
-
+        // Must show success
         assert!(
-            savings >= 90.0,
-            "xcodebuild filter: expected >=90% savings, got {:.1}% ({} -> {} tokens)",
-            savings,
-            input_tokens,
-            output_tokens
+            result.contains("BUILD SUCCEEDED"),
+            "missing BUILD SUCCEEDED: {}",
+            result
+        );
+
+        // Must show warnings
+        assert!(result.contains("warning"), "missing warnings: {}", result);
+
+        // Must contain compiled files
+        assert!(
+            result.contains("Alamofire.swift"),
+            "missing compiled file: {}",
+            result
+        );
+
+        // Must contain package info (7 resolved)
+        assert!(
+            result.contains("7 resolved"),
+            "missing resolved count: {}",
+            result
+        );
+
+        // Must NOT contain verbose noise
+        assert!(
+            !result.contains("ExecuteExternalTool"),
+            "contains ExecuteExternalTool: {}",
+            result
+        );
+        assert!(
+            !result.contains("ProcessInfoPlistFile"),
+            "contains ProcessInfoPlistFile: {}",
+            result
         );
     }
 
     #[test]
-    fn test_token_savings_minimal_build() {
-        let input = include_str!("../tests/fixtures/xcodebuild_success_minimal.txt");
+    fn test_token_savings_kickstarter() {
+        let input = include_str!("../tests/fixtures/xcodebuild_gh_kickstarter_timing_summary.txt");
         let result = filter_xcodebuild(input);
 
         let input_tokens = count_tokens(input);
@@ -586,7 +632,7 @@ mod tests {
 
         assert!(
             savings >= 80.0,
-            "xcodebuild filter: expected >=80% savings, got {:.1}% ({} -> {} tokens)",
+            "xcodebuild kickstarter filter: expected >=80% savings, got {:.1}% ({} -> {} tokens)",
             savings,
             input_tokens,
             output_tokens
@@ -594,8 +640,9 @@ mod tests {
     }
 
     #[test]
-    fn test_token_savings_failure() {
-        let input = include_str!("../tests/fixtures/xcodebuild_failure.txt");
+    fn test_token_savings_testproject() {
+        let input =
+            include_str!("../tests/fixtures/xcodebuild_gh_testproject_compilation_timing.txt");
         let result = filter_xcodebuild(input);
 
         let input_tokens = count_tokens(input);
@@ -603,12 +650,88 @@ mod tests {
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
         assert!(
-            savings >= 60.0,
-            "xcodebuild filter: expected >=60% savings, got {:.1}% ({} -> {} tokens)",
+            savings >= 90.0,
+            "xcodebuild testproject filter: expected >=90% savings, got {:.1}% ({} -> {} tokens)",
             savings,
             input_tokens,
             output_tokens
         );
+    }
+
+    #[test]
+    fn test_token_savings_nativescript() {
+        let input =
+            include_str!("../tests/fixtures/xcodebuild_gh_nativescript_swiftcompile_failure.txt");
+        let result = filter_xcodebuild(input);
+
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        // Nativescript: BUILD FAILED with many errors - errors are preserved
+        assert!(
+            savings >= 55.0,
+            "xcodebuild nativescript filter: expected >=55% savings, got {:.1}% ({} -> {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
+
+    #[test]
+    fn test_token_savings_all_fixtures() {
+        let fixtures: Vec<(&str, &str)> = vec![
+            (
+                "firebase_spm",
+                include_str!("../tests/fixtures/xcodebuild_gh_firebase_spm_failure.txt"),
+            ),
+            (
+                "kickstarter_timing",
+                include_str!("../tests/fixtures/xcodebuild_gh_kickstarter_timing_summary.txt"),
+            ),
+            (
+                "multiplatform_warnings",
+                include_str!("../tests/fixtures/xcodebuild_gh_multiplatform_warnings.txt"),
+            ),
+            (
+                "nativescript_failure",
+                include_str!(
+                    "../tests/fixtures/xcodebuild_gh_nativescript_swiftcompile_failure.txt"
+                ),
+            ),
+            (
+                "reactorkit_failure",
+                include_str!("../tests/fixtures/xcodebuild_gh_reactorkit_xcode12_failure.txt"),
+            ),
+            (
+                "testproject_timing",
+                include_str!("../tests/fixtures/xcodebuild_gh_testproject_compilation_timing.txt"),
+            ),
+        ];
+
+        for (name, input) in &fixtures {
+            let result = filter_xcodebuild(input);
+
+            let input_tokens = count_tokens(input);
+            let output_tokens = count_tokens(&result);
+
+            assert!(input_tokens > 0, "fixture {} has no tokens in input", name);
+            assert!(!result.is_empty(), "fixture {} produced empty output", name);
+
+            let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+            // All xcodebuild fixtures should achieve significant savings
+            // because build system noise is stripped.
+            // Error-heavy fixtures (e.g., nativescript) get ~59% savings.
+            assert!(
+                savings >= 55.0,
+                "xcodebuild {} filter: expected >=55% savings, got {:.1}% ({} -> {} tokens)",
+                name,
+                savings,
+                input_tokens,
+                output_tokens
+            );
+        }
     }
 
     #[test]

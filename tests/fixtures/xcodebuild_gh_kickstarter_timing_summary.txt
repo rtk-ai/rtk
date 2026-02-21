@@ -1,0 +1,140 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -workspace Kickstarter.xcworkspace -scheme Kickstarter-iOS -sdk iphonesimulator -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.2' build -showBuildTimingSummary
+
+User defaults from command line:
+    IDEPackageSupportUseBuiltinSCM = YES
+
+Resolve Package Graph
+Fetching from https://github.com/Alamofire/AlamofireImage.git (cached)
+Fetching from https://github.com/kickstarter/Kickstarter-Prelude.git (cached)
+Fetching from https://github.com/ReactiveX/RxSwift.git (cached)
+Fetching from https://github.com/firebase/firebase-ios-sdk.git (cached)
+Fetching from https://github.com/stripe/stripe-ios.git (cached)
+Fetching from https://github.com/facebook/facebook-ios-sdk.git (cached)
+Fetching from https://github.com/onevcat/Kingfisher.git (cached)
+Resolved source packages:
+  AlamofireImage: https://github.com/Alamofire/AlamofireImage.git @ 4.3.0
+  Kickstarter-Prelude: https://github.com/kickstarter/Kickstarter-Prelude.git @ 0.5.0
+  RxSwift: https://github.com/ReactiveX/RxSwift.git @ 6.7.1
+  firebase-ios-sdk: https://github.com/firebase/firebase-ios-sdk.git @ 10.10.0
+  stripe-ios: https://github.com/stripe/stripe-ios.git @ 23.27.0
+  facebook-ios-sdk: https://github.com/facebook/facebook-ios-sdk.git @ 17.0.0
+  Kingfisher: https://github.com/onevcat/Kingfisher.git @ 7.12.0
+ComputePackagePrebuildTargetDependencyGraph
+Prepare packages
+CreateBuildRequest
+SendProjectDescription
+CreateBuildOperation
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (34 targets)
+    Target 'Kickstarter-iOS' in project 'Kickstarter-iOS'
+        ➜ Explicit dependency on target 'Library' in project 'Library'
+        ➜ Explicit dependency on target 'KsApi' in project 'KsApi'
+        ➜ Implicit dependency on target 'Kickstarter-Prelude' in project 'Kickstarter-Prelude'
+        ➜ Implicit dependency on target 'AlamofireImage' in project 'AlamofireImage'
+        ➜ Implicit dependency on target 'Kingfisher' in project 'Kingfisher'
+        ➜ Implicit dependency on target 'RxSwift' in project 'RxSwift'
+        ➜ Implicit dependency on target 'RxCocoa' in project 'RxSwift'
+        ➜ Implicit dependency on target 'FirebaseAnalytics' in project 'firebase-ios-sdk'
+        ➜ Implicit dependency on target 'FirebaseCrashlytics' in project 'firebase-ios-sdk'
+        ➜ Implicit dependency on target 'Stripe' in project 'stripe-ios'
+        ➜ Implicit dependency on target 'FacebookLogin' in project 'facebook-ios-sdk'
+GatherProvisioningInputs
+CreateBuildDescription
+Build description signature: aa11bb22cc33dd44ee55ff66
+Build description path: /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/XCBuildData/aa11bb22cc33dd44ee55ff66.xcbuilddata
+
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Main.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Activity.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Backing.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Comments.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Dashboard.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Discovery.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Friends.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Login.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Messages.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Profile.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Project.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Rewards.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Search.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Settings.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Thanks.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileStoryboard /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Storyboards/Updates.storyboard (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+
+CompileSwiftSources normal x86_64 com.apple.xcode.tools.swift.compiler (in target 'Library' from project 'Library')
+CompileSwiftSources normal x86_64 com.apple.xcode.tools.swift.compiler (in target 'KsApi' from project 'KsApi')
+CompileSwiftSources normal x86_64 com.apple.xcode.tools.swift.compiler (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+
+SwiftCompile normal x86_64 Compiling\ AppDelegateViewModel.swift /Users/runner/work/ios-oss/Library/ViewModels/AppDelegateViewModel.swift (in target 'Library' from project 'Library')
+SwiftCompile normal x86_64 Compiling\ DiscoveryViewModel.swift /Users/runner/work/ios-oss/Library/ViewModels/DiscoveryViewModel.swift (in target 'Library' from project 'Library')
+SwiftCompile normal x86_64 Compiling\ ProjectViewModel.swift /Users/runner/work/ios-oss/Library/ViewModels/ProjectViewModel.swift (in target 'Library' from project 'Library')
+SwiftCompile normal x86_64 Compiling\ RewardsViewModel.swift /Users/runner/work/ios-oss/Library/ViewModels/RewardsViewModel.swift (in target 'Library' from project 'Library')
+SwiftCompile normal x86_64 Compiling\ CheckoutViewModel.swift /Users/runner/work/ios-oss/Library/ViewModels/CheckoutViewModel.swift (in target 'Library' from project 'Library')
+SwiftCompile normal x86_64 Compiling\ LoginViewModel.swift /Users/runner/work/ios-oss/Library/ViewModels/LoginViewModel.swift (in target 'Library' from project 'Library')
+SwiftCompile normal x86_64 Compiling\ SettingsViewModel.swift /Users/runner/work/ios-oss/Library/ViewModels/SettingsViewModel.swift (in target 'Library' from project 'Library')
+
+SwiftCompile normal x86_64 Compiling\ Service.swift /Users/runner/work/ios-oss/KsApi/Service.swift (in target 'KsApi' from project 'KsApi')
+SwiftCompile normal x86_64 Compiling\ GraphQL.swift /Users/runner/work/ios-oss/KsApi/GraphQL.swift (in target 'KsApi' from project 'KsApi')
+SwiftCompile normal x86_64 Compiling\ Models.swift /Users/runner/work/ios-oss/KsApi/Models.swift (in target 'KsApi' from project 'KsApi')
+
+SwiftCompile normal x86_64 Compiling\ AppDelegate.swift /Users/runner/work/ios-oss/Kickstarter-iOS/AppDelegate.swift (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+SwiftCompile normal x86_64 Compiling\ DiscoveryViewController.swift /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Controllers/DiscoveryViewController.swift (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+SwiftCompile normal x86_64 Compiling\ ProjectPageViewController.swift /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Controllers/ProjectPageViewController.swift (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+SwiftCompile normal x86_64 Compiling\ RewardsCollectionViewController.swift /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Controllers/RewardsCollectionViewController.swift (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+SwiftCompile normal x86_64 Compiling\ CheckoutViewController.swift /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Controllers/CheckoutViewController.swift (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+
+Ld /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Products/Debug-iphonesimulator/Kickstarter.app/Kickstarter normal (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+    cd /Users/runner/work/ios-oss
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -Xlinker -reproducible -target x86_64-apple-ios17.2-simulator
+
+CompileAssetCatalog /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Products/Debug-iphonesimulator/Kickstarter.app /Users/runner/work/ios-oss/Kickstarter-iOS/Assets.xcassets (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/ActivityFriendFollowCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/ActivitySampleCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/BackerDashboardProjectCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/CommentCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/DashboardActionCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/DashboardFundingCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/DashboardRewardCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/DiscoveryPostcardCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/FindFriendsCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/MessageCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/ProjectActivityCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/RewardCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/SettingsAccountCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/SettingsNotificationCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/ThanksProjectCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+CompileXIB /Users/runner/work/ios-oss/Kickstarter-iOS/Views/Cells/UpdateCell.xib (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+
+PhaseScriptExecution Run\ SwiftLint /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Intermediates.noindex/Kickstarter-iOS.build/Debug-iphonesimulator/Kickstarter-iOS.build/Script-B74DC69E.sh (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+    cd /Users/runner/work/ios-oss
+    /bin/sh -c /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Intermediates.noindex/Kickstarter-iOS.build/Debug-iphonesimulator/Kickstarter-iOS.build/Script-B74DC69E.sh
+PhaseScriptExecution Run\ SwiftFormat /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Intermediates.noindex/Kickstarter-iOS.build/Debug-iphonesimulator/Kickstarter-iOS.build/Script-C8A6F2E1.sh (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+    cd /Users/runner/work/ios-oss
+    /bin/sh -c /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Intermediates.noindex/Kickstarter-iOS.build/Debug-iphonesimulator/Kickstarter-iOS.build/Script-C8A6F2E1.sh
+
+CodeSign /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Products/Debug-iphonesimulator/Kickstarter.app (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+    cd /Users/runner/work/ios-oss
+
+    Signing Identity:     "-"
+
+    /usr/bin/codesign --force --sign - --entitlements /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Intermediates.noindex/Kickstarter-iOS.build/Debug-iphonesimulator/Kickstarter-iOS.build/Kickstarter.app.xcent --timestamp=none --generate-entitlement-der /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Products/Debug-iphonesimulator/Kickstarter.app
+
+Touch /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Products/Debug-iphonesimulator/Kickstarter.app (in target 'Kickstarter-iOS' from project 'Kickstarter-iOS')
+    cd /Users/runner/work/ios-oss
+    /usr/bin/touch -c /Users/runner/Library/Developer/Xcode/DerivedData/Kickstarter-iOS-aabbccdd/Build/Products/Debug-iphonesimulator/Kickstarter.app
+
+Build Timing Summary
+CompileStoryboard (16 tasks)     | 87.128 seconds
+CompileSwiftSources (4 tasks)    | 54.144 seconds
+PhaseScriptExecution (14 tasks)  | 18.167 seconds
+CompileAssetCatalog (2 tasks)    | 6.532 seconds
+CompileXIB (16 tasks)            | 6.293 seconds
+CodeSign (7 tasks)               | 3.069 seconds
+Ld (4 tasks)                     | 2.342 seconds
+LinkStoryboards (2 tasks)        | 0.172 seconds
+CompileC (3 tasks)               | 0.122 seconds
+Ditto (20 tasks)                 | 0.076 seconds
+Touch (4 tasks)                  | 0.007 seconds
+
+** BUILD SUCCEEDED ** [178.052 sec]

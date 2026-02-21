@@ -1,0 +1,54 @@
+Command line invocation:
+    /Applications/Xcode-12.0.app/Contents/Developer/usr/bin/xcodebuild -project ReactorKit.xcodeproj -scheme ReactorKit-iOS -sdk iphoneos -configuration Release -destination 'generic/platform=iOS' ONLY_ACTIVE_ARCH=NO build
+
+User defaults from command line:
+    IDEPackageSupportUseBuiltinSCM = YES
+
+note: Using new build system
+note: Planning build
+note: Constructing build description
+Build system information
+warning: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to 8.0, but the range of supported deployment target versions is 9.0 to 14.0.99. (in target 'RxSwift' from project 'Pods')
+warning: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to 8.0, but the range of supported deployment target versions is 9.0 to 14.0.99. (in target 'RxSwift-RxRelay' from project 'Pods')
+warning: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to 8.0, but the range of supported deployment target versions is 9.0 to 14.0.99. (in target 'WeakMapTable' from project 'Pods')
+warning: The iOS deployment target 'IPHONEOS_DEPLOYMENT_TARGET' is set to 8.0, but the range of supported deployment target versions is 9.0 to 14.0.99. (in target 'ReactorKit' from project 'Pods')
+CreateBuildDirectory /Users/runner/Library/Developer/Xcode/DerivedData/ReactorKit-ejyhknqblzzfylfgtuwddqoubgth/Build/Products (in target: ReactorKit-iOS)
+    cd /Users/runner/work/ReactorKit/ReactorKit
+    builtin-create-build-directory /Users/runner/Library/Developer/Xcode/DerivedData/ReactorKit-ejyhknqblzzfylfgtuwddqoubgth/Build/Products
+CreateBuildDirectory /Users/runner/Library/Developer/Xcode/DerivedData/ReactorKit-ejyhknqblzzfylfgtuwddqoubgth/Build/Intermediates.noindex (in target: ReactorKit-iOS)
+    cd /Users/runner/work/ReactorKit/ReactorKit
+    builtin-create-build-directory /Users/runner/Library/Developer/Xcode/DerivedData/ReactorKit-ejyhknqblzzfylfgtuwddqoubgth/Build/Intermediates.noindex
+
+CompileSwiftSources normal arm64 com.apple.xcode.tools.swift.compiler (in target 'RxSwift' from project 'Pods')
+    cd /Users/runner/work/ReactorKit/ReactorKit/Pods
+    /Applications/Xcode-12.0.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -incremental -module-name RxSwift -Onone -whole-module-optimization
+
+CompileSwift normal arm64 /Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/Reactor.swift (in target 'ReactorKit-iOS' from project 'ReactorKit')
+CompileSwift normal arm64 /Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/ActionSubject.swift (in target 'ReactorKit-iOS' from project 'ReactorKit')
+CompileSwift normal arm64 /Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/IdentityEquatable.swift (in target 'ReactorKit-iOS' from project 'ReactorKit')
+CompileSwift normal arm64 /Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/StubStoreProtocol.swift (in target 'ReactorKit-iOS' from project 'ReactorKit')
+CompileSwift normal arm64 /Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/View.swift (in target 'ReactorKit-iOS' from project 'ReactorKit')
+CompileSwift normal arm64 /Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/WeakMapTable+Rx.swift (in target 'ReactorKit-iOS' from project 'ReactorKit')
+CompileSwift normal armv7 /Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/Reactor.swift (in target 'ReactorKit-iOS' from project 'ReactorKit')
+
+/Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/AssociatedObjectStore.swift:12:15: error: Build input file cannot be found: '/Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/AssociatedObjectStore.swift' (in target 'ReactorKit-iOS' from project 'ReactorKit')
+
+/Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/Reactor.swift:45:9: warning: result of call to 'subscribe(onNext:onError:onCompleted:onDisposed:)' is unused
+        state.subscribe(onNext: { [weak self] state in
+        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/Reactor.swift:89:25: warning: expression implicitly coerced from 'Action?' to 'Any'
+        let action: Action? = nil
+                    ^~~~~~
+/Users/runner/work/ReactorKit/ReactorKit/Carthage/Checkouts/ReactorKit/Sources/ReactorKit/View.swift:23:5: warning: 'weak' may only be applied to class and class-bound protocol types, not 'Self'
+    weak var reactor: Reactor?
+    ^~~~
+
+CompileSwiftSources normal armv7 com.apple.xcode.tools.swift.compiler (in target 'ReactorKit-iOS' from project 'ReactorKit')
+CompileSwiftSources normal arm64 com.apple.xcode.tools.swift.compiler (in target 'ReactorKit-iOS' from project 'ReactorKit')
+
+** BUILD FAILED **
+
+The following build commands failed:
+	CompileSwiftSources normal armv7 com.apple.xcode.tools.swift.compiler (in target 'ReactorKit-iOS' from project 'ReactorKit')
+	CompileSwiftSources normal arm64 com.apple.xcode.tools.swift.compiler (in target 'ReactorKit-iOS' from project 'ReactorKit')
+(2 failures)
