@@ -315,4 +315,136 @@ mod tests {
         assert!(should_run(None, true));
         assert!(should_run(None, false));
     }
+
+    // === SUFFIX REDIRECT TESTS — common patterns Claude Code appends ===
+    // These lock in behaviour that must never silently regress.
+
+    // --- stdout / stderr discard ---
+    #[test]
+    fn test_needs_shell_redirect_to_dev_null() {
+        let tokens = tokenize("cmd > /dev/null");
+        assert!(needs_shell(&tokens), "> /dev/null must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_stderr_to_dev_null() {
+        // "2>/dev/null" produces a "2>" Redirect token → needs_shell
+        let tokens = tokenize("cmd 2>/dev/null");
+        assert!(needs_shell(&tokens), "2>/dev/null must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_stderr_to_dev_null_spaced() {
+        let tokens = tokenize("cmd 2> /dev/null");
+        assert!(needs_shell(&tokens), "2> /dev/null must trigger shell");
+    }
+
+    // --- compound FD redirects (2>&1, 1>&2) ---
+    // The `&` in "2>&1" tokenises as Shellism; Shellism triggers needs_shell.
+    #[test]
+    fn test_needs_shell_stderr_to_stdout() {
+        let tokens = tokenize("cmd 2>&1");
+        assert!(
+            needs_shell(&tokens),
+            "2>&1 must trigger shell (& is Shellism)"
+        );
+    }
+
+    #[test]
+    fn test_needs_shell_stdout_to_stderr() {
+        let tokens = tokenize("cmd 1>&2");
+        assert!(
+            needs_shell(&tokens),
+            "1>&2 must trigger shell (& is Shellism)"
+        );
+    }
+
+    #[test]
+    fn test_needs_shell_combined_redirect_chain() {
+        // Classic "silence everything": >/dev/null 2>&1
+        let tokens = tokenize("cmd > /dev/null 2>&1");
+        assert!(needs_shell(&tokens), ">/dev/null 2>&1 must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_redirect_append() {
+        let tokens = tokenize("cmd >> /tmp/output.txt");
+        assert!(needs_shell(&tokens), ">> must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_stderr_redirect_to_file() {
+        let tokens = tokenize("cmd 2> /tmp/err.log");
+        assert!(needs_shell(&tokens), "2> file must trigger shell");
+    }
+
+    // --- pipe suffixes ---
+    #[test]
+    fn test_needs_shell_pipe_to_tail() {
+        let tokens = tokenize("git log | tail -20");
+        assert!(needs_shell(&tokens), "| tail must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_pipe_to_cat() {
+        // Piping to `cat` forces non-TTY output; must go through shell
+        let tokens = tokenize("ls --color | cat");
+        assert!(needs_shell(&tokens), "| cat must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_pipe_to_tee() {
+        let tokens = tokenize("cargo build 2>&1 | tee /tmp/build.log");
+        assert!(needs_shell(&tokens), "| tee must trigger shell");
+    }
+
+    #[test]
+    fn test_needs_shell_pipe_to_wc() {
+        let tokens = tokenize("find . -name '*.rs' | wc -l");
+        assert!(needs_shell(&tokens), "| wc must trigger shell");
+    }
+
+    // --- compound chains that must NOT trigger shell alone ---
+    #[test]
+    fn test_operator_and_does_not_trigger_shell() {
+        // && is an Operator, not Shellism/Pipe/Redirect; handled by parse_chain
+        let tokens = tokenize("cargo fmt && cargo clippy");
+        assert!(
+            !needs_shell(&tokens),
+            "&& alone must NOT trigger needs_shell"
+        );
+    }
+
+    #[test]
+    fn test_operator_or_does_not_trigger_shell() {
+        let tokens = tokenize("cargo test || true");
+        assert!(
+            !needs_shell(&tokens),
+            "|| alone must NOT trigger needs_shell"
+        );
+    }
+
+    #[test]
+    fn test_operator_semicolon_does_not_trigger_shell() {
+        let tokens = tokenize("true ; false");
+        assert!(
+            !needs_shell(&tokens),
+            "; alone must NOT trigger needs_shell"
+        );
+    }
+
+    // --- RTK-rewrite end-to-end: suffix redirect preserves original command ---
+    #[test]
+    fn test_redirect_suffix_is_passed_through_verbatim() {
+        // When needs_shell, the hook wraps in "rtk run -c '<raw>'"
+        // Verify routing logic sends the command to passthrough, not native routing
+        use crate::cmd::analysis::needs_shell;
+        use crate::cmd::lexer::tokenize;
+        let raw = "cargo test 2>&1 | tee /tmp/test.log";
+        let tokens = tokenize(raw);
+        assert!(
+            needs_shell(&tokens),
+            "complex redirect+pipe must trigger shell passthrough"
+        );
+    }
 }

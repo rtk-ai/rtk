@@ -446,6 +446,106 @@ mod tests {
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Redirect)));
     }
 
+    #[test]
+    fn test_redirect_stderr_no_space() {
+        // "2>/dev/null" — the lexer flushes "2" as Arg then creates Redirect(">").
+        // Both a Redirect token AND an Arg("2") must be present.
+        let tokens = tokenize("cmd 2>/dev/null");
+        assert!(
+            tokens.iter().any(|t| matches!(t.kind, TokenKind::Redirect)),
+            "2>/dev/null must produce a Redirect token (needs_shell must fire)"
+        );
+        // "2" appears as a separate Arg preceding the redirect
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Arg) && t.value == "2"),
+            "2 in 2>/dev/null must be a separate Arg token"
+        );
+    }
+
+    #[test]
+    fn test_redirect_dev_null() {
+        let tokens = tokenize("cmd > /dev/null");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Redirect) && t.value == ">"),
+            ">/dev/null must produce a > Redirect token"
+        );
+    }
+
+    #[test]
+    fn test_compound_fd_redirect_2_to_1_has_shellism() {
+        // "2>&1" tokenises as: Arg("2"), Redirect(">"), Shellism("&"), Arg("1")
+        // The & in the middle is what forces shell passthrough via needs_shell().
+        let tokens = tokenize("cmd 2>&1");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Shellism) && t.value == "&"),
+            "& in 2>&1 must be Shellism — this is what triggers needs_shell"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Redirect) && t.value == ">"),
+            "> in 2>&1 must be a Redirect token"
+        );
+        // The "2" is a bare Arg before the redirect
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Arg) && t.value == "2"),
+            "2 in 2>&1 must be a separate Arg token"
+        );
+    }
+
+    #[test]
+    fn test_compound_fd_redirect_1_to_2_has_shellism() {
+        // "1>&2" — same pattern as 2>&1
+        let tokens = tokenize("cmd 1>&2");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Shellism) && t.value == "&"),
+            "& in 1>&2 must be Shellism"
+        );
+        assert!(
+            tokens.iter().any(|t| matches!(t.kind, TokenKind::Redirect)),
+            "1>&2 must produce a Redirect token"
+        );
+    }
+
+    #[test]
+    fn test_combined_redirect_chain() {
+        // ">/dev/null 2>&1": > Redirect, then Arg("2"), >, &(Shellism)
+        let tokens = tokenize("cmd > /dev/null 2>&1");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Redirect) && t.value == ">"),
+            "Must have > Redirect"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Shellism) && t.value == "&"),
+            "Must have & Shellism from 2>&1"
+        );
+    }
+
+    #[test]
+    fn test_redirect_append_to_file() {
+        let tokens = tokenize("echo hello >> /tmp/output.txt");
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Redirect) && t.value == ">>"),
+            ">> must produce a >> Redirect token"
+        );
+    }
+
     // === EXCLAMATION / NEGATION TESTS ===
 
     #[test]
