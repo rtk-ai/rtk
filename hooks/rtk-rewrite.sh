@@ -129,7 +129,23 @@ elif echo "$MATCH_CMD" | grep -qE '^(npx[[:space:]]+)?prisma([[:space:]]|$)'; th
 # --- Containers (added: docker compose, docker run/build/exec, kubectl describe/apply) ---
 elif echo "$MATCH_CMD" | grep -qE '^docker[[:space:]]'; then
   if echo "$MATCH_CMD" | grep -qE '^docker[[:space:]]+compose([[:space:]]|$)'; then
-    REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^docker /rtk docker /')"
+    # Only rewrite supported compose subcommands (ps, logs, build).
+    # Strip compose-level flags (-f/--file, -p/--project-name, --profile, etc.)
+    # that appear before the subcommand, then check what subcommand remains.
+    COMPOSE_SUBCMD=$(echo "$MATCH_CMD" | sed -E \
+      -e 's/^docker[[:space:]]+compose[[:space:]]*//' \
+      -e 's/(-f|--file)[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
+      -e 's/(-p|--project-name)[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
+      -e 's/--profile[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
+      -e 's/--env-file[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
+      -e 's/--project-directory[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
+      -e 's/--[a-z-]+=[^[:space:]]+[[:space:]]*//g' \
+      -e 's/^[[:space:]]*//')
+    case "$COMPOSE_SUBCMD" in
+      ps|ps\ *|logs|logs\ *|build|build\ *)
+        REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^docker /rtk docker /')"
+        ;;
+    esac
   else
     DOCKER_SUBCMD=$(echo "$MATCH_CMD" | sed -E \
       -e 's/^docker[[:space:]]+//' \
