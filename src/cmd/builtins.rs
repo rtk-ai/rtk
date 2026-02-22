@@ -1,10 +1,11 @@
-//! Built-in commands that RTK handles natively.
-//! These maintain session state across hook calls.
+//! Built-in commands that RTK handles natively within a single `rtk run -c` invocation.
+//! Note: state does NOT persist across separate Claude Code hook calls (each is a new process).
 
 use super::predicates::{expand_tilde, get_home};
 use anyhow::{Context, Result};
 
-/// Change directory (persists in RTK process)
+/// Change directory within the current `rtk run -c` invocation.
+/// Does NOT persist across separate hook invocations.
 pub fn builtin_cd(args: &[String]) -> Result<bool> {
     let target = args
         .first()

@@ -12,7 +12,7 @@
 //!
 //! ## Claude Code Stderr Rule (CRITICAL)
 //!
-//! **Source:** See `https://docs.anthropic.com/en/docs/claude-code/hooks`
+//! **Source:** https://docs.anthropic.com/en/docs/claude-code/hooks
 //!
 //! ```text
 //! CRITICAL: ANY stderr output at exit 0 = hook error = fail-open

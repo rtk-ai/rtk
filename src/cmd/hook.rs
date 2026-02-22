@@ -288,6 +288,7 @@ fn route_pnpm(cmd: &analysis::NativeCommand, raw: &str) -> String {
 
         "tsc" => replace_first_word(raw, "pnpm tsc", "rtk tsc"),
         "lint" => replace_first_word(raw, "pnpm lint", "rtk lint"),
+        "eslint" => replace_first_word(raw, "pnpm eslint", "rtk lint"),
         "playwright" => replace_first_word(raw, "pnpm playwright", "rtk playwright"),
 
         _ => format!("rtk run -c '{}'", escape_quotes(raw)),
@@ -1174,6 +1175,9 @@ mod tests {
             ("pnpm test", "rtk vitest run"),
             ("pnpm vitest", "rtk vitest run"),
             ("pnpm lint", "rtk lint"),
+            ("pnpm eslint src/", "rtk lint"), // pnpm eslint → rtk lint (TDD Red)
+            ("pnpm eslint .", "rtk lint ."),  // pnpm eslint bare form
+            ("pnpm eslint --fix src/", "rtk lint"), // pnpm eslint with flag
             ("npx tsc --noEmit", "rtk tsc --noEmit"),
             // Python
             ("python -m pytest tests/", "rtk pytest tests/"),
