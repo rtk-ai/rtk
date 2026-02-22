@@ -333,6 +333,31 @@ FAILED: 2/15 tests
 
 ## How It Works
 
+```
+  Without rtk:
+
+  ┌──────────┐  git status     ┌──────────┐  git status  ┌──────────┐
+  │  Claude  │ ─────────────── │  shell   │ ──────────── │   git    │
+  │   LLM    │                 │          │              │  (CLI)   │
+  └──────────┘                 └──────────┘              └──────────┘
+        ▲                                                      │
+        │              ~2,000 tokens (raw output)              │
+        └──────────────────────────────────────────────────────┘
+
+  With rtk:
+
+  ┌──────────┐  git status     ┌──────────┐  git status  ┌──────────┐
+  │  Claude  │ ─────────────── │   RTK    │ ──────────── │   git    │
+  │   LLM    │                 │  (proxy) │              │  (CLI)   │
+  └──────────┘                 └──────────┘              └──────────┘
+        ▲                           │  ~2,000 tokens raw       │
+        │                           └──────────────────────────┘
+        │  ~200 tokens (filtered)   filter · group · dedup · truncate
+        └───────────────────────────────────────────────────────
+```
+
+Four strategies applied per command type:
+
 1. **Smart Filtering**: Removes noise (comments, whitespace, boilerplate)
 2. **Grouping**: Aggregates similar items (files by directory, errors by type)
 3. **Truncation**: Keeps relevant context, cuts redundancy
@@ -480,6 +505,30 @@ Yes. RTK creates a backup (`settings.json.bak`) before changes. The hook is read
 ### How It Works
 
 The hook runs as a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks). When Claude Code is about to execute a Bash command like `git status`, the hook rewrites it to `rtk git status` before the command reaches the shell. Claude Code never sees the rewrite — it's transparent.
+
+```
+  Claude Code types:  git status
+                           │
+                    ┌──────▼──────────────────────┐
+                    │  ~/.claude/settings.json     │
+                    │  PreToolUse hook registered  │
+                    └──────┬──────────────────────┘
+                           │
+                    ┌──────▼──────────────────────┐
+                    │  rtk-rewrite.sh              │
+                    │  "git status"                │
+                    │    →  "rtk git status"       │  transparent rewrite
+                    └──────┬──────────────────────┘
+                           │
+                    ┌──────▼──────────────────────┐
+                    │  RTK (Rust binary)           │
+                    │  executes real git status    │
+                    │  filters output              │
+                    └──────┬──────────────────────┘
+                           │
+  Claude receives:  "3 modified, 1 untracked ✓"
+                    ↑ not 50 lines of raw git output
+```
 
 ### Quick Install (Automated)
 
