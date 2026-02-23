@@ -30,6 +30,7 @@ mod next_cmd;
 mod npm_cmd;
 mod parser;
 mod pip_cmd;
+mod platform;
 mod playwright_cmd;
 mod pnpm_cmd;
 mod prettier_cmd;
@@ -1119,7 +1120,9 @@ fn main() -> Result<()> {
             if show {
                 init::show_config()?;
             } else if uninstall {
-                init::uninstall(global, cli.verbose)?;
+                let platform = platform::detect_or_infer_platform()
+                    .unwrap_or(platform::AgentPlatform::ClaudeCode);
+                init::uninstall(global, cli.verbose, platform)?;
             } else {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1128,7 +1131,16 @@ fn main() -> Result<()> {
                 } else {
                     init::PatchMode::Ask
                 };
-                init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                let platform = platform::detect_or_infer_platform()
+                    .unwrap_or(platform::AgentPlatform::ClaudeCode);
+                init::run(
+                    global,
+                    claude_md,
+                    hook_only,
+                    patch_mode,
+                    cli.verbose,
+                    platform,
+                )?;
             }
         }
 
@@ -1295,7 +1307,15 @@ fn main() -> Result<()> {
             since,
             format,
         } => {
-            discover::run(project.as_deref(), all, since, limit, &format, cli.verbose)?;
+            discover::run(
+                project.as_deref(),
+                all,
+                since,
+                limit,
+                &format,
+                "all",
+                cli.verbose,
+            )?;
         }
 
         Commands::Learn {
@@ -1315,6 +1335,7 @@ fn main() -> Result<()> {
                 write_rules,
                 min_confidence,
                 min_occurrences,
+                "all",
             )?;
         }
 

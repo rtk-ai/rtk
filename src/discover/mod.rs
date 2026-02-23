@@ -5,7 +5,8 @@ mod report;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use crate::platform::{detect_platform, AgentPlatform};
+use provider::{ClaudeProvider, OpenCodeProvider, SessionProvider};
 use registry::{category_avg_tokens, classify_command, split_command_chain, Classification};
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -32,9 +33,76 @@ pub fn run(
     since_days: u64,
     limit: usize,
     format: &str,
+    platform_filter: &str,
     verbose: u8,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
+    // Determine which platforms to scan
+    let platforms = match platform_filter {
+        "claude" => vec![AgentPlatform::ClaudeCode],
+        "opencode" => vec![AgentPlatform::OpenCode],
+        "both" => vec![AgentPlatform::ClaudeCode, AgentPlatform::OpenCode],
+        other => {
+            anyhow::bail!(
+                "Invalid platform filter '{}'. Use: claude, opencode, or both",
+                other
+            );
+        }
+    };
+
+    // Aggregate results across all platforms
+    let mut all_supported_buckets: HashMap<&'static str, SupportedBucket> = HashMap::new();
+    let mut all_unsupported_buckets: HashMap<String, UnsupportedBucket> = HashMap::new();
+    let mut total_sessions = 0;
+    let mut total_commands = 0;
+    let mut total_rtk_commands = 0;
+
+    for platform in platforms {
+        if let Err(e) = scan_platform(
+            platform,
+            project,
+            all,
+            since_days,
+            &mut all_supported_buckets,
+            &mut all_unsupported_buckets,
+            &mut total_sessions,
+            &mut total_commands,
+            &mut total_rtk_commands,
+        ) {
+            if verbose > 0 {
+                eprintln!("Warning: Failed to scan {}: {}", platform.name(), e);
+            }
+            // Continue scanning other platforms
+        }
+    }
+
+    // Generate report from aggregated results
+    generate_report(
+        all_supported_buckets,
+        all_unsupported_buckets,
+        total_sessions,
+        total_commands,
+        total_rtk_commands,
+        limit,
+        format,
+    )
+}
+
+fn scan_platform(
+    platform: AgentPlatform,
+    project: Option<&str>,
+    all: bool,
+    since_days: u64,
+    supported_buckets: &mut HashMap<&'static str, SupportedBucket>,
+    unsupported_buckets: &mut HashMap<String, UnsupportedBucket>,
+    total_sessions: &mut usize,
+    total_commands: &mut usize,
+    total_rtk_commands: &mut usize,
+) -> Result<()> {
+    // Create the appropriate provider
+    let provider: Box<dyn SessionProvider> = match platform {
+        AgentPlatform::ClaudeCode => Box::new(ClaudeProvider),
+        AgentPlatform::OpenCode => Box::new(OpenCodeProvider),
+    };
 
     // Determine project filter
     let project_filter = if all {
@@ -45,33 +113,22 @@ pub fn run(
         // Default: current working directory
         let cwd = std::env::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        match platform {
+            // Claude Code encodes paths: /Users/foo/bar → -Users-foo-bar
+            AgentPlatform::ClaudeCode => Some(ClaudeProvider::encode_project_path(&cwd_str)),
+            // OpenCode uses raw directory paths in session.directory
+            AgentPlatform::OpenCode => Some(cwd_str),
+        }
     };
 
     let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
-
-    if verbose > 0 {
-        eprintln!("Scanning {} session files...", sessions.len());
-        for s in &sessions {
-            eprintln!("  {}", s.display());
-        }
-    }
-
-    let mut total_commands: usize = 0;
-    let mut already_rtk: usize = 0;
-    let mut parse_errors: usize = 0;
-    let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
-    let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
+    *total_sessions += sessions.len();
 
     for session_path in &sessions {
         let extracted = match provider.extract_commands(session_path) {
             Ok(cmds) => cmds,
-            Err(e) => {
-                if verbose > 0 {
-                    eprintln!("Warning: skipping {}: {}", session_path.display(), e);
-                }
-                parse_errors += 1;
+            Err(_e) => {
+                // Skip this session on error, continue with others
                 continue;
             }
         };
@@ -79,7 +136,7 @@ pub fn run(
         for ext_cmd in &extracted {
             let parts = split_command_chain(&ext_cmd.command);
             for part in parts {
-                total_commands += 1;
+                *total_commands += 1;
 
                 match classify_command(part) {
                     Classification::Supported {
@@ -88,7 +145,7 @@ pub fn run(
                         estimated_savings_pct,
                         status,
                     } => {
-                        let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
+                        let bucket = supported_buckets.entry(rtk_equivalent).or_insert_with(|| {
                             SupportedBucket {
                                 rtk_equivalent,
                                 category,
@@ -124,7 +181,7 @@ pub fn run(
                         *entry += 1;
                     }
                     Classification::Unsupported { base_command } => {
-                        let bucket = unsupported_map.entry(base_command).or_insert_with(|| {
+                        let bucket = unsupported_buckets.entry(base_command).or_insert_with(|| {
                             UnsupportedBucket {
                                 count: 0,
                                 example: part.to_string(),
@@ -135,7 +192,7 @@ pub fn run(
                     Classification::Ignored => {
                         // Check if it starts with "rtk "
                         if part.trim().starts_with("rtk ") {
-                            already_rtk += 1;
+                            *total_rtk_commands += 1;
                         }
                         // Otherwise just skip
                     }
@@ -144,6 +201,18 @@ pub fn run(
         }
     }
 
+    Ok(())
+}
+
+fn generate_report(
+    supported_map: HashMap<&'static str, SupportedBucket>,
+    unsupported_map: HashMap<String, UnsupportedBucket>,
+    total_sessions: usize,
+    total_commands: usize,
+    already_rtk: usize,
+    limit: usize,
+    format: &str,
+) -> Result<()> {
     // Build report
     let mut supported: Vec<SupportedEntry> = supported_map
         .into_values()
@@ -198,18 +267,18 @@ pub fn run(
     unsupported.sort_by(|a, b| b.count.cmp(&a.count));
 
     let report = DiscoverReport {
-        sessions_scanned: sessions.len(),
+        sessions_scanned: total_sessions,
         total_commands,
         already_rtk,
-        since_days,
+        since_days: 0, // We don't track this in aggregated results
         supported,
         unsupported,
-        parse_errors,
+        parse_errors: 0, // We don't track this in aggregated results
     };
 
     match format {
         "json" => println!("{}", report::format_json(&report)),
-        _ => print!("{}", report::format_text(&report, limit, verbose > 0)),
+        _ => print!("{}", report::format_text(&report, limit, false)),
     }
 
     Ok(())

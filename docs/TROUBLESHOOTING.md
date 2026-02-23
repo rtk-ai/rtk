@@ -49,7 +49,7 @@ If `rtk gain` now works, installation is correct.
 
 | Project | Repository | Purpose | Key Command |
 |---------|-----------|---------|-------------|
-| **Rust Token Killer** ✅ | rtk-ai/rtk | LLM token optimizer for Claude Code | `rtk gain` |
+| **Rust Token Killer** ✅ | rtk-ai/rtk | LLM token optimizer for AI coding agents | `rtk gain` |
 | **Rust Type Kit** ❌ | reachingforthejack/rtk | Rust codebase query and type generator | `rtk query` |
 
 ### How to Identify Which One You Have
@@ -91,10 +91,10 @@ rtk gain  # Must work if you want Token Killer
 
 ---
 
-## Problem: RTK not working in Claude Code
+## Problem: RTK not working in your AI agent
 
 ### Symptom
-Claude Code doesn't seem to be using rtk, outputs are verbose.
+Your AI agent (Claude Code or OpenCode) doesn't seem to be using rtk, outputs are verbose.
 
 ### Checklist
 
@@ -104,26 +104,34 @@ rtk --version
 rtk gain  # Must show stats
 ```
 
-**2. Initialize rtk for Claude Code:**
+**2. Initialize rtk for your AI agent:**
 ```bash
 # Global (all projects)
 rtk init --global
+# → Auto-detects Claude Code or OpenCode
 
 # Per-project
 cd /your/project
 rtk init
 ```
 
-**3. Verify CLAUDE.md file exists:**
+**3. Verify rules file exists:**
 ```bash
-# Check global
+# Check global (Claude Code)
 cat ~/.claude/CLAUDE.md | grep rtk
+
+# Check global (OpenCode)
+cat ~/.config/opencode/AGENTS.md | grep rtk
 
 # Check project
 cat ./CLAUDE.md | grep rtk
+# or
+cat ./AGENTS.md | grep rtk
 ```
 
-**4. Install auto-rewrite hook (recommended for automatic RTK usage):**
+**4. Install auto-rewrite hook/plugin (recommended for automatic RTK usage):**
+
+#### Claude Code
 
 **Option A: Automatic (recommended)**
 ```bash
@@ -164,6 +172,28 @@ Then add to `~/.claude/settings.json` (replace `~` with full path):
 ```
 
 **Note**: Use absolute path in `settings.json`, not `~/.claude/...`
+
+#### OpenCode
+
+**Automatic (recommended):**
+```bash
+rtk init -g
+# → Installs plugin to ~/.config/opencode/plugins/rtk-rewrite.ts
+# → Plugin is auto-loaded by OpenCode (no config file changes needed)
+# → Restart OpenCode
+
+# Verify installation
+rtk init --show  # Should show plugin status
+```
+
+**Manual (fallback):**
+```bash
+# Copy plugin to OpenCode plugins directory
+mkdir -p ~/.config/opencode/plugins
+cp hooks/rtk-rewrite.ts ~/.config/opencode/plugins/rtk-rewrite.ts
+```
+
+No config file changes needed — OpenCode auto-loads all plugins from the plugins directory.
 
 ---
 
@@ -270,7 +300,30 @@ This script will check:
 - ✅ RTK installed and in PATH
 - ✅ Correct version (Token Killer, not Type Kit)
 - ✅ Available features (pnpm, vitest, next, etc.)
-- ✅ Claude Code integration (CLAUDE.md files)
-- ✅ Auto-rewrite hook status
+- ✅ AI agent integration (CLAUDE.md / AGENTS.md files)
+- ✅ Auto-rewrite hook/plugin status
 
 The script provides specific fix commands for any issues found.
+
+---
+
+## Known Limitation: Git -C and -c Flags
+
+### Symptom
+When using Claude Code or OpenCode, you might see raw `git -C /path/to/repo status` commands instead of the RTK-optimized version.
+
+### Root Cause
+RTK's auto-rewrite hooks currently do not support git's `-C` (change directory) and `-c` (config) flags. These are global git options that must appear before the subcommand.
+
+**Example:**
+```bash
+git -C /path/to/repo status  # ← Not rewritten to rtk
+git status                    # ← Correctly rewritten to rtk git status
+```
+
+### Workaround
+The agent will automatically use raw git commands when working in directories that require `-C`. This doesn't affect functionality, but you won't get token savings on these operations.
+
+### Future Fix
+Full support for `-C` and `-c` flags is planned for a future release. See issue tracking for updates.
+
