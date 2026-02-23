@@ -896,6 +896,12 @@ fn run_fallback(parse_error: clap::Error) -> Result<()> {
 
     eprintln!("[rtk: parse failed, running raw]");
 
+    let raw_command = args.join(" ");
+    let error_message = parse_error.to_string();
+
+    // Start timer before execution to capture actual command runtime
+    let timer = tracking::TimedExecution::start();
+
     let status = std::process::Command::new(&args[0])
         .args(&args[1..])
         .stdin(std::process::Stdio::inherit())
@@ -903,13 +909,8 @@ fn run_fallback(parse_error: clap::Error) -> Result<()> {
         .stderr(std::process::Stdio::inherit())
         .status();
 
-    let raw_command = args.join(" ");
-    let error_message = parse_error.to_string();
-
     match status {
         Ok(s) => {
-            // Track as passthrough
-            let timer = tracking::TimedExecution::start();
             timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
 
             tracking::record_parse_failure_silent(&raw_command, &error_message, true);
