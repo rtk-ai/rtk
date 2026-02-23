@@ -139,6 +139,22 @@ enum Commands {
         #[arg(long = "work-tree")]
         work_tree: Option<String>,
 
+        /// Disable pager (like git --no-pager)
+        #[arg(long = "no-pager")]
+        no_pager: bool,
+
+        /// Skip optional locks (like git --no-optional-locks)
+        #[arg(long = "no-optional-locks")]
+        no_optional_locks: bool,
+
+        /// Treat repository as bare (like git --bare)
+        #[arg(long)]
+        bare: bool,
+
+        /// Treat pathspecs literally (like git --literal-pathspecs)
+        #[arg(long = "literal-pathspecs")]
+        literal_pathspecs: bool,
+
         #[command(subcommand)]
         command: GitCommands,
     },
@@ -917,6 +933,10 @@ fn main() -> Result<()> {
             config_override,
             git_dir,
             work_tree,
+            no_pager,
+            no_optional_locks,
+            bare,
+            literal_pathspecs,
             command,
         } => {
             // Build global git args (inserted between "git" and subcommand)
@@ -936,6 +956,18 @@ fn main() -> Result<()> {
             if let Some(ref tree) = work_tree {
                 global_args.push("--work-tree".to_string());
                 global_args.push(tree.clone());
+            }
+            if no_pager {
+                global_args.push("--no-pager".to_string());
+            }
+            if no_optional_locks {
+                global_args.push("--no-optional-locks".to_string());
+            }
+            if bare {
+                global_args.push("--bare".to_string());
+            }
+            if literal_pathspecs {
+                global_args.push("--literal-pathspecs".to_string());
             }
 
             match command {
@@ -1632,6 +1664,28 @@ mod tests {
                 assert_eq!(message, vec!["feat: add support", "Body paragraph here."]);
             }
             _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_global_options_parsing() {
+        let cli =
+            Cli::try_parse_from(["rtk", "git", "--no-pager", "--no-optional-locks", "status"])
+                .unwrap();
+        match cli.command {
+            Commands::Git {
+                no_pager,
+                no_optional_locks,
+                bare,
+                literal_pathspecs,
+                ..
+            } => {
+                assert!(no_pager);
+                assert!(no_optional_locks);
+                assert!(!bare);
+                assert!(!literal_pathspecs);
+            }
+            _ => panic!("Expected Git command"),
         }
     }
 

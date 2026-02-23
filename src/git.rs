@@ -1421,6 +1421,14 @@ mod tests {
     }
 
     #[test]
+    fn test_git_cmd_with_boolean_flags() {
+        let global_args = vec!["--no-pager".to_string(), "--bare".to_string()];
+        let cmd = git_cmd(&global_args);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, vec!["--no-pager", "--bare"]);
+    }
+
+    #[test]
     fn test_compact_diff() {
         let diff = r#"diff --git a/foo.rs b/foo.rs
 --- a/foo.rs
