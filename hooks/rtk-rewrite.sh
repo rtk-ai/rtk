@@ -21,10 +21,12 @@ fi
 # We only rewrite if the FIRST command in a chain matches.
 FIRST_CMD="$CMD"
 
-# Skip if already using rtk
-case "$FIRST_CMD" in
-  rtk\ *|*/rtk\ *) exit 0 ;;
-esac
+# Skip if already using rtk as the actual command (not just in a path)
+# Check the basename of the first word before the first space
+FIRST_WORD=$(echo "$FIRST_CMD" | sed -E 's/^([^[:space:]]+).*/\1/')
+if [ "$(basename "$FIRST_WORD")" = "rtk" ]; then
+  exit 0
+fi
 
 # Skip commands with heredocs, variable assignments as the whole command, etc.
 case "$FIRST_CMD" in
@@ -47,9 +49,13 @@ REWRITTEN=""
 
 # --- Git commands ---
 if echo "$MATCH_CMD" | grep -qE '^git[[:space:]]'; then
+  # Skip git commands with -C or -c flags (not yet supported by RTK)
+  if echo "$MATCH_CMD" | grep -qE 'git[[:space:]]+.*(-C|-c)[[:space:]]'; then
+    exit 0
+  fi
+  
   GIT_SUBCMD=$(echo "$MATCH_CMD" | sed -E \
     -e 's/^git[[:space:]]+//' \
-    -e 's/(-C|-c)[[:space:]]+[^[:space:]]+[[:space:]]*//g' \
     -e 's/--[a-z-]+=[^[:space:]]+[[:space:]]*//g' \
     -e 's/--(no-pager|no-optional-locks|bare|literal-pathspecs)[[:space:]]*//g' \
     -e 's/^[[:space:]]+//')

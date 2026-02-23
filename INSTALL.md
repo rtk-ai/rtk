@@ -72,7 +72,7 @@ rtk gain  # MUST show token savings, not "command not found"
 ### Which mode to choose?
 
 ```
-  Do you want RTK active across ALL Claude Code projects?
+  Do you want RTK active across ALL AI agent projects?
   │
   ├─ YES → rtk init -g              (recommended)
   │         Hook + RTK.md (~10 tokens in context)
@@ -110,14 +110,14 @@ rtk init --show  # Check hook is installed and executable
 **Token savings**: ~99.5% reduction (2000 tokens → 10 tokens in context)
 
 **What is settings.json?**
-Claude Code's hook registry. RTK adds a PreToolUse hook that rewrites commands transparently. Without this, Claude won't invoke the hook automatically.
+Claude Code's hook registry (OpenCode uses auto-loaded plugins instead). RTK adds a PreToolUse hook that rewrites commands transparently. Without this, the hook won't be invoked automatically.
 
 ```
-  Claude Code          settings.json        rtk-rewrite.sh        RTK binary
+  AI Agent             Hook/Plugin          Rewrite Logic         RTK binary
        │                    │                     │                    │
        │  "git status"      │                     │                    │
        │ ──────────────────►│                     │                    │
-       │                    │  PreToolUse trigger  │                    │
+       │                    │  Intercept trigger   │                    │
        │                    │ ───────────────────►│                    │
        │                    │                     │  rewrite command   │
        │                    │                     │  → rtk git status  │
@@ -172,7 +172,7 @@ rtk init -g
 # → Answer 'y' when prompted to patch settings.json
 # → Creates backup automatically
 
-# 3. Restart Claude Code
+# 3. Restart your AI agent (Claude Code or OpenCode)
 # 4. Test: git status (should use rtk)
 ```
 
@@ -191,8 +191,8 @@ rtk init --show | grep "Hook:"
 rtk init -g --no-patch
 
 # Review printed JSON snippet
-# Manually edit ~/.claude/settings.json
-# Restart Claude Code
+# Manually edit ~/.claude/settings.json (Claude Code only)
+# Restart your AI agent
 ```
 
 ### Temporary Trial
@@ -237,7 +237,7 @@ rtk init -g --uninstall
 #   - Reference: @RTK.md line from ~/.claude/CLAUDE.md
 #   - Registration: RTK hook entry from settings.json
 
-# Restart Claude Code after uninstall
+# Restart your AI agent after uninstall
 ```
 
 **For Local Projects**: Manually remove RTK block from `./CLAUDE.md`
@@ -309,7 +309,7 @@ rtk gain --history    # With command history
 | `pnpm list` | ~8,000 tokens | ~2,400 | **-70%** |
 | `pnpm outdated` | ~12,000 tokens | ~1,200-2,400 | **-80-90%** |
 
-### Typical Claude Code Session (30 min)
+### Typical AI Agent Session (30 min)
 - **Without RTK**: ~150,000 tokens
 - **With RTK**: ~45,000 tokens
 - **Savings**: **70% reduction**

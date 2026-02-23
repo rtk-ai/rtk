@@ -71,20 +71,22 @@ $ 3 commits      ←─  Terminal      ←─   Format      ←─   Compact Sta
 4. **Fail-Safe**: If filtering fails, fall back to original output
 5. **Transparent**: Users can always see raw output with `-v` flags
 
-### Hook Architecture (v0.9.5+)
+### Hook/Plugin Architecture (v0.9.5+)
 
-The recommended deployment mode uses a Claude Code PreToolUse hook for 100% transparent command rewriting.
+The recommended deployment mode uses platform-specific hooks for 100% transparent command rewriting:
+- **Claude Code**: PreToolUse hook (`rtk-rewrite.sh`) registered in `settings.json`
+- **OpenCode**: TypeScript plugin (`rtk-rewrite.ts`) auto-loaded from `~/.config/opencode/plugins/`
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                    Hook-Based Command Rewriting                        │
 └────────────────────────────────────────────────────────────────────────┘
 
-Claude Code             settings.json        rtk-rewrite.sh        RTK binary
+AI Agent               Hook/Plugin          Rewrite Logic         RTK binary
      │                       │                     │                    │
      │  Bash: "git status"   │                     │                    │
      │ ─────────────────────►│                     │                    │
-     │                       │  PreToolUse hook    │                    │
+     │                       │  Intercept trigger  │                    │
      │                       │ ───────────────────►│                    │
      │                       │                     │  detect: git       │
      │                       │                     │  rewrite:          │
@@ -99,12 +101,16 @@ Claude Code             settings.json        rtk-rewrite.sh        RTK binary
      │◄──────────────────────────────────────────────────────────────────
      │  "3 modified, 1 untracked ✓"    (~10 tokens vs ~200 raw)
      │
-     │  Claude never sees the rewrite — it only sees optimized output.
+     │  The agent never sees the rewrite — it only sees optimized output.
 
-Files:
+Files (Claude Code):
   ~/.claude/hooks/rtk-rewrite.sh  ← shell script (command detection + rewrite)
   ~/.claude/settings.json         ← hook registry (PreToolUse registration)
   ~/.claude/RTK.md                ← minimal context hint (10 lines)
+
+Files (OpenCode):
+  ~/.config/opencode/plugins/rtk-rewrite.ts  ← TS plugin (auto-loaded)
+  ~/.config/opencode/AGENTS.md               ← rules file (optional)
 ```
 
 Two hook strategies:

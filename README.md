@@ -14,7 +14,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 
 1. ✅ **This project (Rust Token Killer)** - LLM token optimizer
    - Repos: `rtk-ai/rtk`
-   - Purpose: Reduce Claude Code token consumption
+   - Purpose: Reduce LLM token consumption in AI coding agents
 
 2. ❌ **reachingforthejack/rtk** - Rust Type Kit (DIFFERENT PROJECT)
    - Purpose: Query Rust codebase and generate types
@@ -28,7 +28,7 @@ rtk gain        # Should show token savings stats
 
 If `rtk gain` doesn't exist, you installed the wrong package. See installation instructions below.
 
-## Token Savings (30-min Claude Code Session)
+## Token Savings (30-min AI Agent Session)
 
 Typical session without rtk: **~150,000 tokens**
 With rtk: **~45,000 tokens** → **70% reduction**
@@ -112,10 +112,11 @@ Download from [rtk-ai/releases](https://github.com/rtk-ai/rtk/releases):
 # 1. Verify installation
 rtk gain  # Must show token stats, not "command not found"
 
-# 2. Initialize for Claude Code (RECOMMENDED: hook-first mode)
+# 2. Initialize for your AI agent (RECOMMENDED: hook-first mode)
 rtk init --global
-# → Installs hook + creates slim RTK.md (10 lines, 99.5% token savings)
-# → Follow printed instructions to add hook to ~/.claude/settings.json
+# → Auto-detects Claude Code or OpenCode
+# → Installs hook/plugin + creates slim rules file
+# → Follow printed instructions to complete setup
 
 # 3. Test it works
 rtk git status  # Should show ultra-compact output
@@ -126,7 +127,7 @@ rtk init --show # Verify hook is installed and executable
 # rtk init                       # Local project only (./CLAUDE.md)
 ```
 
-**New in v0.9.5**: Hook-first installation eliminates ~2000 tokens from Claude's context while maintaining full RTK functionality through transparent command rewriting.
+**New in v0.9.5**: Hook-first installation eliminates ~2000 tokens from the agent's context while maintaining full RTK functionality through transparent command rewriting.
 
 ## Global Flags
 
@@ -204,14 +205,14 @@ rtk gain --all --format csv     # CSV export for Excel/analysis
 
 ### Discover — Find Missed Savings
 
-Scans your Claude Code session history to find commands where rtk would have saved tokens. Use it to:
+Scans your AI agent session history (Claude Code or OpenCode) to find commands where rtk would have saved tokens. Use it to:
 - **Measure what you're missing** — see exactly how many tokens you could save
 - **Identify habits** — find which commands you keep running without rtk
 - **Spot new opportunities** — see unhandled commands that could become rtk features
 
 ```bash
 rtk discover                    # Current project, last 30 days
-rtk discover --all              # All Claude Code projects
+rtk discover --all              # All agent projects
 rtk discover --all --since 7    # Last 7 days across all projects
 rtk discover -p aristote        # Filter by project name (substring)
 rtk discover --format json      # Machine-readable output
@@ -337,8 +338,8 @@ FAILED: 2/15 tests
   Without rtk:
 
   ┌──────────┐  git status     ┌──────────┐  git status  ┌──────────┐
-  │  Claude  │ ─────────────── │  shell   │ ──────────── │   git    │
-  │   LLM    │                 │          │              │  (CLI)   │
+  │   LLM    │ ─────────────── │  shell   │ ──────────── │   git    │
+  │  Agent   │                 │          │              │  (CLI)   │
   └──────────┘                 └──────────┘              └──────────┘
         ▲                                                      │
         │              ~2,000 tokens (raw output)              │
@@ -347,8 +348,8 @@ FAILED: 2/15 tests
   With rtk:
 
   ┌──────────┐  git status     ┌──────────┐  git status  ┌──────────┐
-  │  Claude  │ ─────────────── │   RTK    │ ──────────── │   git    │
-  │   LLM    │                 │  (proxy) │              │  (CLI)   │
+  │   LLM    │ ─────────────── │   RTK    │ ──────────── │   git    │
+  │  Agent   │                 │  (proxy) │              │  (CLI)   │
   └──────────┘                 └──────────┘              └──────────┘
         ▲                           │  ~2,000 tokens raw       │
         │                           └──────────────────────────┘
@@ -383,7 +384,7 @@ rtk init                # Local project: full injection into ./CLAUDE.md
 
 ### Installation Flags
 
-**Settings.json Control**:
+**Settings.json Control (Claude Code only)**:
 ```bash
 rtk init -g                 # Default: prompt to patch [y/N]
 rtk init -g --auto-patch    # Patch settings.json without prompting
@@ -402,7 +403,7 @@ rtk init -g --uninstall     # Remove all RTK artifacts
 ```
 
 **What is settings.json?**
-Claude Code configuration file that registers the RTK hook. The hook transparently rewrites commands (e.g., `git status` → `rtk git status`) before execution. Without this registration, Claude won't use the hook.
+Claude Code's configuration file that registers the RTK hook. The hook transparently rewrites commands (e.g., `git status` → `rtk git status`) before execution. Without this registration, the hook won't run. OpenCode uses a different mechanism (auto-loaded plugins) that doesn't require settings.json.
 
 **Backup Behavior**:
 RTK creates `~/.claude/settings.json.bak` before making changes. If something breaks, restore with:
@@ -485,102 +486,92 @@ max_file_size = 1048576 # 1MB per file max
 
 **Supported commands**: cargo (build/test/clippy/check/install/nextest), vitest, pytest, lint (eslint/biome/ruff/pylint/mypy), tsc, go (test/build/vet), err, test.
 
-## Auto-Rewrite Hook (Recommended)
+## Auto-Rewrite Hook/Plugin (Recommended)
 
-The most effective way to use rtk is with the **auto-rewrite hook** for Claude Code. Instead of relying on CLAUDE.md instructions (which subagents may ignore), this hook transparently intercepts Bash commands and rewrites them to their rtk equivalents before execution.
+The most effective way to use rtk is with the **auto-rewrite hook** (Claude Code) or **plugin** (OpenCode). Instead of relying on rules file instructions (which subagents may ignore), this transparently intercepts Bash commands and rewrites them to their rtk equivalents before execution.
 
-**Result**: 100% rtk adoption across all conversations and subagents, zero token overhead in Claude's context.
-
-### What Are Hooks?
-
-**For Beginners**:
-Claude Code hooks are scripts that run before/after Claude executes commands. RTK uses a **PreToolUse** hook that intercepts Bash commands and rewrites them (e.g., `git status` → `rtk git status`) before execution. This is **transparent** - Claude never sees the rewrite, it just gets optimized output.
-
-**Why settings.json?**
-Claude Code reads `~/.claude/settings.json` to find registered hooks. Without this file, Claude doesn't know the RTK hook exists. Think of it as the hook registry.
-
-**Is it safe?**
-Yes. RTK creates a backup (`settings.json.bak`) before changes. The hook is read-only (it only modifies command strings, never deletes files or accesses secrets). Review the hook script at `~/.claude/hooks/rtk-rewrite.sh` anytime.
+**Result**: 100% rtk adoption across all conversations and subagents, zero token overhead in context.
 
 ### How It Works
 
-The hook runs as a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks). When Claude Code is about to execute a Bash command like `git status`, the hook rewrites it to `rtk git status` before the command reaches the shell. Claude Code never sees the rewrite — it's transparent.
+RTK auto-detects your AI coding agent and installs the appropriate integration:
+
+| Agent | Mechanism | Config Location |
+|-------|-----------|-----------------|
+| **Claude Code** | PreToolUse hook (bash script) | `~/.claude/hooks/rtk-rewrite.sh` + `settings.json` |
+| **OpenCode** | Plugin (TypeScript) | `~/.config/opencode/plugins/rtk-rewrite.ts` |
+
+When the agent is about to execute a Bash command like `git status`, the hook/plugin rewrites it to `rtk git status` before the command reaches the shell. The agent never sees the rewrite — it's transparent.
 
 ```
-  Claude Code types:  git status
-                           │
-                    ┌──────▼──────────────────────┐
-                    │  ~/.claude/settings.json     │
-                    │  PreToolUse hook registered  │
-                    └──────┬──────────────────────┘
-                           │
-                    ┌──────▼──────────────────────┐
-                    │  rtk-rewrite.sh              │
-                    │  "git status"                │
-                    │    →  "rtk git status"       │  transparent rewrite
-                    └──────┬──────────────────────┘
-                           │
-                    ┌──────▼──────────────────────┐
-                    │  RTK (Rust binary)           │
-                    │  executes real git status    │
-                    │  filters output              │
-                    └──────┬──────────────────────┘
-                           │
-  Claude receives:  "3 modified, 1 untracked ✓"
-                    ↑ not 50 lines of raw git output
+  Agent types:  git status
+                      │
+               ┌──────▼──────────────────────┐
+               │  Hook/Plugin registered     │
+               │  (auto-detected per agent)  │
+               └──────┬──────────────────────┘
+                      │
+               ┌──────▼──────────────────────┐
+               │  rtk-rewrite (.sh or .ts)    │
+               │  "git status"                │
+               │    →  "rtk git status"       │  transparent rewrite
+               └──────┬──────────────────────┘
+                      │
+               ┌──────▼──────────────────────┐
+               │  RTK (Rust binary)           │
+               │  executes real git status    │
+               │  filters output              │
+               └──────┬──────────────────────┘
+                      │
+  Agent receives:  "3 modified, 1 untracked ✓"
+                   ↑ not 50 lines of raw git output
 ```
 
 ### Quick Install (Automated)
 
 ```bash
 rtk init -g
-# → Installs hook to ~/.claude/hooks/rtk-rewrite.sh (with executable permissions)
-# → Creates ~/.claude/RTK.md (10 lines, minimal context footprint)
-# → Adds @RTK.md reference to ~/.claude/CLAUDE.md
-# → Prompts: "Patch settings.json? [y/N]"
-# → If yes: creates backup (~/.claude/settings.json.bak), patches file
+# Auto-detects Claude Code or OpenCode and installs:
+#
+# Claude Code:
+#   → Hook: ~/.claude/hooks/rtk-rewrite.sh
+#   → Context: ~/.claude/RTK.md (10 lines)
+#   → Prompts to patch ~/.claude/settings.json
+#
+# OpenCode:
+#   → Plugin: ~/.config/opencode/plugins/rtk-rewrite.ts
+#   → Context: ~/.config/opencode/RTK.md (10 lines)
+#   → No settings.json needed (plugins auto-load)
 
 # Verify installation
-rtk init --show  # Shows hook status, settings.json registration
+rtk init --show  # Shows hook/plugin status for both agents
 ```
 
-**Settings.json Patching Options**:
+#### Claude Code-Specific Options
+
 ```bash
 rtk init -g                 # Default: prompts for consent [y/N]
-rtk init -g --auto-patch    # Patch immediately without prompting (CI/CD)
+rtk init -g --auto-patch    # Patch settings.json without prompting (CI/CD)
 rtk init -g --no-patch      # Skip patching, print manual JSON snippet
 ```
 
 **What is settings.json?**
-Claude Code's configuration file that registers the RTK hook. Without this, Claude won't use the hook. RTK backs up the file before changes (`settings.json.bak`).
+Claude Code's hook registry. RTK adds a PreToolUse hook entry that triggers command rewriting. Without this registration, the hook won't run. RTK backs up the file before changes (`settings.json.bak`).
 
-**Restart Required**: After installation, restart Claude Code, then test with `git status`.
+**Restart Required**: After installation, restart your AI agent, then test with `git status`.
 
 ### Manual Install (Fallback)
 
-If automatic patching fails or you prefer manual control:
-
-```bash
-# 1. Install hook and RTK.md
-rtk init -g --no-patch  # Prints JSON snippet
-
-# 2. Manually edit ~/.claude/settings.json (add the printed snippet)
-
-# 3. Restart Claude Code
-```
-
-**Alternative: Full manual setup**
+#### Claude Code
 
 ```bash
 # 1. Copy the hook script
 mkdir -p ~/.claude/hooks
-cp .claude/hooks/rtk-rewrite.sh ~/.claude/hooks/rtk-rewrite.sh
+cp hooks/rtk-rewrite.sh ~/.claude/hooks/rtk-rewrite.sh
 chmod +x ~/.claude/hooks/rtk-rewrite.sh
 
 # 2. Add to ~/.claude/settings.json under hooks.PreToolUse:
 ```
-
-Add this entry to the `PreToolUse` array in `~/.claude/settings.json`:
 
 ```json
 {
@@ -600,9 +591,18 @@ Add this entry to the `PreToolUse` array in `~/.claude/settings.json`:
 }
 ```
 
+#### OpenCode
+
+```bash
+# Copy the plugin (auto-loaded from plugins directory)
+mkdir -p ~/.config/opencode/plugins
+cp hooks/rtk-rewrite.ts ~/.config/opencode/plugins/rtk-rewrite.ts
+# No config file changes needed — OpenCode auto-loads plugins
+```
+
 ### Per-Project Install
 
-The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To use it in another project, copy the hook and add the same settings.json entry using a relative path or project-level `.claude/settings.json`.
+The hook/plugin files are included in this repository under `hooks/`. To use in another project, copy the appropriate file for your agent.
 
 ### Commands Rewritten
 
@@ -632,27 +632,27 @@ The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To us
 
 Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
 
-### Alternative: Suggest Hook (Non-Intrusive)
+### Alternative: Suggest Hook (Non-Intrusive, Claude Code Only)
 
-If you prefer Claude Code to **suggest** rtk usage rather than automatically rewriting commands, use the **suggest hook** pattern instead. This emits a system reminder when rtk-compatible commands are detected, without modifying the command execution.
+If you prefer the agent to **suggest** rtk usage rather than automatically rewriting commands, use the **suggest hook** pattern instead. This emits a system reminder when rtk-compatible commands are detected, without modifying the command execution. (Currently only available for Claude Code.)
 
 **Comparison**:
 
-| Aspect | Auto-Rewrite Hook | Suggest Hook |
-|--------|-------------------|--------------|
+| Aspect | Auto-Rewrite | Suggest Hook |
+|--------|-------------|--------------|
 | **Strategy** | Intercepts and modifies command before execution | Emits system reminder when rtk-compatible command detected |
-| **Effect** | Claude Code never sees the original command | Claude Code receives hint to use rtk, decides autonomously |
-| **Adoption** | 100% (forced) | ~70-85% (depends on Claude Code's adherence to instructions) |
+| **Effect** | Agent never sees the original command | Agent receives hint to use rtk, decides autonomously |
+| **Adoption** | 100% (forced) | ~70-85% (depends on agent adherence to instructions) |
 | **Use Case** | Production workflows, guaranteed savings | Learning mode, auditing, user preference for explicit control |
 | **Overhead** | Zero (transparent rewrite) | Minimal (reminder message in context) |
 
 **When to use suggest over rewrite**:
-- You want to audit which commands Claude Code chooses to run
+- You want to audit which commands the agent chooses to run
 - You're learning rtk patterns and want visibility into the rewrite logic
-- You prefer Claude Code to make explicit decisions rather than transparent rewrites
+- You prefer the agent to make explicit decisions rather than transparent rewrites
 - You want to preserve exact command execution for debugging
 
-#### Suggest Hook Setup
+#### Suggest Hook Setup (Claude Code)
 
 **1. Create the suggest hook script**
 
@@ -682,7 +682,7 @@ chmod +x ~/.claude/hooks/rtk-suggest.sh
 }
 ```
 
-The suggest hook detects the same commands as the rewrite hook but outputs a `systemMessage` instead of `updatedInput`, informing Claude Code that an rtk alternative exists.
+The suggest hook detects the same commands as the rewrite hook but outputs a `systemMessage` instead of `updatedInput`, informing the agent that an rtk alternative exists.
 
 ## Uninstalling RTK
 
@@ -690,21 +690,28 @@ The suggest hook detects the same commands as the rewrite hook but outputs a `sy
 ```bash
 rtk init -g --uninstall
 
-# Removes:
+# Removes (per detected agent):
+#
+# Claude Code:
 #   - ~/.claude/hooks/rtk-rewrite.sh
 #   - ~/.claude/RTK.md
 #   - @RTK.md reference from ~/.claude/CLAUDE.md
 #   - RTK hook entry from ~/.claude/settings.json
+#
+# OpenCode:
+#   - ~/.config/opencode/plugins/rtk-rewrite.ts
+#   - ~/.config/opencode/RTK.md
+#   - @RTK.md reference from ~/.config/opencode/AGENTS.md
 
-# Restart Claude Code after uninstall
+# Restart your AI agent after uninstall
 ```
 
-**Restore from Backup** (if needed):
+**Restore from Backup** (Claude Code, if needed):
 ```bash
 cp ~/.claude/settings.json.bak ~/.claude/settings.json
 ```
 
-**Local Projects**: Manually remove RTK instructions from `./CLAUDE.md`
+**Local Projects**: Manually remove RTK instructions from `./CLAUDE.md` or `./AGENTS.md`
 
 **Binary Removal**:
 ```bash
@@ -722,7 +729,7 @@ sudo dnf remove rtk         # Fedora/RHEL
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - ⚠️ Fix common issues (wrong rtk installed, missing commands, PATH issues)
 - **[INSTALL.md](INSTALL.md)** - Detailed installation guide with verification steps
 - **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Complete guide to token savings analytics, temporal breakdowns, and data export
-- **[CLAUDE.md](CLAUDE.md)** - Claude Code integration instructions and project context
+- **[CLAUDE.md](CLAUDE.md)** - AI agent integration instructions and project context
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture and development guide
 - **[SECURITY.md](SECURITY.md)** - Security policy, vulnerability reporting, and PR review process
 
@@ -748,19 +755,22 @@ ls -la ~/.claude/settings.json
 chmod 644 ~/.claude/settings.json
 ```
 
-### Hook Not Working After Install
+### Hook/Plugin Not Working After Install
 
 **Problem**: Commands still not using RTK after `rtk init -g`
 
 **Solutions**:
 ```bash
-# Verify hook is registered
+# Verify hook/plugin is registered
 rtk init --show
 
-# Check settings.json manually
+# For Claude Code: check settings.json manually
 cat ~/.claude/settings.json | grep rtk-rewrite
 
-# Restart Claude Code (critical step!)
+# For OpenCode: check plugin exists
+ls ~/.config/opencode/plugins/rtk-rewrite.ts
+
+# Restart your AI agent (critical step!)
 
 # Test with a command
 git status  # Should use rtk automatically
@@ -770,7 +780,7 @@ git status  # Should use rtk automatically
 
 **Problem**: RTK traces remain after `rtk init -g --uninstall`
 
-**Manual Cleanup**:
+**Manual Cleanup (Claude Code)**:
 ```bash
 # Remove hook
 rm ~/.claude/hooks/rtk-rewrite.sh
@@ -786,6 +796,18 @@ nano ~/.claude/settings.json  # Remove RTK hook entry
 
 # Restore from backup
 cp ~/.claude/settings.json.bak ~/.claude/settings.json
+```
+
+**Manual Cleanup (OpenCode)**:
+```bash
+# Remove plugin
+rm ~/.config/opencode/plugins/rtk-rewrite.ts
+
+# Remove RTK.md
+rm ~/.config/opencode/RTK.md
+
+# Remove @RTK.md reference
+nano ~/.config/opencode/AGENTS.md  # Delete @RTK.md line
 ```
 
 See **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** for more issues and solutions.
@@ -806,8 +828,8 @@ Every PR triggers `.github/workflows/security-check.yml`:
 
 Results appear in the PR's GitHub Actions summary.
 
-#### Layer 2: Claude Code Skill
-For comprehensive manual review, maintainers with [Claude Code](https://claude.ai/code) can use:
+#### Layer 2: AI Agent Skill
+For comprehensive manual review, maintainers with [Claude Code](https://claude.ai/code) or OpenCode can use:
 
 ```bash
 /rtk-pr-security <PR_NUMBER>

@@ -1,11 +1,15 @@
+use crate::platform::AgentPlatform;
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
-// Embedded hook script (guards before set -euo pipefail)
+// Embedded hook script for Claude Code (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
+
+// Embedded plugin for OpenCode (TypeScript)
+const REWRITE_PLUGIN: &str = include_str!("../hooks/rtk-rewrite.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
@@ -164,64 +168,162 @@ Overall average: **60-90% token reduction** on common development operations.
 "##;
 
 /// Main entry point for `rtk init`
+/// Multi-platform wrapper for run() - installs to one or both platforms
+pub fn run_multi_platform(
+    global: bool,
+    claude_md: bool,
+    hook_only: bool,
+    patch_mode: PatchMode,
+    platform_filter: &str,
+    verbose: u8,
+) -> Result<()> {
+    let platforms = parse_platform_filter(platform_filter)?;
+
+    for platform in platforms {
+        if let Err(e) = run(global, claude_md, hook_only, patch_mode, verbose, platform) {
+            eprintln!("Warning: Failed to install for {}: {}", platform.name(), e);
+            // Continue with other platforms
+        }
+    }
+
+    Ok(())
+}
+
+/// Multi-platform wrapper for uninstall() - removes from one or both platforms
+pub fn uninstall_multi_platform(global: bool, verbose: u8, platform_filter: &str) -> Result<()> {
+    let platforms = parse_platform_filter(platform_filter)?;
+
+    for platform in platforms {
+        if let Err(e) = uninstall(global, verbose, platform) {
+            eprintln!(
+                "Warning: Failed to uninstall for {}: {}",
+                platform.name(),
+                e
+            );
+            // Continue with other platforms
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse platform filter string into list of platforms
+fn parse_platform_filter(filter: &str) -> Result<Vec<AgentPlatform>> {
+    match filter {
+        "claude" => Ok(vec![AgentPlatform::ClaudeCode]),
+        "opencode" => Ok(vec![AgentPlatform::OpenCode]),
+        "both" => Ok(vec![AgentPlatform::ClaudeCode, AgentPlatform::OpenCode]),
+        other => {
+            anyhow::bail!(
+                "Invalid platform filter '{}'. Use: claude, opencode, or both",
+                other
+            );
+        }
+    }
+}
+
 pub fn run(
     global: bool,
     claude_md: bool,
     hook_only: bool,
     patch_mode: PatchMode,
     verbose: u8,
+    platform: AgentPlatform,
 ) -> Result<()> {
     // Mode selection
     match (claude_md, hook_only) {
-        (true, _) => run_claude_md_mode(global, verbose),
-        (false, true) => run_hook_only_mode(global, patch_mode, verbose),
-        (false, false) => run_default_mode(global, patch_mode, verbose),
+        (true, _) => run_claude_md_mode(global, verbose, platform),
+        (false, true) => run_hook_only_mode(global, patch_mode, verbose, platform),
+        (false, false) => run_default_mode(global, patch_mode, verbose, platform),
     }
 }
 
-/// Prepare hook directory and return paths (hook_dir, hook_path)
-fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
-    let claude_dir = resolve_claude_dir()?;
-    let hook_dir = claude_dir.join("hooks");
-    fs::create_dir_all(&hook_dir)
-        .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
-    let hook_path = hook_dir.join("rtk-rewrite.sh");
+/// Prepare hook/plugin directory and return paths (hook_dir, hook_path)
+fn prepare_hook_paths(platform: AgentPlatform) -> Result<(PathBuf, PathBuf)> {
+    let config_dir = platform.config_dir()?;
+    let hook_dir = config_dir.join(platform.hook_subdir());
+    fs::create_dir_all(&hook_dir).with_context(|| {
+        format!(
+            "Failed to create {} directory: {}",
+            platform.hook_mechanism(),
+            hook_dir.display()
+        )
+    })?;
+    let hook_path = hook_dir.join(platform.hook_filename());
     Ok((hook_dir, hook_path))
 }
 
-/// Write hook file if missing or outdated, return true if changed
-#[cfg(unix)]
-fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
-    let changed = if hook_path.exists() {
-        let existing = fs::read_to_string(hook_path)
-            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+/// Get the embedded hook/plugin content for a platform
+fn hook_content(platform: AgentPlatform) -> &'static str {
+    match platform {
+        AgentPlatform::ClaudeCode => REWRITE_HOOK,
+        AgentPlatform::OpenCode => REWRITE_PLUGIN,
+    }
+}
 
-        if existing == REWRITE_HOOK {
+/// Write hook/plugin file if missing or outdated, return true if changed
+#[cfg(unix)]
+fn ensure_hook_installed(hook_path: &Path, verbose: u8, platform: AgentPlatform) -> Result<bool> {
+    let content = hook_content(platform);
+    let changed = if hook_path.exists() {
+        let existing = fs::read_to_string(hook_path).with_context(|| {
+            format!(
+                "Failed to read existing {}: {}",
+                platform.hook_mechanism(),
+                hook_path.display()
+            )
+        })?;
+
+        if existing == content {
             if verbose > 0 {
-                eprintln!("Hook already up to date: {}", hook_path.display());
+                eprintln!(
+                    "{} already up to date: {}",
+                    platform.hook_mechanism(),
+                    hook_path.display()
+                );
             }
             false
         } else {
-            fs::write(hook_path, REWRITE_HOOK)
-                .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+            fs::write(hook_path, content).with_context(|| {
+                format!(
+                    "Failed to write {} to {}",
+                    platform.hook_mechanism(),
+                    hook_path.display()
+                )
+            })?;
             if verbose > 0 {
-                eprintln!("Updated hook: {}", hook_path.display());
+                eprintln!(
+                    "Updated {}: {}",
+                    platform.hook_mechanism(),
+                    hook_path.display()
+                );
             }
             true
         }
     } else {
-        fs::write(hook_path, REWRITE_HOOK)
-            .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+        fs::write(hook_path, content).with_context(|| {
+            format!(
+                "Failed to write {} to {}",
+                platform.hook_mechanism(),
+                hook_path.display()
+            )
+        })?;
         if verbose > 0 {
-            eprintln!("Created hook: {}", hook_path.display());
+            eprintln!(
+                "Created {}: {}",
+                platform.hook_mechanism(),
+                hook_path.display()
+            );
         }
         true
     };
 
-    // Set executable permissions
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    // Set executable permissions (only needed for Claude Code bash hook)
+    if platform == AgentPlatform::ClaudeCode {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
 
     Ok(changed)
 }
@@ -310,8 +412,8 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
     Ok(response == "y" || response == "yes")
 }
 
-/// Print manual instructions for settings.json patching
-fn print_manual_instructions(hook_path: &Path) {
+/// Print manual instructions for settings.json patching (Claude Code only)
+fn print_manual_instructions_claude(hook_path: &Path) {
     println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
@@ -322,6 +424,13 @@ fn print_manual_instructions(hook_path: &Path) {
     println!("    }}]}}");
     println!("  }}");
     println!("\n  Then restart Claude Code. Test with: git status\n");
+}
+
+/// Print manual instructions for OpenCode plugin registration
+fn print_manual_instructions_opencode(hook_path: &Path) {
+    println!("\n  Plugin installed at: {}", hook_path.display());
+    println!("  OpenCode automatically loads plugins from ~/.config/opencode/plugins/");
+    println!("  Restart OpenCode. Test with: git status\n");
 }
 
 /// Remove RTK hook entry from settings.json
@@ -399,36 +508,52 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall: remove hook, RTK.md, @RTK.md reference, settings.json entry
-pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
+/// Full uninstall: remove hook/plugin, RTK.md, @RTK.md reference, settings.json entry
+pub fn uninstall(global: bool, verbose: u8, platform: AgentPlatform) -> Result<()> {
     if !global {
-        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
+        anyhow::bail!(
+            "Uninstall only works with --global flag. For local projects, manually remove RTK from {}",
+            platform.rules_file()
+        );
     }
 
-    let claude_dir = resolve_claude_dir()?;
+    let config_dir = platform.config_dir()?;
+    let rules_file = platform.rules_file();
     let mut removed = Vec::new();
 
-    // 1. Remove hook file
-    let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
+    // 1. Remove hook/plugin file
+    let hook_path = config_dir
+        .join(platform.hook_subdir())
+        .join(platform.hook_filename());
     if hook_path.exists() {
-        fs::remove_file(&hook_path)
-            .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
-        removed.push(format!("Hook: {}", hook_path.display()));
+        fs::remove_file(&hook_path).with_context(|| {
+            format!(
+                "Failed to remove {}: {}",
+                platform.hook_mechanism(),
+                hook_path.display()
+            )
+        })?;
+        removed.push(format!(
+            "{}: {}",
+            platform.hook_mechanism(),
+            hook_path.display()
+        ));
     }
 
     // 2. Remove RTK.md
-    let rtk_md_path = claude_dir.join("RTK.md");
+    let rtk_md_path = config_dir.join("RTK.md");
     if rtk_md_path.exists() {
         fs::remove_file(&rtk_md_path)
             .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
         removed.push(format!("RTK.md: {}", rtk_md_path.display()));
     }
 
-    // 3. Remove @RTK.md reference from CLAUDE.md
-    let claude_md_path = claude_dir.join("CLAUDE.md");
-    if claude_md_path.exists() {
-        let content = fs::read_to_string(&claude_md_path)
-            .with_context(|| format!("Failed to read CLAUDE.md: {}", claude_md_path.display()))?;
+    // 3. Remove @RTK.md reference from rules file
+    let rules_md_path = config_dir.join(rules_file);
+    if rules_md_path.exists() {
+        let content = fs::read_to_string(&rules_md_path).with_context(|| {
+            format!("Failed to read {}: {}", rules_file, rules_md_path.display())
+        })?;
 
         if content.contains("@RTK.md") {
             let new_content = content
@@ -440,36 +565,45 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
             // Clean up double blanks
             let cleaned = clean_double_blanks(&new_content);
 
-            fs::write(&claude_md_path, cleaned).with_context(|| {
-                format!("Failed to write CLAUDE.md: {}", claude_md_path.display())
+            fs::write(&rules_md_path, cleaned).with_context(|| {
+                format!(
+                    "Failed to write {}: {}",
+                    rules_file,
+                    rules_md_path.display()
+                )
             })?;
-            removed.push(format!("CLAUDE.md: removed @RTK.md reference"));
+            removed.push(format!("{}: removed @RTK.md reference", rules_file));
         }
     }
 
-    // 4. Remove hook entry from settings.json
-    if remove_hook_from_settings(verbose)? {
-        removed.push("settings.json: removed RTK hook entry".to_string());
+    // 4. Remove hook entry from settings.json (Claude Code only)
+    if platform == AgentPlatform::ClaudeCode {
+        if remove_hook_from_settings(verbose)? {
+            removed.push("settings.json: removed RTK hook entry".to_string());
+        }
     }
 
     // Report results
     if removed.is_empty() {
-        println!("RTK was not installed (nothing to remove)");
+        println!(
+            "RTK was not installed for {} (nothing to remove)",
+            platform.name()
+        );
     } else {
-        println!("RTK uninstalled:");
+        println!("RTK uninstalled from {}:", platform.name());
         for item in removed {
             println!("  - {}", item);
         }
-        println!("\nRestart Claude Code to apply changes.");
+        println!("\nRestart {} to apply changes.", platform.name());
     }
 
     Ok(())
 }
 
-/// Orchestrator: patch settings.json with RTK hook
+/// Orchestrator: patch settings.json with RTK hook (Claude Code only)
 /// Handles reading, checking, prompting, merging, backing up, and atomic writing
 fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result<PatchResult> {
-    let claude_dir = resolve_claude_dir()?;
+    let claude_dir = AgentPlatform::ClaudeCode.config_dir()?;
     let settings_path = claude_dir.join("settings.json");
     let hook_command = hook_path
         .to_str()
@@ -501,12 +635,12 @@ fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_path);
+            print_manual_instructions_claude(hook_path);
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
             if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_path);
+                print_manual_instructions_claude(hook_path);
                 return Ok(PatchResult::Declined);
             }
         }
@@ -640,59 +774,80 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
 #[cfg(not(unix))]
-fn run_default_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
+fn run_default_mode(
+    _global: bool,
+    _patch_mode: PatchMode,
+    _verbose: u8,
+    platform: AgentPlatform,
+) -> Result<()> {
     eprintln!("⚠️  Hook-based mode requires Unix (macOS/Linux).");
     eprintln!("    Windows: use --claude-md mode for full injection.");
     eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose)
+    run_claude_md_mode(_global, _verbose, platform)
 }
 
 #[cfg(unix)]
-fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+fn run_default_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
+    platform: AgentPlatform,
+) -> Result<()> {
     if !global {
-        // Local init: unchanged behavior (full injection into ./CLAUDE.md)
-        return run_claude_md_mode(false, verbose);
+        // Local init: unchanged behavior (full injection into ./CLAUDE.md or ./AGENTS.md)
+        return run_claude_md_mode(false, verbose, platform);
     }
 
-    let claude_dir = resolve_claude_dir()?;
-    let rtk_md_path = claude_dir.join("RTK.md");
-    let claude_md_path = claude_dir.join("CLAUDE.md");
+    let config_dir = platform.config_dir()?;
+    let rtk_md_path = config_dir.join("RTK.md");
+    let rules_file = platform.rules_file();
+    let rules_md_path = config_dir.join(rules_file);
 
     // 1. Prepare hook directory and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
-    ensure_hook_installed(&hook_path, verbose)?;
+    let (_hook_dir, hook_path) = prepare_hook_paths(platform)?;
+    ensure_hook_installed(&hook_path, verbose, platform)?;
 
     // 2. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
 
-    // 3. Patch CLAUDE.md (add @RTK.md, migrate if needed)
-    let migrated = patch_claude_md(&claude_md_path, verbose)?;
+    // 3. Patch rules file (add @RTK.md, migrate if needed)
+    let migrated = patch_claude_md(&rules_md_path, verbose)?;
 
     // 4. Print success message
-    println!("\nRTK hook installed (global).\n");
-    println!("  Hook:      {}", hook_path.display());
+    println!("\nRTK {} installed (global).\n", platform.hook_mechanism());
+    println!("  {}: {}", platform.hook_mechanism(), hook_path.display());
     println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
-    println!("  CLAUDE.md: @RTK.md reference added");
+    println!("  {}: @RTK.md reference added", rules_file);
 
     if migrated {
-        println!("\n  ✅ Migrated: removed 137-line RTK block from CLAUDE.md");
+        println!(
+            "\n  Migrated: removed 137-line RTK block from {}",
+            rules_file
+        );
         println!("              replaced with @RTK.md (10 lines)");
     }
 
-    // 5. Patch settings.json
-    let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
-
-    // Report result
-    match patch_result {
-        PatchResult::Patched => {
-            // Already printed by patch_settings_json
+    // 5. Platform-specific registration
+    match platform {
+        AgentPlatform::ClaudeCode => {
+            let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
+            match patch_result {
+                PatchResult::Patched => {
+                    // Already printed by patch_settings_json
+                }
+                PatchResult::AlreadyPresent => {
+                    println!("\n  settings.json: hook already present");
+                    println!("  Restart Claude Code. Test with: git status");
+                }
+                PatchResult::Declined | PatchResult::Skipped => {
+                    // Manual instructions already printed by patch_settings_json
+                }
+            }
         }
-        PatchResult::AlreadyPresent => {
-            println!("\n  settings.json: hook already present");
-            println!("  Restart Claude Code. Test with: git status");
-        }
-        PatchResult::Declined | PatchResult::Skipped => {
-            // Manual instructions already printed by patch_settings_json
+        AgentPlatform::OpenCode => {
+            // OpenCode auto-loads plugins from ~/.config/opencode/plugins/
+            // No config file patching needed
+            print_manual_instructions_opencode(&hook_path);
         }
     }
 
@@ -703,42 +858,60 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
 
 /// Hook-only mode: just the hook, no RTK.md
 #[cfg(not(unix))]
-fn run_hook_only_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
+fn run_hook_only_mode(
+    _global: bool,
+    _patch_mode: PatchMode,
+    _verbose: u8,
+    _platform: AgentPlatform,
+) -> Result<()> {
     anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
 }
 
 #[cfg(unix)]
-fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+fn run_hook_only_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
+    platform: AgentPlatform,
+) -> Result<()> {
     if !global {
-        eprintln!("⚠️  Warning: --hook-only only makes sense with --global");
+        eprintln!("Warning: --hook-only only makes sense with --global");
         eprintln!("    For local projects, use default mode or --claude-md");
         return Ok(());
     }
 
     // Prepare and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
-    ensure_hook_installed(&hook_path, verbose)?;
+    let (_hook_dir, hook_path) = prepare_hook_paths(platform)?;
+    ensure_hook_installed(&hook_path, verbose, platform)?;
 
-    println!("\nRTK hook installed (hook-only mode).\n");
-    println!("  Hook: {}", hook_path.display());
     println!(
-        "  Note: No RTK.md created. Claude won't know about meta commands (gain, discover, proxy)."
+        "\nRTK {} installed (hook-only mode).\n",
+        platform.hook_mechanism()
+    );
+    println!("  {}: {}", platform.hook_mechanism(), hook_path.display());
+    println!(
+        "  Note: No RTK.md created. Agent won't know about meta commands (gain, discover, proxy)."
     );
 
-    // Patch settings.json
-    let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
-
-    // Report result
-    match patch_result {
-        PatchResult::Patched => {
-            // Already printed by patch_settings_json
+    // Platform-specific registration
+    match platform {
+        AgentPlatform::ClaudeCode => {
+            let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
+            match patch_result {
+                PatchResult::Patched => {
+                    // Already printed by patch_settings_json
+                }
+                PatchResult::AlreadyPresent => {
+                    println!("\n  settings.json: hook already present");
+                    println!("  Restart Claude Code. Test with: git status");
+                }
+                PatchResult::Declined | PatchResult::Skipped => {
+                    // Manual instructions already printed by patch_settings_json
+                }
+            }
         }
-        PatchResult::AlreadyPresent => {
-            println!("\n  settings.json: hook already present");
-            println!("  Restart Claude Code. Test with: git status");
-        }
-        PatchResult::Declined | PatchResult::Skipped => {
-            // Manual instructions already printed by patch_settings_json
+        AgentPlatform::OpenCode => {
+            print_manual_instructions_opencode(&hook_path);
         }
     }
 
@@ -747,12 +920,13 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
     Ok(())
 }
 
-/// Legacy mode: full 137-line injection into CLAUDE.md
-fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
+/// Legacy mode: full 137-line injection into CLAUDE.md/AGENTS.md
+fn run_claude_md_mode(global: bool, verbose: u8, platform: AgentPlatform) -> Result<()> {
+    let rules_file = platform.rules_file();
     let path = if global {
-        resolve_claude_dir()?.join("CLAUDE.md")
+        platform.config_dir()?.join(rules_file)
     } else {
-        PathBuf::from("CLAUDE.md")
+        PathBuf::from(rules_file)
     };
 
     if global {
@@ -815,9 +989,9 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
     }
 
     if global {
-        println!("   Claude Code will now use rtk in all sessions");
+        println!("   {} will now use rtk in all sessions", platform.name());
     } else {
-        println!("   Claude Code will use rtk in this project");
+        println!("   {} will use rtk in this project", platform.name());
     }
 
     Ok(())
@@ -980,115 +1154,168 @@ fn resolve_claude_dir() -> Result<PathBuf> {
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
-/// Show current rtk configuration
+/// Show current rtk configuration for all platforms
 pub fn show_config() -> Result<()> {
-    let claude_dir = resolve_claude_dir()?;
-    let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
-    let rtk_md_path = claude_dir.join("RTK.md");
-    let global_claude_md = claude_dir.join("CLAUDE.md");
-    let local_claude_md = PathBuf::from("CLAUDE.md");
+    println!("rtk Configuration:\n");
 
-    println!("📋 rtk Configuration:\n");
+    // --- Claude Code ---
+    println!("  Claude Code:");
+    if let Ok(claude_dir) = AgentPlatform::ClaudeCode.config_dir() {
+        let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
+        let rtk_md_path = claude_dir.join("RTK.md");
+        let global_claude_md = claude_dir.join("CLAUDE.md");
 
-    // Check hook
-    if hook_path.exists() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = fs::metadata(&hook_path)?;
-            let perms = metadata.permissions();
-            let is_executable = perms.mode() & 0o111 != 0;
+        // Check hook
+        if hook_path.exists() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let metadata = fs::metadata(&hook_path)?;
+                let perms = metadata.permissions();
+                let is_executable = perms.mode() & 0o111 != 0;
 
-            let hook_content = fs::read_to_string(&hook_path)?;
-            let has_guards =
-                hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
+                let hook_content = fs::read_to_string(&hook_path)?;
+                let has_guards = hook_content.contains("command -v rtk")
+                    && hook_content.contains("command -v jq");
 
-            if is_executable && has_guards {
-                println!("✅ Hook: {} (executable, with guards)", hook_path.display());
-            } else if !is_executable {
-                println!(
-                    "⚠️  Hook: {} (NOT executable - run: chmod +x)",
-                    hook_path.display()
-                );
-            } else {
-                println!("⚠️  Hook: {} (no guards - outdated)", hook_path.display());
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            println!("✅ Hook: {} (exists)", hook_path.display());
-        }
-    } else {
-        println!("⚪ Hook: not found");
-    }
-
-    // Check RTK.md
-    if rtk_md_path.exists() {
-        println!("✅ RTK.md: {} (slim mode)", rtk_md_path.display());
-    } else {
-        println!("⚪ RTK.md: not found");
-    }
-
-    // Check global CLAUDE.md
-    if global_claude_md.exists() {
-        let content = fs::read_to_string(&global_claude_md)?;
-        if content.contains("@RTK.md") {
-            println!("✅ Global (~/.claude/CLAUDE.md): @RTK.md reference");
-        } else if content.contains("<!-- rtk-instructions") {
-            println!(
-                "⚠️  Global (~/.claude/CLAUDE.md): old RTK block (run: rtk init -g to migrate)"
-            );
-        } else {
-            println!("⚪ Global (~/.claude/CLAUDE.md): exists but rtk not configured");
-        }
-    } else {
-        println!("⚪ Global (~/.claude/CLAUDE.md): not found");
-    }
-
-    // Check local CLAUDE.md
-    if local_claude_md.exists() {
-        let content = fs::read_to_string(&local_claude_md)?;
-        if content.contains("rtk") {
-            println!("✅ Local (./CLAUDE.md): rtk enabled");
-        } else {
-            println!("⚪ Local (./CLAUDE.md): exists but rtk not configured");
-        }
-    } else {
-        println!("⚪ Local (./CLAUDE.md): not found");
-    }
-
-    // Check settings.json
-    let settings_path = claude_dir.join("settings.json");
-    if settings_path.exists() {
-        let content = fs::read_to_string(&settings_path)?;
-        if !content.trim().is_empty() {
-            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-                let hook_command = hook_path.display().to_string();
-                if hook_already_present(&root, &hook_command) {
-                    println!("✅ settings.json: RTK hook configured");
+                if is_executable && has_guards {
+                    println!(
+                        "    Hook: {} (executable, with guards)",
+                        hook_path.display()
+                    );
+                } else if !is_executable {
+                    println!(
+                        "    Hook: {} (NOT executable - run: chmod +x)",
+                        hook_path.display()
+                    );
                 } else {
-                    println!("⚠️  settings.json: exists but RTK hook not configured");
-                    println!("    Run: rtk init -g --auto-patch");
+                    println!("    Hook: {} (no guards - outdated)", hook_path.display());
+                }
+            }
+
+            #[cfg(not(unix))]
+            {
+                println!("    Hook: {} (exists)", hook_path.display());
+            }
+        } else {
+            println!("    Hook: not installed");
+        }
+
+        // Check RTK.md
+        if rtk_md_path.exists() {
+            println!("    RTK.md: {} (slim mode)", rtk_md_path.display());
+        } else {
+            println!("    RTK.md: not found");
+        }
+
+        // Check global CLAUDE.md
+        if global_claude_md.exists() {
+            let content = fs::read_to_string(&global_claude_md)?;
+            if content.contains("@RTK.md") {
+                println!("    CLAUDE.md: @RTK.md reference present");
+            } else if content.contains("<!-- rtk-instructions") {
+                println!("    CLAUDE.md: old RTK block (run: rtk init -g to migrate)");
+            } else {
+                println!("    CLAUDE.md: exists but rtk not configured");
+            }
+        } else {
+            println!("    CLAUDE.md: not found");
+        }
+
+        // Check settings.json
+        let settings_path = claude_dir.join("settings.json");
+        if settings_path.exists() {
+            let content = fs::read_to_string(&settings_path)?;
+            if !content.trim().is_empty() {
+                if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let hook_command = hook_path.display().to_string();
+                    if hook_already_present(&root, &hook_command) {
+                        println!("    settings.json: RTK hook configured");
+                    } else {
+                        println!("    settings.json: exists but RTK hook not configured");
+                    }
+                } else {
+                    println!("    settings.json: exists but invalid JSON");
                 }
             } else {
-                println!("⚠️  settings.json: exists but invalid JSON");
+                println!("    settings.json: empty");
             }
         } else {
-            println!("⚪ settings.json: empty");
+            println!("    settings.json: not found");
         }
     } else {
-        println!("⚪ settings.json: not found");
+        println!("    Not available (cannot resolve home directory)");
+    }
+
+    // --- OpenCode ---
+    println!("\n  OpenCode:");
+    if let Ok(opencode_dir) = AgentPlatform::OpenCode.config_dir() {
+        let plugin_path = opencode_dir.join("plugins").join("rtk-rewrite.ts");
+        let rtk_md_path = opencode_dir.join("RTK.md");
+        let global_agents_md = opencode_dir.join("AGENTS.md");
+
+        // Check plugin
+        if plugin_path.exists() {
+            println!("    Plugin: {} (installed)", plugin_path.display());
+        } else {
+            println!("    Plugin: not installed");
+        }
+
+        // Check RTK.md
+        if rtk_md_path.exists() {
+            println!("    RTK.md: {} (slim mode)", rtk_md_path.display());
+        } else {
+            println!("    RTK.md: not found");
+        }
+
+        // Check global AGENTS.md
+        if global_agents_md.exists() {
+            let content = fs::read_to_string(&global_agents_md)?;
+            if content.contains("@RTK.md") {
+                println!("    AGENTS.md: @RTK.md reference present");
+            } else if content.contains("<!-- rtk-instructions") {
+                println!("    AGENTS.md: old RTK block (run: rtk init -g to migrate)");
+            } else {
+                println!("    AGENTS.md: exists but rtk not configured");
+            }
+        } else {
+            println!("    AGENTS.md: not found");
+        }
+    } else {
+        println!("    Not available (cannot resolve home directory)");
+    }
+
+    // --- Local project ---
+    println!("\n  Local project:");
+    let local_claude_md = PathBuf::from("CLAUDE.md");
+    let local_agents_md = PathBuf::from("AGENTS.md");
+
+    for (name, path) in [
+        ("CLAUDE.md", &local_claude_md),
+        ("AGENTS.md", &local_agents_md),
+    ] {
+        if path.exists() {
+            let content = fs::read_to_string(path)?;
+            if content.contains("rtk") {
+                println!("    {}: rtk enabled", name);
+            } else {
+                println!("    {}: exists but rtk not configured", name);
+            }
+        } else {
+            println!("    {}: not found", name);
+        }
     }
 
     println!("\nUsage:");
-    println!("  rtk init              # Full injection into local CLAUDE.md");
-    println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
-    println!("  rtk init -g --auto-patch    # Same as above but no prompt");
+    println!("  rtk init              # Full injection into local CLAUDE.md/AGENTS.md");
+    println!("  rtk init -g           # Hook/plugin + RTK.md + rules file (recommended)");
+    println!("  rtk init -g --auto-patch    # Same as above, no prompt (Claude Code)");
     println!("  rtk init -g --no-patch      # Skip settings.json (manual setup)");
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
-    println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
-    println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
+    println!("  rtk init -g --claude-md     # Legacy: full injection into rules file");
+    println!("  rtk init -g --hook-only     # Hook/plugin only, no RTK.md");
+    println!("\n  Platform auto-detected from environment (OPENCODE=1 or CLAUDE_CODE=1).");
+    println!("  When not inside an agent session, infers from installed config dirs.");
 
     Ok(())
 }
