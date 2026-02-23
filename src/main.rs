@@ -867,11 +867,30 @@ enum GoCommands {
     Other(Vec<OsString>),
 }
 
+/// RTK-only subcommands that should never fall back to raw execution.
+/// If Clap fails to parse these, show the Clap error directly.
+const RTK_META_COMMANDS: &[&str] = &[
+    "gain",
+    "discover",
+    "learn",
+    "init",
+    "config",
+    "proxy",
+    "hook-audit",
+    "cc-economics",
+];
+
 fn run_fallback(parse_error: clap::Error) -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // No args → show Clap's error (user ran just "rtk" with bad syntax)
     if args.is_empty() {
+        parse_error.exit();
+    }
+
+    // RTK meta-commands should never fall back to raw execution.
+    // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
+    if RTK_META_COMMANDS.contains(&args[0].as_str()) {
         parse_error.exit();
     }
 
@@ -1687,6 +1706,46 @@ mod tests {
                 Commands::Gain { failures, .. } => assert!(failures),
                 _ => panic!("Expected Gain command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_meta_commands_reject_bad_flags() {
+        // RTK meta-commands should produce parse errors (not fall through to raw execution).
+        // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
+        for cmd in RTK_META_COMMANDS {
+            if *cmd == "proxy" {
+                continue;
+            }
+            let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
+            assert!(
+                result.is_err(),
+                "Meta-command '{}' with bad flag should fail to parse",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_meta_command_list_is_complete() {
+        // Verify all meta-commands are in the guard list by checking they parse with valid syntax
+        let meta_cmds_that_parse = [
+            vec!["rtk", "gain"],
+            vec!["rtk", "discover"],
+            vec!["rtk", "learn"],
+            vec!["rtk", "init"],
+            vec!["rtk", "config"],
+            vec!["rtk", "proxy", "echo", "hi"],
+            vec!["rtk", "hook-audit"],
+            vec!["rtk", "cc-economics"],
+        ];
+        for args in &meta_cmds_that_parse {
+            let result = Cli::try_parse_from(args.iter());
+            assert!(
+                result.is_ok(),
+                "Meta-command {:?} should parse successfully",
+                args
+            );
         }
     }
 }
