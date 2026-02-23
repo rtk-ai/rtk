@@ -10,7 +10,7 @@ pub enum GitCommand {
     Status,
     Show,
     Add,
-    Commit { message: String },
+    Commit { messages: Vec<String> },
     Push,
     Pull,
     Branch,
@@ -26,7 +26,7 @@ pub fn run(cmd: GitCommand, args: &[String], max_lines: Option<usize>, verbose: 
         GitCommand::Status => run_status(args, verbose),
         GitCommand::Show => run_show(args, max_lines, verbose),
         GitCommand::Add => run_add(args, verbose),
-        GitCommand::Commit { message } => run_commit(&message, verbose),
+        GitCommand::Commit { messages } => run_commit(&messages, verbose),
         GitCommand::Push => run_push(args, verbose),
         GitCommand::Pull => run_pull(args, verbose),
         GitCommand::Branch => run_branch(args, verbose),
@@ -307,9 +307,9 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
     });
 
     // Check if user provided limit flag
-    let has_limit_flag = args
-        .iter()
-        .any(|arg| arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()));
+    let has_limit_flag = args.iter().any(|arg| {
+        arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+    });
 
     // Apply RTK defaults only if user didn't specify them
     if !has_format_flag {
@@ -323,7 +323,7 @@ fn run_log(args: &[String], _max_lines: Option<usize>, verbose: u8) -> Result<()
         // Extract limit from args if provided
         args.iter()
             .find(|arg| {
-                arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+                arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
             })
             .and_then(|arg| arg[1..].parse::<usize>().ok())
             .unwrap_or(10)
@@ -657,15 +657,30 @@ fn run_add(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn run_commit(message: &str, verbose: u8) -> Result<()> {
+fn build_commit_command(messages: &[String]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("commit");
+    for msg in messages {
+        cmd.args(["-m", msg]);
+    }
+    cmd
+}
+
+fn run_commit(messages: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
+    let original_cmd = messages
+        .iter()
+        .map(|m| format!("-m \"{}\"", m))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let original_cmd = format!("git commit {}", original_cmd);
+
     if verbose > 0 {
-        eprintln!("git commit -m \"{}\"", message);
+        eprintln!("{}", original_cmd);
     }
 
-    let output = Command::new("git")
-        .args(["commit", "-m", message])
+    let output = build_commit_command(messages)
         .output()
         .context("Failed to run git commit")?;
 
@@ -677,7 +692,7 @@ fn run_commit(message: &str, verbose: u8) -> Result<()> {
         // Extract commit hash from output like "[main abc1234] message"
         let compact = if let Some(line) = stdout.lines().next() {
             if let Some(hash_start) = line.find(' ') {
-                let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
+                let hash = line[1..hash_start].split(' ').last().unwrap_or("");
                 if !hash.is_empty() && hash.len() >= 7 {
                     format!("ok ✓ {}", &hash[..7.min(hash.len())])
                 } else {
@@ -692,27 +707,24 @@ fn run_commit(message: &str, verbose: u8) -> Result<()> {
 
         println!("{}", compact);
 
-        timer.track(
-            &format!("git commit -m \"{}\"", message),
-            "rtk git commit",
-            &raw_output,
-            &compact,
-        );
-    } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
-        println!("ok (nothing to commit)");
-        timer.track(
-            &format!("git commit -m \"{}\"", message),
-            "rtk git commit",
-            &raw_output,
-            "ok (nothing to commit)",
-        );
+        timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
     } else {
-        eprintln!("FAILED: git commit");
-        if !stderr.trim().is_empty() {
-            eprintln!("{}", stderr);
-        }
-        if !stdout.trim().is_empty() {
-            eprintln!("{}", stdout);
+        if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
+            println!("ok (nothing to commit)");
+            timer.track(
+                &original_cmd,
+                "rtk git commit",
+                &raw_output,
+                "ok (nothing to commit)",
+            );
+        } else {
+            eprintln!("FAILED: git commit");
+            if !stderr.trim().is_empty() {
+                eprintln!("{}", stderr);
+            }
+            if !stdout.trim().is_empty() {
+                eprintln!("{}", stdout);
+            }
         }
     }
 
@@ -872,15 +884,31 @@ fn run_branch(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("git branch");
     }
 
-    let mut cmd = Command::new("git");
-    cmd.arg("branch");
-
-    // If user passes flags like -d, -D, -m, pass through directly
+    // Detect write operations: delete, rename, copy
     let has_action_flag = args
         .iter()
         .any(|a| a == "-d" || a == "-D" || a == "-m" || a == "-M" || a == "-c" || a == "-C");
 
-    if has_action_flag {
+    // Detect list-mode flags
+    let has_list_flag = args.iter().any(|a| {
+        a == "-a"
+            || a == "--all"
+            || a == "-r"
+            || a == "--remotes"
+            || a == "--list"
+            || a == "--merged"
+            || a == "--no-merged"
+            || a == "--contains"
+            || a == "--no-contains"
+    });
+
+    // Detect positional arguments (not flags) — indicates branch creation
+    let has_positional_arg = args.iter().any(|a| !a.starts_with('-'));
+
+    // Write operation: action flags, or positional args without list flags (= branch creation)
+    if has_action_flag || (has_positional_arg && !has_list_flag) {
+        let mut cmd = Command::new("git");
+        cmd.arg("branch");
         for arg in args {
             cmd.arg(arg);
         }
@@ -905,19 +933,25 @@ fn run_branch(args: &[String], verbose: u8) -> Result<()> {
         if output.status.success() {
             println!("ok ✓");
         } else {
-            eprintln!("FAILED: git branch");
+            eprintln!("FAILED: git branch {}", args.join(" "));
             if !stderr.trim().is_empty() {
                 eprintln!("{}", stderr);
             }
             if !stdout.trim().is_empty() {
                 eprintln!("{}", stdout);
             }
+            std::process::exit(output.status.code().unwrap_or(1));
         }
         return Ok(());
     }
 
     // List mode: show compact branch list
-    cmd.arg("-a").arg("--no-color");
+    let mut cmd = Command::new("git");
+    cmd.arg("branch");
+    if !has_list_flag {
+        cmd.arg("-a");
+    }
+    cmd.arg("--no-color");
     for arg in args {
         cmd.arg(arg);
     }
@@ -1518,5 +1552,109 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let porcelain = "## main\nA  🎉-party.txt\n M 日本語ファイル.rs\n";
         let result = format_status_output(porcelain);
         assert!(result.contains("📌 main"));
+    }
+
+    /// Regression test: `git branch <name>` must create, not list.
+    /// Before fix, positional args fell into list mode which added `-a`,
+    /// turning creation into a pattern-filtered listing (silent no-op).
+    #[test]
+    #[ignore] // Integration test: requires git repo
+    fn test_branch_creation_not_swallowed() {
+        let branch = "test-rtk-create-branch-regression";
+        // Create branch via run_branch
+        run_branch(&[branch.to_string()], 0).expect("run_branch should succeed");
+        // Verify it exists
+        let output = Command::new("git")
+            .args(["branch", "--list", branch])
+            .output()
+            .expect("git branch --list should work");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(branch),
+            "Branch '{}' was not created. run_branch silently swallowed the creation.",
+            branch
+        );
+        // Cleanup
+        let _ = Command::new("git").args(["branch", "-d", branch]).output();
+    }
+
+    /// Regression test: `git branch <name> <commit>` must create from commit.
+    #[test]
+    #[ignore] // Integration test: requires git repo
+    fn test_branch_creation_from_commit() {
+        let branch = "test-rtk-create-from-commit";
+        run_branch(&[branch.to_string(), "HEAD".to_string()], 0)
+            .expect("run_branch with start-point should succeed");
+        let output = Command::new("git")
+            .args(["branch", "--list", branch])
+            .output()
+            .expect("git branch --list should work");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(branch),
+            "Branch '{}' was not created from commit.",
+            branch
+        );
+        let _ = Command::new("git").args(["branch", "-d", branch]).output();
+    }
+
+    #[test]
+    fn test_commit_single_message() {
+        let messages = vec!["fix: typo".to_string()];
+        let cmd = build_commit_command(&messages);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["commit", "-m", "fix: typo"]);
+    }
+
+    #[test]
+    fn test_commit_multiple_messages() {
+        let messages = vec![
+            "feat: add multi-paragraph support".to_string(),
+            "This allows git commit -m \"title\" -m \"body\".".to_string(),
+        ];
+        let cmd = build_commit_command(&messages);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "commit",
+                "-m",
+                "feat: add multi-paragraph support",
+                "-m",
+                "This allows git commit -m \"title\" -m \"body\"."
+            ]
+        );
+    }
+
+    #[test]
+    fn test_commit_three_messages() {
+        let messages = vec![
+            "title".to_string(),
+            "body".to_string(),
+            "footer: refs #202".to_string(),
+        ];
+        let cmd = build_commit_command(&messages);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "commit",
+                "-m",
+                "title",
+                "-m",
+                "body",
+                "-m",
+                "footer: refs #202"
+            ]
+        );
     }
 }

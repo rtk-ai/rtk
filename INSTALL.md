@@ -67,35 +67,25 @@ rtk gain  # MUST show token savings, not "command not found"
 
 ⚠️ **WARNING**: `cargo install rtk` from crates.io might install the wrong package. Always verify with `rtk gain`.
 
-### Windows Installation
-
-RTK compiles natively for Windows. Download from GitHub Releases or:
-
-```bash
-cargo install --path .
-```
-
-Configure Claude Code `settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Bash",
-      "hooks": [{
-        "type": "command",
-        "command": "rtk hook claude"
-      }]
-    }]
-  }
-}
-```
-
-No bash, node, or bun required — `rtk hook claude` is a native Windows binary.
-The exec.rs shell selection (`cfg!(windows)`) automatically uses `cmd /C` on Windows
-and `sh -c` on Unix for passthrough commands.
-
 ## Project Initialization
+
+### Which mode to choose?
+
+```
+  Do you want RTK active across ALL Claude Code projects?
+  │
+  ├─ YES → rtk init -g              (recommended)
+  │         Hook + RTK.md (~10 tokens in context)
+  │         Commands auto-rewritten transparently
+  │
+  ├─ YES, minimal → rtk init -g --hook-only
+  │         Hook only, nothing added to CLAUDE.md
+  │         Zero tokens in context
+  │
+  └─ NO, single project → rtk init
+            Local CLAUDE.md only (137 lines)
+            No hook, no global effect
+```
 
 ### Recommended: Global Hook-First Setup
 
@@ -121,6 +111,25 @@ rtk init --show  # Check hook is installed and executable
 
 **What is settings.json?**
 Claude Code's hook registry. RTK adds a PreToolUse hook that rewrites commands transparently. Without this, Claude won't invoke the hook automatically.
+
+```
+  Claude Code          settings.json        rtk-rewrite.sh        RTK binary
+       │                    │                     │                    │
+       │  "git status"      │                     │                    │
+       │ ──────────────────►│                     │                    │
+       │                    │  PreToolUse trigger  │                    │
+       │                    │ ───────────────────►│                    │
+       │                    │                     │  rewrite command   │
+       │                    │                     │  → rtk git status  │
+       │                    │◄────────────────────│                    │
+       │                    │  updated command     │                    │
+       │                    │                                          │
+       │  execute: rtk git status                                      │
+       │ ─────────────────────────────────────────────────────────────►│
+       │                                                               │  filter
+       │  "3 modified, 1 untracked ✓"                                  │
+       │◄──────────────────────────────────────────────────────────────│
+```
 
 **Backup Safety**:
 RTK backs up existing settings.json before changes. Restore if needed:

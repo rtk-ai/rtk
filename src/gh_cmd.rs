@@ -8,8 +8,105 @@ use crate::json_cmd;
 use crate::tracking;
 use crate::utils::{ok_confirmation, truncate};
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde_json::Value;
 use std::process::Command;
+
+lazy_static! {
+    static ref HTML_COMMENT_RE: Regex = Regex::new(r"(?s)<!--.*?-->").unwrap();
+    static ref BADGE_LINE_RE: Regex =
+        Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap();
+    static ref IMAGE_ONLY_LINE_RE: Regex = Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap();
+    static ref HORIZONTAL_RULE_RE: Regex =
+        Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap();
+    static ref MULTI_BLANK_RE: Regex = Regex::new(r"\n{3,}").unwrap();
+}
+
+/// Filter markdown body to remove noise while preserving meaningful content.
+/// Removes HTML comments, badge lines, image-only lines, horizontal rules,
+/// and collapses excessive blank lines. Preserves code blocks untouched.
+fn filter_markdown_body(body: &str) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+
+    // Split into code blocks and non-code segments
+    let mut result = String::new();
+    let mut remaining = body;
+
+    loop {
+        // Find next code block opening (``` or ~~~)
+        let fence_pos = remaining
+            .find("```")
+            .or_else(|| remaining.find("~~~"))
+            .map(|pos| {
+                let fence = if remaining[pos..].starts_with("```") {
+                    "```"
+                } else {
+                    "~~~"
+                };
+                (pos, fence)
+            });
+
+        match fence_pos {
+            Some((start, fence)) => {
+                // Filter the text before the code block
+                let before = &remaining[..start];
+                result.push_str(&filter_markdown_segment(before));
+
+                // Find the closing fence
+                let after_open = start + fence.len();
+                // Skip past the opening fence line
+                let code_start = remaining[after_open..]
+                    .find('\n')
+                    .map(|p| after_open + p + 1)
+                    .unwrap_or(remaining.len());
+
+                let close_pos = remaining[code_start..]
+                    .find(fence)
+                    .map(|p| code_start + p + fence.len());
+
+                match close_pos {
+                    Some(end) => {
+                        // Preserve the entire code block as-is
+                        result.push_str(&remaining[start..end]);
+                        // Include the rest of the closing fence line
+                        let after_close = remaining[end..]
+                            .find('\n')
+                            .map(|p| end + p + 1)
+                            .unwrap_or(remaining.len());
+                        result.push_str(&remaining[end..after_close]);
+                        remaining = &remaining[after_close..];
+                    }
+                    None => {
+                        // Unclosed code block — preserve everything
+                        result.push_str(&remaining[start..]);
+                        remaining = "";
+                    }
+                }
+            }
+            None => {
+                // No more code blocks, filter the rest
+                result.push_str(&filter_markdown_segment(remaining));
+                break;
+            }
+        }
+    }
+
+    // Final cleanup: trim trailing whitespace
+    result.trim().to_string()
+}
+
+/// Filter a markdown segment that is NOT inside a code block.
+fn filter_markdown_segment(text: &str) -> String {
+    let mut s = HTML_COMMENT_RE.replace_all(text, "").to_string();
+    s = BADGE_LINE_RE.replace_all(&s, "").to_string();
+    s = IMAGE_ONLY_LINE_RE.replace_all(&s, "").to_string();
+    s = HORIZONTAL_RULE_RE.replace_all(&s, "").to_string();
+    s = MULTI_BLANK_RE.replace_all(&s, "\n\n").to_string();
+    s
+}
 
 /// Run a gh command with token-optimized output
 pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
@@ -273,22 +370,18 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     filtered.push_str(&line);
     print!("{}", line);
 
-    // Show body summary (first 3 lines max)
+    // Show filtered body
     if let Some(body) = json["body"].as_str() {
         if !body.is_empty() {
-            filtered.push('\n');
-            println!();
-            for line in body.lines().take(3) {
-                if !line.trim().is_empty() {
-                    let formatted = format!("  {}\n", truncate(line, 80));
+            let body_filtered = filter_markdown_body(body);
+            if !body_filtered.is_empty() {
+                filtered.push('\n');
+                println!();
+                for line in body_filtered.lines() {
+                    let formatted = format!("  {}\n", line);
                     filtered.push_str(&formatted);
                     print!("{}", formatted);
                 }
-            }
-            if body.lines().count() > 3 {
-                let line = format!("  ... (gh pr view {} for full)\n", pr_number);
-                filtered.push_str(&line);
-                print!("{}", line);
             }
         }
     }
@@ -575,12 +668,13 @@ fn view_issue(args: &[String], _verbose: u8) -> Result<()> {
 
     if let Some(body) = json["body"].as_str() {
         if !body.is_empty() {
-            let line = "\n  Description:\n";
-            filtered.push_str(line);
-            print!("{}", line);
-            for line in body.lines().take(3) {
-                if !line.trim().is_empty() {
-                    let formatted = format!("    {}\n", truncate(line, 80));
+            let body_filtered = filter_markdown_body(body);
+            if !body_filtered.is_empty() {
+                let line = "\n  Description:\n";
+                filtered.push_str(line);
+                print!("{}", line);
+                for line in body_filtered.lines() {
+                    let formatted = format!("    {}\n", line);
                     filtered.push_str(&formatted);
                     print!("{}", formatted);
                 }
@@ -692,14 +786,29 @@ fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     Ok(())
 }
 
-fn view_run(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
+/// Check if run view args should bypass filtering and pass through directly.
+/// Flags like --log-failed, --log, and --json produce output that the filter
+/// would incorrectly strip.
+fn should_passthrough_run_view(extra_args: &[String]) -> bool {
+    extra_args
+        .iter()
+        .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
+}
 
+fn view_run(args: &[String], _verbose: u8) -> Result<()> {
     if args.is_empty() {
         return Err(anyhow::anyhow!("Run ID required"));
     }
 
     let run_id = &args[0];
+    let extra_args = &args[1..];
+
+    // Pass through when user requests logs or JSON — the filter would strip them
+    if should_passthrough_run_view(extra_args) {
+        return run_passthrough_with_extra("gh", &["run", "view", run_id], extra_args);
+    }
+
+    let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
     cmd.args(["run", "view", run_id]);
@@ -1055,6 +1164,38 @@ fn run_api(args: &[String], _verbose: u8) -> Result<()> {
     Ok(())
 }
 
+/// Pass through a command with base args + extra args, tracking as passthrough.
+fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[String]) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut command = Command::new(cmd);
+    for arg in base_args {
+        command.arg(arg);
+    }
+    for arg in extra_args {
+        command.arg(arg);
+    }
+
+    let status =
+        command
+            .status()
+            .context(format!("Failed to run {} {}", cmd, base_args.join(" ")))?;
+
+    let full_cmd = format!(
+        "{} {} {}",
+        cmd,
+        base_args.join(" "),
+        tracking::args_display(&extra_args.iter().map(|s| s.into()).collect::<Vec<_>>())
+    );
+    timer.track_passthrough(&full_cmd, &format!("rtk {} (passthrough)", full_cmd));
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    Ok(())
+}
+
 fn run_passthrough(cmd: &str, subcommand: &str, args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
@@ -1134,5 +1275,184 @@ mod tests {
     fn test_ok_confirmation_pr_edit() {
         let result = ok_confirmation("edited", "#42");
         assert_eq!(result, "ok edited #42");
+    }
+
+    #[test]
+    fn test_run_view_passthrough_log_failed() {
+        assert!(should_passthrough_run_view(&["--log-failed".into()]));
+    }
+
+    #[test]
+    fn test_run_view_passthrough_log() {
+        assert!(should_passthrough_run_view(&["--log".into()]));
+    }
+
+    #[test]
+    fn test_run_view_passthrough_json() {
+        assert!(should_passthrough_run_view(&[
+            "--json".into(),
+            "jobs".into()
+        ]));
+    }
+
+    #[test]
+    fn test_run_view_no_passthrough_empty() {
+        assert!(!should_passthrough_run_view(&[]));
+    }
+
+    #[test]
+    fn test_run_view_no_passthrough_other_flags() {
+        assert!(!should_passthrough_run_view(&["--web".into()]));
+    }
+
+    // --- filter_markdown_body tests ---
+
+    #[test]
+    fn test_filter_markdown_body_html_comment_single_line() {
+        let input = "Hello\n<!-- this is a comment -->\nWorld";
+        let result = filter_markdown_body(input);
+        assert!(!result.contains("<!--"));
+        assert!(result.contains("Hello"));
+        assert!(result.contains("World"));
+    }
+
+    #[test]
+    fn test_filter_markdown_body_html_comment_multiline() {
+        let input = "Before\n<!--\nmultiline\ncomment\n-->\nAfter";
+        let result = filter_markdown_body(input);
+        assert!(!result.contains("<!--"));
+        assert!(!result.contains("multiline"));
+        assert!(result.contains("Before"));
+        assert!(result.contains("After"));
+    }
+
+    #[test]
+    fn test_filter_markdown_body_badge_lines() {
+        let input = "# Title\n[![CI](https://img.shields.io/badge.svg)](https://github.com/actions)\nSome text";
+        let result = filter_markdown_body(input);
+        assert!(!result.contains("shields.io"));
+        assert!(result.contains("# Title"));
+        assert!(result.contains("Some text"));
+    }
+
+    #[test]
+    fn test_filter_markdown_body_image_only_lines() {
+        let input = "# Title\n![screenshot](https://example.com/img.png)\nSome text";
+        let result = filter_markdown_body(input);
+        assert!(!result.contains("![screenshot]"));
+        assert!(result.contains("# Title"));
+        assert!(result.contains("Some text"));
+    }
+
+    #[test]
+    fn test_filter_markdown_body_horizontal_rules() {
+        let input = "Section 1\n---\nSection 2\n***\nSection 3\n___\nEnd";
+        let result = filter_markdown_body(input);
+        assert!(!result.contains("---"));
+        assert!(!result.contains("***"));
+        assert!(!result.contains("___"));
+        assert!(result.contains("Section 1"));
+        assert!(result.contains("Section 2"));
+        assert!(result.contains("Section 3"));
+    }
+
+    #[test]
+    fn test_filter_markdown_body_blank_lines_collapse() {
+        let input = "Line 1\n\n\n\n\nLine 2";
+        let result = filter_markdown_body(input);
+        // Should collapse to at most one blank line (2 newlines)
+        assert!(!result.contains("\n\n\n"));
+        assert!(result.contains("Line 1"));
+        assert!(result.contains("Line 2"));
+    }
+
+    #[test]
+    fn test_filter_markdown_body_code_block_preserved() {
+        let input = "Text before\n```python\n<!-- not a comment -->\n![not an image](url)\n---\n```\nText after";
+        let result = filter_markdown_body(input);
+        // Content inside code block should be preserved
+        assert!(result.contains("<!-- not a comment -->"));
+        assert!(result.contains("![not an image](url)"));
+        assert!(result.contains("---"));
+        assert!(result.contains("Text before"));
+        assert!(result.contains("Text after"));
+    }
+
+    #[test]
+    fn test_filter_markdown_body_empty() {
+        assert_eq!(filter_markdown_body(""), "");
+    }
+
+    #[test]
+    fn test_filter_markdown_body_meaningful_content_preserved() {
+        let input = "## Summary\n- Item 1\n- Item 2\n\n[Link](https://example.com)\n\n| Col1 | Col2 |\n| --- | --- |\n| a | b |";
+        let result = filter_markdown_body(input);
+        assert!(result.contains("## Summary"));
+        assert!(result.contains("- Item 1"));
+        assert!(result.contains("- Item 2"));
+        assert!(result.contains("[Link](https://example.com)"));
+        assert!(result.contains("| Col1 | Col2 |"));
+    }
+
+    #[test]
+    fn test_filter_markdown_body_token_savings() {
+        // Realistic PR body with noise
+        let input = r#"<!-- This PR template is auto-generated -->
+<!-- Please fill in the following sections -->
+
+## Summary
+
+Added smart markdown filtering for gh issue/pr view commands.
+
+[![CI](https://img.shields.io/github/actions/workflow/status/rtk-ai/rtk/ci.yml)](https://github.com/rtk-ai/rtk/actions)
+[![Coverage](https://img.shields.io/codecov/c/github/rtk-ai/rtk)](https://codecov.io/gh/rtk-ai/rtk)
+
+![screenshot](https://user-images.githubusercontent.com/123/screenshot.png)
+
+---
+
+## Changes
+
+- Filter HTML comments
+- Filter badge lines
+- Filter image-only lines
+- Collapse blank lines
+
+***
+
+## Test Plan
+
+- [x] Unit tests added
+- [x] Snapshot tests pass
+- [ ] Manual testing
+
+___
+
+<!-- Do not edit below this line -->
+<!-- Auto-generated footer -->"#;
+
+        let result = filter_markdown_body(input);
+
+        fn count_tokens(text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(
+            savings >= 30.0,
+            "Expected ≥30% savings, got {:.1}% (input: {} tokens, output: {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+
+        // Verify meaningful content preserved
+        assert!(result.contains("## Summary"));
+        assert!(result.contains("## Changes"));
+        assert!(result.contains("## Test Plan"));
+        assert!(result.contains("Filter HTML comments"));
     }
 }

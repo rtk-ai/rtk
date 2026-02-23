@@ -890,30 +890,122 @@ impl AggregatedTestResult {
     }
 }
 
-/// Filter cargo test output - show failures + summary only.
-///
-/// Buffered variant — for use when input is already fully accumulated (e.g.
-/// `rtk pipe --filter cargo-test`). For live subprocess output, prefer
-/// `CargoTestStreamFilter` with `run_streaming`.
+/// Filter cargo test output - show failures + summary only
 pub(crate) fn filter_cargo_test(output: &str) -> String {
-    let mut filter = CargoTestStreamFilter::new();
+    let mut failures: Vec<String> = Vec::new();
+    let mut summary_lines: Vec<String> = Vec::new();
+    let mut in_failure_section = false;
+    let mut current_failure = Vec::new();
+
     for line in output.lines() {
-        filter.feed_line(line);
+        // Skip compilation lines
+        if line.trim_start().starts_with("Compiling")
+            || line.trim_start().starts_with("Downloading")
+            || line.trim_start().starts_with("Downloaded")
+            || line.trim_start().starts_with("Finished")
+        {
+            continue;
+        }
+
+        // Skip "running N tests" and individual "test ... ok" lines
+        if line.starts_with("running ") || (line.starts_with("test ") && line.ends_with("... ok")) {
+            continue;
+        }
+
+        // Detect failures section
+        if line == "failures:" {
+            in_failure_section = true;
+            continue;
+        }
+
+        if in_failure_section {
+            if line.starts_with("test result:") {
+                in_failure_section = false;
+                summary_lines.push(line.to_string());
+            } else if line.starts_with("    ") || line.starts_with("---- ") {
+                current_failure.push(line.to_string());
+            } else if line.trim().is_empty() && !current_failure.is_empty() {
+                failures.push(current_failure.join("\n"));
+                current_failure.clear();
+            } else if !line.trim().is_empty() {
+                current_failure.push(line.to_string());
+            }
+        }
+
+        // Capture test result summary
+        if !in_failure_section && line.starts_with("test result:") {
+            summary_lines.push(line.to_string());
+        }
     }
-    // Handle fallback: if filter produced nothing meaningful, show last lines
-    let result = filter.flush();
+
+    if !current_failure.is_empty() {
+        failures.push(current_failure.join("\n"));
+    }
+
+    let mut result = String::new();
+
+    if failures.is_empty() && !summary_lines.is_empty() {
+        // All passed - try to aggregate
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in &summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        // If all lines parsed successfully and we have at least one suite, return compact format
+        if all_parsed {
+            if let Some(agg) = aggregated {
+                if agg.suites > 0 {
+                    return agg.format_compact();
+                }
+            }
+        }
+
+        // Fallback: use original behavior if regex failed
+        for line in &summary_lines {
+            result.push_str(&format!("✓ {}\n", line));
+        }
+        return result.trim().to_string();
+    }
+
+    if !failures.is_empty() {
+        result.push_str(&format!("FAILURES ({}):\n", failures.len()));
+        result.push_str("═══════════════════════════════════════\n");
+        for (i, failure) in failures.iter().enumerate().take(10) {
+            result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
+        }
+        if failures.len() > 10 {
+            result.push_str(&format!("\n... +{} more failures\n", failures.len() - 10));
+        }
+        result.push('\n');
+    }
+
+    for line in &summary_lines {
+        result.push_str(&format!("{}\n", line));
+    }
+
     if result.trim().is_empty() {
+        // Fallback: show last meaningful lines
         let meaningful: Vec<&str> = output
             .lines()
             .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
             .collect();
-        let mut fallback = String::new();
         for line in meaningful.iter().rev().take(5).rev() {
-            fallback.push_str(&format!("{}\n", line));
+            result.push_str(&format!("{}\n", line));
         }
-        return fallback.trim().to_string();
     }
-    result
+
+    result.trim().to_string()
 }
 
 /// Filter cargo clippy output - group warnings by lint rule
