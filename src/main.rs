@@ -897,7 +897,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<()> {
     eprintln!("[rtk: parse failed, running raw]");
 
     let raw_command = args.join(" ");
-    let error_message = parse_error.to_string();
+    let error_message = utils::strip_ansi(&parse_error.to_string());
 
     // Start timer before execution to capture actual command runtime
     let timer = tracking::TimedExecution::start();
