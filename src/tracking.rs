@@ -407,6 +407,7 @@ impl Tracker {
                 fallback_succeeded as i32,
             ],
         )?;
+        self.cleanup_old()?;
         Ok(())
     }
 
