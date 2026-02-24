@@ -340,9 +340,9 @@ fn route_npx(cmd: &analysis::NativeCommand, raw: &str) -> String {
 /// `vitest run` double-"run" bug by using parsed args rather than regex substitution.
 ///
 /// ## Safety interaction
-/// PR 2 adds safety::check before this function. The `cat` arm is defensive for
-/// when `RTK_BLOCK_TOKEN_WASTE=0`.
-fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
+/// `safety::check` runs BEFORE this function. Blocked commands (cat, head, sed)
+/// never reach here. The `cat` arm is defensive for when `RTK_BLOCK_TOKEN_WASTE=0`.
+pub(crate) fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
     // === ENV PREFIX STRIPPING ===
     // When the "binary" is actually a VAR=val env assignment (e.g. "GIT_PAGER=cat"),
     // collect all leading env assigns, find the real binary in args, route it, and
@@ -441,7 +441,7 @@ fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
 ///
 /// This avoids embedding nested `rtk run -c` calls inside an outer shell string,
 /// which would require double-escaping and never improves token savings.
-fn try_route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> Option<String> {
+pub(crate) fn try_route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> Option<String> {
     let routed = route_native_command(cmd, raw);
     if routed.starts_with("rtk run -c") {
         None // passthrough — keep original
@@ -1175,7 +1175,7 @@ mod tests {
             ("pnpm test", "rtk vitest run"),
             ("pnpm vitest", "rtk vitest run"),
             ("pnpm lint", "rtk lint"),
-            ("pnpm eslint src/", "rtk lint"), // pnpm eslint → rtk lint (TDD Red)
+            ("pnpm eslint src/", "rtk lint"), // pnpm eslint → rtk lint
             ("pnpm eslint .", "rtk lint ."),  // pnpm eslint bare form
             ("pnpm eslint --fix src/", "rtk lint"), // pnpm eslint with flag
             ("npx tsc --noEmit", "rtk tsc --noEmit"),

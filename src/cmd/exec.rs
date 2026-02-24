@@ -140,12 +140,27 @@ fn spawn_with_filter(binary: &str, args: &[String], _verbose: u8) -> Result<i32>
     let result = crate::stream::run_streaming(&mut cmd, StdinMode::Inherit, mode)
         .with_context(|| format!("Failed to execute: {}", binary))?;
 
-    timer.track(
-        &format!("{} {}", binary, args.join(" ")),
-        &format!("rtk run {} {}", binary, args.join(" ")),
-        &result.raw,
-        &result.filtered,
-    );
+    // Track usage with raw vs filtered for accurate savings
+    let orig_cmd = format!("{} {}", binary, args.join(" "));
+
+    // Check if this command could be routed - if so, track with the routed name
+    // This ensures tracking accuracy even when commands are executed directly
+    let rtk_cmd = if binary == "rtk" {
+        // RTK calling itself - track as "rtk <subcommand>" not "rtk run rtk <subcommand>"
+        format!("rtk {}", args.join(" "))
+    } else {
+        // Try to route the command to see if it has an RTK equivalent
+        let native_cmd = analysis::NativeCommand {
+            binary: binary.to_string(),
+            args: args.to_vec(),
+            operator: None,
+        };
+        match super::hook::try_route_native_command(&native_cmd, &orig_cmd) {
+            Some(routed) => routed,
+            None => format!("rtk run {}", orig_cmd),
+        }
+    };
+    timer.track(&orig_cmd, &rtk_cmd, &result.raw, &result.filtered);
 
     Ok(result.exit_code)
 }
@@ -188,6 +203,7 @@ pub fn run_passthrough(raw: &str, verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::hook;
     use crate::cmd::test_helpers::EnvGuard;
 
     // === RAII GUARD TESTS ===
@@ -398,5 +414,116 @@ mod tests {
     fn test_run_native_and_chain_exit_code() {
         // "true && false" — last command fails, exit code non-zero
         assert_ne!(execute("true && false", 0).unwrap(), 0);
+    }
+
+    // === TRACKING LABEL TESTS ===
+    // These tests verify that spawn_with_filter tracks commands with the correct
+    // RTK command name, not always "rtk run <cmd>"
+
+    /// Helper to test what rtk_cmd would be tracked for a given binary/args
+    fn compute_rtk_cmd_label(binary: &str, args: &[&str]) -> String {
+        let native_cmd = analysis::NativeCommand {
+            binary: binary.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            operator: None,
+        };
+        let orig_cmd = if args.is_empty() {
+            binary.to_string()
+        } else {
+            format!("{} {}", binary, args.join(" "))
+        };
+
+        if binary == "rtk" {
+            format!("rtk {}", args.join(" "))
+        } else {
+            match hook::try_route_native_command(&native_cmd, &orig_cmd) {
+                Some(routed) => routed,
+                None => format!("rtk run {}", orig_cmd),
+            }
+        }
+    }
+
+    #[test]
+    fn test_tracking_routed_command_uses_rtk_prefix() {
+        // Commands that have an RTK equivalent should be tracked as "rtk <cmd>"
+        // NOT as "rtk run <cmd>"
+        let label = compute_rtk_cmd_label("ls", &["-F"]);
+        assert!(
+            label == "rtk ls -F",
+            "Expected 'rtk ls -F', got '{}'",
+            label
+        );
+    }
+
+    #[test]
+    fn test_tracking_git_status_uses_rtk_git() {
+        // git status should be tracked as "rtk git status"
+        let label = compute_rtk_cmd_label("git", &["status"]);
+        assert!(
+            label == "rtk git status",
+            "Expected 'rtk git status', got '{}'",
+            label
+        );
+    }
+
+    #[test]
+    fn test_tracking_cargo_test_uses_rtk_cargo() {
+        // cargo test should be tracked as "rtk cargo test"
+        let label = compute_rtk_cmd_label("cargo", &["test"]);
+        assert!(
+            label == "rtk cargo test",
+            "Expected 'rtk cargo test', got '{}'",
+            label
+        );
+    }
+
+    #[test]
+    fn test_tracking_unknown_command_uses_rtk_run() {
+        // Commands without an RTK equivalent should be tracked as "rtk run <cmd>"
+        let label = compute_rtk_cmd_label("python3", &["--version"]);
+        assert!(
+            label == "rtk run python3 --version",
+            "Expected 'rtk run python3 --version', got '{}'",
+            label
+        );
+    }
+
+    #[test]
+    fn test_tracking_rtk_self_reference_no_double_rtk() {
+        // When RTK calls itself, track as "rtk <subcommand>" not "rtk run rtk <subcommand>"
+        let label = compute_rtk_cmd_label("rtk", &["git", "status"]);
+        assert!(
+            label == "rtk git status",
+            "Expected 'rtk git status', got '{}'",
+            label
+        );
+        assert!(
+            !label.contains("rtk run rtk"),
+            "Should NOT contain 'rtk run rtk', got '{}'",
+            label
+        );
+    }
+
+    #[test]
+    fn test_tracking_find_uses_rtk_run() {
+        // NOTE: find is NOT in the ROUTES lookup table, so it falls through to rtk run
+        // This is intentional - find commands often have complex arguments that need shell
+        let label = compute_rtk_cmd_label("find", &[".", "-name", "*.rs"]);
+        assert!(
+            label.starts_with("rtk run"),
+            "Expected 'rtk run ...' (find not in ROUTES), got '{}'",
+            label
+        );
+    }
+
+    #[test]
+    fn test_tracking_grep_uses_rtk_grep() {
+        // grep should be tracked as "rtk grep"
+        let label = compute_rtk_cmd_label("grep", &["-r", "pattern"]);
+        assert!(
+            label.starts_with("rtk grep"),
+            "Expected 'rtk grep ...', got '{}'",
+            label
+        );
     }
 }
