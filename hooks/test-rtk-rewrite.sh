@@ -247,6 +247,26 @@ test_rewrite "pnpm vitest run --coverage" \
 
 echo ""
 
+# ---- SECTION: Gradle ----
+echo "--- Gradle ---"
+test_rewrite "gradle test" \
+  "gradle test" \
+  "rtk gradle test"
+
+test_rewrite "./gradlew test" \
+  "./gradlew test --tests com.example.MyTest" \
+  "rtk gradle test --tests com.example.MyTest"
+
+test_rewrite "gradle :app:test" \
+  "gradle :app:test" \
+  "rtk gradle :app:test"
+
+test_rewrite "./gradlew :app:test" \
+  "./gradlew :app:test --tests com.example.MyTest" \
+  "rtk gradle :app:test --tests com.example.MyTest"
+
+echo ""
+
 # ---- SECTION 5: Should NOT rewrite ----
 echo "--- Should NOT rewrite ---"
 test_rewrite "already rtk" \

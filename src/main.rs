@@ -17,6 +17,7 @@ mod gh_cmd;
 mod git;
 mod go_cmd;
 mod golangci_cmd;
+mod gradle_cmd;
 mod grep_cmd;
 mod hook_audit_cmd;
 mod init;
@@ -516,6 +517,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Gradle commands with compact output
+    Gradle {
+        #[command(subcommand)]
+        command: GradleCommands,
+    },
+
     /// Go commands with compact output
     Go {
         #[command(subcommand)]
@@ -823,6 +830,19 @@ enum CargoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported cargo subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum GradleCommands {
+    /// Run tests with compact output (failures only)
+    Test {
+        /// Additional gradle test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported gradle subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1408,6 +1428,20 @@ fn main() -> Result<()> {
             pip_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Gradle { command } => match command {
+            GradleCommands::Test { args } => {
+                gradle_cmd::run_task("test", &args, cli.verbose)?;
+            }
+            GradleCommands::Other(args) => {
+                let task = args[0].to_string_lossy().to_string();
+                let extra_args: Vec<String> = args[1..]
+                    .iter()
+                    .map(|a| a.to_string_lossy().to_string())
+                    .collect();
+                gradle_cmd::run_task(&task, &extra_args, cli.verbose)?;
+            }
+        },
+
         Commands::Go { command } => match command {
             GoCommands::Test { args } => {
                 go_cmd::run_test(&args, cli.verbose)?;
@@ -1544,6 +1578,42 @@ mod tests {
                 assert_eq!(message, vec!["title", "body", "footer"]);
             }
             _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_gradle_test_subcommand() {
+        let cli = Cli::try_parse_from(["rtk", "gradle", "test", "--tests", "com.example.MyTest"])
+            .unwrap();
+        match cli.command {
+            Commands::Gradle {
+                command: GradleCommands::Test { args },
+            } => {
+                assert_eq!(args, vec!["--tests", "com.example.MyTest"]);
+            }
+            _ => panic!("Expected Gradle Test command"),
+        }
+    }
+
+    #[test]
+    fn test_gradle_submodule_test_routes_to_other() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "gradle",
+            ":moduleA:test",
+            "--tests",
+            "com.example.MyTest",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Gradle {
+                command: GradleCommands::Other(args),
+            } => {
+                assert_eq!(args[0], ":moduleA:test");
+                assert_eq!(args[1], "--tests");
+                assert_eq!(args[2], "com.example.MyTest");
+            }
+            _ => panic!("Expected Gradle Other command"),
         }
     }
 }

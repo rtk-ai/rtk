@@ -133,6 +133,12 @@ elif echo "$FIRST_CMD" | grep -qE '^wget\s+'; then
 # --- pnpm package management ---
 elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+(list|ls|outdated)(\s|$)'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^pnpm /rtk pnpm /')
+
+# --- JVM tooling (Gradle) ---
+elif echo "$FIRST_CMD" | grep -qE '^\./gradlew\s'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^\.\/gradlew /rtk gradle /')
+elif echo "$FIRST_CMD" | grep -qE '^gradle\s'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^gradle /rtk gradle /')
 fi
 
 # If no suggestion, allow command as-is

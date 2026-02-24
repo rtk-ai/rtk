@@ -195,6 +195,12 @@ elif echo "$MATCH_CMD" | grep -qE '^go[[:space:]]+vet([[:space:]]|$)'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^go vet/rtk go vet/')"
 elif echo "$MATCH_CMD" | grep -qE '^golangci-lint([[:space:]]|$)'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^golangci-lint/rtk golangci-lint/')"
+
+# --- JVM tooling (Gradle) ---
+elif echo "$MATCH_CMD" | grep -qE '^\./gradlew[[:space:]]'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^\.\/gradlew /rtk gradle /')"
+elif echo "$MATCH_CMD" | grep -qE '^gradle[[:space:]]'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^gradle /rtk gradle /')"
 fi
 
 # If no rewrite needed, approve as-is

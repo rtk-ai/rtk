@@ -433,6 +433,12 @@ section "Learn"
 assert_ok      "rtk learn --help"             rtk learn --help
 assert_ok      "rtk learn (no sessions)"      rtk learn --since 0 2>&1 || true
 
+# ── 32. Gradle ─────────────────────────────────────
+
+section "Gradle"
+
+assert_help    "rtk gradle test"               rtk gradle test -h
+
 # ══════════════════════════════════════════════════════
 # Report
 # ══════════════════════════════════════════════════════

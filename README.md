@@ -284,6 +284,12 @@ rtk go vet                       # Vet issues (75% reduction)
 rtk golangci-lint run            # JSON grouped by rule (85% reduction)
 ```
 
+### JVM Stack (Gradle)
+```bash
+rtk gradle test                  # Test failures only (70% reduction)
+rtk gradle <any-task>            # Passthrough for other tasks
+```
+
 ## Examples
 
 ### Standard vs rtk
@@ -625,6 +631,7 @@ The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To us
 | `pip list/install/outdated` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint run` | `rtk golangci-lint run` |
+| `gradle/gradlew test` | `rtk gradle test` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
