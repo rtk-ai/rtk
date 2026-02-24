@@ -195,6 +195,12 @@ elif echo "$MATCH_CMD" | grep -qE '^go[[:space:]]+vet([[:space:]]|$)'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^go vet/rtk go vet/')"
 elif echo "$MATCH_CMD" | grep -qE '^golangci-lint([[:space:]]|$)'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^golangci-lint/rtk golangci-lint/')"
+
+# --- Swift/Xcode tooling ---
+elif echo "$MATCH_CMD" | grep -qE '^swiftlint([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^swiftlint/rtk swiftlint/')"
+elif echo "$MATCH_CMD" | grep -qE '^xcodebuild([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^xcodebuild/rtk xcodebuild/')"
 fi
 
 # If no rewrite needed, approve as-is

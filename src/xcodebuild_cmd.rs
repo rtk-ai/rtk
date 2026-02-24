@@ -1,9 +1,9 @@
 use crate::tracking;
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashSet;
 use std::process::Command;
-use std::sync::OnceLock;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -62,34 +62,41 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// === Regex helpers (lazy_static for repo consistency) ===
+
+lazy_static! {
+    /// Matches target declarations: "Target 'Foo' in project 'Bar'"
+    static ref TARGET_RE: Regex =
+        Regex::new(r"Target '([^']+)' in project '([^']+)'").unwrap();
+
+    /// Newer Xcode format: "SwiftCompile normal arm64 Compiling\ File.swift /path/..."
+    static ref COMPILE_NEW_RE: Regex =
+        Regex::new(r"^SwiftCompile\s+\w+\s+\w+\s+Compiling\\?\s+(\S+\.swift)").unwrap();
+
+    /// Older Xcode format: "CompileSwift normal arm64 /path/to/File.swift"
+    static ref COMPILE_OLD_RE: Regex =
+        Regex::new(r"^CompileSwift\s+\w+\s+\w+\s+(\S+\.swift)").unwrap();
+
+    /// Error/warning lines: "file:line:col: error|warning: message"
+    static ref ERROR_RE: Regex =
+        Regex::new(r"^(.+?):(\d+):(\d+):\s+(error|warning):\s+(.+)$").unwrap();
+
+    /// Signing identity: 'Signing Identity: "Apple Development"'
+    static ref SIGNING_RE: Regex =
+        Regex::new(r#"Signing Identity:\s+"([^"]+)""#).unwrap();
+
+    /// Resolved package lines (indented with 2 spaces, contain @version)
+    static ref RESOLVED_PKG_RE: Regex =
+        Regex::new(r"^\s{2}\S+:.*@").unwrap();
+
+    /// Extract filename from failed command line for compact output
+    static ref FAILED_CMD_FILE_RE: Regex =
+        Regex::new(r"(?:Compiling\s+)?(\S+\.swift)").unwrap();
+}
+
 /// Filter xcodebuild output - extract targets, errors, warnings, signing, and build result.
 /// Strips verbose build system internals, full command invocations, and package resolution details.
 pub fn filter_xcodebuild(output: &str) -> String {
-    static TARGET_RE: OnceLock<Regex> = OnceLock::new();
-    let target_re = TARGET_RE.get_or_init(|| {
-        Regex::new(r"Target '([^']+)' in project '([^']+)'").expect("invalid target regex")
-    });
-
-    static COMPILE_FILE_RE: OnceLock<Regex> = OnceLock::new();
-    let compile_file_re = COMPILE_FILE_RE.get_or_init(|| {
-        Regex::new(r"^SwiftCompile\s+\w+\s+\w+\s+Compiling\\?\s+(\S+\.swift)")
-            .expect("invalid compile file regex")
-    });
-
-    static ERROR_RE: OnceLock<Regex> = OnceLock::new();
-    let error_re = ERROR_RE.get_or_init(|| {
-        Regex::new(r"^(.+?):(\d+):(\d+):\s+(error|warning):\s+(.+)$").expect("invalid error regex")
-    });
-
-    static SIGNING_RE: OnceLock<Regex> = OnceLock::new();
-    let signing_re = SIGNING_RE.get_or_init(|| {
-        Regex::new(r#"Signing Identity:\s+"([^"]+)""#).expect("invalid signing regex")
-    });
-
-    static RESOLVED_PKG_RE: OnceLock<Regex> = OnceLock::new();
-    let resolved_pkg_re = RESOLVED_PKG_RE
-        .get_or_init(|| Regex::new(r"^\s{2}\S+:.*@").expect("invalid resolved package regex"));
-
     // Counters and collectors
     let mut targets: Vec<(String, String)> = Vec::new();
     let mut compiled_files: Vec<String> = Vec::new();
@@ -131,7 +138,19 @@ pub fn filter_xcodebuild(output: &str) -> String {
                 failure_count = Some(trimmed.to_string());
                 in_failed_section = false;
             } else if line.starts_with('\t') || line.starts_with("    ") {
-                failed_commands.push(trimmed.to_string());
+                // Compact: extract just the task type + filename instead of full command
+                let compact = if let Some(caps) = FAILED_CMD_FILE_RE.captures(trimmed) {
+                    let file = &caps[1];
+                    // Extract the build step prefix (e.g., "SwiftCompile", "SwiftEmitModule")
+                    let step = trimmed.split_whitespace().next().unwrap_or("Build");
+                    format!("{} {}", step, file)
+                } else {
+                    trimmed.to_string()
+                };
+                failed_commands.push(compact);
+            } else if trimmed.is_empty() {
+                // Blank lines within the failed section are tolerated
+                continue;
             }
             continue;
         }
@@ -142,7 +161,7 @@ pub fn filter_xcodebuild(output: &str) -> String {
             continue;
         }
         if in_resolved_section {
-            if resolved_pkg_re.is_match(line) {
+            if RESOLVED_PKG_RE.is_match(line) {
                 packages_resolved += 1;
                 continue;
             }
@@ -168,7 +187,7 @@ pub fn filter_xcodebuild(output: &str) -> String {
         }
 
         // Extract target info
-        if let Some(caps) = target_re.captures(trimmed) {
+        if let Some(caps) = TARGET_RE.captures(trimmed) {
             let target_name = caps[1].to_string();
             let project_name = caps[2].to_string();
             let entry = (target_name, project_name);
@@ -178,8 +197,8 @@ pub fn filter_xcodebuild(output: &str) -> String {
             continue;
         }
 
-        // Extract compiled Swift files
-        if let Some(caps) = compile_file_re.captures(trimmed) {
+        // Extract compiled Swift files (newer format: SwiftCompile ... Compiling\ File.swift)
+        if let Some(caps) = COMPILE_NEW_RE.captures(trimmed) {
             let filename = caps[1].replace('\\', "");
             if compiled_files_seen.insert(filename.clone()) {
                 compiled_files.push(filename);
@@ -187,8 +206,23 @@ pub fn filter_xcodebuild(output: &str) -> String {
             continue;
         }
 
+        // Extract compiled Swift files (older format: CompileSwift normal arm64 /path/File.swift)
+        if let Some(caps) = COMPILE_OLD_RE.captures(trimmed) {
+            // Extract just the filename from the full path
+            let full_path = &caps[1];
+            let filename = full_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(full_path)
+                .to_string();
+            if compiled_files_seen.insert(filename.clone()) {
+                compiled_files.push(filename);
+            }
+            continue;
+        }
+
         // Extract errors and warnings from compiler output
-        if let Some(caps) = error_re.captures(trimmed) {
+        if let Some(caps) = ERROR_RE.captures(trimmed) {
             let file_path = &caps[1];
             let line_num = &caps[2];
             let col = &caps[3];
@@ -209,7 +243,7 @@ pub fn filter_xcodebuild(output: &str) -> String {
         }
 
         // Extract signing identity
-        if let Some(caps) = signing_re.captures(trimmed) {
+        if let Some(caps) = SIGNING_RE.captures(trimmed) {
             signing_identity = Some(caps[1].to_string());
             continue;
         }
@@ -504,7 +538,6 @@ mod tests {
         );
 
         // Error lines should have filenames stripped (not full paths)
-        // Note: Failed command lines preserve full paths for debugging
         let error_lines: Vec<&str> = result
             .lines()
             .filter(|l| l.starts_with("  ") && l.contains(": ") && !l.starts_with("    "))
@@ -518,6 +551,16 @@ mod tests {
                 !el.contains("/Users/runner/"),
                 "error line contains full path: {}",
                 el
+            );
+        }
+
+        // Failed commands should be compacted (no full paths)
+        let failed_lines: Vec<&str> = result.lines().filter(|l| l.starts_with("    ")).collect();
+        for fl in &failed_lines {
+            assert!(
+                !fl.contains("/Users/runner/"),
+                "failed command line contains full path: {}",
+                fl
             );
         }
     }
@@ -669,9 +712,10 @@ mod tests {
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
         // Nativescript: BUILD FAILED with many errors - errors are preserved
+        // Failed commands are compacted to task+filename for token savings
         assert!(
-            savings >= 55.0,
-            "xcodebuild nativescript filter: expected >=55% savings, got {:.1}% ({} -> {} tokens)",
+            savings >= 60.0,
+            "xcodebuild nativescript filter: expected >=60% savings, got {:.1}% ({} -> {} tokens)",
             savings,
             input_tokens,
             output_tokens
@@ -720,12 +764,11 @@ mod tests {
 
             let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-            // All xcodebuild fixtures should achieve significant savings
+            // All xcodebuild fixtures should achieve >=60% savings
             // because build system noise is stripped.
-            // Error-heavy fixtures (e.g., nativescript) get ~59% savings.
             assert!(
-                savings >= 55.0,
-                "xcodebuild {} filter: expected >=55% savings, got {:.1}% ({} -> {} tokens)",
+                savings >= 60.0,
+                "xcodebuild {} filter: expected >=60% savings, got {:.1}% ({} -> {} tokens)",
                 name,
                 savings,
                 input_tokens,

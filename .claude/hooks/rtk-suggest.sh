@@ -133,6 +133,30 @@ elif echo "$FIRST_CMD" | grep -qE '^wget\s+'; then
 # --- pnpm package management ---
 elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+(list|ls|outdated)(\s|$)'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^pnpm /rtk pnpm /')
+
+# --- Python tooling ---
+elif echo "$FIRST_CMD" | grep -qE '^pytest(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^pytest/rtk pytest/')
+elif echo "$FIRST_CMD" | grep -qE '^ruff\s+(check|format)(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^ruff /rtk ruff /')
+elif echo "$FIRST_CMD" | grep -qE '^pip\s+(list|outdated|install|show)(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^pip /rtk pip /')
+
+# --- Go tooling ---
+elif echo "$FIRST_CMD" | grep -qE '^go\s+test(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^go test/rtk go test/')
+elif echo "$FIRST_CMD" | grep -qE '^go\s+build(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^go build/rtk go build/')
+elif echo "$FIRST_CMD" | grep -qE '^go\s+vet(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^go vet/rtk go vet/')
+elif echo "$FIRST_CMD" | grep -qE '^golangci-lint(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^golangci-lint/rtk golangci-lint/')
+
+# --- Swift/Xcode tooling ---
+elif echo "$FIRST_CMD" | grep -qE '^swiftlint(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^swiftlint/rtk swiftlint/')
+elif echo "$FIRST_CMD" | grep -qE '^xcodebuild(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^xcodebuild/rtk xcodebuild/')
 fi
 
 # If no suggestion, allow command as-is

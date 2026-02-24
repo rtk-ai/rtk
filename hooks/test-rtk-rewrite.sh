@@ -245,6 +245,32 @@ test_rewrite "pnpm vitest run --coverage" \
   "pnpm vitest run --coverage" \
   "rtk vitest run --coverage"
 
+# ---- SECTION: Swift/Xcode tooling ----
+echo "--- Swift/Xcode tooling ---"
+test_rewrite "swiftlint (no args)" \
+  "swiftlint" \
+  "rtk swiftlint"
+
+test_rewrite "swiftlint lint" \
+  "swiftlint lint --config .swiftlint.yml" \
+  "rtk swiftlint lint --config .swiftlint.yml"
+
+test_rewrite "swiftlint autocorrect" \
+  "swiftlint autocorrect --format" \
+  "rtk swiftlint autocorrect --format"
+
+test_rewrite "xcodebuild (no args)" \
+  "xcodebuild" \
+  "rtk xcodebuild"
+
+test_rewrite "xcodebuild -scheme" \
+  "xcodebuild -scheme MyApp -sdk iphoneos build" \
+  "rtk xcodebuild -scheme MyApp -sdk iphoneos build"
+
+test_rewrite "xcodebuild clean build" \
+  "xcodebuild clean build -project MyApp.xcodeproj" \
+  "rtk xcodebuild clean build -project MyApp.xcodeproj"
+
 echo ""
 
 # ---- SECTION 5: Should NOT rewrite ----

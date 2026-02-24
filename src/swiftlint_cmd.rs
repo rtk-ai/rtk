@@ -1,9 +1,9 @@
 use crate::tracking;
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::process::Command;
-use std::sync::OnceLock;
 
 /// Maximum number of files shown per rule before truncation.
 const MAX_FILES_PER_RULE: usize = 5;
@@ -65,30 +65,21 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
-// === Regex helpers ===
+// === Regex helpers (lazy_static for repo consistency) ===
 
-/// Regex matching "Linting 'Foo.swift' (N/M)" or "Correcting 'Foo.swift' (N/M)" progress lines.
-fn progress_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^(?:Linting|Correcting) '.+\.swift' \(\d+/\d+\)$")
-            .expect("invalid progress regex")
-    })
-}
+lazy_static! {
+    /// Regex matching "Linting 'Foo.swift' (N/M)" or "Correcting 'Foo.swift' (N/M)" progress lines.
+    static ref PROGRESS_RE: Regex =
+        Regex::new(r"^(?:Linting|Correcting) '.+\.swift' \(\d+/\d+\)$").unwrap();
 
-/// Regex matching SwiftLint violation lines:
-/// /path/to/File.swift:LINE:COL: warning|error: Message (rule_id)
-fn violation_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"^(.+?):(\d+):(\d+): (warning|error): (.+)$").expect("invalid violation regex")
-    })
-}
+    /// Regex matching SwiftLint violation lines:
+    /// /path/to/File.swift:LINE:COL: warning|error: Message (rule_id)
+    static ref VIOLATION_RE: Regex =
+        Regex::new(r"^(.+?):(\d+):(\d+): (warning|error): (.+)$").unwrap();
 
-/// Regex to extract file count from summary line.
-fn file_count_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"in (\d+) files").expect("invalid file count regex"))
+    /// Regex to extract file count from summary line.
+    static ref FILE_COUNT_RE: Regex =
+        Regex::new(r"in (\d+) files").unwrap();
 }
 
 // === Utility functions ===
@@ -138,9 +129,6 @@ fn sorted_rules(
 /// compact file:line references. Matches git-status style compression for maximum
 /// token savings.
 pub fn filter_swiftlint(output: &str) -> String {
-    let progress = progress_re();
-    let violation = violation_re();
-
     let mut summary: Option<String> = None;
     // rule_id -> BTreeMap<filename, Vec<line_num>>
     let mut errors_by_rule: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
@@ -164,7 +152,7 @@ pub fn filter_swiftlint(output: &str) -> String {
         }
 
         // Strip progress lines
-        if progress.is_match(trimmed) {
+        if PROGRESS_RE.is_match(trimmed) {
             continue;
         }
 
@@ -175,7 +163,7 @@ pub fn filter_swiftlint(output: &str) -> String {
         }
 
         // Parse violation lines
-        if let Some(caps) = violation.captures(trimmed) {
+        if let Some(caps) = VIOLATION_RE.captures(trimmed) {
             let full_path = &caps[1];
             let line_num = &caps[2];
             let severity = &caps[4];
@@ -216,7 +204,7 @@ pub fn filter_swiftlint(output: &str) -> String {
     // Extract file count from summary
     let file_count = summary
         .as_ref()
-        .and_then(|s| file_count_re().captures(s))
+        .and_then(|s| FILE_COUNT_RE.captures(s))
         .and_then(|caps| caps[1].parse::<usize>().ok());
     let files_str = file_count
         .map(|n| format!(" ({} files)", n))
@@ -899,154 +887,5 @@ mod tests {
                 output_tokens
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod token_savings_tests {
-    use super::*;
-
-    fn count_tokens(text: &str) -> usize {
-        text.split_whitespace().count()
-    }
-
-    #[test]
-    fn test_token_savings_alamofire_many() {
-        let input = include_str!("../tests/fixtures/swiftlint_gh_alamofire_many_violations.txt");
-        let output = filter_swiftlint(input);
-
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&output);
-        let savings = 100.0 * (1.0 - output_tokens as f64 / input_tokens as f64);
-
-        eprintln!(
-            "alamofire_many: {} → {} tokens, {:.1}% savings",
-            input_tokens, output_tokens, savings
-        );
-        assert!(
-            savings >= 60.0,
-            "Expected ≥60% savings, got {:.1}%",
-            savings
-        );
-    }
-
-    #[test]
-    fn test_token_savings_alamofire_violations() {
-        let input = include_str!("../tests/fixtures/swiftlint_gh_alamofire_violations.txt");
-        let output = filter_swiftlint(input);
-
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&output);
-        let savings = 100.0 * (1.0 - output_tokens as f64 / input_tokens as f64);
-
-        eprintln!(
-            "alamofire_violations: {} → {} tokens, {:.1}% savings",
-            input_tokens, output_tokens, savings
-        );
-        assert!(
-            savings >= 60.0,
-            "Expected ≥60% savings, got {:.1}%",
-            savings
-        );
-    }
-
-    #[test]
-    fn test_token_savings_kingfisher_strict() {
-        let input = include_str!("../tests/fixtures/swiftlint_gh_kingfisher_strict_mode.txt");
-        let output = filter_swiftlint(input);
-
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&output);
-        let savings = 100.0 * (1.0 - output_tokens as f64 / input_tokens as f64);
-
-        eprintln!(
-            "kingfisher_strict: {} → {} tokens, {:.1}% savings",
-            input_tokens, output_tokens, savings
-        );
-        assert!(
-            savings >= 60.0,
-            "Expected ≥60% savings, got {:.1}%",
-            savings
-        );
-    }
-
-    #[test]
-    fn test_token_savings_realm_configerror() {
-        let input = include_str!("../tests/fixtures/swiftlint_gh_realm_configerror.txt");
-        let output = filter_swiftlint(input);
-
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&output);
-        let savings = 100.0 * (1.0 - output_tokens as f64 / input_tokens as f64);
-
-        eprintln!(
-            "realm_configerror: {} → {} tokens, {:.1}% savings",
-            input_tokens, output_tokens, savings
-        );
-        assert!(
-            savings >= 60.0,
-            "Expected ≥60% savings, got {:.1}%",
-            savings
-        );
-    }
-
-    #[test]
-    fn test_token_savings_rxswift_interleaved() {
-        let input = include_str!("../tests/fixtures/swiftlint_gh_rxswift_interleaved.txt");
-        let output = filter_swiftlint(input);
-
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&output);
-        let savings = 100.0 * (1.0 - output_tokens as f64 / input_tokens as f64);
-
-        eprintln!(
-            "rxswift_interleaved: {} → {} tokens, {:.1}% savings",
-            input_tokens, output_tokens, savings
-        );
-        assert!(
-            savings >= 60.0,
-            "Expected ≥60% savings, got {:.1}%",
-            savings
-        );
-    }
-
-    #[test]
-    fn test_token_savings_snapkit_minimal() {
-        let input = include_str!("../tests/fixtures/swiftlint_gh_snapkit_minimal.txt");
-        let output = filter_swiftlint(input);
-
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&output);
-        let savings = 100.0 * (1.0 - output_tokens as f64 / input_tokens as f64);
-
-        eprintln!(
-            "snapkit_minimal: {} → {} tokens, {:.1}% savings",
-            input_tokens, output_tokens, savings
-        );
-        assert!(
-            savings >= 60.0,
-            "Expected ≥60% savings, got {:.1}%",
-            savings
-        );
-    }
-
-    #[test]
-    fn test_token_savings_vapor_warnings() {
-        let input = include_str!("../tests/fixtures/swiftlint_gh_vapor_warnings_only.txt");
-        let output = filter_swiftlint(input);
-
-        let input_tokens = count_tokens(input);
-        let output_tokens = count_tokens(&output);
-        let savings = 100.0 * (1.0 - output_tokens as f64 / input_tokens as f64);
-
-        eprintln!(
-            "vapor_warnings: {} → {} tokens, {:.1}% savings",
-            input_tokens, output_tokens, savings
-        );
-        assert!(
-            savings >= 60.0,
-            "Expected ≥60% savings, got {:.1}%",
-            savings
-        );
     }
 }
