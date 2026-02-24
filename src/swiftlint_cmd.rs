@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// Maximum number of files shown per rule before truncation.
+const MAX_FILES_PER_RULE: usize = 5;
+
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
@@ -62,6 +65,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// === Regex helpers ===
+
 /// Regex matching "Linting 'Foo.swift' (N/M)" or "Correcting 'Foo.swift' (N/M)" progress lines.
 fn progress_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -80,17 +85,68 @@ fn violation_re() -> &'static Regex {
     })
 }
 
-/// Filter swiftlint output - strip progress lines, group violations by file, keep summary.
+/// Regex to extract file count from summary line.
+fn file_count_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"in (\d+) files").expect("invalid file count regex"))
+}
+
+// === Utility functions ===
+
+/// Extract rule_id from the end of a SwiftLint violation message.
+/// e.g., "Line Length Violation: ... (line_length)" -> "line_length"
+fn extract_rule_id(message: &str) -> &str {
+    if let Some(start) = message.rfind('(') {
+        if message.ends_with(')') {
+            return &message[start + 1..message.len() - 1];
+        }
+    }
+    message
+}
+
+/// Format compact file:line locations for a single rule.
+/// Files beyond MAX_FILES_PER_RULE are truncated with "+N more".
+fn format_rule_locations(files: &BTreeMap<String, Vec<String>>) -> String {
+    let total = files.len();
+    let mut parts = Vec::new();
+    for (i, (file, lines)) in files.iter().enumerate() {
+        if i >= MAX_FILES_PER_RULE {
+            parts.push(format!("+{} more", total - MAX_FILES_PER_RULE));
+            break;
+        }
+        parts.push(format!("{}:{}", file, lines.join(",")));
+    }
+    parts.join(" ")
+}
+
+/// Sort rules by violation count (descending), then name (ascending) for determinism.
+fn sorted_rules(
+    rules: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+) -> Vec<(&String, &BTreeMap<String, Vec<String>>)> {
+    let mut sorted: Vec<_> = rules.iter().collect();
+    sorted.sort_by(|a, b| {
+        let count_a: usize = a.1.values().map(|v| v.len()).sum();
+        let count_b: usize = b.1.values().map(|v| v.len()).sum();
+        count_b.cmp(&count_a).then_with(|| a.0.cmp(b.0))
+    });
+    sorted
+}
+
+// === Main filter ===
+
+/// Aggressively compress swiftlint output: group by rule, strip verbose messages,
+/// compact file:line references. Matches git-status style compression for maximum
+/// token savings.
 pub fn filter_swiftlint(output: &str) -> String {
     let progress = progress_re();
     let violation = violation_re();
 
-    let mut header: Option<String> = None;
     let mut summary: Option<String> = None;
-    // BTreeMap for deterministic file ordering
-    let mut by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut errors = 0;
-    let mut warnings = 0;
+    // rule_id -> BTreeMap<filename, Vec<line_num>>
+    let mut errors_by_rule: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    let mut warnings_by_rule: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    let mut total_errors: usize = 0;
+    let mut total_warnings: usize = 0;
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -99,11 +155,11 @@ pub fn filter_swiftlint(output: &str) -> String {
             continue;
         }
 
-        // Capture header line
+        // Skip header and config lines
         if trimmed.starts_with("Linting Swift files")
             || trimmed.starts_with("Correcting Swift files")
+            || trimmed.starts_with("Loading configuration from")
         {
-            header = Some(trimmed.to_string());
             continue;
         }
 
@@ -112,7 +168,7 @@ pub fn filter_swiftlint(output: &str) -> String {
             continue;
         }
 
-        // Capture summary line
+        // Capture summary (used only for file count extraction)
         if trimmed.starts_with("Done linting!") || trimmed.starts_with("Done correcting!") {
             summary = Some(trimmed.to_string());
             continue;
@@ -122,59 +178,89 @@ pub fn filter_swiftlint(output: &str) -> String {
         if let Some(caps) = violation.captures(trimmed) {
             let full_path = &caps[1];
             let line_num = &caps[2];
-            let col = &caps[3];
             let severity = &caps[4];
             let message = &caps[5];
 
-            // Extract just the filename from full path
             let filename = full_path.rsplit('/').next().unwrap_or(full_path);
+            let rule_id = extract_rule_id(message);
 
-            match severity {
-                "error" => errors += 1,
-                "warning" => warnings += 1,
-                _ => {}
-            }
+            let target = match severity {
+                "error" => {
+                    total_errors += 1;
+                    &mut errors_by_rule
+                }
+                "warning" => {
+                    total_warnings += 1;
+                    &mut warnings_by_rule
+                }
+                _ => continue,
+            };
 
-            let formatted = format!("  {}:{} {}: {}", line_num, col, severity, message);
-            by_file
+            target
+                .entry(rule_id.to_string())
+                .or_default()
                 .entry(filename.to_string())
                 .or_default()
-                .push(formatted);
+                .push(line_num.to_string());
             continue;
         }
 
-        // Keep any other unrecognized lines (future-proofing)
+        // All other lines (config errors, rule identifiers, etc.) silently skipped
+    }
+
+    // Empty input
+    if total_errors == 0 && total_warnings == 0 && summary.is_none() {
+        return String::new();
+    }
+
+    // Extract file count from summary
+    let file_count = summary
+        .as_ref()
+        .and_then(|s| file_count_re().captures(s))
+        .and_then(|caps| caps[1].parse::<usize>().ok());
+    let files_str = file_count
+        .map(|n| format!(" ({} files)", n))
+        .unwrap_or_default();
+
+    // Clean run (summary present but no violations matched)
+    if total_errors == 0 && total_warnings == 0 {
+        return format!("✓ SwiftLint: clean{}", files_str);
     }
 
     let mut result = String::new();
 
-    // Show header if present
-    if let Some(h) = &header {
-        result.push_str(h);
-        result.push('\n');
-    }
+    // Header
+    result.push_str(&format!(
+        "⚠️ SwiftLint: {} warnings, {} errors{}\n",
+        total_warnings, total_errors, files_str
+    ));
 
-    // If there are violations, show grouped by file
-    if !by_file.is_empty() {
-        result.push_str(&format!(
-            "SwiftLint: {} warnings, {} errors\n",
-            warnings, errors
-        ));
-
-        for (file, violations) in &by_file {
-            result.push_str(file);
-            result.push('\n');
-            for v in violations {
-                result.push_str(v);
-                result.push('\n');
-            }
-            result.push('\n');
+    // Errors section
+    if !errors_by_rule.is_empty() {
+        result.push_str(&format!("\n❌ Errors ({}):\n", total_errors));
+        for (rule, files) in sorted_rules(&errors_by_rule) {
+            let count: usize = files.values().map(|v| v.len()).sum();
+            result.push_str(&format!(
+                "  {} ({}): {}\n",
+                rule,
+                count,
+                format_rule_locations(files)
+            ));
         }
     }
 
-    // Show summary if present
-    if let Some(s) = &summary {
-        result.push_str(s);
+    // Warnings section
+    if !warnings_by_rule.is_empty() {
+        result.push_str(&format!("\n⚠️ Warnings ({}):\n", total_warnings));
+        for (rule, files) in sorted_rules(&warnings_by_rule) {
+            let count: usize = files.values().map(|v| v.len()).sum();
+            result.push_str(&format!(
+                "  {} ({}): {}\n",
+                rule,
+                count,
+                format_rule_locations(files)
+            ));
+        }
     }
 
     result.trim().to_string()
@@ -193,6 +279,8 @@ mod tests {
         text.split_whitespace().count()
     }
 
+    // === Format tests ===
+
     #[test]
     fn test_filter_empty_input() {
         let result = filter_swiftlint("");
@@ -204,21 +292,14 @@ mod tests {
         let input = include_str!("../tests/fixtures/swiftlint_gh_vapor_warnings_only.txt");
         let result = filter_swiftlint(input);
 
-        // Should contain the header
+        // Header with counts and file count
         assert!(
-            result.contains("Linting Swift files in current working directory"),
+            result.contains("22 warnings, 0 errors (342 files)"),
             "missing header: {}",
             result
         );
 
-        // Should contain the summary
-        assert!(
-            result.contains("Done linting! Found 23 violations, 0 serious in 342 files."),
-            "missing summary: {}",
-            result
-        );
-
-        // Should NOT contain any progress lines
+        // No progress lines
         assert!(
             !result.contains("Linting 'Application.swift'"),
             "contains progress line: {}",
@@ -230,15 +311,32 @@ mod tests {
             result
         );
 
-        // Should contain severity summary (0 errors, 22 warnings from regex-matched lines)
+        // Rules grouped
         assert!(
-            result.contains("22 warnings"),
-            "missing warning count: {}",
+            result.contains("line_length"),
+            "missing line_length rule: {}",
             result
         );
         assert!(
-            result.contains("0 errors"),
-            "missing error count: {}",
+            result.contains("trailing_whitespace"),
+            "missing trailing_whitespace rule: {}",
+            result
+        );
+        assert!(
+            result.contains("vertical_whitespace"),
+            "missing vertical_whitespace rule: {}",
+            result
+        );
+
+        // Warnings section present, errors section absent
+        assert!(
+            result.contains("⚠️ Warnings"),
+            "missing warnings section: {}",
+            result
+        );
+        assert!(
+            !result.contains("❌ Errors"),
+            "should not have errors section: {}",
             result
         );
     }
@@ -248,55 +346,77 @@ mod tests {
         let input = include_str!("../tests/fixtures/swiftlint_gh_alamofire_many_violations.txt");
         let result = filter_swiftlint(input);
 
-        // Should contain grouped violations by file
+        // Header
         assert!(
-            result.contains("AFError.swift"),
-            "missing file group: {}",
-            result
-        );
-        assert!(
-            result.contains("Session.swift"),
-            "missing file group: {}",
-            result
-        );
-        assert!(
-            result.contains("Request.swift"),
-            "missing file group: {}",
+            result.contains("98 warnings, 12 errors (85 files)"),
+            "missing header: {}",
             result
         );
 
-        // Should contain severity counts (98 warnings, 12 errors)
+        // Errors section with key rules
         assert!(
-            result.contains("98 warnings"),
-            "missing warning count: {}",
+            result.contains("❌ Errors (12):"),
+            "missing errors section: {}",
             result
         );
         assert!(
-            result.contains("12 errors"),
-            "missing error count: {}",
+            result.contains("file_length"),
+            "missing file_length rule: {}",
+            result
+        );
+        assert!(
+            result.contains("cyclomatic_complexity"),
+            "missing cyclomatic_complexity: {}",
+            result
+        );
+        assert!(
+            result.contains("function_body_length"),
+            "missing function_body_length: {}",
+            result
+        );
+        assert!(
+            result.contains("type_body_length"),
+            "missing type_body_length: {}",
             result
         );
 
-        // Should contain summary
+        // Warnings section with key rules
         assert!(
-            result.contains("Done linting! Found 112 violations, 12 serious in 85 files."),
-            "missing summary: {}",
+            result.contains("⚠️ Warnings (98):"),
+            "missing warnings section: {}",
+            result
+        );
+        assert!(
+            result.contains("force_cast"),
+            "missing force_cast rule: {}",
+            result
+        );
+        assert!(
+            result.contains("force_try"),
+            "missing force_try rule: {}",
             result
         );
 
-        // Violation lines should use filenames (not full paths)
-        // Note: the header line may still contain the original path
-        let violation_lines: Vec<&str> = result
-            .lines()
-            .filter(|l| l.starts_with("  ") && l.contains(": "))
-            .collect();
-        for vl in &violation_lines {
-            assert!(
-                !vl.contains("/Users/ci/"),
-                "violation line contains full path: {}",
-                vl
-            );
-        }
+        // No full paths in output
+        assert!(
+            !result.contains("/Users/ci/"),
+            "contains full path: {}",
+            result
+        );
+
+        // No progress lines
+        assert!(
+            !result.contains("Linting '"),
+            "contains progress line: {}",
+            result
+        );
+
+        // No verbose violation messages
+        assert!(
+            !result.contains("Line should be 120 characters"),
+            "contains verbose message: {}",
+            result
+        );
     }
 
     #[test]
@@ -304,11 +424,10 @@ mod tests {
         let input = include_str!("../tests/fixtures/swiftlint_gh_rxswift_interleaved.txt");
         let result = filter_swiftlint(input);
 
-        // Violations are interleaved with progress lines in this fixture.
-        // The filter must strip all progress lines.
+        // Progress lines stripped
         assert!(
             !result.contains("Linting 'Observable.swift'"),
-            "contains progress line: {}",
+            "contains progress: {}",
             result
         );
         assert!(
@@ -322,29 +441,29 @@ mod tests {
             result
         );
 
-        // Should contain grouped violations
+        // Rules present
         assert!(
-            result.contains("Observable.swift"),
-            "missing grouped file: {}",
+            result.contains("line_length"),
+            "missing line_length: {}",
             result
         );
         assert!(
-            result.contains("FlatMap.swift"),
-            "missing grouped file: {}",
-            result
-        );
-
-        // Should contain summary
-        assert!(
-            result.contains("Done linting! Found 56 violations, 7 serious in 456 files."),
-            "missing summary: {}",
+            result.contains("identifier_name"),
+            "missing identifier_name: {}",
             result
         );
 
-        // Should NOT contain full paths
+        // No full paths
         assert!(
             !result.contains("/Users/runner/work/RxSwift/"),
             "contains full path: {}",
+            result
+        );
+
+        // File count from summary
+        assert!(
+            result.contains("456 files"),
+            "missing file count: {}",
             result
         );
     }
@@ -354,7 +473,7 @@ mod tests {
         let input = include_str!("../tests/fixtures/swiftlint_gh_kingfisher_strict_mode.txt");
         let result = filter_swiftlint(input);
 
-        // All violations are errors in strict mode (49 match the violation regex)
+        // All violations are errors in strict mode
         assert!(
             result.contains("49 errors"),
             "missing error count: {}",
@@ -366,32 +485,47 @@ mod tests {
             result
         );
 
-        // Key rule violations should be preserved
+        // Key rules preserved
         assert!(
             result.contains("force_unwrapping"),
-            "missing force_unwrapping rule: {}",
+            "missing force_unwrapping: {}",
             result
         );
         assert!(
             result.contains("force_cast"),
-            "missing force_cast rule: {}",
+            "missing force_cast: {}",
             result
         );
         assert!(
             result.contains("file_length"),
-            "missing file_length rule: {}",
+            "missing file_length: {}",
             result
         );
         assert!(
             result.contains("cyclomatic_complexity"),
-            "missing cyclomatic_complexity rule: {}",
+            "missing cyclomatic_complexity: {}",
+            result
+        );
+        assert!(
+            result.contains("line_length"),
+            "missing line_length: {}",
+            result
+        );
+        assert!(
+            result.contains("function_body_length"),
+            "missing function_body_length: {}",
             result
         );
 
-        // Should contain summary
+        // Errors section only, no warnings section
         assert!(
-            result.contains("Done linting! Found 53 violations, 53 serious in 78 files."),
-            "missing summary: {}",
+            result.contains("❌ Errors (49):"),
+            "missing errors section: {}",
+            result
+        );
+        assert!(
+            !result.contains("⚠️ Warnings"),
+            "should not have warnings section: {}",
             result
         );
     }
@@ -401,20 +535,14 @@ mod tests {
         let input = include_str!("../tests/fixtures/swiftlint_gh_alamofire_violations.txt");
         let result = filter_swiftlint(input);
 
-        // Violation lines should NOT contain full paths
-        let violation_lines: Vec<&str> = result
-            .lines()
-            .filter(|l| l.starts_with("  ") && l.contains(": "))
-            .collect();
-        for vl in &violation_lines {
-            assert!(
-                !vl.contains("/Users/runner/work/Alamofire/"),
-                "violation line contains full path: {}",
-                vl
-            );
-        }
+        // No full paths
+        assert!(
+            !result.contains("/Users/runner/work/Alamofire/"),
+            "contains full path: {}",
+            result
+        );
 
-        // Just filenames should be present (as group headers)
+        // Filenames present in rule locations
         assert!(
             result.contains("Session.swift"),
             "missing filename: {}",
@@ -426,7 +554,7 @@ mod tests {
             result
         );
 
-        // Config header lines are not captured by the filter (they're unrecognized and skipped)
+        // Config loading line stripped
         assert!(
             !result.contains("Loading configuration from"),
             "config loading line should be stripped: {}",
@@ -435,31 +563,74 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_groups_by_file_alamofire() {
+    fn test_filter_groups_by_rule() {
         let input = include_str!("../tests/fixtures/swiftlint_gh_alamofire_many_violations.txt");
         let result = filter_swiftlint(input);
 
-        // AFError.swift should have multiple violations grouped together
-        let lines: Vec<&str> = result.lines().collect();
-        let af_idx = lines
-            .iter()
-            .position(|l| l.trim() == "AFError.swift")
-            .expect("AFError.swift section not found");
-
-        // The next lines should be indented violations
-        let mut violation_count = 0;
-        for line in &lines[af_idx + 1..] {
-            if line.starts_with("  ") && !line.trim().is_empty() {
-                violation_count += 1;
-            } else {
-                break;
-            }
-        }
+        // file_length: 7 errors across 7 files (truncated to 5 + "+2 more")
         assert!(
-            violation_count >= 10,
-            "AFError.swift should have at least 10 violations grouped, got {}: {}",
-            violation_count,
+            result.contains("file_length (7):"),
+            "missing file_length count: {}",
             result
+        );
+        let file_length_line = result
+            .lines()
+            .find(|l| l.contains("file_length (7)"))
+            .expect("file_length line not found");
+        assert!(
+            file_length_line.contains("AFError.swift:350"),
+            "missing AFError in file_length: {}",
+            file_length_line
+        );
+        assert!(
+            file_length_line.contains("+2 more"),
+            "missing truncation: {}",
+            file_length_line
+        );
+
+        // cyclomatic_complexity: 3 errors, all shown (under MAX_FILES_PER_RULE)
+        assert!(
+            result.contains("cyclomatic_complexity (3):"),
+            "missing cyclomatic_complexity count: {}",
+            result
+        );
+        let cc_line = result
+            .lines()
+            .find(|l| l.contains("cyclomatic_complexity"))
+            .expect("cyclomatic_complexity line not found");
+        assert!(
+            cc_line.contains("DownloadRequest.swift:78"),
+            "missing DownloadRequest: {}",
+            cc_line
+        );
+        assert!(
+            cc_line.contains("ResponseSerialization.swift:278"),
+            "missing ResponseSerialization: {}",
+            cc_line
+        );
+        assert!(
+            cc_line.contains("Validation.swift:100"),
+            "missing Validation: {}",
+            cc_line
+        );
+
+        // Same-file line numbers are comma-separated
+        // AFError.swift has many line_length warnings: 23,45,78,112,145,178,212,256,289,312
+        let ll_line = result
+            .lines()
+            .find(|l| l.contains("line_length") && l.contains("AFError.swift"))
+            .expect("AFError.swift missing from line_length");
+        // Multiple lines from same file should be comma-separated
+        assert!(
+            ll_line.contains("AFError.swift:23,45,78,112,145,178,212,256,289,312"),
+            "AFError.swift lines not comma-separated: {}",
+            ll_line
+        );
+        // Truncation indicator for rules with many files
+        assert!(
+            ll_line.contains("+"),
+            "line_length should show truncation: {}",
+            ll_line
         );
     }
 
@@ -468,42 +639,46 @@ mod tests {
         let input = include_str!("../tests/fixtures/swiftlint_gh_realm_configerror.txt");
         let result = filter_swiftlint(input);
 
-        // Config error lines are not violations - they should be skipped
-        // (they don't match progress, header, summary, or violation regexes)
+        // Config error lines stripped
         assert!(
             !result.contains("configuration error:"),
-            "config error lines should not appear in output: {}",
+            "config error in output: {}",
             result
         );
         assert!(
             !result.contains("Valid rule identifiers:"),
-            "rule identifier lists should not appear: {}",
+            "rule identifiers in output: {}",
             result
         );
 
-        // Should still contain grouped violations
+        // Rules from violations present
         assert!(
-            result.contains("BankViewController.swift"),
-            "missing file group: {}",
+            result.contains("line_length"),
+            "missing line_length: {}",
             result
         );
         assert!(
-            result.contains("TransactionListViewController.swift"),
-            "missing file group: {}",
+            result.contains("force_cast"),
+            "missing force_cast: {}",
+            result
+        );
+        assert!(
+            result.contains("identifier_name"),
+            "missing identifier_name: {}",
             result
         );
 
-        // Should have correct severity counts (54 warnings, 4 errors)
+        // Correct error count (4 errors)
         assert!(
             result.contains("4 errors"),
             "missing error count: {}",
             result
         );
 
-        // Should contain summary
+        // File count from summary
         assert!(
-            result.contains("Done linting! Found 58 violations, 4 serious in 370 files."),
-            "missing summary: {}",
+            result.contains("370 files"),
+            "missing file count: {}",
             result
         );
     }
@@ -513,26 +688,21 @@ mod tests {
         let input = include_str!("../tests/fixtures/swiftlint_gh_snapkit_minimal.txt");
         let result = filter_swiftlint(input);
 
-        // Small project: 23 files, 3 violations, 0 serious
+        // 3 warnings, 0 errors
         assert!(
-            result.contains("3 warnings"),
-            "missing warning count: {}",
-            result
-        );
-        assert!(
-            result.contains("0 errors"),
-            "missing error count: {}",
+            result.contains("3 warnings, 0 errors (23 files)"),
+            "missing header: {}",
             result
         );
 
-        // All 3 violations are line_length
+        // All 3 are line_length
         assert!(
-            result.contains("line_length"),
-            "missing line_length rule: {}",
+            result.contains("line_length (3):"),
+            "missing line_length count: {}",
             result
         );
 
-        // Two files have violations
+        // Two files present
         assert!(
             result.contains("ConstraintMaker.swift"),
             "missing file: {}",
@@ -544,10 +714,10 @@ mod tests {
             result
         );
 
-        // Should contain summary
+        // No errors section
         assert!(
-            result.contains("Done linting! Found 3 violations, 0 serious in 23 files."),
-            "missing summary: {}",
+            !result.contains("❌ Errors"),
+            "should not have errors section: {}",
             result
         );
     }
@@ -557,13 +727,87 @@ mod tests {
         let input = include_str!("../tests/fixtures/swiftlint_gh_rxswift_interleaved.txt");
         let result = filter_swiftlint_verbose(input);
 
-        // Verbose mode should preserve progress lines
+        // Verbose mode preserves progress lines
         assert!(
             result.contains("Linting 'Observable.swift' (1/456)"),
             "verbose mode should include progress lines: {}",
             result
         );
     }
+
+    // === Utility function tests ===
+
+    #[test]
+    fn test_extract_rule_id() {
+        assert_eq!(
+            extract_rule_id("Line Length Violation: Line should be 120 characters or less; currently it has 167 characters (line_length)"),
+            "line_length"
+        );
+        assert_eq!(
+            extract_rule_id("Force Cast Violation: Force casts should be avoided (force_cast)"),
+            "force_cast"
+        );
+        assert_eq!(
+            extract_rule_id(
+                "Variable name 'e' should be between 3 and 40 characters long (identifier_name)"
+            ),
+            "identifier_name"
+        );
+        // No rule_id in parens - returns full message
+        assert_eq!(
+            extract_rule_id("Some violation without rule id"),
+            "Some violation without rule id"
+        );
+    }
+
+    #[test]
+    fn test_format_rule_locations_under_max() {
+        let mut files = BTreeMap::new();
+        files
+            .entry("Foo.swift".to_string())
+            .or_insert_with(Vec::new)
+            .push("23".to_string());
+        files
+            .entry("Bar.swift".to_string())
+            .or_insert_with(Vec::new)
+            .extend(vec!["34".to_string(), "56".to_string()]);
+
+        let result = format_rule_locations(&files);
+        assert_eq!(result, "Bar.swift:34,56 Foo.swift:23");
+    }
+
+    #[test]
+    fn test_format_rule_locations_over_max() {
+        let mut files = BTreeMap::new();
+        for i in 0..7 {
+            files
+                .entry(format!("File{}.swift", i))
+                .or_insert_with(Vec::new)
+                .push(format!("{}", i * 10));
+        }
+
+        let result = format_rule_locations(&files);
+        assert!(result.contains("+2 more"), "missing truncation: {}", result);
+        // First 5 files shown (alphabetical: File0..File4)
+        assert!(
+            result.contains("File0.swift:0"),
+            "missing File0: {}",
+            result
+        );
+        assert!(
+            result.contains("File4.swift:40"),
+            "missing File4: {}",
+            result
+        );
+        // File5, File6 truncated
+        assert!(
+            !result.contains("File5.swift"),
+            "File5 should be truncated: {}",
+            result
+        );
+    }
+
+    // === Token savings tests ===
 
     #[test]
     fn test_token_savings_vapor() {
@@ -574,10 +818,9 @@ mod tests {
         let output_tokens = count_tokens(&result);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-        // Vapor: 342 files, 22 warnings -> ~50% savings (progress lines stripped)
         assert!(
-            savings >= 40.0,
-            "swiftlint vapor filter: expected >=40% savings, got {:.1}% ({} -> {} tokens)",
+            savings >= 80.0,
+            "swiftlint vapor: expected >=80% savings, got {:.1}% ({} -> {} tokens)",
             savings,
             input_tokens,
             output_tokens
@@ -593,11 +836,9 @@ mod tests {
         let output_tokens = count_tokens(&result);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-        // Alamofire many: 85 files, 110 violations -> ~11% savings
-        // (high violation density means most content is preserved)
         assert!(
-            savings >= 5.0,
-            "swiftlint alamofire filter: expected >=5% savings, got {:.1}% ({} -> {} tokens)",
+            savings >= 75.0,
+            "swiftlint alamofire: expected >=75% savings, got {:.1}% ({} -> {} tokens)",
             savings,
             input_tokens,
             output_tokens
@@ -648,13 +889,10 @@ mod tests {
 
             let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
 
-            // All SwiftLint fixtures should achieve some savings
-            // because progress lines are always stripped.
-            // High-violation-density fixtures (e.g., alamofire_many) get ~11% savings,
-            // while low-violation fixtures (e.g., vapor) get ~50%+.
+            // All fixtures should achieve 60%+ savings with the new aggressive filter
             assert!(
-                savings >= 5.0,
-                "swiftlint {} filter: expected >=5% savings, got {:.1}% ({} -> {} tokens)",
+                savings >= 60.0,
+                "swiftlint {} filter: expected >=60% savings, got {:.1}% ({} -> {} tokens)",
                 name,
                 savings,
                 input_tokens,

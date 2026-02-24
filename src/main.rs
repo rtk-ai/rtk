@@ -532,19 +532,19 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// SwiftLint with rule-grouped compact output
+    Swiftlint {
+        /// SwiftLint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
     #[command(name = "hook-audit")]
     HookAudit {
         /// Show entries from last N days (0 = all time)
         #[arg(short, long, default_value = "7")]
         since: u64,
-    },
-
-    /// SwiftLint with compact output (strips per-file progress lines)
-    Swiftlint {
-        /// swiftlint arguments (supports all swiftlint flags)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
     },
 
     /// Xcode build with compact output (strips verbose build internals)
@@ -1443,12 +1443,12 @@ fn main() -> Result<()> {
             golangci_cmd::run(&args, cli.verbose)?;
         }
 
-        Commands::HookAudit { since } => {
-            hook_audit_cmd::run(since, cli.verbose)?;
-        }
-
         Commands::Swiftlint { args } => {
             swiftlint_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::HookAudit { since } => {
+            hook_audit_cmd::run(since, cli.verbose)?;
         }
 
         Commands::Xcodebuild { args } => {
