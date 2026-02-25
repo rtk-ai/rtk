@@ -43,6 +43,8 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
     }
 }
 
+
+
 lazy_static! {
     static ref REGEX_SET: RegexSet =
         RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns");
