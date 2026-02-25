@@ -141,13 +141,21 @@ fn spawn_with_filter(binary: &str, args: &[String], _verbose: u8) -> Result<i32>
         .with_context(|| format!("Failed to execute: {}", binary))?;
 
     // Track usage with raw vs filtered for accurate savings
-    let orig_cmd = format!("{} {}", binary, args.join(" "));
+    let orig_cmd = if args.is_empty() {
+        binary.to_string()
+    } else {
+        format!("{} {}", binary, args.join(" "))
+    };
 
     // Check if this command could be routed - if so, track with the routed name
     // This ensures tracking accuracy even when commands are executed directly
     let rtk_cmd = if binary == "rtk" {
         // RTK calling itself - track as "rtk <subcommand>" not "rtk run rtk <subcommand>"
-        format!("rtk {}", args.join(" "))
+        if args.is_empty() {
+            "rtk".to_string()
+        } else {
+            format!("rtk {}", args.join(" "))
+        }
     } else {
         // Try to route the command to see if it has an RTK equivalent
         let native_cmd = analysis::NativeCommand {
@@ -434,7 +442,11 @@ mod tests {
         };
 
         if binary == "rtk" {
-            format!("rtk {}", args.join(" "))
+            if args.is_empty() {
+                "rtk".to_string()
+            } else {
+                format!("rtk {}", args.join(" "))
+            }
         } else {
             match hook::try_route_native_command(&native_cmd, &orig_cmd) {
                 Some(routed) => routed,

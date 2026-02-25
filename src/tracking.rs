@@ -890,6 +890,7 @@ pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::test_helpers::EnvGuard;
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1015,24 +1016,19 @@ mod tests {
     // 7. get_db_path respects environment variable RTK_DB_PATH
     #[test]
     fn test_custom_db_path_env() {
-        use std::env;
+        let _guard = EnvGuard::new(); // Serializes env access and auto-cleans
 
         let custom_path = "/tmp/rtk_test_custom.db";
-        env::set_var("RTK_DB_PATH", custom_path);
+        std::env::set_var("RTK_DB_PATH", custom_path);
 
         let db_path = get_db_path().expect("Failed to get db path");
         assert_eq!(db_path, PathBuf::from(custom_path));
-
-        env::remove_var("RTK_DB_PATH");
     }
 
     // 8. get_db_path falls back to default when no custom config
     #[test]
     fn test_default_db_path() {
-        use std::env;
-
-        // Ensure no env var is set
-        env::remove_var("RTK_DB_PATH");
+        let _guard = EnvGuard::new(); // Serializes env access and ensures RTK_DB_PATH is unset
 
         let db_path = get_db_path().expect("Failed to get db path");
         assert!(db_path.ends_with("rtk/history.db"));

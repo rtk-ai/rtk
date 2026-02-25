@@ -25,6 +25,7 @@ impl EnvGuard {
         std::env::remove_var("RTK_SAFE_COMMANDS");
         std::env::remove_var("RTK_BLOCK_TOKEN_WASTE");
         std::env::remove_var("RTK_ACTIVE");
+        std::env::remove_var("RTK_DB_PATH");
     }
 }
 
