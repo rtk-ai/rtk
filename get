@@ -1,0 +1,12 @@
+{
+  "args": {}, 
+  "headers": {
+    "Accept": "*/*", 
+    "Accept-Encoding": "identity", 
+    "Host": "httpbin.org", 
+    "User-Agent": "Wget/1.25.0", 
+    "X-Amzn-Trace-Id": "Root=1-69b2dfc9-1caefd3629f546f2584d3aef"
+  }, 
+  "origin": "90.110.73.127", 
+  "url": "https://httpbin.org/get"
+}

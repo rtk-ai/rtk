@@ -178,6 +178,10 @@ enum Commands {
 
     /// pnpm commands with ultra-compact output
     Pnpm {
+        /// pnpm filter arguments (can be repeated: --filter @app1 --filter @app2)
+        #[arg(long, short = 'F')]
+        filter: Vec<String>,
+
         #[command(subcommand)]
         command: PnpmCommands,
     },
@@ -1202,6 +1206,24 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
+/// Merge pnpm global filters args with other ones
+fn merge_pnpm_args(filters: &[String], args: &[String]) -> Vec<String> {
+    filters
+        .iter()
+        .map(|filter| format!("--filter={}", filter))
+        .chain(args.iter().map(|arg| arg.to_string()))
+        .collect()
+}
+
+/// Merge pnpm global filters args with other ones
+fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
+    filters
+        .iter()
+        .map(|filter| OsString::from(format!("--filter={}", filter)))
+        .chain(args.iter().map(|arg| arg.to_os_string()))
+        .collect()
+}
+
 fn main() {
     let code = match run_cli() {
         Ok(code) => code,
@@ -1407,26 +1429,35 @@ fn run_cli() -> Result<i32> {
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
-        Commands::Pnpm { command } => match command {
-            PnpmCommands::List { depth, args } => {
-                pnpm_cmd::run(pnpm_cmd::PnpmCommand::List { depth }, &args, cli.verbose)?
-            }
-            PnpmCommands::Outdated { args } => {
-                pnpm_cmd::run(pnpm_cmd::PnpmCommand::Outdated, &args, cli.verbose)?
-            }
+        Commands::Pnpm { filter, command } => match command {
+            PnpmCommands::List { depth, args } => pnpm_cmd::run(
+                pnpm_cmd::PnpmCommand::List { depth },
+                &merge_pnpm_args(&filter, &args),
+                cli.verbose,
+            )?,
+            PnpmCommands::Outdated { args } => pnpm_cmd::run(
+                pnpm_cmd::PnpmCommand::Outdated,
+                &merge_pnpm_args(&filter, &args),
+                cli.verbose,
+            )?,
             PnpmCommands::Install { packages, args } => pnpm_cmd::run(
                 pnpm_cmd::PnpmCommand::Install { packages },
-                &args,
+                &merge_pnpm_args(&filter, &args),
                 cli.verbose,
             )?,
             PnpmCommands::Build { args } => {
                 let mut build_args: Vec<String> = vec!["build".into()];
                 build_args.extend(args);
                 let os_args: Vec<OsString> = build_args.into_iter().map(OsString::from).collect();
-                pnpm_cmd::run_passthrough(&os_args, cli.verbose)?
+                pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &os_args), cli.verbose)?
             }
-            PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
-            PnpmCommands::Other(args) => pnpm_cmd::run_passthrough(&args, cli.verbose)?,
+            PnpmCommands::Typecheck { args } => {
+                // FIXME: if filters are present, we should find out which workspaces are typechecked before running tsc
+                tsc_cmd::run(&args, cli.verbose)?
+            }
+            PnpmCommands::Other(args) => {
+                pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
+            }
         },
 
         Commands::Err { command } => {
@@ -2458,6 +2489,64 @@ mod tests {
                 }
                 _ => panic!("expected Rewrite command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_merge_filters_with_args() {
+        let filters = vec!["@app1".to_string(), "@app2".to_string()];
+        let args = vec![
+            "--filter=@app3".to_string(),
+            "--depth=0".to_string(),
+            "--no-verbose".to_string(),
+        ];
+        let expected_args = vec![
+            "--filter=@app1",
+            "--filter=@app2",
+            "--filter=@app3",
+            "--depth=0",
+            "--no-verbose",
+        ];
+        assert_eq!(merge_pnpm_args(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_merge_filters_with_args_os() {
+        let filters = vec!["@app1".to_string()];
+        let args = vec![OsString::from("--depth=0")];
+        let expected_args = vec![
+            OsString::from("--filter=@app1"),
+            OsString::from("--depth=0"),
+        ];
+        assert_eq!(merge_pnpm_args_os(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_pnpm_subcommand_with_filter() {
+        let cli = Cli::try_parse_from(["rtk", "pnpm", "--filter", "@app1", "list"]).unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                filter,
+                command: PnpmCommands::List { depth, args },
+            } => {
+                assert_eq!(depth, 0);
+                assert_eq!(filter, vec!["@app1"]);
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Pnpm List command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_subcommand_with_short_filter() {
+        // -F is the short form of --filter in pnpm
+        let cli =
+            Cli::try_parse_from(["rtk", "pnpm", "-F", "@app1", "-F", "@app2", "list"]).unwrap();
+        match cli.command {
+            Commands::Pnpm { filter, .. } => {
+                assert_eq!(filter, vec!["@app1", "@app2"]);
+            }
+            _ => panic!("Expected Pnpm command"),
         }
     }
 }
