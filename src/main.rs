@@ -27,6 +27,7 @@ mod lint_cmd;
 mod local_llm;
 mod log_cmd;
 mod ls;
+mod mvn_cmd;
 mod next_cmd;
 mod npm_cmd;
 mod parser;
@@ -529,6 +530,12 @@ enum Commands {
         command: GradleCommands,
     },
 
+    /// Maven commands with compact output (auto-detects ./mvnw)
+    Mvn {
+        #[command(subcommand)]
+        command: MvnCommands,
+    },
+
     /// golangci-lint with compact output
     #[command(name = "golangci-lint")]
     GolangciLint {
@@ -892,6 +899,50 @@ enum GradleCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported gradle subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum MvnCommands {
+    /// Compile with compact output (strip [INFO] noise, keep errors)
+    Compile {
+        /// Additional mvn compile arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Test with failures-only output (90% token reduction)
+    Test {
+        /// Additional mvn test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Package with compact output
+    Package {
+        /// Additional mvn package arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Install with compact output
+    Install {
+        /// Additional mvn install arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Clean with compact output
+    Clean {
+        /// Additional mvn clean arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Dependency tree with compact output
+    #[command(name = "dependency:tree")]
+    DependencyTree {
+        /// Additional mvn dependency:tree arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported mvn subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1485,6 +1536,30 @@ fn main() -> Result<()> {
             }
             GradleCommands::Other(args) => {
                 gradle_cmd::run_other(&args, cli.verbose)?;
+            }
+        },
+
+        Commands::Mvn { command } => match command {
+            MvnCommands::Compile { args } => {
+                mvn_cmd::run_compile(&args, cli.verbose)?;
+            }
+            MvnCommands::Test { args } => {
+                mvn_cmd::run_test(&args, cli.verbose)?;
+            }
+            MvnCommands::Package { args } => {
+                mvn_cmd::run_package(&args, cli.verbose)?;
+            }
+            MvnCommands::Install { args } => {
+                mvn_cmd::run_install(&args, cli.verbose)?;
+            }
+            MvnCommands::Clean { args } => {
+                mvn_cmd::run_clean(&args, cli.verbose)?;
+            }
+            MvnCommands::DependencyTree { args } => {
+                mvn_cmd::run_dependency_tree(&args, cli.verbose)?;
+            }
+            MvnCommands::Other(args) => {
+                mvn_cmd::run_other(&args, cli.verbose)?;
             }
         },
 
