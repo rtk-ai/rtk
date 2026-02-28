@@ -6,11 +6,12 @@ use tempfile::NamedTempFile;
 
 use crate::integrity;
 
-// Embedded hook script (guards before set -euo pipefail)
-const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
-
 // Native hook command (cross-platform, no bash/jq dependency)
 const HOOK_COMMAND: &str = "rtk hook-rewrite";
+
+// Embedded bash hook script (default on Unix — requires bash + jq)
+#[cfg(unix)]
+const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
@@ -173,18 +174,68 @@ pub fn run(
     global: bool,
     claude_md: bool,
     hook_only: bool,
+    native_hook: bool,
     patch_mode: PatchMode,
     verbose: u8,
 ) -> Result<()> {
     // Mode selection
     match (claude_md, hook_only) {
         (true, _) => run_claude_md_mode(global, verbose),
-        (false, true) => run_hook_only_mode(global, patch_mode, verbose),
-        (false, false) => run_default_mode(global, patch_mode, verbose),
+        (false, true) => run_hook_only_mode(global, native_hook, patch_mode, verbose),
+        (false, false) => run_default_mode(global, native_hook, patch_mode, verbose),
     }
 }
 
-/// Return path to the old bash hook file (for migration/cleanup)
+/// Prepare hook directory and return paths (hook_dir, hook_path)
+#[cfg(unix)]
+fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
+    let claude_dir = resolve_claude_dir()?;
+    let hook_dir = claude_dir.join("hooks");
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
+    let hook_path = hook_dir.join("rtk-rewrite.sh");
+    Ok((hook_dir, hook_path))
+}
+
+/// Write bash hook file if missing or outdated, return true if changed
+#[cfg(unix)]
+fn ensure_bash_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let changed = if hook_path.exists() {
+        let existing = fs::read_to_string(hook_path)
+            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+
+        if existing == REWRITE_HOOK {
+            if verbose > 0 {
+                eprintln!("Hook already up to date: {}", hook_path.display());
+            }
+            false
+        } else {
+            fs::write(hook_path, REWRITE_HOOK)
+                .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Updated hook: {}", hook_path.display());
+            }
+            true
+        }
+    } else {
+        fs::write(hook_path, REWRITE_HOOK)
+            .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Created hook: {}", hook_path.display());
+        }
+        true
+    };
+
+    // Set executable permissions
+    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+
+    Ok(changed)
+}
+
+/// Return path to the bash hook file
 fn old_hook_path() -> Result<PathBuf> {
     let claude_dir = resolve_claude_dir()?;
     Ok(claude_dir.join("hooks").join("rtk-rewrite.sh"))
@@ -351,13 +402,13 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
 }
 
 /// Print manual instructions for settings.json patching
-fn print_manual_instructions() {
+fn print_manual_instructions(hook_command: &str) {
     println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
     println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", HOOK_COMMAND);
+    println!("        \"command\": \"{}\"", hook_command);
     println!("      }}]");
     println!("    }}]}}");
     println!("  }}");
@@ -544,12 +595,12 @@ fn patch_settings_json(hook_command: &str, mode: PatchMode, verbose: u8) -> Resu
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions();
+            print_manual_instructions(hook_command);
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
             if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions();
+                print_manual_instructions(hook_command);
                 return Ok(PatchResult::Declined);
             }
         }
@@ -685,10 +736,43 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         })
 }
 
-/// Default mode: native hook + slim RTK.md + @RTK.md reference (cross-platform)
-fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+/// Default mode: bash hook (Unix) or native hook (--native-hook / Windows)
+/// + slim RTK.md + @RTK.md reference
+#[cfg(not(unix))]
+fn run_default_mode(
+    global: bool,
+    native_hook: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
+) -> Result<()> {
+    if !native_hook {
+        // Windows without --native-hook: fall back to --claude-md mode
+        eprintln!("Bash hook requires Unix (macOS/Linux).");
+        eprintln!("Use --native-hook for cross-platform support, or --claude-md for legacy mode.");
+        eprintln!("Falling back to --claude-md mode.");
+        return run_claude_md_mode(global, verbose);
+    }
+    run_native_hook_mode(global, patch_mode, verbose)
+}
+
+#[cfg(unix)]
+fn run_default_mode(
+    global: bool,
+    native_hook: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
+) -> Result<()> {
+    if native_hook {
+        return run_native_hook_mode(global, patch_mode, verbose);
+    }
+    // Default: bash hook on Unix
+    run_bash_hook_mode(global, patch_mode, verbose)
+}
+
+/// Install bash hook (default on Unix — requires bash + jq)
+#[cfg(unix)]
+fn run_bash_hook_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
     if !global {
-        // Local init: unchanged behavior (full injection into ./CLAUDE.md)
         return run_claude_md_mode(false, verbose);
     }
 
@@ -696,8 +780,9 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
     let rtk_md_path = claude_dir.join("RTK.md");
     let claude_md_path = claude_dir.join("CLAUDE.md");
 
-    // 1. Migrate old bash hook if present, install native hook
-    let hook_migrated = migrate_old_hook(verbose)?;
+    // 1. Install bash hook
+    let (_hook_dir, hook_path) = prepare_hook_paths()?;
+    ensure_bash_hook_installed(&hook_path, verbose)?;
 
     // 2. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
@@ -707,7 +792,7 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
 
     // 4. Print success message
     println!("\nRTK hook installed (global).\n");
-    println!("  Hook:      {} (native, cross-platform)", HOOK_COMMAND);
+    println!("  Hook:      {} (bash)", hook_path.display());
     println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
     println!("  CLAUDE.md: @RTK.md reference added");
 
@@ -715,12 +800,12 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
         println!("\n  Migrated: removed 137-line RTK block from CLAUDE.md");
         println!("            replaced with @RTK.md (10 lines)");
     }
-    if hook_migrated {
-        println!("  Migrated: rtk-rewrite.sh → rtk hook-rewrite (native)");
-    }
 
-    // 5. Patch settings.json
-    let patch_result = patch_settings_json(HOOK_COMMAND, patch_mode, verbose)?;
+    // 5. Patch settings.json with bash hook path
+    let hook_command = hook_path
+        .to_str()
+        .context("Hook path contains invalid UTF-8")?;
+    let patch_result = patch_settings_json(hook_command, patch_mode, verbose)?;
 
     // Report result
     match patch_result {
@@ -741,25 +826,100 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
     Ok(())
 }
 
-/// Hook-only mode: just the hook, no RTK.md (cross-platform)
-fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+/// Install native hook (opt-in via --native-hook, cross-platform)
+fn run_native_hook_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    if !global {
+        return run_claude_md_mode(false, verbose);
+    }
+
+    let claude_dir = resolve_claude_dir()?;
+    let rtk_md_path = claude_dir.join("RTK.md");
+    let claude_md_path = claude_dir.join("CLAUDE.md");
+
+    // 1. Migrate old bash hook if present
+    let hook_migrated = migrate_old_hook(verbose)?;
+
+    // 2. Write RTK.md
+    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
+
+    // 3. Patch CLAUDE.md (add @RTK.md, migrate if needed)
+    let block_migrated = patch_claude_md(&claude_md_path, verbose)?;
+
+    // 4. Print success message
+    println!("\nRTK hook installed (global, native).\n");
+    println!("  Hook:      {} (native, cross-platform)", HOOK_COMMAND);
+    println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+    println!("  CLAUDE.md: @RTK.md reference added");
+
+    if block_migrated {
+        println!("\n  Migrated: removed 137-line RTK block from CLAUDE.md");
+        println!("            replaced with @RTK.md (10 lines)");
+    }
+    if hook_migrated {
+        println!("  Migrated: rtk-rewrite.sh → rtk hook-rewrite (native)");
+    }
+
+    // 5. Patch settings.json with native hook command
+    let patch_result = patch_settings_json(HOOK_COMMAND, patch_mode, verbose)?;
+
+    match patch_result {
+        PatchResult::Patched => {}
+        PatchResult::AlreadyPresent => {
+            println!("\n  settings.json: hook already present");
+            println!("  Restart Claude Code. Test with: git status");
+        }
+        PatchResult::Declined | PatchResult::Skipped => {}
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Hook-only mode: just the hook, no RTK.md
+fn run_hook_only_mode(
+    global: bool,
+    native_hook: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
+) -> Result<()> {
     if !global {
         eprintln!("Warning: --hook-only only makes sense with --global");
         eprintln!("    For local projects, use default mode or --claude-md");
         return Ok(());
     }
 
-    // Migrate old bash hook if present
-    migrate_old_hook(verbose)?;
+    let hook_command = if native_hook {
+        // Native hook: migrate old bash hook, use rtk hook-rewrite
+        migrate_old_hook(verbose)?;
+        println!("\nRTK hook installed (hook-only, native).\n");
+        println!("  Hook: {} (native, cross-platform)", HOOK_COMMAND);
+        HOOK_COMMAND.to_string()
+    } else {
+        // Bash hook (default on Unix)
+        #[cfg(unix)]
+        {
+            let (_hook_dir, hook_path) = prepare_hook_paths()?;
+            ensure_bash_hook_installed(&hook_path, verbose)?;
+            println!("\nRTK hook installed (hook-only, bash).\n");
+            println!("  Hook: {} (bash)", hook_path.display());
+            hook_path
+                .to_str()
+                .context("Hook path contains invalid UTF-8")?
+                .to_string()
+        }
+        #[cfg(not(unix))]
+        {
+            eprintln!("Bash hook requires Unix. Use --native-hook for Windows.");
+            return Ok(());
+        }
+    };
 
-    println!("\nRTK hook installed (hook-only mode).\n");
-    println!("  Hook: {} (native, cross-platform)", HOOK_COMMAND);
     println!(
         "  Note: No RTK.md created. Claude won't know about meta commands (gain, discover, proxy)."
     );
 
     // Patch settings.json
-    let patch_result = patch_settings_json(HOOK_COMMAND, patch_mode, verbose)?;
+    let patch_result = patch_settings_json(&hook_command, patch_mode, verbose)?;
 
     // Report result
     match patch_result {
@@ -1068,11 +1228,13 @@ pub fn show_config() -> Result<()> {
             } else {
                 println!("⚠️  Hook: {} (no guards - outdated)", old_hook_path.display());
             }
+            println!("   Tip: use --native-hook for cross-platform support (Windows)");
         }
 
         #[cfg(not(unix))]
         {
             println!("✅ Hook: {} (exists)", old_hook_path.display());
+            println!("   Tip: use --native-hook for cross-platform support");
         }
     } else {
         println!("-- Hook: not configured");

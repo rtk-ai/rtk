@@ -322,6 +322,10 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
+        /// Use native Rust hook instead of bash script (cross-platform, no bash/jq dependency)
+        #[arg(long = "native-hook")]
+        native_hook: bool,
+
         /// Auto-patch settings.json without prompting
         #[arg(long = "auto-patch", group = "patch")]
         auto_patch: bool,
@@ -1369,6 +1373,7 @@ fn main() -> Result<()> {
             show,
             claude_md,
             hook_only,
+            native_hook,
             auto_patch,
             no_patch,
             uninstall,
@@ -1385,7 +1390,14 @@ fn main() -> Result<()> {
                 } else {
                     init::PatchMode::Ask
                 };
-                init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                init::run(
+                    global,
+                    claude_md,
+                    hook_only,
+                    native_hook,
+                    patch_mode,
+                    cli.verbose,
+                )?;
             }
         }
 
