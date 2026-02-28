@@ -5,8 +5,10 @@ use anyhow::{Context, Result};
 use colored::Colorize; // added: terminal colors
 use serde::Serialize;
 use std::io::IsTerminal; // added: TTY detection for graceful degradation
+use std::path::PathBuf; // added: for project path resolution
 
 pub fn run(
+    project: bool, // added: per-project scope flag
     graph: bool,
     history: bool,
     quota: bool,
@@ -19,16 +21,35 @@ pub fn run(
     _verbose: u8,
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+    let project_scope = resolve_project_scope(project)?; // added: resolve project path
 
     // Handle export formats
     match format {
-        "json" => return export_json(&tracker, daily, weekly, monthly, all),
-        "csv" => return export_csv(&tracker, daily, weekly, monthly, all),
+        "json" => {
+            return export_json(
+                &tracker,
+                daily,
+                weekly,
+                monthly,
+                all,
+                project_scope.as_deref(), // added: pass project scope
+            );
+        }
+        "csv" => {
+            return export_csv(
+                &tracker,
+                daily,
+                weekly,
+                monthly,
+                all,
+                project_scope.as_deref(), // added: pass project scope
+            );
+        }
         _ => {} // Continue with text format
     }
 
     let summary = tracker
-        .get_summary()
+        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
 
     if summary.total_commands == 0 {
@@ -39,9 +60,18 @@ pub fn run(
 
     // Default view (summary)
     if !daily && !weekly && !monthly && !all {
-        // added: styled header with bold title
-        println!("{}", styled("RTK Token Savings (Global Scope)", true));
+        // added: scope-aware styled header // changed: merged upstream styled + project scope
+        let title = if project_scope.is_some() {
+            "RTK Token Savings (Project Scope)"
+        } else {
+            "RTK Token Savings (Global Scope)"
+        };
+        println!("{}", styled(title, true));
         println!("{}", "═".repeat(60));
+        // added: show project path when scoped
+        if let Some(ref scope) = project_scope {
+            println!("Scope: {}", shorten_path(scope));
+        }
         println!();
 
         // added: KPI-style aligned output
@@ -160,7 +190,7 @@ pub fn run(
         }
 
         if history {
-            let recent = tracker.get_recent(10)?;
+            let recent = tracker.get_recent_filtered(10, project_scope.as_deref())?; // changed: filtered
             if !recent.is_empty() {
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
@@ -223,15 +253,15 @@ pub fn run(
 
     // Time breakdown views
     if all || daily {
-        print_daily_full(&tracker)?;
+        print_daily_full(&tracker, project_scope.as_deref())?; // changed: pass project scope
     }
 
     if all || weekly {
-        print_weekly(&tracker)?;
+        print_weekly(&tracker, project_scope.as_deref())?; // changed: pass project scope
     }
 
     if all || monthly {
-        print_monthly(&tracker)?;
+        print_monthly(&tracker, project_scope.as_deref())?; // changed: pass project scope
     }
 
     Ok(())
@@ -331,6 +361,39 @@ fn print_efficiency_meter(pct: f64) {
     }
 }
 
+/// Resolve project scope from --project flag. // added
+fn resolve_project_scope(project: bool) -> Result<Option<String>> {
+    if !project {
+        return Ok(None);
+    }
+    let cwd = std::env::current_dir().context("Failed to resolve current working directory")?;
+    let canonical = cwd.canonicalize().unwrap_or(cwd);
+    Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+/// Shorten long absolute paths for display. // added
+fn shorten_path(path: &str) -> String {
+    let path_buf = PathBuf::from(path);
+    let comps: Vec<String> = path_buf
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if comps.len() <= 4 {
+        return path.to_string();
+    }
+    let root = comps[0].as_str();
+    if root == "/" || root.is_empty() {
+        format!("/.../{}/{}", comps[comps.len() - 2], comps[comps.len() - 1])
+    } else {
+        format!(
+            "{}/.../{}/{}",
+            root,
+            comps[comps.len() - 2],
+            comps[comps.len() - 1]
+        )
+    }
+}
+
 fn print_ascii_graph(data: &[(String, usize)]) {
     if data.is_empty() {
         return;
@@ -361,20 +424,23 @@ fn print_ascii_graph(data: &[(String, usize)]) {
     }
 }
 
-fn print_daily_full(tracker: &Tracker) -> Result<()> {
-    let days = tracker.get_all_days()?;
+fn print_daily_full(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
+    // changed: add project scope
+    let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered variant
     print_period_table(&days);
     Ok(())
 }
 
-fn print_weekly(tracker: &Tracker) -> Result<()> {
-    let weeks = tracker.get_by_week()?;
+fn print_weekly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
+    // changed: add project scope
+    let weeks = tracker.get_by_week_filtered(project_scope)?; // changed: use filtered variant
     print_period_table(&weeks);
     Ok(())
 }
 
-fn print_monthly(tracker: &Tracker) -> Result<()> {
-    let months = tracker.get_by_month()?;
+fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
+    // changed: add project scope
+    let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered variant
     print_period_table(&months);
     Ok(())
 }
@@ -407,9 +473,10 @@ fn export_json(
     weekly: bool,
     monthly: bool,
     all: bool,
+    project_scope: Option<&str>, // added: project scope
 ) -> Result<()> {
     let summary = tracker
-        .get_summary()
+        .get_summary_filtered(project_scope) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
@@ -423,17 +490,17 @@ fn export_json(
             avg_time_ms: summary.avg_time_ms,
         },
         daily: if all || daily {
-            Some(tracker.get_all_days()?)
+            Some(tracker.get_all_days_filtered(project_scope)?) // changed: use filtered
         } else {
             None
         },
         weekly: if all || weekly {
-            Some(tracker.get_by_week()?)
+            Some(tracker.get_by_week_filtered(project_scope)?) // changed: use filtered
         } else {
             None
         },
         monthly: if all || monthly {
-            Some(tracker.get_by_month()?)
+            Some(tracker.get_by_month_filtered(project_scope)?) // changed: use filtered
         } else {
             None
         },
@@ -451,9 +518,10 @@ fn export_csv(
     weekly: bool,
     monthly: bool,
     all: bool,
+    project_scope: Option<&str>, // added: project scope
 ) -> Result<()> {
     if all || daily {
-        let days = tracker.get_all_days()?;
+        let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered
         println!("# Daily Data");
         println!("date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
         for day in days {
@@ -473,7 +541,7 @@ fn export_csv(
     }
 
     if all || weekly {
-        let weeks = tracker.get_by_week()?;
+        let weeks = tracker.get_by_week_filtered(project_scope)?; // changed: use filtered
         println!("# Weekly Data");
         println!(
             "week_start,week_end,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
@@ -496,7 +564,7 @@ fn export_csv(
     }
 
     if all || monthly {
-        let months = tracker.get_by_month()?;
+        let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered
         println!("# Monthly Data");
         println!("month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
         for month in months {
