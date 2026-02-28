@@ -32,6 +32,15 @@ pub fn try_rewrite_head(match_cmd: &str) -> Option<String> {
 /// Returns Some(rewritten) if matched, None otherwise.
 pub fn try_rewrite_file_cmd(match_cmd: &str, cmd_body: &str) -> Option<String> {
     if match_cmd.starts_with("cat ") {
+        // Count non-flag arguments: skip tokens starting with '-'
+        let args: Vec<&str> = match_cmd["cat ".len()..]
+            .split_whitespace()
+            .filter(|a| !a.starts_with('-'))
+            .collect();
+        // rtk read only accepts a single file — skip multi-file cat
+        if args.len() > 1 {
+            return None;
+        }
         return Some(replace_prefix(cmd_body, "cat ", "rtk read "));
     }
     if match_cmd.starts_with("rg ") {
@@ -144,6 +153,34 @@ mod tests {
         assert_eq!(
             rewrite("wget https://example.com/file"),
             Some("rtk wget https://example.com/file".into())
+        );
+    }
+
+    // --- P0-3: cat with multiple files should NOT be rewritten ---
+    #[test]
+    fn test_cat_multi_file_no_rewrite() {
+        assert_eq!(rewrite("cat file1.txt file2.txt"), None);
+    }
+
+    #[test]
+    fn test_cat_three_files_no_rewrite() {
+        assert_eq!(rewrite("cat a.txt b.txt c.txt"), None);
+    }
+
+    #[test]
+    fn test_cat_single_file_still_works() {
+        assert_eq!(
+            rewrite("cat src/main.rs"),
+            Some("rtk read src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_cat_with_flags_single_file() {
+        // cat -n file → has flag, still single file target
+        assert_eq!(
+            rewrite("cat -n src/main.rs"),
+            Some("rtk read -n src/main.rs".into())
         );
     }
 }
