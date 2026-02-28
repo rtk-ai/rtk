@@ -57,7 +57,10 @@ get_latest_version() {
 get_target() {
     case "$OS" in
         linux)
-            TARGET="${ARCH}-unknown-linux-gnu"
+            case "$ARCH" in
+                x86_64)  TARGET="x86_64-unknown-linux-musl";;
+                aarch64) TARGET="aarch64-unknown-linux-gnu";;
+            esac
             ;;
         darwin)
             TARGET="${ARCH}-apple-darwin"
