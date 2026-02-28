@@ -129,7 +129,12 @@ elif echo "$MATCH_CMD" | grep -qE '^(npx[[:space:]]+)?prisma([[:space:]]|$)'; th
 # --- Containers (added: docker compose, docker run/build/exec, kubectl describe/apply) ---
 elif echo "$MATCH_CMD" | grep -qE '^docker[[:space:]]'; then
   if echo "$MATCH_CMD" | grep -qE '^docker[[:space:]]+compose([[:space:]]|$)'; then
-    REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^docker /rtk docker /')"
+    COMPOSE_SUBCMD=$(echo "$MATCH_CMD" | sed -E 's/^docker[[:space:]]+compose[[:space:]]*//')
+    case "$COMPOSE_SUBCMD" in
+      ps|ps\ *|logs|logs\ *|build|build\ *)
+        REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^docker /rtk docker /')"
+        ;;
+    esac
   else
     DOCKER_SUBCMD=$(echo "$MATCH_CMD" | sed -E \
       -e 's/^docker[[:space:]]+//' \
