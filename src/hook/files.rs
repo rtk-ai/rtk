@@ -33,12 +33,14 @@ pub fn try_rewrite_head(match_cmd: &str) -> Option<String> {
 pub fn try_rewrite_file_cmd(match_cmd: &str, cmd_body: &str) -> Option<String> {
     if match_cmd.starts_with("cat ") {
         // Count non-flag arguments: skip tokens starting with '-'
-        let args: Vec<&str> = match_cmd["cat ".len()..]
+        let args: Vec<&str> = match_cmd
+            .strip_prefix("cat ")
+            .unwrap_or("")
             .split_whitespace()
             .filter(|a| !a.starts_with('-'))
             .collect();
-        // rtk read only accepts a single file — skip multi-file cat
-        if args.len() > 1 {
+        // rtk read only accepts a single file — skip multi-file cat and stdin (cat -)
+        if args.len() != 1 || args[0] == "-" {
             return None;
         }
         return Some(replace_prefix(cmd_body, "cat ", "rtk read "));
@@ -182,5 +184,11 @@ mod tests {
             rewrite("cat -n src/main.rs"),
             Some("rtk read -n src/main.rs".into())
         );
+    }
+
+    #[test]
+    fn test_cat_stdin_no_rewrite() {
+        // cat - reads from stdin, rtk read doesn't support it
+        assert_eq!(rewrite("cat -"), None);
     }
 }

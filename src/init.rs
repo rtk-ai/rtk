@@ -725,15 +725,7 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| {
-            // Exact match
-            cmd == hook_command
-                // Both contain old .sh path
-                || (cmd.contains("rtk-rewrite.sh") && hook_command.contains("rtk-rewrite.sh"))
-                // Either is the native hook command
-                || cmd == HOOK_COMMAND
-                || cmd.contains("rtk-rewrite.sh")
-        })
+        .any(|cmd| cmd == hook_command || cmd == HOOK_COMMAND || cmd.contains("rtk-rewrite.sh"))
 }
 
 /// Default mode: bash hook (Unix) or native hook (--native-hook / Windows)

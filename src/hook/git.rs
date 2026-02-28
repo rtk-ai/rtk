@@ -8,8 +8,8 @@ lazy_static! {
         Regex::new(r"(?:(-C|-c)\s+\S+\s*|--[a-z-]+=\S+\s*|--(no-pager|no-optional-locks|bare|literal-pathspecs)\s*)").unwrap();
 }
 
-pub fn try_rewrite_git(_match_cmd: &str, cmd_body: &str) -> Option<String> {
-    let after_git = _match_cmd.strip_prefix("git ").unwrap_or("");
+pub fn try_rewrite_git(match_cmd: &str, cmd_body: &str) -> Option<String> {
+    let after_git = match_cmd.strip_prefix("git ").unwrap_or("");
     let stripped = GIT_GLOBAL_FLAGS_RE.replace_all(after_git, "");
     let stripped = stripped.trim_start();
 
@@ -194,5 +194,11 @@ mod tests {
             rewrite("git -c core.pager=cat log"),
             Some("rtk git log".into())
         );
+    }
+
+    #[test]
+    fn test_git_unknown_global_flag_no_rewrite() {
+        // Unknown boolean flags cause the subcommand to not be detected → safe fallback (no rewrite)
+        assert_eq!(rewrite("git --worktree-attributes log --oneline"), None);
     }
 }
