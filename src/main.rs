@@ -17,6 +17,7 @@ mod gh_cmd;
 mod git;
 mod go_cmd;
 mod golangci_cmd;
+mod gradle_cmd;
 mod grep_cmd;
 mod hook_audit_cmd;
 mod init;
@@ -522,6 +523,12 @@ enum Commands {
         command: GoCommands,
     },
 
+    /// Gradle commands with compact output (auto-detects ./gradlew)
+    Gradle {
+        #[command(subcommand)]
+        command: GradleCommands,
+    },
+
     /// golangci-lint with compact output
     #[command(name = "golangci-lint")]
     GolangciLint {
@@ -848,6 +855,43 @@ enum GoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported go subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum GradleCommands {
+    /// Build with compact output (strip task noise, keep errors)
+    Build {
+        /// Additional gradle build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Test with failures-only output (90% token reduction)
+    Test {
+        /// Additional gradle test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Clean with compact output
+    Clean {
+        /// Additional gradle clean arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Assemble with compact output
+    Assemble {
+        /// Additional gradle assemble arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Dependencies with compact tree
+    Dependencies {
+        /// Additional gradle dependencies arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported gradle subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1420,6 +1464,27 @@ fn main() -> Result<()> {
             }
             GoCommands::Other(args) => {
                 go_cmd::run_other(&args, cli.verbose)?;
+            }
+        },
+
+        Commands::Gradle { command } => match command {
+            GradleCommands::Build { args } => {
+                gradle_cmd::run_build(&args, cli.verbose)?;
+            }
+            GradleCommands::Test { args } => {
+                gradle_cmd::run_test(&args, cli.verbose)?;
+            }
+            GradleCommands::Clean { args } => {
+                gradle_cmd::run_clean(&args, cli.verbose)?;
+            }
+            GradleCommands::Assemble { args } => {
+                gradle_cmd::run_assemble(&args, cli.verbose)?;
+            }
+            GradleCommands::Dependencies { args } => {
+                gradle_cmd::run_dependencies(&args, cli.verbose)?;
+            }
+            GradleCommands::Other(args) => {
+                gradle_cmd::run_other(&args, cli.verbose)?;
             }
         },
 
