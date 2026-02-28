@@ -28,6 +28,7 @@ mod local_llm;
 mod log_cmd;
 mod ls;
 mod mvn_cmd;
+mod mypy_cmd;
 mod next_cmd;
 mod npm_cmd;
 mod parser;
@@ -310,6 +311,9 @@ enum Commands {
 
     /// Show token savings summary and history
     Gain {
+        /// Filter statistics to current project (current working directory) // added
+        #[arg(short, long)]
+        project: bool,
         /// Show ASCII graph of daily savings
         #[arg(short, long)]
         graph: bool,
@@ -507,6 +511,13 @@ enum Commands {
     /// Pytest test runner with compact output
     Pytest {
         /// Pytest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Mypy type checker with grouped error output
+    Mypy {
+        /// Mypy arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1240,6 +1251,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Gain {
+            project, // added
             graph,
             history,
             quota,
@@ -1251,6 +1263,7 @@ fn main() -> Result<()> {
             format,
         } => {
             gain::run(
+                project, // added: pass project flag
                 graph,
                 history,
                 quota,
@@ -1497,6 +1510,10 @@ fn main() -> Result<()> {
 
         Commands::Pytest { args } => {
             pytest_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::Mypy { args } => {
+            mypy_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Pip { args } => {
