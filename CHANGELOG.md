@@ -5,6 +5,26 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0](https://github.com/rtk-ai/rtk/compare/v0.22.2...v0.23.0) (2026-02-28)
+
+
+### Features
+
+* add mypy command with grouped error output ([#109](https://github.com/rtk-ai/rtk/issues/109)) ([e8ef341](https://github.com/rtk-ai/rtk/commit/e8ef3418537247043808dc3c88bfd189b717a0a1))
+* **gain:** add per-project token savings with -p flag ([#128](https://github.com/rtk-ai/rtk/issues/128)) ([2b550ee](https://github.com/rtk-ai/rtk/commit/2b550eebd6219a4844488d8fde1842ba3c6dec25))
+
+
+### Bug Fixes
+
+* eliminate duplicate output when grep-ing function names from git show ([#248](https://github.com/rtk-ai/rtk/issues/248)) ([a6f65f1](https://github.com/rtk-ai/rtk/commit/a6f65f11da71936d148a2562216ab45b4c4b04a0))
+* filter docker compose hook rewrites to supported subcommands ([#245](https://github.com/rtk-ai/rtk/issues/245)) ([dbbf980](https://github.com/rtk-ai/rtk/commit/dbbf980f3ba9a51d0f7eb703e7b3c52fde2b784f)), closes [#244](https://github.com/rtk-ai/rtk/issues/244)
+* **registry:** "fi" in IGNORED_PREFIXES shadows find commands ([#246](https://github.com/rtk-ai/rtk/issues/246)) ([48965c8](https://github.com/rtk-ai/rtk/commit/48965c85d2dd274bbdcf27b11850ccd38909e6f4))
+* remove personal preferences from project CLAUDE.md ([3a8044e](https://github.com/rtk-ai/rtk/commit/3a8044ef6991b2208d904b7401975fcfcb165cdb))
+* remove personal preferences from project CLAUDE.md ([d362ad0](https://github.com/rtk-ai/rtk/commit/d362ad0e4968cfc6aa93f9ef163512a692ca5d1b))
+* remove remaining personal project reference from CLAUDE.md ([5b59700](https://github.com/rtk-ai/rtk/commit/5b597002dcd99029cb9c0da9b6d38b44021bdb3a))
+* remove remaining personal project reference from CLAUDE.md ([dc09265](https://github.com/rtk-ai/rtk/commit/dc092655fb84a7c19a477e731eed87df5ad0b89f))
+* surface build failures in go test summary ([#274](https://github.com/rtk-ai/rtk/issues/274)) ([b405e48](https://github.com/rtk-ai/rtk/commit/b405e48ca6c4be3ba702a5d9092fa4da4dff51dc))
+
 ## [0.22.2](https://github.com/rtk-ai/rtk/compare/v0.22.1...v0.22.2) (2026-02-20)
 
 
