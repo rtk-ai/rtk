@@ -697,11 +697,23 @@ pub fn is_pnpm_script(name: &str) -> bool {
     false
 }
 
-/// Apply a specialized filter to script output
-pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> (String, &'static str) {
-    use crate::parser::{OutputParser, TokenFormatter};
+/// Apply a specialized filter to script output.
+/// Returns Result to allow caller fallback on error (replaces catch_unwind, QUAL-01).
+pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, &'static str)> {
+    // Empty/whitespace input is an error -- nothing meaningful to filter
+    if output.trim().is_empty() {
+        let label = match route {
+            FilterRoute::Vitest => "vitest (via pnpm run)",
+            FilterRoute::Playwright => "playwright (via pnpm run)",
+            FilterRoute::Tsc => "tsc (via pnpm run)",
+            FilterRoute::Lint => "lint (via pnpm run)",
+            FilterRoute::Prettier => "prettier (via pnpm run)",
+            FilterRoute::TestRunner => "test (via pnpm run)",
+        };
+        anyhow::bail!("{} filter received empty input", label);
+    }
 
-    let result = std::panic::catch_unwind(|| match route {
+    let filtered = match route {
         FilterRoute::Vitest => {
             let parse_result = crate::vitest_cmd::VitestParser::parse(output);
             match parse_result {
@@ -722,7 +734,7 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> (String, &'stati
         FilterRoute::Lint => crate::lint_cmd::filter_generic_lint(output),
         FilterRoute::Prettier => crate::prettier_cmd::filter_prettier_output(output),
         FilterRoute::TestRunner => crate::runner::extract_test_summary(output, "pnpm test"),
-    });
+    };
 
     let label = match route {
         FilterRoute::Vitest => "vitest (via pnpm run)",
@@ -733,10 +745,12 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> (String, &'stati
         FilterRoute::TestRunner => "test (via pnpm run)",
     };
 
-    match result {
-        Ok(filtered) if !filtered.trim().is_empty() => (filtered, label),
-        _ => (output.to_string(), label),
+    // Empty/whitespace filter output treated as error (triggers fallback)
+    if filtered.trim().is_empty() {
+        anyhow::bail!("{} filter returned empty output", label);
     }
+
+    Ok((filtered, label))
 }
 
 /// Execute `pnpm run <script>` with smart routing to specialized filters
@@ -802,13 +816,20 @@ pub fn run_script(script: &str, args: &[String], verbose: u8, skip_env: bool) ->
 
     // Route to specialized filter
     let filtered = match route_script(script) {
-        Some(route) => {
-            let (result, label) = apply_filter(route, &stripped);
-            if verbose > 0 {
-                eprintln!("Routed to: {}", label);
+        Some(route) => match apply_filter(route, &stripped) {
+            Ok((result, label)) => {
+                if verbose > 0 {
+                    eprintln!("Routed to: {}", label);
+                }
+                result
             }
-            result
-        }
+            Err(e) => {
+                if verbose > 0 {
+                    eprintln!("[RTK:FALLBACK] filter error: {}", e);
+                }
+                stripped.clone()
+            }
+        },
         None => stripped.clone(),
     };
 
@@ -1010,37 +1031,37 @@ Done in 5.2s
 
     #[test]
     fn test_apply_filter_tsc_label() {
-        let (_, label) = apply_filter(FilterRoute::Tsc, "some output");
+        let (_, label) = apply_filter(FilterRoute::Tsc, "some output").unwrap();
         assert_eq!(label, "tsc (via pnpm run)");
     }
 
     #[test]
     fn test_apply_filter_vitest_label() {
-        let (_, label) = apply_filter(FilterRoute::Vitest, "some output");
+        let (_, label) = apply_filter(FilterRoute::Vitest, "some output").unwrap();
         assert_eq!(label, "vitest (via pnpm run)");
     }
 
     #[test]
     fn test_apply_filter_lint_label() {
-        let (_, label) = apply_filter(FilterRoute::Lint, "some output");
+        let (_, label) = apply_filter(FilterRoute::Lint, "some output").unwrap();
         assert_eq!(label, "lint (via pnpm run)");
     }
 
     #[test]
     fn test_apply_filter_prettier_label() {
-        let (_, label) = apply_filter(FilterRoute::Prettier, "some output");
+        let (_, label) = apply_filter(FilterRoute::Prettier, "some output").unwrap();
         assert_eq!(label, "prettier (via pnpm run)");
     }
 
     #[test]
     fn test_apply_filter_test_runner_label() {
-        let (_, label) = apply_filter(FilterRoute::TestRunner, "some output");
+        let (_, label) = apply_filter(FilterRoute::TestRunner, "some output").unwrap();
         assert_eq!(label, "test (via pnpm run)");
     }
 
     #[test]
     fn test_apply_filter_playwright_label() {
-        let (_, label) = apply_filter(FilterRoute::Playwright, "some output");
+        let (_, label) = apply_filter(FilterRoute::Playwright, "some output").unwrap();
         assert_eq!(label, "playwright (via pnpm run)");
     }
 
@@ -1061,7 +1082,7 @@ Done in 1.2s"#;
         let route = route_script("lint");
         assert_eq!(route, Some(FilterRoute::Lint));
 
-        let (filtered, label) = apply_filter(route.unwrap(), &stripped);
+        let (filtered, label) = apply_filter(route.unwrap(), &stripped).unwrap();
         assert_eq!(label, "lint (via pnpm run)");
         assert!(!filtered.is_empty());
     }
@@ -1121,6 +1142,20 @@ Done in 1.2s"#;
             &sorted[..],
             "NATIVE_PNPM_COMMANDS must be sorted alphabetically for binary_search"
         );
+    }
+
+    #[test]
+    fn test_apply_filter_empty_output_returns_error() {
+        // Empty output triggers Err (fallback to stripped output in caller)
+        let result = apply_filter(FilterRoute::Tsc, "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_apply_filter_whitespace_only_returns_error() {
+        // Whitespace-only output triggers Err
+        let result = apply_filter(FilterRoute::Lint, "   \n\n  ");
+        assert!(result.is_err());
     }
 
     #[test]
