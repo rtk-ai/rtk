@@ -68,6 +68,7 @@ If already installed and `rtk gain` works, **DO NOT reinstall**. Skip to Quick S
 ### Homebrew (macOS/Linux)
 
 ```bash
+brew tap rtk-ai/tap
 brew install rtk
 ```
 
