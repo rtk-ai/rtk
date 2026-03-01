@@ -33,7 +33,7 @@ use cmds::system::{
 
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -1485,6 +1485,45 @@ enum ComposeCommands {
     Other(Vec<OsString>),
 }
 
+#[derive(Args, Clone, Debug)]
+struct KubectlGlobalArgs {
+    /// The name of the kubeconfig context to use
+    #[arg(long)]
+    context: Option<String>,
+    /// Path to the kubeconfig file
+    #[arg(long)]
+    kubeconfig: Option<String>,
+    /// Namespace scope for this request
+    #[arg(short, long)]
+    namespace: Option<String>,
+    /// Username to impersonate
+    #[arg(long = "as")]
+    impersonate: Option<String>,
+}
+
+impl KubectlGlobalArgs {
+    fn to_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(ref ctx) = self.context {
+            args.push("--context".to_string());
+            args.push(ctx.clone());
+        }
+        if let Some(ref kc) = self.kubeconfig {
+            args.push("--kubeconfig".to_string());
+            args.push(kc.clone());
+        }
+        if let Some(ref ns) = self.namespace {
+            args.push("-n".to_string());
+            args.push(ns.clone());
+        }
+        if let Some(ref imp) = self.impersonate {
+            args.push("--as".to_string());
+            args.push(imp.clone());
+        }
+        args
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum KubectlCommands {
     /// Get Kubernetes resources (compact for pods/services)
@@ -1495,10 +1534,13 @@ enum KubectlCommands {
     },
     /// List pods
     Pods {
-        #[arg(short, long)]
-        namespace: Option<String>,
+        #[command(flatten)]
+        global: KubectlGlobalArgs,
+        /// Label selector (e.g. -l app=web)
+        #[arg(short = 'l', long)]
+        selector: Option<String>,
         /// All namespaces
-        #[arg(short = 'A', long)]
+        #[arg(short = 'A', long = "all-namespaces")]
         all: bool,
         // An RTK-only alias, so the raw-exec fallback would run `kubectl pods` (#4198).
         /// Further arguments forwarded to `get pods`
@@ -1507,10 +1549,13 @@ enum KubectlCommands {
     },
     /// List services
     Services {
-        #[arg(short, long)]
-        namespace: Option<String>,
+        #[command(flatten)]
+        global: KubectlGlobalArgs,
+        /// Label selector (e.g. -l app=web)
+        #[arg(short = 'l', long)]
+        selector: Option<String>,
         /// All namespaces
-        #[arg(short = 'A', long)]
+        #[arg(short = 'A', long = "all-namespaces")]
         all: bool,
         /// Further arguments forwarded to `get services`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1519,6 +1564,8 @@ enum KubectlCommands {
     /// Show pod logs (deduplicated)
     Logs {
         pod: String,
+        #[command(flatten)]
+        global: KubectlGlobalArgs,
         #[arg(short, long)]
         container: Option<String>,
     },
@@ -4586,6 +4633,29 @@ mod tests {
     }
 
     #[test]
+    fn test_kubectl_pods_context() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "kubectl",
+            "pods",
+            "--context",
+            "my-cluster",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Kubectl {
+                command: KubectlCommands::Pods { global, all },
+            } => {
+                assert_eq!(global.context.as_deref(), Some("my-cluster"));
+                assert!(!all);
+                let args = global.to_args();
+                assert_eq!(args, vec!["--context", "my-cluster"]);
+            }
+            _ => panic!("Expected Kubectl Pods command"),
+        }
+    }
+
+    #[test]
     fn test_gain_failures_flag_parses() {
         let result = try_parse_cli_from(["rtk", "gain", "--failures"]);
         assert!(result.is_ok());
@@ -4598,6 +4668,46 @@ mod tests {
     }
 
     #[test]
+    fn test_kubectl_pods_all_global_args() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "kubectl",
+            "pods",
+            "--context",
+            "prod",
+            "--kubeconfig",
+            "/tmp/kube.conf",
+            "-n",
+            "default",
+            "-l",
+            "app=web",
+            "--as",
+            "admin",
+            "-A",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Kubectl {
+                command: KubectlCommands::Pods { global, all },
+            } => {
+                assert_eq!(global.context.as_deref(), Some("prod"));
+                assert_eq!(global.kubeconfig.as_deref(), Some("/tmp/kube.conf"));
+                assert_eq!(global.namespace.as_deref(), Some("default"));
+                assert_eq!(global.selector.as_deref(), Some("app=web"));
+                assert_eq!(global.impersonate.as_deref(), Some("admin"));
+                assert!(all);
+                let args = global.to_args();
+                assert!(args.contains(&"--context".to_string()));
+                assert!(args.contains(&"--kubeconfig".to_string()));
+                assert!(args.contains(&"-n".to_string()));
+                assert!(args.contains(&"-l".to_string()));
+                assert!(args.contains(&"--as".to_string()));
+            }
+            _ => panic!("Expected Kubectl Pods command"),
+        }
+    }
+
+    #[test]
     fn test_gain_failures_short_flag_parses() {
         let result = try_parse_cli_from(["rtk", "gain", "-F"]);
         assert!(result.is_ok());
@@ -4606,6 +4716,37 @@ mod tests {
                 Commands::Gain(gain) => assert!(gain.failures),
                 _ => panic!("Expected Gain command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_kubectl_logs_with_namespace() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "kubectl",
+            "logs",
+            "my-pod",
+            "-n",
+            "staging",
+            "--context",
+            "dev",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Kubectl {
+                command:
+                    KubectlCommands::Logs {
+                        pod,
+                        global,
+                        container,
+                    },
+            } => {
+                assert_eq!(pod, "my-pod");
+                assert_eq!(global.namespace.as_deref(), Some("staging"));
+                assert_eq!(global.context.as_deref(), Some("dev"));
+                assert!(container.is_none());
+            }
+            _ => panic!("Expected Kubectl Logs command"),
         }
     }
 
@@ -5357,6 +5498,27 @@ mod tests {
     }
 
     #[test]
+    fn test_kubectl_services_selector() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "kubectl",
+            "services",
+            "-l",
+            "tier=frontend",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Kubectl {
+                command: KubectlCommands::Services { global, all },
+            } => {
+                assert_eq!(global.selector.as_deref(), Some("tier=frontend"));
+                assert!(!all);
+            }
+            _ => panic!("Expected Kubectl Services command"),
+        }
+    }
+
+    #[test]
     fn test_meta_command_list_is_complete() {
         // Verify all meta-commands are in the guard list by checking they parse with valid syntax
         let meta_cmds_that_parse = [
@@ -5463,6 +5625,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< ours
     fn test_rewrite_help_documents_each_exit_code() {
         use clap::CommandFactory;
 
@@ -5484,6 +5647,9 @@ mod tests {
     }
 
     #[test]
+=======
+<<<<<<< HEAD
+>>>>>>> theirs
     fn test_merge_filters_with_no_args() {
         let filters = vec![];
         let args = vec!["--depth=0".to_string(), "--no-verbose".to_string()];
@@ -5783,6 +5949,17 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+=======
+    fn test_kubectl_global_args_to_args_empty() {
+        let global = KubectlGlobalArgs {
+            context: None,
+            kubeconfig: None,
+            namespace: None,
+            selector: None,
+            impersonate: None,
+        };
+        assert!(global.to_args().is_empty());
+>>>>>>> 340d4ba (feat(kubectl): add --context, --kubeconfig, -n, -l, --as global flags)
     }
 
     // --- grep argument routing (clap layer) ---
