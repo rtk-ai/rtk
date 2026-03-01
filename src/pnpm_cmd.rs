@@ -12,6 +12,20 @@ use crate::parser::{
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
 
+// pnpm run output boilerplate patterns
+lazy_static! {
+    // > my-project@1.0.0 test /path/to/project
+    static ref LIFECYCLE_HEADER: Regex = Regex::new(r"^>\s+\S+@\S+\s+").unwrap();
+    // $ vitest run --reporter=json
+    static ref SCRIPT_ECHO: Regex = Regex::new(r"^\$\s+").unwrap();
+    // Done in 3.4s
+    static ref DONE_MSG: Regex = Regex::new(r"^Done in \d").unwrap();
+    // ELIFECYCLE  Command failed with exit code 1.
+    static ref ELIFECYCLE: Regex = Regex::new(r"(?i)ELIFECYCLE|ERR_PNPM").unwrap();
+    // Progress: resolved 123, reused 120, downloaded 3
+    static ref PROGRESS: Regex = Regex::new(r"^Progress:").unwrap();
+}
+
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]
 struct PnpmListOutput {
@@ -529,19 +543,6 @@ pub(crate) enum FilterRoute {
 
 /// Strip pnpm-specific boilerplate from script output
 pub(crate) fn filter_pnpm_run_output(output: &str) -> String {
-    lazy_static! {
-        // > my-project@1.0.0 test /path/to/project
-        static ref LIFECYCLE_HEADER: Regex = Regex::new(r"^>\s+\S+@\S+\s+").unwrap();
-        // $ vitest run --reporter=json
-        static ref SCRIPT_ECHO: Regex = Regex::new(r"^\$\s+").unwrap();
-        // Done in 3.4s
-        static ref DONE_MSG: Regex = Regex::new(r"^Done in \d").unwrap();
-        // ELIFECYCLE  Command failed with exit code 1.
-        static ref ELIFECYCLE: Regex = Regex::new(r"(?i)ELIFECYCLE|ERR_PNPM").unwrap();
-        // Progress: resolved 123, reused 120, downloaded 3
-        static ref PROGRESS: Regex = Regex::new(r"^Progress:").unwrap();
-    }
-
     let mut result = Vec::new();
 
     for line in output.lines() {
@@ -668,7 +669,7 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> (String, &'stati
         FilterRoute::Tsc => crate::tsc_cmd::filter_tsc_output(output),
         FilterRoute::Lint => crate::lint_cmd::filter_generic_lint(output),
         FilterRoute::Prettier => crate::prettier_cmd::filter_prettier_output(output),
-        FilterRoute::TestRunner => crate::runner::extract_test_summary(output, "npm test"),
+        FilterRoute::TestRunner => crate::runner::extract_test_summary(output, "pnpm test"),
     });
 
     let label = match route {
