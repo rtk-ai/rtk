@@ -175,6 +175,9 @@ rtk pytest                       # Python tests (failures only, 90% reduction)
 rtk pip list                     # Python packages (auto-detect uv, 70% reduction)
 rtk go test                      # Go tests (NDJSON, 90% reduction)
 rtk golangci-lint run            # Go linting (JSON, 85% reduction)
+rtk rails test                   # Rails minitest (failures only, 50%+ reduction)
+rtk rails routes                 # Routes grouped by controller (50%+ reduction)
+rtk rails db:migrate             # Migration summary (40%+ reduction)
 ```
 
 ### Data & Analytics
@@ -282,6 +285,18 @@ rtk go test                      # NDJSON streaming parser (90% reduction)
 rtk go build                     # Build errors only (80% reduction)
 rtk go vet                       # Vet issues (75% reduction)
 rtk golangci-lint run            # JSON grouped by rule (85% reduction)
+```
+
+### Ruby on Rails Stack
+```bash
+# Rails
+rtk rails test                   # Minitest (state machine parser, 50%+ reduction)
+rtk rails test test/models/       # Run specific directory
+rtk rails routes                 # Routes grouped by controller (50%+ reduction)
+rtk rails db:migrate             # Migration summary (40%+ reduction)
+rtk rails db:migrate:status      # Pending migration status
+rtk rails db:rollback            # Rollback summary
+rtk rails generate model User    # Generator summary (created files)
 ```
 
 ## Examples
@@ -625,6 +640,8 @@ The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To us
 | `pip list/install/outdated` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint run` | `rtk golangci-lint run` |
+| `rails test/routes/db:migrate/...` | `rtk rails ...` |
+| `rake routes/db:migrate` | `rtk rails ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |

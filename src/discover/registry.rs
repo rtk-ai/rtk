@@ -71,6 +71,8 @@ const PATTERNS: &[&str] = &[
     r"^curl\s+",
     r"^wget\s+",
     r"^(python3?\s+-m\s+)?mypy(\s|$)",
+    r"^(?:bundle\s+exec\s+)?rails\s+(test|routes|db:migrate:status|db:migrate|db:rollback|g(?:enerate)?)(?:\s|$)",
+    r"^bin/rails\s+(test|routes|db:migrate:status|db:migrate|db:rollback|g(?:enerate)?)(?:\s|$)",
 ];
 
 const RULES: &[RtkRule] = &[
@@ -233,6 +235,38 @@ const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // Pattern: (bundle exec)?rails test/routes/db:migrate/db:rollback/generate
+    RtkRule {
+        rtk_cmd: "rtk rails",
+        category: "Tests",
+        savings_pct: 50.0,
+        subcmd_savings: &[
+            ("test", 50.0),
+            ("routes", 50.0),
+            ("db:migrate:status", 40.0),
+            ("db:migrate", 40.0),
+            ("db:rollback", 40.0),
+            ("generate", 20.0),
+            ("g", 20.0),
+        ],
+        subcmd_status: &[],
+    },
+    // Pattern: bin/rails test/routes/db:migrate/db:rollback/generate (same config)
+    RtkRule {
+        rtk_cmd: "rtk rails",
+        category: "Tests",
+        savings_pct: 50.0,
+        subcmd_savings: &[
+            ("test", 50.0),
+            ("routes", 50.0),
+            ("db:migrate:status", 40.0),
+            ("db:migrate", 40.0),
+            ("db:rollback", 40.0),
+            ("generate", 20.0),
+            ("g", 20.0),
+        ],
+        subcmd_status: &[],
+    },
 ];
 
 /// Commands to ignore (shell builtins, trivial, already rtk).
@@ -288,7 +322,9 @@ const IGNORED_PREFIXES: &[&str] = &[
     "case ",
 ];
 
-const IGNORED_EXACT: &[&str] = &["cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done"];
+const IGNORED_EXACT: &[&str] = &[
+    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
+];
 
 lazy_static! {
     static ref REGEX_SET: RegexSet = RegexSet::new(PATTERNS).expect("invalid regex patterns");
@@ -790,5 +826,151 @@ mod tests {
                 status: RtkStatus::Existing,
             }
         );
+    }
+
+    #[test]
+    fn test_classify_rails_test() {
+        match classify_command("rails test") {
+            Classification::Supported {
+                rtk_equivalent: "rtk rails",
+                ..
+            } => {}
+            other => panic!("rails test should be Supported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_bin_rails_routes() {
+        match classify_command("bin/rails routes") {
+            Classification::Supported {
+                rtk_equivalent: "rtk rails",
+                ..
+            } => {}
+            other => panic!("bin/rails routes should be Supported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_bundle_exec_rails() {
+        match classify_command("bundle exec rails test") {
+            Classification::Supported {
+                rtk_equivalent: "rtk rails",
+                estimated_savings_pct,
+                ..
+            } => {
+                assert!(
+                    (estimated_savings_pct - 50.0).abs() < 0.1,
+                    "expected ~50% savings for rails test, got {}",
+                    estimated_savings_pct
+                );
+            }
+            other => panic!(
+                "bundle exec rails test should be Supported, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_classify_rails_db_rollback() {
+        match classify_command("rails db:rollback") {
+            Classification::Supported {
+                rtk_equivalent: "rtk rails",
+                estimated_savings_pct,
+                ..
+            } => {
+                assert!(
+                    (estimated_savings_pct - 40.0).abs() < 0.1,
+                    "expected ~40% savings for db:rollback, got {}",
+                    estimated_savings_pct
+                );
+            }
+            other => panic!("rails db:rollback should be Supported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_rails_generate() {
+        match classify_command("rails generate model User") {
+            Classification::Supported {
+                rtk_equivalent: "rtk rails",
+                estimated_savings_pct,
+                ..
+            } => {
+                assert!(
+                    (estimated_savings_pct - 20.0).abs() < 0.1,
+                    "expected ~20% savings for generate, got {}",
+                    estimated_savings_pct
+                );
+            }
+            other => panic!("rails generate should be Supported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_rails_g_shorthand() {
+        match classify_command("rails g controller Posts") {
+            Classification::Supported {
+                rtk_equivalent: "rtk rails",
+                estimated_savings_pct,
+                ..
+            } => {
+                assert!(
+                    (estimated_savings_pct - 20.0).abs() < 0.1,
+                    "expected ~20% savings for g shorthand, got {}",
+                    estimated_savings_pct
+                );
+            }
+            other => panic!("rails g should be Supported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_bin_rails_db_rollback() {
+        match classify_command("bin/rails db:rollback") {
+            Classification::Supported {
+                rtk_equivalent: "rtk rails",
+                ..
+            } => {}
+            other => panic!("bin/rails db:rollback should be Supported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_rails_db_migrate_status() {
+        match classify_command("rails db:migrate:status") {
+            Classification::Supported {
+                rtk_equivalent: "rtk rails",
+                estimated_savings_pct,
+                ..
+            } => {
+                assert!(
+                    (estimated_savings_pct - 40.0).abs() < 0.1,
+                    "expected ~40% savings for db:migrate:status, got {}",
+                    estimated_savings_pct
+                );
+            }
+            other => panic!(
+                "rails db:migrate:status should be Supported, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_classify_rails_db_migrate_savings() {
+        match classify_command("rails db:migrate") {
+            Classification::Supported {
+                estimated_savings_pct,
+                ..
+            } => {
+                assert!(
+                    (estimated_savings_pct - 40.0).abs() < 0.1,
+                    "expected ~40% savings for db:migrate, got {}",
+                    estimated_savings_pct
+                );
+            }
+            other => panic!("rails db:migrate should be Supported, got {:?}", other),
+        }
     }
 }

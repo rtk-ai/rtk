@@ -36,6 +36,7 @@ mod pnpm_cmd;
 mod prettier_cmd;
 mod prisma_cmd;
 mod pytest_cmd;
+mod rails_cmd;
 mod read;
 mod ruff_cmd;
 mod runner;
@@ -541,6 +542,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Rails commands with compact output
+    Rails {
+        #[command(subcommand)]
+        command: RailsCommands,
+    },
+
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
     #[command(name = "hook-audit")]
     HookAudit {
@@ -859,6 +866,53 @@ enum GoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported go subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum RailsCommands {
+    /// Run minitest tests with compact output (50%+ token reduction)
+    Test {
+        /// Additional rails test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Show routes with compact output (grouped by controller)
+    Routes {
+        /// Additional rails routes arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run migrations with compact output
+    #[command(name = "db:migrate")]
+    DbMigrate {
+        /// Additional migration arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Show migration status (pending/applied)
+    #[command(name = "db:migrate:status")]
+    DbMigrateStatus {
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Rollback migrations with compact output
+    #[command(name = "db:rollback")]
+    DbRollback {
+        /// Additional rollback arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run rails generate with compact output
+    #[command(alias = "g")]
+    Generate {
+        /// Additional generate arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported rails subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1443,6 +1497,30 @@ fn main() -> Result<()> {
         Commands::GolangciLint { args } => {
             golangci_cmd::run(&args, cli.verbose)?;
         }
+
+        Commands::Rails { command } => match command {
+            RailsCommands::Test { args } => {
+                rails_cmd::run_test(&args, cli.verbose)?;
+            }
+            RailsCommands::Routes { args } => {
+                rails_cmd::run_routes(&args, cli.verbose)?;
+            }
+            RailsCommands::DbMigrate { args } => {
+                rails_cmd::run_db_migrate(&args, cli.verbose)?;
+            }
+            RailsCommands::DbMigrateStatus { args } => {
+                rails_cmd::run_db_migrate_status(&args, cli.verbose)?;
+            }
+            RailsCommands::DbRollback { args } => {
+                rails_cmd::run_db_rollback(&args, cli.verbose)?;
+            }
+            RailsCommands::Generate { args } => {
+                rails_cmd::run_generate(&args, cli.verbose)?;
+            }
+            RailsCommands::Other(args) => {
+                rails_cmd::run_other(&args, cli.verbose)?;
+            }
+        },
 
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;

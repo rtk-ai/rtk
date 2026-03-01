@@ -190,6 +190,40 @@ elif echo "$MATCH_CMD" | grep -qE '^mypy([[:space:]]|$)'; then
 elif echo "$MATCH_CMD" | grep -qE '^python[[:space:]]+-m[[:space:]]+mypy([[:space:]]|$)'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^python -m mypy/rtk mypy/')"
 
+# --- Ruby tooling (rails) ---
+elif echo "$MATCH_CMD" | grep -qE '^(bundle[[:space:]]+exec[[:space:]]+)?rails[[:space:]]+test([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^(bundle exec )?rails test/rtk rails test/')"
+elif echo "$MATCH_CMD" | grep -qE '^bin/rails[[:space:]]+test([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's|^bin/rails test|rtk rails test|')"
+elif echo "$MATCH_CMD" | grep -qE '^(bundle[[:space:]]+exec[[:space:]]+)?rails[[:space:]]+routes([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^(bundle exec )?rails routes/rtk rails routes/')"
+elif echo "$MATCH_CMD" | grep -qE '^(bundle[[:space:]]+exec[[:space:]]+)?rails[[:space:]]+db:migrate:status([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^(bundle exec )?rails db:migrate:status/rtk rails db:migrate:status/')"
+elif echo "$MATCH_CMD" | grep -qE '^(bundle[[:space:]]+exec[[:space:]]+)?rails[[:space:]]+db:migrate([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^(bundle exec )?rails db:migrate/rtk rails db:migrate/')"
+elif echo "$MATCH_CMD" | grep -qE '^(bundle[[:space:]]+exec[[:space:]]+)?rails[[:space:]]+db:rollback([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^(bundle exec )?rails db:rollback/rtk rails db:rollback/')"
+elif echo "$MATCH_CMD" | grep -qE '^(bundle[[:space:]]+exec[[:space:]]+)?rails[[:space:]]+(generate|g)([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's/^(bundle exec )?rails (generate|g)/rtk rails generate/')"
+elif echo "$MATCH_CMD" | grep -qE '^bin/rails[[:space:]]+routes([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's|^bin/rails routes|rtk rails routes|')"
+elif echo "$MATCH_CMD" | grep -qE '^bin/rails[[:space:]]+db:migrate:status([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's|^bin/rails db:migrate:status|rtk rails db:migrate:status|')"
+elif echo "$MATCH_CMD" | grep -qE '^bin/rails[[:space:]]+db:migrate([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's|^bin/rails db:migrate|rtk rails db:migrate|')"
+elif echo "$MATCH_CMD" | grep -qE '^bin/rails[[:space:]]+db:rollback([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's|^bin/rails db:rollback|rtk rails db:rollback|')"
+elif echo "$MATCH_CMD" | grep -qE '^bin/rails[[:space:]]+(generate|g)([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed -E 's|^bin/rails (generate\|g)|rtk rails generate|')"
+elif echo "$MATCH_CMD" | grep -qE '^rake[[:space:]]+routes([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^rake routes/rtk rails routes/')"
+elif echo "$MATCH_CMD" | grep -qE '^rake[[:space:]]+db:migrate:status([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^rake db:migrate:status/rtk rails db:migrate:status/')"
+elif echo "$MATCH_CMD" | grep -qE '^rake[[:space:]]+db:migrate([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^rake db:migrate/rtk rails db:migrate/')"
+elif echo "$MATCH_CMD" | grep -qE '^rake[[:space:]]+db:rollback([[:space:]]|$)'; then
+  REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^rake db:rollback/rtk rails db:rollback/')"
+
 # --- Go tooling ---
 elif echo "$MATCH_CMD" | grep -qE '^go[[:space:]]+test([[:space:]]|$)'; then
   REWRITTEN="${ENV_PREFIX}$(echo "$CMD_BODY" | sed 's/^go test/rtk go test/')"
