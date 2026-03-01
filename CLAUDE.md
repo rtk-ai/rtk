@@ -230,8 +230,12 @@ rtk gain --history | grep proxy
 | pip_cmd.rs | pip/uv package manager | JSON parsing, auto-detect uv (70-85% reduction) |
 | go_cmd.rs | Go commands | NDJSON for test, text for build/vet (80-90% reduction) |
 | golangci_cmd.rs | golangci-lint | JSON parsing, group by rule (85% reduction) |
+| rspec_cmd.rs | RSpec test runner | JSON parsing, failures only (60%+ JSON, 30%+ text fallback) |
+| rubocop_cmd.rs | RuboCop linter | JSON parsing, group by cop name (60%+ reduction) |
+| bundle_cmd.rs | Bundler package manager | Text parsing for list/outdated/install/update (10-30% reduction) |
+| rails_cmd.rs | Rails commands | Sub-enum: test/routes/db:migrate (40-50%+ reduction) |
 | tee.rs | Full output recovery | Save raw output to file on failure, print hint for LLM re-read |
-| utils.rs | Shared utilities | Package manager detection, common formatting |
+| utils.rs | Shared utilities | Package manager detection, ruby_exec, common formatting |
 | discover/ | Claude Code history analysis | Scan JSONL sessions, classify commands, report missed savings |
 
 ## Performance Constraints
@@ -391,6 +395,16 @@ pub fn execute_with_filter(cmd: &str, args: &[&str]) -> Result<()> {
   - `rtk golangci-lint`: JSON parsing grouped by rule (85% reduction)
 - **Architecture**: Standalone Python commands (mirror lint/prettier), Go sub-enum (mirror git/cargo)
 - **Patterns**: JSON for structured output (ruff check, golangci-lint, pip), NDJSON streaming (go test), text state machine (pytest), text filters (go build/vet, ruff format)
+
+### Ruby on Rails Support (2026-02-28)
+- **Ruby Commands**: 4 modules covering the full Rails development workflow
+  - `rtk rspec`: RSpec test runner with JSON parsing (`--format json`), text fallback (60%+ JSON, 30%+ text fallback)
+  - `rtk rubocop`: RuboCop linter with JSON parsing, group by cop name/severity (60%+ reduction)
+  - `rtk bundle list/outdated/install/update`: Bundler package manager with subcommand dispatch (10-30% reduction)
+  - `rtk rails test/routes/db:migrate/db:migrate:status/db:rollback/generate`: Rails sub-enum with minitest parser, route grouping, migration summary (40-50%+ reduction)
+- **Shared Infrastructure**: `ruby_exec()` in utils.rs auto-detects `bundle exec` when Gemfile exists
+- **Architecture**: Standalone commands (rspec, rubocop, bundle) + sub-enum (rails, mirrors go_cmd.rs pattern)
+- **Hook Integration**: Rewrites `rspec`, `rubocop`, `bundle list/outdated/install/update`, `rails test/routes/db:migrate/db:migrate:status/db:rollback/generate`, `bundle exec`/`bin/` variants, and `rake routes/db:migrate/db:migrate:status/db:rollback` variants
 
 ## Testing Strategy
 

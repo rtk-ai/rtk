@@ -168,6 +168,12 @@ rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
+rtk rspec                        # RSpec tests (JSON, 60%+ reduction)
+rtk rubocop                      # RuboCop linting (JSON, 60%+ reduction)
+rtk bundle list                  # Bundler packages (compact format)
+rtk rails test                   # Rails minitest (failures only, 50%+ reduction)
+rtk rails routes                 # Routes grouped by controller (50%+ reduction)
+rtk rails db:migrate             # Migration summary (40%+ reduction)
 ```
 
 ### Build & Lint
@@ -231,6 +237,32 @@ rtk discover --all --since 7    # All projects, last 7 days
 ```bash
 -u, --ultra-compact    # ASCII icons, inline format (extra token savings)
 -v, --verbose          # Increase verbosity (-v, -vv, -vvv)
+```
+
+### Ruby on Rails Stack
+```bash
+# Testing
+rtk rspec                        # RSpec tests (JSON parser, 60%+ reduction)
+rtk rspec spec/models/            # Run specific directory
+rtk rails test                   # Minitest (state machine parser, 50%+ reduction)
+rtk rails test test/models/       # Run specific directory
+
+# Linting
+rtk rubocop                      # RuboCop (JSON, group by cop, 60%+ reduction)
+rtk rubocop -A                   # Auto-correct with summary
+
+# Package Management
+rtk bundle list                  # Gem list with counts (10%+ reduction)
+rtk bundle outdated              # Outdated gems with version transitions (30%+ reduction)
+rtk bundle install               # Install summary (new/updated gems only)
+rtk bundle update                # Update summary (same filter as install)
+
+# Rails
+rtk rails routes                 # Routes grouped by controller (50%+ reduction)
+rtk rails db:migrate             # Migration summary (40%+ reduction)
+rtk rails db:migrate:status      # Pending migration status
+rtk rails db:rollback            # Rollback summary
+rtk rails generate model User    # Generator summary (created files)
 ```
 
 ## Examples
@@ -304,6 +336,11 @@ After install, **restart Claude Code**.
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
+| `rspec/bundle exec rspec/bin/rspec` | `rtk rspec ...` |
+| `rubocop/bundle exec rubocop` | `rtk rubocop ...` |
+| `bundle list/outdated/install/update` | `rtk bundle ...` |
+| `rails test/routes/db:migrate/...` | `rtk rails ...` |
+| `rake routes/db:migrate` | `rtk rails ...` |
 
 Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
 

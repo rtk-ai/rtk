@@ -437,14 +437,44 @@ else
     skip "gt not installed"
 fi
 
-# ── 30. Global flags ────────────────────────────────
+# ── 30. Ruby (conditional) ──────────────────────────
+
+section "Ruby (conditional)"
+
+if command -v rspec &>/dev/null; then
+    assert_help    "rtk rspec"                     rtk rspec --help
+else
+    skip "rspec not installed"
+fi
+
+if command -v rubocop &>/dev/null; then
+    assert_help    "rtk rubocop"                   rtk rubocop --help
+else
+    skip "rubocop not installed"
+fi
+
+if command -v bundle &>/dev/null; then
+    assert_help    "rtk bundle"                    rtk bundle --help
+else
+    skip "bundler not installed"
+fi
+
+if command -v rails &>/dev/null; then
+    assert_help    "rtk rails"                     rtk rails --help
+    assert_help    "rtk rails test"                rtk rails test -h
+    assert_help    "rtk rails routes"              rtk rails routes -h
+else
+    skip "rails not installed"
+fi
+
+# ── 31. Global flags ────────────────────────────────
 
 section "Global flags"
 
 assert_ok      "rtk -u ls ."                  rtk -u ls .
 assert_ok      "rtk --skip-env npm --help"    rtk --skip-env npm --help
 
-# ── 31. CcEconomics ─────────────────────────────────
+# ── 32. CcEconomics ─────────────────────────────────
 
 section "CcEconomics"
 

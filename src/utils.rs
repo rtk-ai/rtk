@@ -226,6 +226,91 @@ pub fn detect_package_manager() -> &'static str {
     }
 }
 
+/// Extract exit code from a process output. Returns the actual exit code, or
+/// `128 + signal` per Unix convention when terminated by a signal (no exit code
+/// available). Falls back to 1 on non-Unix platforms.
+pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 {
+    match output.status.code() {
+        Some(code) => code,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = output.status.signal() {
+                    eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
+                    return 128 + sig;
+                }
+            }
+            eprintln!("[rtk] {}: process terminated by signal", label);
+            1
+        }
+    }
+}
+
+/// Return the last `n` lines of output with a label, for use as a fallback
+/// when filter parsing fails. Logs a diagnostic to stderr.
+pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
+    eprintln!(
+        "[rtk] {}: output format not recognized, showing last {} lines",
+        label, n
+    );
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// Build a Command for Ruby tools, auto-detecting bundle exec.
+/// Only uses `bundle exec <tool>` when a Gemfile exists AND declares the tool as a gem,
+/// so globally-installed tools aren't forced through bundler unnecessarily.
+/// Falls back to bare tool execution with a stderr warning if the Gemfile cannot be read.
+pub fn ruby_exec(tool: &str) -> Command {
+    if std::path::Path::new("Gemfile").exists() {
+        match std::fs::read_to_string("Gemfile") {
+            Ok(gemfile) => {
+                if gemfile_mentions_gem(&gemfile, tool) {
+                    let mut c = Command::new("bundle");
+                    c.arg("exec").arg(tool);
+                    return c;
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[rtk] Warning: Gemfile exists but could not be read ({}). \
+                     Running '{}' directly (not via bundle exec). \
+                     Check file permissions if this causes version mismatches.",
+                    e, tool
+                );
+            }
+        }
+    }
+    Command::new(tool)
+}
+
+/// Check if a Gemfile declares a gem matching the tool name.
+/// Matches `gem 'tool'`, `gem "tool"`, `gem 'tool-rails'`, etc.
+/// Avoids false positives from comments or unrelated substrings.
+fn gemfile_mentions_gem(gemfile: &str, tool: &str) -> bool {
+    for line in gemfile.lines() {
+        let trimmed = line.trim();
+        // Skip comments
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        // Match gem declarations: gem 'tool' or gem "tool" or gem 'tool-*'
+        if let Some(rest) = trimmed.strip_prefix("gem") {
+            let rest = rest.trim_start();
+            if rest.starts_with(&format!("'{}'", tool))
+                || rest.starts_with(&format!("\"{}\"", tool))
+                || rest.starts_with(&format!("'{}-", tool))
+                || rest.starts_with(&format!("\"{}-", tool))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
 pub fn package_manager_exec(tool: &str) -> Command {
@@ -257,6 +342,13 @@ pub fn package_manager_exec(tool: &str) -> Command {
             }
         }
     }
+}
+
+/// Count whitespace-delimited tokens in text. Used by filter tests to verify
+/// token savings claims.
+#[cfg(test)]
+pub fn count_tokens(text: &str) -> usize {
+    text.split_whitespace().count()
 }
 
 #[cfg(test)]
@@ -399,6 +491,31 @@ mod tests {
     }
 
     #[test]
+    fn test_ruby_exec_without_gemfile() {
+        // In the rtk repo there's no Gemfile, so ruby_exec should return Command::new(tool)
+        let cmd = ruby_exec("rspec");
+        assert_eq!(cmd.get_program(), "rspec");
+    }
+
+    #[test]
+    fn test_fallback_tail_returns_last_n_lines() {
+        let input = "line1\nline2\nline3\nline4\nline5\nline6\nline7";
+        let result = fallback_tail(input, "test", 3);
+        assert!(result.contains("line5"));
+        assert!(result.contains("line6"));
+        assert!(result.contains("line7"));
+        assert!(!result.contains("line4"));
+    }
+
+    #[test]
+    fn test_fallback_tail_short_input() {
+        let input = "only\ntwo";
+        let result = fallback_tail(input, "test", 5);
+        assert!(result.contains("only"));
+        assert!(result.contains("two"));
+    }
+
+    #[test]
     fn test_detect_package_manager_default() {
         // In the test environment (rtk repo), there's no JS lockfile
         // so it should default to "npm"
@@ -428,5 +545,45 @@ mod tests {
         let cjk = "你好世界测试字符串";
         let result = truncate(cjk, 6);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_gemfile_mentions_gem_basic() {
+        let gemfile = "gem 'rspec'\ngem 'rails'\n";
+        assert!(gemfile_mentions_gem(gemfile, "rspec"));
+        assert!(gemfile_mentions_gem(gemfile, "rails"));
+        assert!(!gemfile_mentions_gem(gemfile, "rubocop"));
+    }
+
+    #[test]
+    fn test_gemfile_mentions_gem_double_quotes() {
+        let gemfile = "gem \"rspec\"\n";
+        assert!(gemfile_mentions_gem(gemfile, "rspec"));
+    }
+
+    #[test]
+    fn test_gemfile_mentions_gem_with_version() {
+        let gemfile = "gem 'rspec', '~> 3.0'\n";
+        assert!(gemfile_mentions_gem(gemfile, "rspec"));
+    }
+
+    #[test]
+    fn test_gemfile_mentions_gem_related_gem() {
+        // gem 'rspec-rails' should match tool "rspec" (tool-prefixed gems)
+        let gemfile = "gem 'rspec-rails'\n";
+        assert!(gemfile_mentions_gem(gemfile, "rspec"));
+    }
+
+    #[test]
+    fn test_gemfile_mentions_gem_no_false_positive_comments() {
+        let gemfile = "# We don't use rspec\ngem 'minitest'\n";
+        assert!(!gemfile_mentions_gem(gemfile, "rspec"));
+    }
+
+    #[test]
+    fn test_gemfile_mentions_gem_no_false_positive_substring() {
+        // "guardrails" should NOT match "rails"
+        let gemfile = "gem 'guardrails'\n";
+        assert!(!gemfile_mentions_gem(gemfile, "rails"));
     }
 }
