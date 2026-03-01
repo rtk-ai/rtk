@@ -12,6 +12,53 @@ use crate::parser::{
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
 
+/// Native pnpm subcommands that must never be intercepted as scripts (BUG-03).
+/// Sorted alphabetically for binary_search lookup.
+/// Excludes: run, test, start -- those are pnpm script shortcuts that go through smart routing.
+const NATIVE_PNPM_COMMANDS: &[&str] = &[
+    "add",
+    "audit",
+    "bin",
+    "cache",
+    "cat-file",
+    "cat-index",
+    "completion",
+    "config",
+    "create",
+    "dedupe",
+    "deploy",
+    "dlx",
+    "doctor",
+    "env",
+    "exec",
+    "fetch",
+    "find-hash",
+    "import",
+    "init",
+    "install",
+    "install-test",
+    "licenses",
+    "link",
+    "list",
+    "outdated",
+    "pack",
+    "patch",
+    "patch-commit",
+    "patch-remove",
+    "prune",
+    "publish",
+    "rebuild",
+    "remove",
+    "root",
+    "self-update",
+    "server",
+    "setup",
+    "store",
+    "unlink",
+    "update",
+    "why",
+];
+
 // pnpm run output boilerplate patterns
 lazy_static! {
     // > my-project@1.0.0 test /path/to/project
@@ -631,6 +678,11 @@ pub(crate) fn detect_tool_from_package_json(script: &str) -> Option<FilterRoute>
 
 /// Check if a name is a known pnpm script (static routing or package.json)
 pub fn is_pnpm_script(name: &str) -> bool {
+    // Native pnpm commands are never scripts (BUG-03)
+    if NATIVE_PNPM_COMMANDS.binary_search(&name).is_ok() {
+        return false;
+    }
+
     if route_script(name).is_some() {
         return true;
     }
@@ -1026,8 +1078,8 @@ Done in 1.2s"#;
     // ─── is_pnpm_script tests ────────────────────────────────────────────
 
     #[test]
-    fn test_is_pnpm_script_static() {
-        assert!(is_pnpm_script("test"));
+    fn test_is_pnpm_script_routed_scripts() {
+        // These are script names that go through smart routing (NOT native commands)
         assert!(is_pnpm_script("lint"));
         assert!(is_pnpm_script("vitest"));
     }
@@ -1035,7 +1087,50 @@ Done in 1.2s"#;
     #[test]
     fn test_is_pnpm_script_unknown() {
         // Not a known script name and no package.json in test env
+        assert!(!is_pnpm_script("my-custom-script"));
+    }
+
+    #[test]
+    fn test_native_commands_not_intercepted() {
+        // These are native pnpm commands -- must never be treated as scripts (BUG-03)
+        assert!(!is_pnpm_script("exec"));
+        assert!(!is_pnpm_script("dlx"));
+        assert!(!is_pnpm_script("audit"));
+        assert!(!is_pnpm_script("create"));
+        assert!(!is_pnpm_script("deploy"));
         assert!(!is_pnpm_script("store"));
-        assert!(!is_pnpm_script("prune"));
+        assert!(!is_pnpm_script("server"));
+        assert!(!is_pnpm_script("patch"));
+        assert!(!is_pnpm_script("env"));
+        assert!(!is_pnpm_script("doctor"));
+        assert!(!is_pnpm_script("why"));
+        assert!(!is_pnpm_script("init"));
+        assert!(!is_pnpm_script("config"));
+        assert!(!is_pnpm_script("setup"));
+        assert!(!is_pnpm_script("bin"));
+        assert!(!is_pnpm_script("self-update"));
+    }
+
+    #[test]
+    fn test_native_commands_sorted() {
+        // binary_search requires sorted array
+        let mut sorted = NATIVE_PNPM_COMMANDS.to_vec();
+        sorted.sort();
+        assert_eq!(
+            NATIVE_PNPM_COMMANDS,
+            &sorted[..],
+            "NATIVE_PNPM_COMMANDS must be sorted alphabetically for binary_search"
+        );
+    }
+
+    #[test]
+    fn test_native_denylist_does_not_block_script_shortcuts() {
+        // run, test, start are NOT in denylist -- they are pnpm script shortcuts
+        // "test" routes via route_script -> FilterRoute::TestRunner
+        assert!(is_pnpm_script("test"));
+        // "start" does not match route_script and no package.json in test env
+        assert!(!is_pnpm_script("start"));
+        // "run" does not match route_script and no package.json in test env
+        assert!(!is_pnpm_script("run"));
     }
 }
