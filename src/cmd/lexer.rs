@@ -65,12 +65,12 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 // Digits and special chars → Shellism (positional/special variables).
                 if chars
                     .peek()
-                    .map_or(false, |&nc| nc.is_ascii_alphabetic() || nc == '_')
+                    .is_some_and(|&nc| nc.is_ascii_alphabetic() || nc == '_')
                 {
                     let mut name = String::from("$");
                     while chars
                         .peek()
-                        .map_or(false, |&nc| nc.is_ascii_alphanumeric() || nc == '_')
+                        .is_some_and(|&nc| nc.is_ascii_alphanumeric() || nc == '_')
                     {
                         name.push(chars.next().unwrap());
                     }

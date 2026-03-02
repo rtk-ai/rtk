@@ -129,7 +129,7 @@ pub struct GainSummary {
     /// Average execution time per command (milliseconds)
     pub avg_time_ms: u64,
     /// Top 10 commands by tokens saved: (cmd, count, saved, avg_pct, avg_time_ms)
-    pub by_command: Vec<(String, usize, usize, f64, u64)>,
+    pub by_command: Vec<CommandStats>,
     /// Last 30 days of activity: (date, saved_tokens)
     pub by_day: Vec<(String, usize)>,
 }
@@ -220,6 +220,9 @@ pub struct MonthStats {
     /// Average execution time per command (milliseconds)
     pub avg_time_ms: u64,
 }
+
+/// Per-command aggregate statistics from tracking database.
+type CommandStats = (String, usize, usize, f64, u64);
 
 impl Tracker {
     /// Create a new tracker instance.
@@ -459,10 +462,8 @@ impl Tracker {
         })
     }
 
-    fn get_by_command(
-        &self,
-        project_path: Option<&str>, // added
-    ) -> Result<Vec<(String, usize, usize, f64, u64)>> {
+    /// (rtk_cmd, count, total_saved_tokens, avg_savings_pct, avg_exec_time_ms)
+    fn get_by_command(&self, project_path: Option<&str>) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)

@@ -60,7 +60,12 @@ fn docker_ps(_verbose: u8) -> Result<()> {
         if parts.len() >= 4 {
             let id = &parts[0][..12.min(parts[0].len())];
             let name = parts[1];
-            let short_image = parts.get(3).unwrap_or(&"").split('/').last().unwrap_or("");
+            let short_image = parts
+                .get(3)
+                .unwrap_or(&"")
+                .split('/')
+                .next_back()
+                .unwrap_or("");
             let ports = compact_ports(parts.get(4).unwrap_or(&""));
             if ports == "-" {
                 rtk.push_str(&format!("  {} {} ({})\n", id, name, short_image));
@@ -508,7 +513,7 @@ fn compact_ports(ports: &str) -> String {
     // Extract just the port numbers
     let port_nums: Vec<&str> = ports
         .split(',')
-        .filter_map(|p| p.split("->").next().and_then(|s| s.split(':').last()))
+        .filter_map(|p| p.split("->").next().and_then(|s| s.split(':').next_back()))
         .collect();
 
     if port_nums.len() <= 3 {

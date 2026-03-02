@@ -194,6 +194,8 @@ pub enum HookResponse {
 /// Commands whose RTK output format matches their raw output, making them
 /// safe as the left side of any pipe.
 ///
+/// Commands whose RTK output format matches raw output (format-preserving).
+///
 /// For a command to be format-preserving, RTK must emit the same logical
 /// lines as the underlying tool — just possibly with ANSI codes stripped.
 /// These can be substituted on the left of a pipe without breaking the
@@ -203,7 +205,8 @@ pub enum HookResponse {
 /// `cargo test`, `git log`, `pytest`, `go test` etc. heavily compress output.
 /// They must **not** appear here — substituting them as a pipe-left would
 /// break right-side semantic sinks (`grep`, `jq`, `awk`, `patch`, `xargs`).
-pub(crate) const FORMAT_PRESERVING: &[&str] = &["tail", "echo", "cat", "find", "fd"];
+#[cfg(test)]
+const FORMAT_PRESERVING: &[&str] = &["tail", "echo", "cat", "find", "fd"];
 
 /// Right-side commands that accept any input format (transparent sinks).
 ///
@@ -211,7 +214,8 @@ pub(crate) const FORMAT_PRESERVING: &[&str] = &["tail", "echo", "cat", "find", "
 /// structure, so RTK's compressed output is always compatible with them.
 /// Already handled at the routing level by `split_safe_suffix` — listed here
 /// for classification documentation and future pipe-left substitution logic.
-pub(crate) const TRANSPARENT_SINKS: &[&str] = &["tee", "head", "tail", "cat"];
+#[cfg(test)]
+const TRANSPARENT_SINKS: &[&str] = &["tee", "head", "tail", "cat"];
 
 /// Escape single quotes for shell
 fn escape_quotes(s: &str) -> String {
@@ -229,7 +233,7 @@ fn is_env_assign(s: &str) -> bool {
             && key
                 .chars()
                 .next()
-                .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     } else {
         false
@@ -535,8 +539,10 @@ mod tests {
         }
     }
 
-    fn assert_blocked(input: &str, contains: &str) {
-        match check_for_hook(input, "claude") {
+    /// Assert that a command at the given rewrite depth produces a Blocked result
+    /// containing the expected message substring.
+    fn assert_blocked(input: &str, depth: usize, contains: &str) {
+        match check_for_hook_inner(input, depth) {
             HookResult::Blocked(msg) => assert!(
                 msg.contains(contains),
                 "'{}' block msg should contain '{}', got '{}'",
@@ -1030,12 +1036,13 @@ mod tests {
     // === RECURSION DEPTH LIMIT ===
 
     #[test]
-    fn test_rewrite_depth_limit() {
-        // At max depth → blocked
-        match check_for_hook_inner("echo hello", MAX_REWRITE_DEPTH) {
-            HookResult::Blocked(msg) => assert!(msg.contains("loop"), "msg: {}", msg),
-            _ => panic!("Expected Blocked at max depth"),
-        }
+    fn test_rewrite_depth_limit_blocked() {
+        // At max depth → blocked with loop detection message
+        assert_blocked("echo hello", MAX_REWRITE_DEPTH, "loop");
+    }
+
+    #[test]
+    fn test_rewrite_depth_limit_allowed() {
         // At depth 0 → normal rewrite
         match check_for_hook_inner("echo hello", 0) {
             HookResult::Rewrite(cmd) => assert!(cmd.contains("rtk run")),

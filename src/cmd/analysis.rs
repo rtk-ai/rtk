@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn test_split_suffix_pipe_tail() {
         let tokens = tokenize("git log | tail -10");
-        let (core, suffix) = split_safe_suffix(tokens);
+        let (_core, suffix) = split_safe_suffix(tokens);
         assert!(suffix.starts_with("| tail"), "suffix: {suffix}");
     }
 

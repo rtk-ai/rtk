@@ -48,9 +48,14 @@ pub fn run(
         _ => {} // Continue with text format
     }
 
-    let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
-        .context("Failed to load token savings summary from database")?;
+    let summary = match project_scope.as_deref() {
+        Some(_) => tracker
+            .get_summary_filtered(project_scope.as_deref())
+            .context("Failed to load token savings summary from database")?,
+        None => tracker
+            .get_summary()
+            .context("Failed to load token savings summary from database")?,
+    };
 
     if summary.total_commands == 0 {
         println!("No tracking data yet.");
@@ -190,7 +195,10 @@ pub fn run(
         }
 
         if history {
-            let recent = tracker.get_recent_filtered(10, project_scope.as_deref())?; // changed: filtered
+            let recent = match project_scope.as_deref() {
+                Some(_) => tracker.get_recent_filtered(10, project_scope.as_deref())?,
+                None => tracker.get_recent(10)?,
+            };
             if !recent.is_empty() {
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");

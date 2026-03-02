@@ -121,8 +121,17 @@ fn run_native(commands: &[analysis::NativeCommand], verbose: u8) -> Result<i32> 
 /// Spawn external command and apply appropriate filter.
 ///
 /// Returns the real exit code (0–254) or 128+N for signal-killed processes.
-fn spawn_with_filter(binary: &str, args: &[String], _verbose: u8) -> Result<i32> {
+fn spawn_with_filter(binary: &str, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+
+    if verbose > 1 {
+        eprintln!(
+            "[rtk exec] binary={} interactive={} unstaged={}",
+            binary,
+            super::predicates::is_interactive(),
+            super::predicates::has_unstaged_changes(),
+        );
+    }
 
     // Try to find the binary in PATH
     let binary_path = match which::which(binary) {

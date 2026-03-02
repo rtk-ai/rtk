@@ -126,7 +126,7 @@ fn filter_tree_output(raw: &str) -> String {
     }
 
     // Remove trailing empty lines
-    while filtered_lines.last().map_or(false, |l| l.trim().is_empty()) {
+    while filtered_lines.last().is_some_and(|l| l.trim().is_empty()) {
         filtered_lines.pop();
     }
 

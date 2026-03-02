@@ -13,45 +13,6 @@
 use crate::stream::{FilterMode, LineFilter};
 use crate::utils;
 
-/// Filter types for different command categories
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum FilterType {
-    Git,
-    Cargo,
-    Test,
-    Pnpm,
-    Npm,
-    Generic,
-    None,
-}
-
-/// Determine which filter to apply based on binary name
-pub fn get_filter_type(binary: &str) -> FilterType {
-    match binary {
-        "git" => FilterType::Git,
-        "cargo" => FilterType::Cargo,
-        "npm" | "npx" => FilterType::Npm,
-        "pnpm" => FilterType::Pnpm,
-        "pytest" | "go" | "vitest" | "jest" | "mocha" | "mypy" | "ruff" | "golangci-lint" => {
-            FilterType::Test
-        }
-        "ls" | "find" | "grep" | "rg" | "fd" => FilterType::Generic,
-        _ => FilterType::None,
-    }
-}
-
-/// Apply filter to already-captured string output
-pub fn apply_to_string(filter: FilterType, output: &str) -> String {
-    match filter {
-        FilterType::Git => utils::strip_ansi(output),
-        FilterType::Cargo => filter_cargo_output(output),
-        FilterType::Test => filter_test_output(output),
-        FilterType::Generic => truncate_lines(output, 100),
-        FilterType::Npm | FilterType::Pnpm => utils::strip_ansi(output),
-        FilterType::None => output.to_string(),
-    }
-}
-
 /// Filter cargo output: remove verbose "Compiling" lines
 fn filter_cargo_output(output: &str) -> String {
     output
@@ -83,7 +44,6 @@ fn filter_test_output(output: &str) -> String {
 
 /// Map a binary name to a [`FilterMode`] for use with [`crate::stream::run_streaming`].
 ///
-/// This is the streaming counterpart to [`get_filter_type`] + [`apply_to_string`].
 /// Used by `spawn_with_filter` in exec.rs for external commands without dedicated modules.
 pub fn get_filter_mode(binary: &str) -> FilterMode {
     match binary {
@@ -109,73 +69,18 @@ pub fn get_filter_mode(binary: &str) -> FilterMode {
         "git" => FilterMode::Streaming(Box::new(LineFilter::new(|l| {
             Some(format!("{}\n", utils::strip_ansi(l)))
         }))),
+        // npm/pnpm: ANSI strip (dedicated pnpm_cmd.rs handles specific subcommands)
+        "npm" | "npx" | "pnpm" => FilterMode::Streaming(Box::new(LineFilter::new(|l| {
+            Some(format!("{}\n", utils::strip_ansi(l)))
+        }))),
         // Unknown commands: passthrough (no filtering, preserves all output)
         _ => FilterMode::Passthrough,
-    }
-}
-
-/// Truncate output to max lines
-fn truncate_lines(output: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    if lines.len() <= max_lines {
-        output.to_string()
-    } else {
-        let truncated: Vec<&str> = lines.iter().take(max_lines).copied().collect();
-        format!(
-            "{}\n... ({} more lines)",
-            truncated.join("\n"),
-            lines.len() - max_lines
-        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // === GET_FILTER_TYPE TESTS ===
-
-    #[test]
-    fn test_filter_type_git() {
-        assert_eq!(get_filter_type("git"), FilterType::Git);
-    }
-
-    #[test]
-    fn test_filter_type_cargo() {
-        assert_eq!(get_filter_type("cargo"), FilterType::Cargo);
-    }
-
-    #[test]
-    fn test_filter_type_npm() {
-        assert_eq!(get_filter_type("npm"), FilterType::Npm);
-        assert_eq!(get_filter_type("npx"), FilterType::Npm);
-    }
-
-    #[test]
-    fn test_filter_type_generic() {
-        assert_eq!(get_filter_type("ls"), FilterType::Generic);
-        assert_eq!(get_filter_type("grep"), FilterType::Generic);
-    }
-
-    #[test]
-    fn test_filter_type_mypy() {
-        assert_eq!(get_filter_type("mypy"), FilterType::Test);
-    }
-
-    #[test]
-    fn test_filter_type_ruff() {
-        assert_eq!(get_filter_type("ruff"), FilterType::Test);
-    }
-
-    #[test]
-    fn test_filter_type_golangci_lint() {
-        assert_eq!(get_filter_type("golangci-lint"), FilterType::Test);
-    }
-
-    #[test]
-    fn test_filter_type_none() {
-        assert_eq!(get_filter_type("unknown_command"), FilterType::None);
-    }
 
     // === STRIP_ANSI TESTS (now testing utils::strip_ansi) ===
 
@@ -227,7 +132,33 @@ mod tests {
         assert!(output.contains("warning"));
     }
 
+    // === FILTER_TEST_OUTPUT TESTS ===
+
+    #[test]
+    fn test_filter_test_keeps_failures() {
+        let input = "test foo ... ok\ntest bar ... FAILED\ntest result: 1 passed; 1 failed";
+        let output = filter_test_output(input);
+        assert!(output.contains("FAILED"));
+        assert!(output.contains("test result:"));
+        assert!(!output.contains("test foo"));
+    }
+
     // === TRUNCATE_LINES TESTS ===
+
+    /// Truncate output to max lines (test utility)
+    fn truncate_lines(output: &str, max_lines: usize) -> String {
+        let lines: Vec<&str> = output.lines().collect();
+        if lines.len() <= max_lines {
+            output.to_string()
+        } else {
+            let truncated: Vec<&str> = lines.iter().take(max_lines).copied().collect();
+            format!(
+                "{}\n... ({} more lines)",
+                truncated.join("\n"),
+                lines.len() - max_lines
+            )
+        }
+    }
 
     #[test]
     fn test_truncate_short() {
@@ -245,72 +176,77 @@ mod tests {
         assert!(output.contains("2 more lines"));
     }
 
-    // === APPLY_TO_STRING TESTS ===
-
-    #[test]
-    fn test_apply_to_string_none() {
-        let input = "hello world";
-        let output = apply_to_string(FilterType::None, input);
-        assert_eq!(output, input);
-    }
-
-    #[test]
-    fn test_apply_to_string_git() {
-        let input = "\x1b[32mgreen\x1b[0m";
-        let output = apply_to_string(FilterType::Git, input);
-        assert_eq!(output, "green");
-    }
-
     // === GET_FILTER_MODE TESTS ===
 
     #[test]
     fn test_get_filter_mode_grep_is_streaming() {
-        matches!(get_filter_mode("grep"), FilterMode::Streaming(_));
+        assert!(matches!(get_filter_mode("grep"), FilterMode::Streaming(_)));
     }
 
     #[test]
     fn test_get_filter_mode_rg_is_streaming() {
-        matches!(get_filter_mode("rg"), FilterMode::Streaming(_));
+        assert!(matches!(get_filter_mode("rg"), FilterMode::Streaming(_)));
     }
 
     #[test]
     fn test_get_filter_mode_find_is_streaming() {
-        matches!(get_filter_mode("find"), FilterMode::Streaming(_));
+        assert!(matches!(get_filter_mode("find"), FilterMode::Streaming(_)));
     }
 
     #[test]
     fn test_get_filter_mode_fd_is_streaming() {
-        matches!(get_filter_mode("fd"), FilterMode::Streaming(_));
+        assert!(matches!(get_filter_mode("fd"), FilterMode::Streaming(_)));
     }
 
     #[test]
     fn test_get_filter_mode_ls_is_streaming() {
-        matches!(get_filter_mode("ls"), FilterMode::Streaming(_));
+        assert!(matches!(get_filter_mode("ls"), FilterMode::Streaming(_)));
     }
 
     #[test]
     fn test_get_filter_mode_cargo_is_buffered() {
-        matches!(get_filter_mode("cargo"), FilterMode::Buffered(_));
+        assert!(matches!(get_filter_mode("cargo"), FilterMode::Buffered(_)));
     }
 
     #[test]
     fn test_get_filter_mode_mypy_is_buffered() {
-        matches!(get_filter_mode("mypy"), FilterMode::Buffered(_));
+        assert!(matches!(get_filter_mode("mypy"), FilterMode::Buffered(_)));
     }
 
     #[test]
     fn test_get_filter_mode_ruff_is_buffered() {
-        matches!(get_filter_mode("ruff"), FilterMode::Buffered(_));
+        assert!(matches!(get_filter_mode("ruff"), FilterMode::Buffered(_)));
     }
 
     #[test]
     fn test_get_filter_mode_golangci_lint_is_buffered() {
-        matches!(get_filter_mode("golangci-lint"), FilterMode::Buffered(_));
+        assert!(matches!(
+            get_filter_mode("golangci-lint"),
+            FilterMode::Buffered(_)
+        ));
+    }
+
+    #[test]
+    fn test_get_filter_mode_npm_is_streaming() {
+        assert!(matches!(get_filter_mode("npm"), FilterMode::Streaming(_)));
+    }
+
+    #[test]
+    fn test_get_filter_mode_pnpm_is_streaming() {
+        assert!(matches!(get_filter_mode("pnpm"), FilterMode::Streaming(_)));
+    }
+
+    #[test]
+    fn test_get_filter_mode_git_is_streaming() {
+        assert!(matches!(get_filter_mode("git"), FilterMode::Streaming(_)));
     }
 
     #[test]
     fn test_get_filter_mode_unknown_is_passthrough() {
-        matches!(get_filter_mode("unknowncmd"), FilterMode::Passthrough);
+        assert!(matches!(
+            get_filter_mode("unknowncmd"),
+            FilterMode::Passthrough
+        ));
     }
 
     #[test]
@@ -369,5 +305,73 @@ mod tests {
         } else {
             panic!("Expected FilterMode::Streaming for 'rg'");
         }
+    }
+
+    // === EDGE CASE: go subcommands not handled by go_cmd.rs must passthrough ===
+
+    #[test]
+    fn test_get_filter_mode_go_is_passthrough() {
+        // go mod tidy, go get, go run etc. are not in the registry's Only(&["test","build","vet"])
+        // so they reach spawn_with_filter. They must passthrough, not get test-filtered.
+        assert!(matches!(get_filter_mode("go"), FilterMode::Passthrough));
+    }
+
+    // === EDGE CASE: npx should get ANSI stripping ===
+
+    #[test]
+    fn test_get_filter_mode_npx_is_streaming() {
+        assert!(matches!(get_filter_mode("npx"), FilterMode::Streaming(_)));
+    }
+
+    // === EDGE CASE: npm streaming filter strips ANSI ===
+
+    #[test]
+    fn test_get_filter_mode_npm_strips_ansi() {
+        let mut mode = get_filter_mode("npm");
+        if let FilterMode::Streaming(ref mut filter) = mode {
+            let result = filter.feed_line("\x1b[33mWARN\x1b[0m deprecated package");
+            assert!(result.is_some());
+            let out = result.unwrap();
+            assert!(out.contains("WARN"), "content preserved: {}", out);
+            assert!(!out.contains("\x1b["), "ANSI codes stripped: {}", out);
+        } else {
+            panic!("Expected FilterMode::Streaming for 'npm'");
+        }
+    }
+
+    // === EDGE CASE: filter_test_output with no matching lines returns empty ===
+
+    #[test]
+    fn test_filter_test_output_no_failures_returns_empty() {
+        let input = "test foo ... ok\ntest bar ... ok\ntest baz ... ok";
+        let output = filter_test_output(input);
+        assert!(
+            output.is_empty(),
+            "all-passing tests should produce empty output"
+        );
+    }
+
+    // === EDGE CASE: filter_cargo_output with only Compiling lines ===
+
+    #[test]
+    fn test_filter_cargo_output_only_compiling() {
+        let input = "Compiling dep1\nCompiling dep2\nCompiling dep3";
+        let output = filter_cargo_output(input);
+        assert!(
+            output.is_empty() || output.trim().is_empty(),
+            "pure Compiling output should be filtered out"
+        );
+    }
+
+    // === EDGE CASE: filter_test_output keeps error separator lines ===
+
+    #[test]
+    fn test_filter_test_output_keeps_separator_lines() {
+        let input = "test foo ... ok\n---- test_bar stdout ----\nerror: assertion failed\ntest result: 0 passed; 1 failed";
+        let output = filter_test_output(input);
+        assert!(output.contains("----"), "separator lines preserved");
+        assert!(output.contains("error:"), "error lines preserved");
+        assert!(output.contains("test result:"), "summary preserved");
+        assert!(!output.contains("test foo"), "passing test filtered out");
     }
 }
