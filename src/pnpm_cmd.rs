@@ -588,6 +588,56 @@ pub(crate) enum FilterRoute {
     Playwright,
 }
 
+/// Cached package.json scripts (read once per invocation, QUAL-02).
+/// Eliminates redundant fs::read_to_string("package.json") calls in
+/// is_pnpm_script and route_script.
+pub struct PackageScripts {
+    scripts: HashMap<String, String>, // script_name -> command_string
+}
+
+impl PackageScripts {
+    /// Read package.json from CWD, parse scripts field. Returns None if
+    /// file is missing, unparseable, or has no scripts section.
+    pub fn load() -> Option<Self> {
+        let content = std::fs::read_to_string("package.json").ok()?;
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let scripts_obj = json.get("scripts")?.as_object()?;
+        let scripts: HashMap<String, String> = scripts_obj
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+            .collect();
+        Some(PackageScripts { scripts })
+    }
+
+    /// Check if a script name exists in the cached scripts map.
+    pub fn contains(&self, name: &str) -> bool {
+        self.scripts.contains_key(name)
+    }
+
+    /// Detect the underlying tool from the script command string.
+    /// Replaces the old detect_tool_from_package_json function.
+    pub fn detect_tool(&self, script: &str) -> Option<FilterRoute> {
+        let command = self.scripts.get(script)?;
+        let cmd_lower = command.to_lowercase();
+
+        if cmd_lower.contains("playwright") {
+            Some(FilterRoute::Playwright)
+        } else if cmd_lower.contains("vitest") {
+            Some(FilterRoute::Vitest)
+        } else if cmd_lower.contains("jest") {
+            Some(FilterRoute::TestRunner)
+        } else if cmd_lower.contains("tsc") || cmd_lower.contains("typescript") {
+            Some(FilterRoute::Tsc)
+        } else if cmd_lower.contains("eslint") || cmd_lower.contains("biome") {
+            Some(FilterRoute::Lint)
+        } else if cmd_lower.contains("prettier") {
+            Some(FilterRoute::Prettier)
+        } else {
+            None
+        }
+    }
+}
+
 /// Strip pnpm-specific boilerplate from script output
 pub(crate) fn filter_pnpm_run_output(output: &str) -> String {
     let mut result = Vec::new();
@@ -622,8 +672,11 @@ pub(crate) fn filter_pnpm_run_output(output: &str) -> String {
     }
 }
 
-/// Route a script name to a specialized filter (static rules + package.json detection)
-pub(crate) fn route_script(script: &str) -> Option<FilterRoute> {
+/// Route a script name to a specialized filter (static rules + cached package.json detection)
+pub(crate) fn route_script(
+    script: &str,
+    pkg_scripts: Option<&PackageScripts>,
+) -> Option<FilterRoute> {
     // Tier 1: Static routing (exact match)
     match script {
         "vitest" => return Some(FilterRoute::Vitest),
@@ -647,54 +700,27 @@ pub(crate) fn route_script(script: &str) -> Option<FilterRoute> {
         }
     }
 
-    // Tier 2: Auto-detect from package.json
-    detect_tool_from_package_json(script)
+    // Tier 2: Auto-detect from cached package.json scripts (QUAL-02)
+    pkg_scripts.and_then(|ps| ps.detect_tool(script))
 }
 
-/// Read package.json scripts[name] and detect the underlying tool
-pub(crate) fn detect_tool_from_package_json(script: &str) -> Option<FilterRoute> {
-    let content = std::fs::read_to_string("package.json").ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let scripts = json.get("scripts")?.as_object()?;
-    let command = scripts.get(script)?.as_str()?;
-    let cmd_lower = command.to_lowercase();
-
-    if cmd_lower.contains("playwright") {
-        Some(FilterRoute::Playwright)
-    } else if cmd_lower.contains("vitest") {
-        Some(FilterRoute::Vitest)
-    } else if cmd_lower.contains("jest") {
-        Some(FilterRoute::TestRunner)
-    } else if cmd_lower.contains("tsc") || cmd_lower.contains("typescript") {
-        Some(FilterRoute::Tsc)
-    } else if cmd_lower.contains("eslint") || cmd_lower.contains("biome") {
-        Some(FilterRoute::Lint)
-    } else if cmd_lower.contains("prettier") {
-        Some(FilterRoute::Prettier)
-    } else {
-        None
-    }
-}
-
-/// Check if a name is a known pnpm script (static routing or package.json)
-pub fn is_pnpm_script(name: &str) -> bool {
+/// Check if a name is a known pnpm script (static routing or cached package.json)
+pub fn is_pnpm_script(name: &str, pkg_scripts: &Option<PackageScripts>) -> bool {
     // Native pnpm commands are never scripts (BUG-03)
     if NATIVE_PNPM_COMMANDS.binary_search(&name).is_ok() {
         return false;
     }
 
-    if route_script(name).is_some() {
+    // Check static routing first (no I/O)
+    if route_script(name, pkg_scripts.as_ref()).is_some() {
         return true;
     }
-    // Check package.json scripts
-    if let Ok(content) = std::fs::read_to_string("package.json") {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(scripts) = json.get("scripts").and_then(|s| s.as_object()) {
-                return scripts.contains_key(name);
-            }
-        }
+
+    // Check cached package.json scripts (QUAL-02)
+    match pkg_scripts {
+        Some(ps) => ps.contains(name),
+        None => false,
     }
-    false
 }
 
 /// Apply a specialized filter to script output.
@@ -754,7 +780,13 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, 
 }
 
 /// Execute `pnpm run <script>` with smart routing to specialized filters
-pub fn run_script(script: &str, args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
+pub fn run_script(
+    script: &str,
+    args: &[String],
+    verbose: u8,
+    skip_env: bool,
+    pkg_scripts: Option<PackageScripts>,
+) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("pnpm");
@@ -815,7 +847,7 @@ pub fn run_script(script: &str, args: &[String], verbose: u8, skip_env: bool) ->
     }
 
     // Route to specialized filter
-    let filtered = match route_script(script) {
+    let filtered = match route_script(script, pkg_scripts.as_ref()) {
         Some(route) => match apply_filter(route, &stripped) {
             Ok((result, label)) => {
                 if verbose > 0 {
@@ -982,49 +1014,151 @@ Done in 5.2s
 
     #[test]
     fn test_route_script_exact_matches() {
-        assert_eq!(route_script("vitest"), Some(FilterRoute::Vitest));
-        assert_eq!(route_script("tsc"), Some(FilterRoute::Tsc));
-        assert_eq!(route_script("typecheck"), Some(FilterRoute::Tsc));
-        assert_eq!(route_script("lint"), Some(FilterRoute::Lint));
-        assert_eq!(route_script("prettier"), Some(FilterRoute::Prettier));
-        assert_eq!(route_script("format"), Some(FilterRoute::Prettier));
-        assert_eq!(route_script("test"), Some(FilterRoute::TestRunner));
+        // Static routing works with None pkg_scripts
+        assert_eq!(route_script("vitest", None), Some(FilterRoute::Vitest));
+        assert_eq!(route_script("tsc", None), Some(FilterRoute::Tsc));
+        assert_eq!(route_script("typecheck", None), Some(FilterRoute::Tsc));
+        assert_eq!(route_script("lint", None), Some(FilterRoute::Lint));
+        assert_eq!(route_script("prettier", None), Some(FilterRoute::Prettier));
+        assert_eq!(route_script("format", None), Some(FilterRoute::Prettier));
+        assert_eq!(route_script("test", None), Some(FilterRoute::TestRunner));
     }
 
     #[test]
     fn test_route_script_unknown_returns_none() {
-        // These don't match static rules and no package.json in test env
-        assert_eq!(route_script("build"), None);
-        assert_eq!(route_script("dev"), None);
-        assert_eq!(route_script("start"), None);
+        // These don't match static rules and no PackageScripts provided
+        assert_eq!(route_script("build", None), None);
+        assert_eq!(route_script("dev", None), None);
+        assert_eq!(route_script("start", None), None);
     }
 
     #[test]
     fn test_route_script_prefix_matching() {
-        assert_eq!(route_script("test:unit"), Some(FilterRoute::TestRunner));
         assert_eq!(
-            route_script("test:integration"),
+            route_script("test:unit", None),
             Some(FilterRoute::TestRunner)
         );
-        assert_eq!(route_script("lint:check"), Some(FilterRoute::Lint));
-        assert_eq!(route_script("lint:ci"), Some(FilterRoute::Lint));
+        assert_eq!(
+            route_script("test:integration", None),
+            Some(FilterRoute::TestRunner)
+        );
+        assert_eq!(route_script("lint:check", None), Some(FilterRoute::Lint));
+        assert_eq!(route_script("lint:ci", None), Some(FilterRoute::Lint));
     }
 
     #[test]
     fn test_route_script_prefix_exclusions() {
-        // These are deferred to package.json (no package.json in test → None)
-        assert_eq!(route_script("test:e2e"), None);
-        assert_eq!(route_script("test:playwright"), None);
-        assert_eq!(route_script("test:cypress"), None);
-        assert_eq!(route_script("lint:fix"), None);
+        // These are deferred to package.json (no PackageScripts → None)
+        assert_eq!(route_script("test:e2e", None), None);
+        assert_eq!(route_script("test:playwright", None), None);
+        assert_eq!(route_script("test:cypress", None), None);
+        assert_eq!(route_script("lint:fix", None), None);
     }
 
-    // ─── detect_tool_from_package_json tests ─────────────────────────────
+    // ─── PackageScripts tests ───────────────────────────────────────────
 
     #[test]
-    fn test_detect_missing_script_returns_none() {
-        // No package.json in test CWD → None
-        assert_eq!(detect_tool_from_package_json("nonexistent"), None);
+    fn test_package_scripts_load_returns_none_without_package_json() {
+        // Test CWD has no package.json → load() returns None
+        assert!(PackageScripts::load().is_none());
+    }
+
+    #[test]
+    fn test_package_scripts_contains() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([
+                ("test".to_string(), "vitest run".to_string()),
+                ("lint".to_string(), "eslint .".to_string()),
+            ]),
+        };
+        assert!(ps.contains("test"));
+        assert!(ps.contains("lint"));
+        assert!(!ps.contains("build"));
+        assert!(!ps.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_vitest() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("test".to_string(), "vitest run".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("test"), Some(FilterRoute::Vitest));
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_playwright() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("test:e2e".to_string(), "playwright test".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("test:e2e"), Some(FilterRoute::Playwright));
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_eslint() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("lint".to_string(), "eslint .".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("lint"), Some(FilterRoute::Lint));
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_tsc() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("typecheck".to_string(), "tsc --noEmit".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("typecheck"), Some(FilterRoute::Tsc));
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_prettier() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("format".to_string(), "prettier --check .".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("format"), Some(FilterRoute::Prettier));
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_jest() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("test".to_string(), "jest --ci".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("test"), Some(FilterRoute::TestRunner));
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_biome() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("lint".to_string(), "biome check .".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("lint"), Some(FilterRoute::Lint));
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_unknown() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("dev".to_string(), "node server.js".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("dev"), None);
+    }
+
+    #[test]
+    fn test_package_scripts_detect_tool_missing_script() {
+        let ps = PackageScripts {
+            scripts: HashMap::from([("test".to_string(), "vitest run".to_string())]),
+        };
+        assert_eq!(ps.detect_tool("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_route_script_with_package_scripts() {
+        // route_script falls through static matching to cached detect_tool
+        let ps = PackageScripts {
+            scripts: HashMap::from([("test:e2e".to_string(), "playwright test".to_string())]),
+        };
+        assert_eq!(
+            route_script("test:e2e", Some(&ps)),
+            Some(FilterRoute::Playwright)
+        );
     }
 
     // ─── apply_filter tests ──────────────────────────────────────────────
@@ -1079,7 +1213,7 @@ Done in 1.2s"#;
         assert!(!stripped.contains("> app@"));
         assert!(!stripped.contains("Done in"));
 
-        let route = route_script("lint");
+        let route = route_script("lint", None);
         assert_eq!(route, Some(FilterRoute::Lint));
 
         let (filtered, label) = apply_filter(route.unwrap(), &stripped).unwrap();
@@ -1101,35 +1235,55 @@ Done in 1.2s"#;
     #[test]
     fn test_is_pnpm_script_routed_scripts() {
         // These are script names that go through smart routing (NOT native commands)
-        assert!(is_pnpm_script("lint"));
-        assert!(is_pnpm_script("vitest"));
+        let no_scripts: Option<PackageScripts> = None;
+        assert!(is_pnpm_script("lint", &no_scripts));
+        assert!(is_pnpm_script("vitest", &no_scripts));
     }
 
     #[test]
     fn test_is_pnpm_script_unknown() {
-        // Not a known script name and no package.json in test env
-        assert!(!is_pnpm_script("my-custom-script"));
+        // Not a known script name and no PackageScripts
+        let no_scripts: Option<PackageScripts> = None;
+        assert!(!is_pnpm_script("my-custom-script", &no_scripts));
+    }
+
+    #[test]
+    fn test_is_pnpm_script_with_cached_scripts() {
+        // Custom script found via cached PackageScripts
+        let ps = Some(PackageScripts {
+            scripts: HashMap::from([("my-custom".to_string(), "node run.js".to_string())]),
+        });
+        assert!(is_pnpm_script("my-custom", &ps));
+    }
+
+    #[test]
+    fn test_is_pnpm_script_none_scripts_falls_back() {
+        // With None pkg_scripts, only static routing works
+        let no_scripts: Option<PackageScripts> = None;
+        assert!(!is_pnpm_script("my-custom-script", &no_scripts));
+        assert!(is_pnpm_script("lint", &no_scripts)); // static route exists
     }
 
     #[test]
     fn test_native_commands_not_intercepted() {
         // These are native pnpm commands -- must never be treated as scripts (BUG-03)
-        assert!(!is_pnpm_script("exec"));
-        assert!(!is_pnpm_script("dlx"));
-        assert!(!is_pnpm_script("audit"));
-        assert!(!is_pnpm_script("create"));
-        assert!(!is_pnpm_script("deploy"));
-        assert!(!is_pnpm_script("store"));
-        assert!(!is_pnpm_script("server"));
-        assert!(!is_pnpm_script("patch"));
-        assert!(!is_pnpm_script("env"));
-        assert!(!is_pnpm_script("doctor"));
-        assert!(!is_pnpm_script("why"));
-        assert!(!is_pnpm_script("init"));
-        assert!(!is_pnpm_script("config"));
-        assert!(!is_pnpm_script("setup"));
-        assert!(!is_pnpm_script("bin"));
-        assert!(!is_pnpm_script("self-update"));
+        let no_scripts: Option<PackageScripts> = None;
+        assert!(!is_pnpm_script("exec", &no_scripts));
+        assert!(!is_pnpm_script("dlx", &no_scripts));
+        assert!(!is_pnpm_script("audit", &no_scripts));
+        assert!(!is_pnpm_script("create", &no_scripts));
+        assert!(!is_pnpm_script("deploy", &no_scripts));
+        assert!(!is_pnpm_script("store", &no_scripts));
+        assert!(!is_pnpm_script("server", &no_scripts));
+        assert!(!is_pnpm_script("patch", &no_scripts));
+        assert!(!is_pnpm_script("env", &no_scripts));
+        assert!(!is_pnpm_script("doctor", &no_scripts));
+        assert!(!is_pnpm_script("why", &no_scripts));
+        assert!(!is_pnpm_script("init", &no_scripts));
+        assert!(!is_pnpm_script("config", &no_scripts));
+        assert!(!is_pnpm_script("setup", &no_scripts));
+        assert!(!is_pnpm_script("bin", &no_scripts));
+        assert!(!is_pnpm_script("self-update", &no_scripts));
     }
 
     #[test]
@@ -1160,12 +1314,13 @@ Done in 1.2s"#;
 
     #[test]
     fn test_native_denylist_does_not_block_script_shortcuts() {
+        let no_scripts: Option<PackageScripts> = None;
         // run, test, start are NOT in denylist -- they are pnpm script shortcuts
         // "test" routes via route_script -> FilterRoute::TestRunner
-        assert!(is_pnpm_script("test"));
-        // "start" does not match route_script and no package.json in test env
-        assert!(!is_pnpm_script("start"));
-        // "run" does not match route_script and no package.json in test env
-        assert!(!is_pnpm_script("run"));
+        assert!(is_pnpm_script("test", &no_scripts));
+        // "start" does not match route_script and no PackageScripts
+        assert!(!is_pnpm_script("start", &no_scripts));
+        // "run" does not match route_script and no PackageScripts
+        assert!(!is_pnpm_script("run", &no_scripts));
     }
 }

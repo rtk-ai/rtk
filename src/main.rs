@@ -1218,16 +1218,18 @@ fn main() -> Result<()> {
                 tsc_cmd::run(&args, cli.verbose)?;
             }
             PnpmCommands::Run { script, args } => {
-                pnpm_cmd::run_script(&script, &args, cli.verbose, cli.skip_env)?;
+                let pkg_scripts = pnpm_cmd::PackageScripts::load();
+                pnpm_cmd::run_script(&script, &args, cli.verbose, cli.skip_env, pkg_scripts)?;
             }
             PnpmCommands::Other(args) => {
                 let first = args.first().and_then(|a| a.to_str()).unwrap_or("");
-                if pnpm_cmd::is_pnpm_script(first) {
+                let pkg_scripts = pnpm_cmd::PackageScripts::load();
+                if pnpm_cmd::is_pnpm_script(first, &pkg_scripts) {
                     let str_args: Vec<String> = args[1..]
                         .iter()
                         .filter_map(|a| a.to_str().map(String::from))
                         .collect();
-                    pnpm_cmd::run_script(first, &str_args, cli.verbose, cli.skip_env)?;
+                    pnpm_cmd::run_script(first, &str_args, cli.verbose, cli.skip_env, pkg_scripts)?;
                 } else {
                     pnpm_cmd::run_passthrough(&args, cli.verbose)?;
                 }
