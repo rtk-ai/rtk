@@ -208,6 +208,7 @@ rtk gain --history | grep proxy
 
 | Module | Purpose | Token Strategy |
 |--------|---------|----------------|
+| bazel_cmd.rs | Bazel commands | Strip stderr noise, group targets by package (85% reduction) |
 | git.rs | Git operations | Stat summaries + compact diffs |
 | grep_cmd.rs | Code search | Group by file, truncate lines |
 | ls.rs | Directory listing | Tree format, aggregate counts |

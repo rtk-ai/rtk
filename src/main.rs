@@ -1,4 +1,5 @@
 mod aws_cmd;
+mod bazel_cmd;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
@@ -472,6 +473,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Bazel commands with compact output
+    Bazel {
+        #[command(subcommand)]
+        command: BazelCommands,
+    },
+
     /// Cargo commands with compact output
     Cargo {
         #[command(subcommand)]
@@ -906,6 +913,25 @@ enum CargoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported cargo subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum BazelCommands {
+    /// Query with grouped target output (85% token reduction)
+    Query {
+        /// Maximum depth of package tree to show (default: 1, "all" for unlimited)
+        #[arg(long, default_value = "1")]
+        depth: bazel_cmd::Limit,
+        /// Maximum items per level (default: 10, "all" for unlimited)
+        #[arg(long, default_value = "10")]
+        width: bazel_cmd::Limit,
+        /// Additional bazel query arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported bazel subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1557,6 +1583,15 @@ fn main() -> Result<()> {
         Commands::Playwright { args } => {
             playwright_cmd::run(&args, cli.verbose)?;
         }
+
+        Commands::Bazel { command } => match command {
+            BazelCommands::Query { depth, width, args } => {
+                bazel_cmd::run_query(&args, depth, width, cli.verbose)?;
+            }
+            BazelCommands::Other(args) => {
+                bazel_cmd::run_other(&args, cli.verbose)?;
+            }
+        },
 
         Commands::Cargo { command } => match command {
             CargoCommands::Build { args } => {
