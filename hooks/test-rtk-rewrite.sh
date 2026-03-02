@@ -145,9 +145,13 @@ test_rewrite "env + npm run" \
   "NODE_ENV=test npm run test:e2e" \
   "NODE_ENV=test rtk npm test:e2e"
 
-test_rewrite "env + docker compose" \
+test_rewrite "env + docker compose (unsupported subcommand, NOT rewritten)" \
   "COMPOSE_PROJECT_NAME=test docker compose up -d" \
-  "COMPOSE_PROJECT_NAME=test rtk docker compose up -d"
+  ""
+
+test_rewrite "env + docker compose logs (supported, rewritten)" \
+  "COMPOSE_PROJECT_NAME=test docker compose logs web" \
+  "COMPOSE_PROJECT_NAME=test rtk docker compose logs web"
 
 echo ""
 
@@ -173,17 +177,29 @@ test_rewrite "npx vue-tsc --noEmit" \
   "npx vue-tsc --noEmit" \
   "rtk tsc --noEmit"
 
-test_rewrite "docker compose up -d" \
+test_rewrite "docker compose up -d (NOT rewritten — unsupported by rtk)" \
   "docker compose up -d" \
-  "rtk docker compose up -d"
+  ""
 
 test_rewrite "docker compose logs postgrest" \
   "docker compose logs postgrest" \
   "rtk docker compose logs postgrest"
 
-test_rewrite "docker compose down" \
+test_rewrite "docker compose ps" \
+  "docker compose ps" \
+  "rtk docker compose ps"
+
+test_rewrite "docker compose build" \
+  "docker compose build" \
+  "rtk docker compose build"
+
+test_rewrite "docker compose down (NOT rewritten — unsupported by rtk)" \
   "docker compose down" \
-  "rtk docker compose down"
+  ""
+
+test_rewrite "docker compose -f file.yml up (NOT rewritten — flag before subcommand)" \
+  "docker compose -f docker-compose.preview.yml --project-name myapp up -d --build" \
+  ""
 
 test_rewrite "docker run --rm postgres" \
   "docker run --rm postgres" \

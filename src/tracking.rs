@@ -37,6 +37,30 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
+// ── Project path helpers ── // added: project-scoped tracking support
+
+/// Get the canonical project path string for the current working directory.
+fn current_project_path_string() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// Build SQL filter params for project-scoped queries.
+/// Returns (exact_match, glob_prefix) for WHERE clause.
+/// Uses GLOB instead of LIKE to avoid `_` and `%` in paths acting as wildcards. // changed: GLOB
+fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<String>) {
+    match project_path {
+        Some(p) => (
+            Some(p.to_string()),
+            Some(format!("{}{}*", p, std::path::MAIN_SEPARATOR)), // changed: GLOB pattern with * wildcard
+        ),
+        None => (None, None),
+    }
+}
+
 /// Number of days to retain tracking history before automatic cleanup.
 const HISTORY_DAYS: i64 = 90;
 
@@ -251,6 +275,30 @@ impl Tracker {
             "ALTER TABLE commands ADD COLUMN exec_time_ms INTEGER DEFAULT 0",
             [],
         );
+        // Migration: add project_path column with DEFAULT '' for new rows // changed: added DEFAULT
+        let _ = conn.execute(
+            "ALTER TABLE commands ADD COLUMN project_path TEXT DEFAULT ''",
+            [],
+        );
+        // One-time migration: normalize NULLs from pre-default schema // changed: guarded with EXISTS
+        let has_nulls: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM commands WHERE project_path IS NULL)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if has_nulls {
+            let _ = conn.execute(
+                "UPDATE commands SET project_path = '' WHERE project_path IS NULL",
+                [],
+            );
+        }
+        // Index for fast project-scoped gain queries // added
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
+            [],
+        );
 
         Ok(Self { conn })
     }
@@ -292,13 +340,16 @@ impl Tracker {
             0.0
         };
 
+        let project_path = current_project_path_string(); // added: record cwd
+
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
                 rtk_cmd,
+                project_path, // added
                 input_tokens as i64,
                 output_tokens as i64,
                 saved as i64,
@@ -340,6 +391,15 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_summary(&self) -> Result<GainSummary> {
+        self.get_summary_filtered(None) // delegate to filtered variant
+    }
+
+    /// Get summary statistics filtered by project path. // added
+    ///
+    /// When `project_path` is `Some`, matches the exact working directory
+    /// or any subdirectory (prefix match with path separator).
+    pub fn get_summary_filtered(&self, project_path: Option<&str>) -> Result<GainSummary> {
+        let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
@@ -347,10 +407,13 @@ impl Tracker {
         let mut total_time_ms = 0u64;
 
         let mut stmt = self.conn.prepare(
-            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms FROM commands",
+            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
+             FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
             Ok((
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
@@ -380,8 +443,8 @@ impl Tracker {
             0
         };
 
-        let by_command = self.get_by_command()?;
-        let by_day = self.get_by_day()?;
+        let by_command = self.get_by_command(project_path)?; // added: pass project filter
+        let by_day = self.get_by_day(project_path)?; // added: pass project filter
 
         Ok(GainSummary {
             total_commands,
@@ -396,16 +459,22 @@ impl Tracker {
         })
     }
 
-    fn get_by_command(&self) -> Result<Vec<(String, usize, usize, f64, u64)>> {
+    fn get_by_command(
+        &self,
+        project_path: Option<&str>, // added
+    ) -> Result<Vec<(String, usize, usize, f64, u64)>> {
+        let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10",
+             LIMIT 10", // added: project filter in WHERE
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
@@ -418,16 +487,22 @@ impl Tracker {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    fn get_by_day(&self) -> Result<Vec<(String, usize)>> {
+    fn get_by_day(
+        &self,
+        project_path: Option<&str>, // added
+    ) -> Result<Vec<(String, usize)>> {
+        let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT DATE(timestamp), SUM(saved_tokens)
              FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
-             LIMIT 30",
+             LIMIT 30", // added: project filter in WHERE
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })?;
 
@@ -455,6 +530,12 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_all_days(&self) -> Result<Vec<DayStats>> {
+        self.get_all_days_filtered(None) // delegate to filtered variant
+    }
+
+    /// Get daily statistics filtered by project path. // added
+    pub fn get_all_days_filtered(&self, project_path: Option<&str>) -> Result<Vec<DayStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT
                 DATE(timestamp) as date,
@@ -464,11 +545,13 @@ impl Tracker {
                 SUM(saved_tokens) as saved,
                 SUM(exec_time_ms) as total_time
              FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY DATE(timestamp)
-             ORDER BY DATE(timestamp) DESC",
+             ORDER BY DATE(timestamp) DESC", // added: project filter
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
             let input = row.get::<_, i64>(2)? as usize;
             let saved = row.get::<_, i64>(4)? as usize;
             let commands = row.get::<_, i64>(1)? as usize;
@@ -520,6 +603,12 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_by_week(&self) -> Result<Vec<WeekStats>> {
+        self.get_by_week_filtered(None) // delegate to filtered variant
+    }
+
+    /// Get weekly statistics filtered by project path. // added
+    pub fn get_by_week_filtered(&self, project_path: Option<&str>) -> Result<Vec<WeekStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT
                 DATE(timestamp, 'weekday 0', '-6 days') as week_start,
@@ -530,11 +619,13 @@ impl Tracker {
                 SUM(saved_tokens) as saved,
                 SUM(exec_time_ms) as total_time
              FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY week_start
-             ORDER BY week_start DESC",
+             ORDER BY week_start DESC", // added: project filter
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
             let input = row.get::<_, i64>(3)? as usize;
             let saved = row.get::<_, i64>(5)? as usize;
             let commands = row.get::<_, i64>(2)? as usize;
@@ -587,6 +678,12 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_by_month(&self) -> Result<Vec<MonthStats>> {
+        self.get_by_month_filtered(None) // delegate to filtered variant
+    }
+
+    /// Get monthly statistics filtered by project path. // added
+    pub fn get_by_month_filtered(&self, project_path: Option<&str>) -> Result<Vec<MonthStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT
                 strftime('%Y-%m', timestamp) as month,
@@ -596,11 +693,13 @@ impl Tracker {
                 SUM(saved_tokens) as saved,
                 SUM(exec_time_ms) as total_time
              FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY month
-             ORDER BY month DESC",
+             ORDER BY month DESC", // added: project filter
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+            // added: params
             let input = row.get::<_, i64>(2)? as usize;
             let saved = row.get::<_, i64>(4)? as usize;
             let commands = row.get::<_, i64>(1)? as usize;
@@ -655,23 +754,37 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_recent(&self, limit: usize) -> Result<Vec<CommandRecord>> {
+        self.get_recent_filtered(limit, None) // delegate to filtered variant
+    }
+
+    /// Get recent command history filtered by project path. // added
+    pub fn get_recent_filtered(
+        &self,
+        limit: usize,
+        project_path: Option<&str>,
+    ) -> Result<Vec<CommandRecord>> {
+        let (project_exact, project_glob) = project_filter_params(project_path); // added
         let mut stmt = self.conn.prepare(
             "SELECT timestamp, rtk_cmd, saved_tokens, savings_pct
              FROM commands
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              ORDER BY timestamp DESC
-             LIMIT ?1",
+             LIMIT ?3", // added: project filter
         )?;
 
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(CommandRecord {
-                timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
-                rtk_cmd: row.get(1)?,
-                saved_tokens: row.get::<_, i64>(2)? as usize,
-                savings_pct: row.get(3)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![project_exact, project_glob, limit as i64], // added: project params
+            |row| {
+                Ok(CommandRecord {
+                    timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    rtk_cmd: row.get(1)?,
+                    saved_tokens: row.get::<_, i64>(2)? as usize,
+                    savings_pct: row.get(3)?,
+                })
+            },
+        )?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -1036,5 +1149,43 @@ mod tests {
 
         let db_path = get_db_path().expect("Failed to get db path");
         assert!(db_path.ends_with("rtk/history.db"));
+    }
+
+    // 9. project_filter_params uses GLOB pattern with * wildcard // added
+    #[test]
+    fn test_project_filter_params_glob_pattern() {
+        let (exact, glob) = project_filter_params(Some("/home/user/project"));
+        assert_eq!(exact.unwrap(), "/home/user/project");
+        // Must use * (GLOB) not % (LIKE) for subdirectory prefix matching
+        let glob_val = glob.unwrap();
+        assert!(glob_val.ends_with('*'), "GLOB pattern must end with *");
+        assert!(!glob_val.contains('%'), "Must not contain LIKE wildcard %");
+        assert_eq!(
+            glob_val,
+            format!("/home/user/project{}*", std::path::MAIN_SEPARATOR)
+        );
+    }
+
+    // 10. project_filter_params returns None for None input // added
+    #[test]
+    fn test_project_filter_params_none() {
+        let (exact, glob) = project_filter_params(None);
+        assert!(exact.is_none());
+        assert!(glob.is_none());
+    }
+
+    // 11. GLOB pattern safe with underscores in path names // added
+    #[test]
+    fn test_project_filter_params_underscore_safe() {
+        // In LIKE, _ matches any single char; in GLOB, _ is literal
+        let (exact, glob) = project_filter_params(Some("/home/user/my_project"));
+        assert_eq!(exact.unwrap(), "/home/user/my_project");
+        let glob_val = glob.unwrap();
+        // _ must be preserved literally (GLOB treats _ as literal, LIKE does not)
+        assert!(glob_val.contains("my_project"));
+        assert_eq!(
+            glob_val,
+            format!("/home/user/my_project{}*", std::path::MAIN_SEPARATOR)
+        );
     }
 }
