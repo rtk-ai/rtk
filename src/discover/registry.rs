@@ -288,7 +288,9 @@ const IGNORED_PREFIXES: &[&str] = &[
     "case ",
 ];
 
-const IGNORED_EXACT: &[&str] = &["cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done"];
+const IGNORED_EXACT: &[&str] = &[
+    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
+];
 
 lazy_static! {
     static ref REGEX_SET: RegexSet = RegexSet::new(PATTERNS).expect("invalid regex patterns");
