@@ -17,6 +17,10 @@
 //! | `git-log` | git::filter_log_output | `git log` output |
 //! | `git-diff` | git::compact_diff | `git diff` output |
 //! | `git-status` | git::format_status_output | `git status --porcelain=v1` |
+//! | `mypy` | mypy_cmd::filter_mypy_output | `mypy` type check output |
+//! | `ruff-check` | ruff_cmd::filter_ruff_check_json | `ruff check --output-format=json` |
+//! | `ruff-format` | ruff_cmd::filter_ruff_format | `ruff format --check` output |
+//! | `prettier` | prettier_cmd::filter_prettier_output | `prettier --check` output |
 
 use anyhow::Result;
 use std::io::Read;
@@ -37,6 +41,10 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "git-log" => Some(git_log_wrapper),
         "git-diff" => Some(git_diff_wrapper),
         "git-status" => Some(crate::git::format_status_output),
+        "mypy" => Some(crate::mypy_cmd::filter_mypy_output),
+        "ruff-check" => Some(crate::ruff_cmd::filter_ruff_check_json),
+        "ruff-format" => Some(crate::ruff_cmd::filter_ruff_format),
+        "prettier" => Some(crate::prettier_cmd::filter_prettier_output),
         _ => None,
     }
 }
@@ -77,6 +85,11 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     let first_trimmed = first_1k.trim_start();
     if first_trimmed.starts_with('{') && first_1k.contains("\"Action\"") {
         return go_test_wrapper;
+    }
+
+    // mypy: lines like "file.py:42: error: ..." with optional [error-code]
+    if first_1k.contains(": error:") && first_1k.contains(".py:") {
+        return crate::mypy_cmd::filter_mypy_output;
     }
 
     // grep/rg: lines matching file:number:content pattern
@@ -138,7 +151,8 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         Some(name) => resolve_filter(name).ok_or_else(|| {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
-                 tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status",
+                 tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
+                 mypy, ruff-check, ruff-format, prettier",
                 name
             )
         })?,
@@ -388,5 +402,38 @@ mod tests {
     #[test]
     fn test_resolve_filter_go_build() {
         assert!(resolve_filter("go-build").is_some());
+    }
+
+    // ── mypy / ruff / prettier filters ──────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_filter_mypy() {
+        assert!(resolve_filter("mypy").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_ruff_check() {
+        assert!(resolve_filter("ruff-check").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_ruff_format() {
+        assert!(resolve_filter("ruff-format").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_prettier() {
+        assert!(resolve_filter("prettier").is_some());
+    }
+
+    #[test]
+    fn test_auto_detect_mypy_output() {
+        let input = "src/app.py:42: error: Argument 1 has incompatible type [arg-type]\n\
+                     src/utils.py:10: error: Missing return statement [return]\n\
+                     Found 2 errors in 2 files\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        // Should use mypy filter (not identity)
+        assert!(!out.is_empty());
     }
 }

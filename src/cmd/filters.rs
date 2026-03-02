@@ -32,7 +32,9 @@ pub fn get_filter_type(binary: &str) -> FilterType {
         "cargo" => FilterType::Cargo,
         "npm" | "npx" => FilterType::Npm,
         "pnpm" => FilterType::Pnpm,
-        "pytest" | "go" | "vitest" | "jest" | "mocha" => FilterType::Test,
+        "pytest" | "go" | "vitest" | "jest" | "mocha" | "mypy" | "ruff" | "golangci-lint" => {
+            FilterType::Test
+        }
         "ls" | "find" | "grep" | "rg" | "fd" => FilterType::Generic,
         _ => FilterType::None,
     }
@@ -100,7 +102,9 @@ pub fn get_filter_mode(binary: &str) -> FilterMode {
         // Buffered: cargo, git, and test runners use simple filters here
         // (dedicated modules like cargo_cmd.rs / go_cmd.rs provide 60-90% savings)
         "cargo" => FilterMode::Buffered(filter_cargo_output),
-        "pytest" | "jest" | "mocha" | "vitest" => FilterMode::Buffered(filter_test_output),
+        "pytest" | "jest" | "mocha" | "vitest" | "mypy" | "ruff" | "golangci-lint" => {
+            FilterMode::Buffered(filter_test_output)
+        }
         // git: ANSI strip per-line (dedicated git.rs handles git subcommands)
         "git" => FilterMode::Streaming(Box::new(LineFilter::new(|l| {
             Some(format!("{}\n", utils::strip_ansi(l)))
@@ -151,6 +155,21 @@ mod tests {
     fn test_filter_type_generic() {
         assert_eq!(get_filter_type("ls"), FilterType::Generic);
         assert_eq!(get_filter_type("grep"), FilterType::Generic);
+    }
+
+    #[test]
+    fn test_filter_type_mypy() {
+        assert_eq!(get_filter_type("mypy"), FilterType::Test);
+    }
+
+    #[test]
+    fn test_filter_type_ruff() {
+        assert_eq!(get_filter_type("ruff"), FilterType::Test);
+    }
+
+    #[test]
+    fn test_filter_type_golangci_lint() {
+        assert_eq!(get_filter_type("golangci-lint"), FilterType::Test);
     }
 
     #[test]
@@ -272,6 +291,21 @@ mod tests {
     #[test]
     fn test_get_filter_mode_cargo_is_buffered() {
         matches!(get_filter_mode("cargo"), FilterMode::Buffered(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_mypy_is_buffered() {
+        matches!(get_filter_mode("mypy"), FilterMode::Buffered(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_ruff_is_buffered() {
+        matches!(get_filter_mode("ruff"), FilterMode::Buffered(_));
+    }
+
+    #[test]
+    fn test_get_filter_mode_golangci_lint_is_buffered() {
+        matches!(get_filter_mode("golangci-lint"), FilterMode::Buffered(_));
     }
 
     #[test]
