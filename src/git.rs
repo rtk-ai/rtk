@@ -135,7 +135,11 @@ fn run_show(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()
         .iter()
         .any(|arg| arg.starts_with("--pretty") || arg.starts_with("--format"));
 
-    if wants_stat_only || wants_format {
+    // `git show rev:path` prints a blob, not a commit diff. In this mode we should
+    // pass through directly to avoid duplicated output from compact-show steps.
+    let wants_blob_show = args.iter().any(|arg| is_blob_show_arg(arg));
+
+    if wants_stat_only || wants_format || wants_blob_show {
         let mut cmd = Command::new("git");
         cmd.arg("show");
         for arg in args {
@@ -148,7 +152,11 @@ fn run_show(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()
             std::process::exit(output.status.code().unwrap_or(1));
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        println!("{}", stdout.trim());
+        if wants_blob_show {
+            print!("{}", stdout);
+        } else {
+            println!("{}", stdout.trim());
+        }
 
         timer.track(
             &format!("git show {}", args.join(" ")),
@@ -227,6 +235,11 @@ fn run_show(args: &[String], max_lines: Option<usize>, verbose: u8) -> Result<()
     );
 
     Ok(())
+}
+
+fn is_blob_show_arg(arg: &str) -> bool {
+    // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
+    !arg.starts_with('-') && arg.contains(':')
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
@@ -787,6 +800,7 @@ fn run_push(args: &[String], verbose: u8) -> Result<()> {
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     Ok(())
@@ -872,6 +886,7 @@ fn run_pull(args: &[String], verbose: u8) -> Result<()> {
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     Ok(())
@@ -1050,7 +1065,7 @@ fn run_fetch(args: &[String], verbose: u8) -> Result<()> {
         if !stderr.trim().is_empty() {
             eprintln!("{}", stderr);
         }
-        return Ok(());
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     // Count new refs from stderr (git fetch outputs to stderr)
@@ -1150,6 +1165,10 @@ fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<(
                 &combined,
                 &msg,
             );
+
+            if !output.status.success() {
+                std::process::exit(output.status.code().unwrap_or(1));
+            }
         }
         _ => {
             // Default: git stash (push)
@@ -1182,6 +1201,10 @@ fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<(
             };
 
             timer.track("git stash", "rtk git stash", &combined, &msg);
+
+            if !output.status.success() {
+                std::process::exit(output.status.code().unwrap_or(1));
+            }
         }
     }
 
@@ -1252,6 +1275,7 @@ fn run_worktree(args: &[String], verbose: u8) -> Result<()> {
             if !stderr.trim().is_empty() {
                 eprintln!("{}", stderr);
             }
+            std::process::exit(output.status.code().unwrap_or(1));
         }
         return Ok(());
     }
@@ -1340,6 +1364,15 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_is_blob_show_arg() {
+        assert!(is_blob_show_arg("develop:modules/pairs_backtest.py"));
+        assert!(is_blob_show_arg("HEAD:src/main.rs"));
+        assert!(!is_blob_show_arg("--pretty=format:%h"));
+        assert!(!is_blob_show_arg("--format=short"));
+        assert!(!is_blob_show_arg("HEAD"));
     }
 
     #[test]

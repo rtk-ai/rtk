@@ -22,6 +22,10 @@ struct GoTestEvent {
     output: Option<String>,
     #[serde(rename = "Elapsed")]
     elapsed: Option<f64>,
+    #[serde(rename = "ImportPath")]
+    import_path: Option<String>,
+    #[serde(rename = "FailedBuild")]
+    failed_build: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -29,6 +33,8 @@ struct PackageResult {
     pass: usize,
     fail: usize,
     skip: usize,
+    build_failed: bool,
+    build_errors: Vec<String>,
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
 }
 
@@ -40,6 +46,7 @@ struct PackageResult {
 pub struct GoTestStreamFilter {
     packages: HashMap<String, PackageResult>,
     current_test_output: HashMap<(String, String), Vec<String>>,
+    build_output: HashMap<String, Vec<String>>, // import_path -> error lines
 }
 
 impl GoTestStreamFilter {
@@ -47,6 +54,7 @@ impl GoTestStreamFilter {
         Self {
             packages: HashMap::new(),
             current_test_output: HashMap::new(),
+            build_output: HashMap::new(),
         }
     }
 }
@@ -71,6 +79,28 @@ impl StreamFilter for GoTestStreamFilter {
             Err(_) => return None, // skip non-JSON lines
         };
 
+        // Handle build-output/build-fail events (use ImportPath, no Package)
+        match event.action.as_str() {
+            "build-output" => {
+                if let (Some(import_path), Some(output_text)) = (&event.import_path, &event.output)
+                {
+                    let text = output_text.trim_end().to_string();
+                    if !text.is_empty() {
+                        self.build_output
+                            .entry(import_path.clone())
+                            .or_default()
+                            .push(text);
+                    }
+                }
+                return None;
+            }
+            "build-fail" => {
+                // build-fail has ImportPath — we'll handle it when the package-level fail arrives
+                return None;
+            }
+            _ => {}
+        }
+
         let package = event.package.unwrap_or_else(|| "unknown".to_string());
         let pkg_result = self.packages.entry(package.clone()).or_default();
 
@@ -82,10 +112,20 @@ impl StreamFilter for GoTestStreamFilter {
             }
             "fail" => {
                 if let Some(test) = &event.test {
+                    // Individual test failure
                     pkg_result.fail += 1;
                     let key = (package.clone(), test.clone());
                     let outputs = self.current_test_output.remove(&key).unwrap_or_default();
                     pkg_result.failed_tests.push((test.clone(), outputs));
+                } else if event.failed_build.is_some() {
+                    // Package-level build failure
+                    pkg_result.build_failed = true;
+                    // Collect build errors from the import path
+                    if let Some(import_path) = &event.failed_build {
+                        if let Some(errors) = self.build_output.remove(import_path) {
+                            pkg_result.build_errors = errors;
+                        }
+                    }
                 }
             }
             "skip" => {
@@ -320,12 +360,15 @@ fn build_go_test_summary(packages: &HashMap<String, PackageResult>) -> String {
     let total_pass: usize = packages.values().map(|p| p.pass).sum();
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
+    let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
 
-    if total_fail == 0 && total_pass == 0 {
+    let has_failures = total_fail > 0 || total_build_fail > 0;
+
+    if !has_failures && total_pass == 0 {
         return "Go test: No tests found".to_string();
     }
 
-    if total_fail == 0 {
+    if !has_failures {
         return format!(
             "✓ Go test: {} passed in {} packages",
             total_pass, total_packages
@@ -335,13 +378,34 @@ fn build_go_test_summary(packages: &HashMap<String, PackageResult>) -> String {
     let mut result = String::new();
     result.push_str(&format!(
         "Go test: {} passed, {} failed",
-        total_pass, total_fail
+        total_pass,
+        total_fail + total_build_fail
     ));
     if total_skip > 0 {
         result.push_str(&format!(", {} skipped", total_skip));
     }
     result.push_str(&format!(" in {} packages\n", total_packages));
     result.push_str("═══════════════════════════════════════\n");
+
+    // Show build failures first
+    for (package, pkg_result) in packages.iter() {
+        if !pkg_result.build_failed {
+            continue;
+        }
+
+        result.push_str(&format!(
+            "\n📦 {} [build failed]\n",
+            compact_package_name(package)
+        ));
+
+        for line in &pkg_result.build_errors {
+            let trimmed = line.trim();
+            // Skip the "# package" header line
+            if !trimmed.starts_with('#') && !trimmed.is_empty() {
+                result.push_str(&format!("  {}\n", truncate(trimmed, 120)));
+            }
+        }
+    }
 
     // Show failed tests grouped by package
     for (package, pkg_result) in packages.iter() {

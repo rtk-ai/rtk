@@ -1135,10 +1135,10 @@ mod tests {
 
     #[test]
     fn test_hook_has_guards() {
-        // PR 1 v2: Replaced bash hook with binary shim
-        // Old test checked for "command -v rtk" and "command -v jq" guards
-        // New shim just execs rtk hook claude binary (no bash guards needed)
-        assert!(REWRITE_HOOK.contains("exec rtk hook claude"));
+        // Shell hook kept for backward compatibility during transition to Rust hook engine.
+        // Users can use either the shell hook or `rtk hook claude` binary.
+        assert!(REWRITE_HOOK.contains("command -v rtk"));
+        assert!(REWRITE_HOOK.contains("command -v jq"));
     }
 
     #[test]

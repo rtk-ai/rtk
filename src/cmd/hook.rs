@@ -425,6 +425,12 @@ pub(crate) fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> 
             replace_first_word(raw, &prefix, "rtk pytest")
         }
 
+        // python/python3 -m mypy: two-arg prefix replacement
+        "python" | "python3" if sub == "-m" && sub2 == "mypy" => {
+            let prefix = format!("{} -m mypy", cmd.binary);
+            replace_first_word(raw, &prefix, "rtk mypy")
+        }
+
         // pnpm / npx: delegated to helpers (complex sub-routing)
         "pnpm" => route_pnpm(cmd, raw),
         "npx" => route_npx(cmd, raw),

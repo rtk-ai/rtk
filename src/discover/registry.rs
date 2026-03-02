@@ -50,7 +50,7 @@ pub const ROUTES: &[Route] = &[
         binaries: &["git"],
         subcmds: Subcmds::Only(&[
             "status", "diff", "log", "add", "commit", "push", "pull", "branch", "fetch", "stash",
-            "show",
+            "show", "worktree",
         ]),
         rtk_cmd: "git",
     },
@@ -155,6 +155,12 @@ pub const ROUTES: &[Route] = &[
         binaries: &["pip"],
         subcmds: Subcmds::Only(&["list", "outdated", "install", "show"]),
         rtk_cmd: "pip",
+    },
+    // Python type checking
+    Route {
+        binaries: &["mypy"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "mypy",
     },
 ];
 
@@ -268,6 +274,7 @@ const PATTERNS: &[&str] = &[
     r"^ruff\s+(check|format)(\s|$)",
     r"^(pip|pip3)\s+(list|outdated|install|show)(\s|$)",
     r"^golangci-lint(\s|$)",
+    r"^(python3?\s+-m\s+)?mypy(\s|$)",
 ];
 
 const RULES: &[RtkRule] = &[
@@ -459,6 +466,13 @@ const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        rtk_cmd: "rtk mypy",
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 /// Commands to ignore (shell builtins, trivial, already rtk).
@@ -506,17 +520,17 @@ const IGNORED_PREFIXES: &[&str] = &[
     "then ",
     "else\n",
     "else ",
-    "fi",
     "do\n",
     "do ",
-    "done",
     "for ",
     "while ",
     "if ",
     "case ",
 ];
 
-const IGNORED_EXACT: &[&str] = &["cd", "echo", "true", "false", "wait", "pwd", "bash", "sh"];
+const IGNORED_EXACT: &[&str] = &[
+    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
+];
 
 lazy_static! {
     static ref REGEX_SET: RegexSet = RegexSet::new(PATTERNS).expect("invalid regex patterns");
@@ -1057,6 +1071,33 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_find_not_blocked_by_fi() {
+        // Regression: "fi" in IGNORED_PREFIXES used to shadow "find" commands
+        // because "find".starts_with("fi") is true. "fi" should only match exactly.
+        assert_eq!(
+            classify_command("find . -name foo"),
+            Classification::Supported {
+                rtk_equivalent: "rtk find",
+                category: "Files",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_fi_still_ignored_exact() {
+        // Bare "fi" (shell keyword) should still be ignored
+        assert_eq!(classify_command("fi"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_done_still_ignored_exact() {
+        // Bare "done" (shell keyword) should still be ignored
+        assert_eq!(classify_command("done"), Classification::Ignored);
+    }
+
+    #[test]
     fn test_split_chain_and() {
         assert_eq!(split_command_chain("a && b"), vec!["a", "b"]);
     }
@@ -1173,5 +1214,33 @@ mod tests {
         let r1 = lookup("git", "status");
         let r2 = lookup("git", "status");
         assert_eq!(r1.map(|r| r.rtk_cmd), r2.map(|r| r.rtk_cmd));
+    }
+
+    // --- Mypy classification tests (from upstream) ---
+
+    #[test]
+    fn test_classify_mypy() {
+        assert_eq!(
+            classify_command("mypy src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mypy",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_python_m_mypy() {
+        assert_eq!(
+            classify_command("python3 -m mypy --strict"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mypy",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
     }
 }

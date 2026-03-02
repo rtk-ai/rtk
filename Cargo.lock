@@ -633,7 +633,7 @@ checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
 name = "rtk"
-version = "0.22.2"
+version = "0.23.0"
 dependencies = [
  "anyhow",
  "chrono",
