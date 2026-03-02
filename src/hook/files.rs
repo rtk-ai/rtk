@@ -46,9 +46,31 @@ pub fn try_rewrite_file_cmd(match_cmd: &str, cmd_body: &str) -> Option<String> {
         return Some(replace_prefix(cmd_body, "cat ", "rtk read "));
     }
     if match_cmd.starts_with("rg ") {
+        // P1-2: rtk grep expects PATTERN as first positional arg.
+        // Skip rewrite when flags precede pattern (e.g. rg -i pattern) — clap error.
+        let first_arg = match_cmd
+            .strip_prefix("rg ")
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if first_arg.starts_with('-') {
+            return None;
+        }
         return Some(replace_prefix(cmd_body, "rg ", "rtk grep "));
     }
     if match_cmd.starts_with("grep ") {
+        // P1-2: rtk grep expects PATTERN as first positional arg.
+        // Skip rewrite when flags precede pattern (e.g. grep -r TODO .) — clap error.
+        let first_arg = match_cmd
+            .strip_prefix("grep ")
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if first_arg.starts_with('-') {
+            return None;
+        }
         return Some(replace_prefix(cmd_body, "grep ", "rtk grep "));
     }
     if match_cmd == "ls" || match_cmd.starts_with("ls ") {
@@ -104,8 +126,9 @@ mod tests {
     }
 
     #[test]
-    fn test_grep_to_rtk_grep() {
-        assert_eq!(rewrite("grep -r TODO ."), Some("rtk grep -r TODO .".into()));
+    fn test_grep_pattern_first_to_rtk_grep() {
+        // Only rewrite when pattern comes first (no flags before pattern)
+        assert_eq!(rewrite("grep TODO ."), Some("rtk grep TODO .".into()));
     }
 
     #[test]
@@ -190,5 +213,42 @@ mod tests {
     fn test_cat_stdin_no_rewrite() {
         // cat - reads from stdin, rtk read doesn't support it
         assert_eq!(rewrite("cat -"), None);
+    }
+
+    // --- P1-2: grep/rg with flags before pattern must NOT be rewritten ---
+    // rtk grep expects: rtk grep PATTERN [PATH] — flags before pattern cause clap error
+    #[test]
+    fn test_grep_dash_r_no_rewrite() {
+        // grep -r TODO . → rtk grep -r TODO . → clap error (pattern expected first)
+        assert_eq!(rewrite("grep -r TODO ."), None);
+    }
+
+    #[test]
+    fn test_grep_dash_rn_no_rewrite() {
+        assert_eq!(rewrite("grep -rn pattern src/"), None);
+    }
+
+    #[test]
+    fn test_grep_dash_i_no_rewrite() {
+        assert_eq!(rewrite("grep -i TODO ."), None);
+    }
+
+    #[test]
+    fn test_rg_dash_i_no_rewrite() {
+        assert_eq!(rewrite("rg -i pattern ."), None);
+    }
+
+    #[test]
+    fn test_grep_pattern_first_still_works() {
+        // No flags before pattern → safe to rewrite
+        assert_eq!(rewrite("grep TODO src/"), Some("rtk grep TODO src/".into()));
+    }
+
+    #[test]
+    fn test_rg_pattern_first_still_works() {
+        assert_eq!(
+            rewrite("rg pattern src/"),
+            Some("rtk grep pattern src/".into())
+        );
     }
 }

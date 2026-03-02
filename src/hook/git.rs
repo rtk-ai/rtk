@@ -10,6 +10,13 @@ lazy_static! {
 
 pub fn try_rewrite_git(match_cmd: &str, cmd_body: &str) -> Option<String> {
     let after_git = match_cmd.strip_prefix("git ").unwrap_or("");
+
+    // P1-1: -C /path changes working directory — stripping it silently
+    // would run the command in the wrong directory with no warning.
+    if after_git.split_whitespace().any(|t| t == "-C") {
+        return None;
+    }
+
     let stripped = GIT_GLOBAL_FLAGS_RE.replace_all(after_git, "");
     let stripped = stripped.trim_start();
 
@@ -165,11 +172,9 @@ mod tests {
     }
 
     #[test]
-    fn test_git_c_path_strips_flag() {
-        assert_eq!(
-            rewrite("git -C /some/path status"),
-            Some("rtk git status".into())
-        );
+    fn test_git_c_path_no_rewrite() {
+        // P1-1: -C changes working directory — can't strip safely
+        assert_eq!(rewrite("git -C /some/path status"), None);
     }
 
     #[test]
@@ -200,5 +205,31 @@ mod tests {
     fn test_git_unknown_global_flag_no_rewrite() {
         // Unknown boolean flags cause the subcommand to not be detected → safe fallback (no rewrite)
         assert_eq!(rewrite("git --worktree-attributes log --oneline"), None);
+    }
+
+    // --- P1-1: git -C /path changes working directory — must NOT be rewritten ---
+    #[test]
+    fn test_git_dash_c_path_no_rewrite() {
+        // -C changes working directory — stripping it would run in wrong directory
+        assert_eq!(rewrite("git -C /other/repo status"), None);
+    }
+
+    #[test]
+    fn test_git_dash_c_path_log_no_rewrite() {
+        assert_eq!(rewrite("git -C /other/repo log --oneline"), None);
+    }
+
+    #[test]
+    fn test_git_dash_c_path_diff_no_rewrite() {
+        assert_eq!(rewrite("git -C ../sibling diff HEAD"), None);
+    }
+
+    #[test]
+    fn test_git_lowercase_c_config_still_strips() {
+        // -c key=val is a config override, safe to strip (no directory change)
+        assert_eq!(
+            rewrite("git -c core.pager=cat log"),
+            Some("rtk git log".into())
+        );
     }
 }
