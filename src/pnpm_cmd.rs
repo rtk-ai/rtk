@@ -12,7 +12,7 @@ use crate::parser::{
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
 
-/// Native pnpm subcommands that must never be intercepted as scripts (BUG-03).
+/// Native pnpm subcommands that must never be intercepted as scripts.
 /// Sorted alphabetically for binary_search lookup.
 /// Excludes: run, test, start -- those are pnpm script shortcuts that go through smart routing.
 const NATIVE_PNPM_COMMANDS: &[&str] = &[
@@ -68,7 +68,7 @@ lazy_static! {
     // Done in 3.4s
     static ref DONE_MSG: Regex = Regex::new(r"^Done in \d").unwrap();
     // ELIFECYCLE  Command failed with exit code 1.
-    // Matches only ELIFECYCLE, preserves ERR_PNPM messages (BUG-04)
+    // Matches only ELIFECYCLE, preserves ERR_PNPM messages
     static ref ELIFECYCLE_ONLY: Regex = Regex::new(r"(?i)ELIFECYCLE").unwrap();
     // Progress: resolved 123, reused 120, downloaded 3
     static ref PROGRESS: Regex = Regex::new(r"^Progress:").unwrap();
@@ -589,7 +589,7 @@ pub(crate) enum FilterRoute {
     Playwright,
 }
 
-/// Cached package.json scripts (read once per invocation, QUAL-02).
+/// Cached package.json scripts (read once per invocation).
 /// Eliminates redundant fs::read_to_string("package.json") calls in
 /// is_pnpm_script and route_script.
 pub struct PackageScripts {
@@ -640,7 +640,7 @@ impl PackageScripts {
 }
 
 /// Strip pnpm-specific boilerplate from script output.
-/// Returns empty string when all lines are boilerplate (BUG-04: caller decides what to show).
+/// Returns empty string when all lines are boilerplate (caller decides what to show).
 pub(crate) fn filter_pnpm_run_output(output: &str) -> String {
     let mut result = Vec::new();
 
@@ -703,7 +703,7 @@ pub(crate) fn route_script(
 
 /// Check if a name is a known pnpm script (static routing or cached package.json)
 pub fn is_pnpm_script(name: &str, pkg_scripts: &Option<PackageScripts>) -> bool {
-    // Native pnpm commands are never scripts (BUG-03)
+    // Native pnpm commands are never scripts
     if NATIVE_PNPM_COMMANDS.binary_search(&name).is_ok() {
         return false;
     }
@@ -713,7 +713,7 @@ pub fn is_pnpm_script(name: &str, pkg_scripts: &Option<PackageScripts>) -> bool 
         return true;
     }
 
-    // Check cached package.json scripts (QUAL-02)
+    // Check cached package.json scripts
     match pkg_scripts {
         Some(ps) => ps.contains(name),
         None => false,
@@ -721,7 +721,7 @@ pub fn is_pnpm_script(name: &str, pkg_scripts: &Option<PackageScripts>) -> bool 
 }
 
 /// Apply a specialized filter to script output.
-/// Returns Result to allow caller fallback on error (replaces catch_unwind, QUAL-01).
+/// Returns Result to allow caller fallback on error (replaces catch_unwind).
 pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, &'static str)> {
     // Empty/whitespace input is an error -- nothing meaningful to filter
     if output.trim().is_empty() {
@@ -777,8 +777,8 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, 
 }
 
 /// Execute `pnpm run <script>` with smart routing to specialized filters.
-/// Stream-separated: feeds stdout-only to filters (BUG-01, BUG-02).
-/// Shows stderr on failure, "ok +" only on success with empty stdout (BUG-04).
+/// Stream-separated: feeds stdout-only to filters.
+/// Shows stderr on failure, "ok +" only on success with empty stdout.
 pub fn run_script(
     script: &str,
     args: &[String],
@@ -813,7 +813,7 @@ pub fn run_script(
     // For tee recovery: combined output (stdout+stderr)
     let raw_for_tee = format!("{}\n{}", stdout_str, stderr_str);
 
-    // Stage 1: Strip pnpm boilerplate from STDOUT ONLY (BUG-01, BUG-02 fix)
+    // Stage 1: Strip pnpm boilerplate from STDOUT ONLY
     let stripped = filter_pnpm_run_output(&stdout_str);
 
     if !output.status.success() {
@@ -840,7 +840,7 @@ pub fn run_script(
             String::new()
         };
 
-        // Strip pnpm boilerplate from stderr but preserve ERR_PNPM messages (BUG-04)
+        // Strip pnpm boilerplate from stderr but preserve ERR_PNPM messages
         let stderr_display = strip_pnpm_stderr(&stderr_str);
 
         // Show: filtered stdout (if any) then stderr (if any)
@@ -872,7 +872,7 @@ pub fn run_script(
         std::process::exit(exit_code);
     }
 
-    // SUCCESS PATH: "ok +" only when exit 0 AND stripped stdout is empty (BUG-04)
+    // SUCCESS PATH: "ok +" only when exit 0 AND stripped stdout is empty
     if stripped.is_empty() {
         let display = "ok \u{2713}".to_string();
         println!("{}", display);
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn test_filter_pnpm_run_output_empty() {
-        // BUG-04: filter returns empty string for pure boilerplate (caller decides "ok +")
+        // Filter returns empty string for pure boilerplate (caller decides "ok +")
         let input = "> pkg@1.0.0 test\n$ vitest run\n\nDone in 2.1s\n";
         let result = filter_pnpm_run_output(input);
         assert_eq!(result, "");
@@ -1361,7 +1361,7 @@ Done in 1.2s"#;
 
     #[test]
     fn test_ok_checkmark_guard_skips_routing() {
-        // BUG-04: filter returns empty for boilerplate; run_script adds "ok +" on success
+        // Filter returns empty for boilerplate; run_script adds "ok +" on success
         let raw = "> pkg@1.0.0 test\n$ vitest run\n\nDone in 2s\n";
         let stripped = filter_pnpm_run_output(raw);
         assert_eq!(stripped, "");
@@ -1410,7 +1410,7 @@ Done in 1.2s"#;
 
     #[test]
     fn test_native_commands_not_intercepted() {
-        // These are native pnpm commands -- must never be treated as scripts (BUG-03)
+        // These are native pnpm commands -- must never be treated as scripts
         let no_scripts: Option<PackageScripts> = None;
         assert!(!is_pnpm_script("exec", &no_scripts));
         assert!(!is_pnpm_script("dlx", &no_scripts));
@@ -1519,7 +1519,7 @@ Done in 1.2s"#;
 
     #[test]
     fn test_filter_pnpm_run_output_returns_empty_for_boilerplate() {
-        // BUG-04: filter_pnpm_run_output returns empty string, not "ok +"
+        // filter_pnpm_run_output returns empty string, not "ok +"
         let input = "> pkg@1.0.0 build\n$ tsc\n\nDone in 1s\n";
         let result = filter_pnpm_run_output(input);
         assert!(
@@ -1531,7 +1531,7 @@ Done in 1.2s"#;
 
     #[test]
     fn test_failure_empty_stdout_no_ok_checkmark() {
-        // BUG-04: empty stdout + failure should NOT produce "ok +"
+        // Empty stdout + failure should NOT produce "ok +"
         // Simulate the logic flow in run_script (can't call run_script since it calls exit)
         let stdout = "> pkg@1.0.0 test\n$ vitest run\n";
         let stderr = " ERR_PNPM_NO_PKG_MANIFEST  No package.json found";
@@ -1561,7 +1561,7 @@ Done in 1.2s"#;
         // In run_script success path: println!("ok +") -- verified by logic, not process::exit
     }
 
-    // ─── full pipeline token savings tests (QUAL-05) ─────────────────────
+    // ─── full pipeline token savings tests ─────────────────────
 
     fn count_tokens(text: &str) -> usize {
         text.split_whitespace().count()
