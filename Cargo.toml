@@ -20,12 +20,12 @@ regex = "1"
 lazy_static = "1.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-colored = "2"
-dirs = "5"
-rusqlite = { version = "0.31", features = ["bundled"] }
-toml = "0.8"
+colored = "3"
+dirs = "6"
+rusqlite = { version = "0.38", features = ["bundled"] }
+toml = "1.0"
 chrono = "0.4"
-thiserror = "1.0"
+thiserror = "2.0"
 tempfile = "3"
 
 [dev-dependencies]

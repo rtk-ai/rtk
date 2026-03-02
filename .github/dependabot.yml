@@ -1,0 +1,17 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown: # applies only to version-updates (security-updates will be suggested immediately)
+      default-days: 10
+      semver-minor-days: 14 # wait 14 days before applying minor updates
+      semver-major-days: 28
+    versioning-strategy: increase-if-necessary # Update Cargo.toml only if necessary https://github.com/dependabot/dependabot-core/issues/4009
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 10
