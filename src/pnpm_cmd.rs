@@ -1472,4 +1472,106 @@ Done in 1.2s"#;
         assert!(stripped.is_empty());
         // In run_script success path: println!("ok +") -- verified by logic, not process::exit
     }
+
+    // ─── full pipeline token savings tests (QUAL-05) ─────────────────────
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_full_pipeline_vitest_savings() {
+        // Realistic pnpm stdout containing vitest --reporter=json output
+        // Pipeline: raw pnpm stdout -> filter_pnpm_run_output (strip) -> apply_filter(Vitest)
+        let fixture = r#"> my-app@1.0.0 test /Users/dev/my-app
+$ vitest run --reporter=json
+
+{"numTotalTestSuites":5,"numPassedTestSuites":4,"numFailedTestSuites":1,"numPendingTestSuites":0,"numTotalTests":25,"numPassedTests":23,"numFailedTests":2,"numPendingTests":0,"startTime":1709312400000,"endTime":1709312405200,"testResults":[{"name":"src/utils.test.ts","assertionResults":[{"fullName":"utils > formats date correctly","status":"passed","failureMessages":[]},{"fullName":"utils > validates email format","status":"passed","failureMessages":[]},{"fullName":"utils > truncates long strings","status":"passed","failureMessages":[]},{"fullName":"utils > handles null input","status":"passed","failureMessages":[]}]},{"name":"src/api.test.ts","assertionResults":[{"fullName":"api > GET /users returns list","status":"passed","failureMessages":[]},{"fullName":"api > POST /users creates user","status":"passed","failureMessages":[]},{"fullName":"api > handles auth error","status":"failed","failureMessages":["Error: expected 200 got 500\n    at Object.<anonymous> (src/api.test.ts:15:5)\n    at Promise.then.completed"]},{"fullName":"api > validates request body","status":"passed","failureMessages":[]}]},{"name":"src/hooks.test.ts","assertionResults":[{"fullName":"hooks > useAuth returns user","status":"passed","failureMessages":[]},{"fullName":"hooks > useAuth handles logout","status":"passed","failureMessages":[]},{"fullName":"hooks > useFetch caches results","status":"passed","failureMessages":[]},{"fullName":"hooks > useFetch retries on error","status":"passed","failureMessages":[]},{"fullName":"hooks > useDebounce delays call","status":"passed","failureMessages":[]}]},{"name":"src/components/Button.test.ts","assertionResults":[{"fullName":"Button > renders with text","status":"passed","failureMessages":[]},{"fullName":"Button > handles click","status":"passed","failureMessages":[]},{"fullName":"Button > applies disabled state","status":"passed","failureMessages":[]},{"fullName":"Button > shows loading spinner","status":"passed","failureMessages":[]}]},{"name":"src/store.test.ts","assertionResults":[{"fullName":"store > initializes with defaults","status":"passed","failureMessages":[]},{"fullName":"store > updates state","status":"passed","failureMessages":[]},{"fullName":"store > handles concurrent updates","status":"failed","failureMessages":["Error: Race condition detected\n    at Object.<anonymous> (src/store.test.ts:42:10)"]},{"fullName":"store > persists to localStorage","status":"passed","failureMessages":[]},{"fullName":"store > clears on logout","status":"passed","failureMessages":[]},{"fullName":"store > subscribes to changes","status":"passed","failureMessages":[]}]}]}
+
+Done in 5.2s
+"#;
+
+        // Stage 1: Strip pnpm boilerplate
+        let stripped = filter_pnpm_run_output(fixture);
+        assert!(
+            !stripped.contains("> my-app@"),
+            "Lifecycle header should be stripped"
+        );
+        assert!(
+            !stripped.contains("Done in"),
+            "Done line should be stripped"
+        );
+        assert!(
+            stripped.contains("numTotalTests"),
+            "JSON payload should survive stripping"
+        );
+
+        // Stage 2: Apply vitest specialized filter
+        let (filtered, label) = apply_filter(FilterRoute::Vitest, &stripped).unwrap();
+        assert_eq!(label, "vitest (via pnpm run)");
+        assert!(
+            filtered.contains("PASS"),
+            "Filtered output should contain PASS summary"
+        );
+
+        // Stage 3: Verify token savings >= 60%
+        let input_tokens = count_tokens(fixture);
+        let output_tokens = count_tokens(&filtered);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Full pipeline vitest savings: expected >= 60%, got {:.1}% (input={}, output={})",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
+
+    #[test]
+    fn test_full_pipeline_playwright_savings() {
+        // Realistic pnpm stdout containing playwright --reporter=json output
+        // Pipeline: raw pnpm stdout -> filter_pnpm_run_output (strip) -> apply_filter(Playwright)
+        let fixture = r#"> my-app@1.0.0 test:e2e /Users/dev/my-app
+$ playwright test --reporter=json
+
+{"config":{"projects":[{"name":"chromium"}]},"suites":[{"title":"login.spec.ts","file":"tests/login.spec.ts","specs":[{"title":"should login with valid credentials","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":1234,"errors":[]}]}]},{"title":"should reject invalid password","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":567,"errors":[]}]}]},{"title":"should show error for locked account","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":890,"errors":[]}]}]},{"title":"should redirect after login","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":456,"errors":[]}]}]}],"suites":[]},{"title":"dashboard.spec.ts","file":"tests/dashboard.spec.ts","specs":[{"title":"shows metrics overview","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":1100,"errors":[]}]}]},{"title":"filters by date range","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":980,"errors":[]}]}]},{"title":"exports CSV report","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":1500,"errors":[]}]}]}],"suites":[]},{"title":"settings.spec.ts","file":"tests/settings.spec.ts","specs":[{"title":"updates profile name","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":670,"errors":[]}]}]},{"title":"changes password","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":890,"errors":[]}]}]},{"title":"toggles dark mode","ok":true,"tests":[{"status":"expected","projectName":"chromium","results":[{"status":"passed","duration":340,"errors":[]}]}]}],"suites":[]}],"stats":{"expected":10,"unexpected":0,"flaky":0,"skipped":0,"duration":8500}}
+
+Done in 12.3s
+"#;
+
+        // Stage 1: Strip pnpm boilerplate
+        let stripped = filter_pnpm_run_output(fixture);
+        assert!(
+            !stripped.contains("> my-app@"),
+            "Lifecycle header should be stripped"
+        );
+        assert!(
+            !stripped.contains("Done in"),
+            "Done line should be stripped"
+        );
+        assert!(
+            stripped.contains("stats"),
+            "JSON payload should survive stripping"
+        );
+
+        // Stage 2: Apply playwright specialized filter
+        let (filtered, label) = apply_filter(FilterRoute::Playwright, &stripped).unwrap();
+        assert_eq!(label, "playwright (via pnpm run)");
+        assert!(
+            filtered.contains("PASS"),
+            "Filtered output should contain PASS summary"
+        );
+
+        // Stage 3: Verify token savings >= 60%
+        let input_tokens = count_tokens(fixture);
+        let output_tokens = count_tokens(&filtered);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Full pipeline playwright savings: expected >= 60%, got {:.1}% (input={}, output={})",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
 }
