@@ -66,6 +66,42 @@ lazy_static! {
     /// e.g. "(10:23:45) WARNING: Warning message..."
     static ref WARNING_WITH_TIMESTAMP: Regex =
         Regex::new(r"^\(\d+:\d+:\d+\)\s*WARNING:").unwrap();
+
+    /// Matches test result lines
+    ///
+    /// e.g. "//pkg:test PASSED in 0.3s", "//pkg:test (cached) PASSED in 0.3s"
+    static ref TEST_RESULT_LINE: Regex =
+        Regex::new(r"^(//\S+)\s+(?:\(cached\)\s+)?(PASSED|FAILED|TIMEOUT|FLAKY|NO STATUS)\s+in\s+([\d.]+)s").unwrap();
+
+    /// Matches the Executed summary line
+    ///
+    /// e.g. "Executed 3 out of 3 tests: 3 tests pass."
+    static ref TEST_SUMMARY: Regex =
+        Regex::new(r"^Executed\s+(\d+)\s+out\s+of\s+(\d+)\s+tests?:").unwrap();
+
+    /// Matches test output delimiters
+    ///
+    /// e.g. "==================== Test output for //pkg:test:"
+    static ref TEST_OUTPUT_START: Regex =
+        Regex::new(r"^={10,}\s+Test output for\s+").unwrap();
+
+    /// Matches test output end delimiter
+    ///
+    /// e.g. "================================================================================"
+    static ref TEST_OUTPUT_END: Regex =
+        Regex::new(r"^={40,}$").unwrap();
+
+    /// Matches FAIL: lines with target
+    ///
+    /// e.g. "FAIL: //pkg:test (Exit 1) (see /path/to/test.log)"
+    static ref FAIL_LINE: Regex =
+        Regex::new(r"^FAIL:\s+(//\S+)").unwrap();
+
+    /// Matches elapsed time from INFO lines
+    ///
+    /// e.g. "INFO: Elapsed time: 3.89s, Critical Path: 1.23s"
+    static ref ELAPSED_TIME: Regex =
+        Regex::new(r"Elapsed time:\s*([\d.]+)s").unwrap();
 }
 
 /// A limit value that can be a specific number or unlimited ("all").
@@ -373,6 +409,317 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
     timer.track(
         &format!("bazel build {}", args.join(" ")),
         &format!("rtk bazel build {}", args.join(" ")),
+        &raw,
+        &filtered,
+    );
+
+    if !output.status.success() {
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
+}
+
+/**********************************************************************/
+/*                            bazel test                              */
+/**********************************************************************/
+
+/// Filter `bazel test` output.
+///
+/// # Arguments
+///
+/// * `stdout` - stdout output from `bazel test`
+/// * `stderr` - stderr output from `bazel test`
+///
+/// # Returns
+///
+/// The filtered `bazel test` output
+///
+/// # Notes
+///
+/// Strips the same build noise as `filter_bazel_build`, plus parses test
+/// result lines (PASSED/FAILED/TIMEOUT) and inline test output blocks.
+/// On all-pass, returns a one-liner. On failure, shows FAIL blocks and
+/// inline test output while stripping surrounding noise.
+///
+pub fn filter_bazel_test(stdout: &str, stderr: &str) -> String {
+    let mut passed: usize = 0;
+    let mut failed: usize = 0;
+    let mut elapsed: Option<String> = None;
+    let mut error_lines: Vec<String> = Vec::new();
+    let mut fail_blocks: Vec<String> = Vec::new();
+    let mut failed_result_lines: Vec<String> = Vec::new();
+    let mut inline_output_blocks: Vec<String> = Vec::new();
+
+    // State for collecting inline test output
+    let mut in_test_output = false;
+    let mut current_output_block: Vec<String> = Vec::new();
+
+    // Combine stderr + stdout (bazel sends most to stderr)
+    let combined = format!("{}\n{}", stderr, stdout);
+
+    for line in combined.lines() {
+        let trimmed = line.trim();
+
+        // Collecting inline test output between delimiter lines
+        if in_test_output {
+            if TEST_OUTPUT_END.is_match(trimmed) {
+                current_output_block.push(trimmed.to_string());
+                inline_output_blocks.push(current_output_block.join("\n"));
+                current_output_block.clear();
+                in_test_output = false;
+            } else {
+                current_output_block.push(line.to_string());
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Extract elapsed time before skipping INFO lines
+        if trimmed.starts_with("INFO:") || NOISE_WITH_TIMESTAMP.is_match(trimmed) {
+            if let Some(caps) = ELAPSED_TIME.captures(trimmed) {
+                elapsed = Some(caps[1].to_string());
+            }
+            continue;
+        }
+
+        // Strip progress lines: [N / M] ...
+        if PROGRESS_LINE.is_match(trimmed) {
+            continue;
+        }
+
+        // Strip loading/analyzing status
+        if trimmed.starts_with("Loading:")
+            || trimmed.starts_with("Analyzing:")
+            || trimmed.starts_with("Computing main repo mapping:")
+        {
+            continue;
+        }
+
+        // Strip Java notes
+        if trimmed.starts_with("Note: ") {
+            continue;
+        }
+
+        // Strip target output paths
+        if trimmed.starts_with("Target //") || trimmed.starts_with("bazel-bin/") {
+            continue;
+        }
+
+        // Strip DEBUG lines
+        if trimmed.starts_with("DEBUG:") {
+            continue;
+        }
+
+        // Strip timeout size warnings
+        if trimmed.starts_with("There were tests whose specified size") {
+            continue;
+        }
+
+        // Test result lines: //pkg:test PASSED in 0.3s
+        if let Some(caps) = TEST_RESULT_LINE.captures(trimmed) {
+            let status = &caps[2];
+            match status {
+                "PASSED" => passed += 1,
+                "FAILED" | "TIMEOUT" | "NO STATUS" => {
+                    failed += 1;
+                    failed_result_lines.push(trimmed.to_string());
+                }
+                "FLAKY" => passed += 1, // flaky but passed on retry
+                _ => {}
+            }
+            continue;
+        }
+
+        // Executed summary line (skip — we produce our own)
+        if TEST_SUMMARY.is_match(trimmed) {
+            continue;
+        }
+
+        // FAIL: lines
+        if FAIL_LINE.is_match(trimmed) {
+            fail_blocks.push(trimmed.to_string());
+            continue;
+        }
+
+        // Inline test output start
+        if TEST_OUTPUT_START.is_match(trimmed) {
+            in_test_output = true;
+            current_output_block.push(trimmed.to_string());
+            continue;
+        }
+
+        // ERROR lines
+        if ERROR_PLAIN.is_match(trimmed) || ERROR_WITH_TIMESTAMP.is_match(trimmed) {
+            if trimmed.contains("Build did NOT complete successfully")
+                || trimmed.contains("not all tests passed")
+            {
+                continue;
+            }
+            error_lines.push(trimmed.to_string());
+            continue;
+        }
+
+        // WARNING lines (strip — build noise)
+        if WARNING_PLAIN.is_match(trimmed) || WARNING_WITH_TIMESTAMP.is_match(trimmed) {
+            continue;
+        }
+
+        // Indented log paths after FAILED lines (e.g. "  /path/to/test.log")
+        // Keep only if we have failures
+        if trimmed.starts_with('/') && trimmed.ends_with(".log") && failed > 0 {
+            continue; // skip log paths — we show inline output instead
+        }
+
+        // Everything else is noise — skip
+    }
+
+    // Flush any unclosed test output block
+    if !current_output_block.is_empty() {
+        inline_output_blocks.push(current_output_block.join("\n"));
+    }
+
+    let elapsed_str = elapsed.unwrap_or_else(|| "0".to_string());
+
+    // Build error — no test results but ERROR lines present
+    if passed == 0 && failed == 0 && !error_lines.is_empty() {
+        let mut result = String::from("bazel test: build failed\n");
+        result.push_str("═══════════════════════════════════════\n");
+        for err in error_lines.iter().take(15) {
+            result.push_str(err);
+            result.push('\n');
+        }
+        if error_lines.len() > 15 {
+            result.push_str(&format!("\n... +{} more errors\n", error_lines.len() - 15));
+        }
+        return result.trim().to_string();
+    }
+
+    // All pass: one-liner
+    if failed == 0 {
+        return format!(
+            "\u{2713} bazel test: {} passed, 0 failed ({}s)",
+            passed, elapsed_str
+        );
+    }
+
+    // Has failures: show details
+    let mut result = String::new();
+    result.push_str(&format!(
+        "bazel test: {} failed, {} passed ({}s)\n",
+        failed, passed, elapsed_str
+    ));
+    result.push_str("═══════════════════════════════════════\n");
+
+    // FAIL: lines
+    let mut block_count = 0;
+    for fail in &fail_blocks {
+        if block_count >= 15 {
+            break;
+        }
+        result.push_str(fail);
+        result.push('\n');
+        block_count += 1;
+    }
+
+    // Inline test output blocks
+    for block in &inline_output_blocks {
+        if block_count >= 15 {
+            break;
+        }
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(block);
+        result.push('\n');
+        block_count += 1;
+    }
+
+    // FAILED result lines
+    for line in &failed_result_lines {
+        if block_count >= 15 {
+            break;
+        }
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(line);
+        result.push('\n');
+        block_count += 1;
+    }
+
+    // Error lines (if any)
+    for err in &error_lines {
+        if block_count >= 15 {
+            break;
+        }
+        result.push_str(err);
+        result.push('\n');
+        block_count += 1;
+    }
+
+    let total_blocks = fail_blocks.len()
+        + inline_output_blocks.len()
+        + failed_result_lines.len()
+        + error_lines.len();
+    if total_blocks > 15 {
+        result.push_str(&format!("\n... +{} more blocks\n", total_blocks - 15));
+    }
+
+    result.trim().to_string()
+}
+
+/// Run `bazel test` while filtering the output.
+///
+/// # Arguments
+///
+/// * `args` - Arguments to pass to `bazel test`
+/// * `verbose` - Verbosity level
+///
+/// # Returns
+///
+/// Result of the operation
+///
+pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("bazel");
+    cmd.arg("test");
+
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: bazel test {}", args.join(" "));
+    }
+
+    let output = cmd
+        .output()
+        .context("Failed to run bazel test. Is Bazel installed?")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    let filtered = filter_bazel_test(&stdout, &stderr);
+
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_test", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
+
+    timer.track(
+        &format!("bazel test {}", args.join(" ")),
+        &format!("rtk bazel test {}", args.join(" ")),
         &raw,
         &filtered,
     );
@@ -1520,5 +1867,232 @@ some non-target output line
         // All 16 targets should be present (depth=all)
         assert!(result.contains("🎯 :bar\n"));
         assert!(result.contains("🎯 :runner_test"));
+    }
+
+    /******************************************************************/
+    /*                       bazel test tests                         */
+    /******************************************************************/
+    fn btest(stdout: &str, stderr: &str) -> String {
+        filter_bazel_test(stdout, stderr)
+    }
+
+    #[test]
+    fn test_filter_bazel_test_all_pass() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: 3 targets (81 packages loaded, 684 targets configured)
+INFO: Analyzed 3 targets (81 packages loaded, 684 targets configured).
+INFO: Found 3 test targets...
+[0 / 4] [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[5 / 14] Compiling src/test/java/com/google/devtools/build/lib/util/CommandUtilsTest.java; 0s worker
+[14 / 14] 3 tests, 1 action running
+//src/test/java/com/google/devtools/build/lib/util:CommandUtilsTest    PASSED in 0.3s
+//src/test/java/com/google/devtools/build/lib/util:DecimalBucketerTest    PASSED in 0.3s
+//src/test/java/com/google/devtools/build/lib/util:StringEncodingTest    PASSED in 0.3s
+INFO: Elapsed time: 5.164s, Critical Path: 3.89s
+INFO: 6 processes: 3 internal, 3 worker.
+INFO: Build completed successfully, 6 total actions
+Executed 3 out of 3 tests: 3 tests pass.";
+        let result = btest("", stderr);
+        assert_eq!(result, "\u{2713} bazel test: 3 passed, 0 failed (5.164s)");
+    }
+
+    #[test]
+    fn test_filter_bazel_test_with_cached() {
+        let stderr = "\
+Loading:
+INFO: Analyzed 2 targets (0 packages loaded, 0 targets configured).
+INFO: Found 2 test targets...
+//src/test/java/com/google/devtools/build/lib/util:CommandUtilsTest (cached) PASSED in 0.3s
+//src/test/java/com/google/devtools/build/lib/util:StringEncodingTest    PASSED in 0.1s
+INFO: Elapsed time: 0.412s, Critical Path: 0.10s
+INFO: 2 processes: 1 internal, 1 worker.
+INFO: Build completed successfully, 2 total actions
+Executed 1 out of 2 tests: 2 tests pass.";
+        let result = btest("", stderr);
+        assert_eq!(result, "\u{2713} bazel test: 2 passed, 0 failed (0.412s)");
+    }
+
+    #[test]
+    fn test_filter_bazel_test_failure() {
+        let stderr = "\
+Loading:
+INFO: Analyzed 1 target (0 packages loaded, 0 targets configured).
+INFO: Found 1 test target...
+FAIL: //src/test/java/com/google/devtools/build/lib/util:StringEncodingTest (Exit 1) (see /home/user/.cache/bazel/_bazel_user/abc/execroot/io_bazel/bazel-out/k8-fastbuild/testlogs/src/test/java/com/google/devtools/build/lib/util/StringEncodingTest/test.log)
+//src/test/java/com/google/devtools/build/lib/util:StringEncodingTest    FAILED in 0.3s
+  /home/user/.cache/bazel/testlogs/src/test/java/com/google/devtools/build/lib/util/StringEncodingTest/test.log
+INFO: Elapsed time: 0.340s, Critical Path: 0.30s
+INFO: 2 processes: 1 internal, 1 worker.
+INFO: Build completed, 1 test FAILED, 2 total actions
+Executed 1 out of 1 test: 1 fails locally.";
+        let result = btest("", stderr);
+
+        assert!(result.contains("bazel test: 1 failed, 0 passed (0.340s)"));
+        assert!(result.contains("═══════════════════════════════════════"));
+        assert!(result.contains("FAIL: //src/test/java"));
+        assert!(result.contains("FAILED in 0.3s"));
+        // Noise stripped
+        assert!(!result.contains("Loading:"));
+        assert!(!result.contains("INFO:"));
+        assert!(!result.contains("Executed 1 out of"));
+    }
+
+    #[test]
+    fn test_filter_bazel_test_failure_with_test_output() {
+        let stderr = "\
+Loading:
+INFO: Analyzed 1 target (0 packages loaded, 0 targets configured).
+INFO: Found 1 test target...
+FAIL: //src/test/java/com/google/devtools/build/lib/util:StringEncodingTest (Exit 1)
+==================== Test output for //src/test/java/com/google/devtools/build/lib/util:StringEncodingTest:
+JUnit4 Test Runner
+.EE
+Time: 0.002
+There were 2 failures:
+1) initializationError(org.junit.runner.manipulation.Filter)
+java.lang.Exception: No tests found matching RegEx[NONEXISTENT_TEST]
+\tat org.junit.internal.requests.FilterRequest.getRunner(FilterRequest.java:40)
+\tat com.google.testing.junit.runner.internal.junit4.JUnit4Runner.createErrorReportingRequestForFilterError(JUnit4Runner.java:233)
+================================================================================
+//src/test/java/com/google/devtools/build/lib/util:StringEncodingTest    FAILED in 0.3s
+INFO: Elapsed time: 0.340s, Critical Path: 0.30s
+INFO: Build completed, 1 test FAILED, 2 total actions
+Executed 1 out of 1 test: 1 fails locally.";
+        let result = btest("", stderr);
+
+        assert!(result.contains("bazel test: 1 failed, 0 passed"));
+        // Inline test output preserved
+        assert!(result.contains("==================== Test output for"));
+        assert!(result.contains("JUnit4 Test Runner"));
+        assert!(result.contains("No tests found matching"));
+        assert!(result.contains(
+            "================================================================================"
+        ));
+        // FAIL line preserved
+        assert!(result.contains("FAIL: //src/test/java"));
+        // Result line preserved
+        assert!(result.contains("FAILED in 0.3s"));
+    }
+
+    #[test]
+    fn test_filter_bazel_test_strips_build_noise() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: 1 target (81 packages loaded, 684 targets configured)
+INFO: Analyzed 1 target (81 packages loaded).
+[0 / 4] [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[5 / 14] Compiling something.java; 0s worker
+[14 / 14] 1 test running
+INFO: Found 1 test target...
+DEBUG: /some/debug/info
+Note: Some input files use deprecated API.
+Target //src:target up-to-date:
+  bazel-bin/src/target
+//pkg:test    PASSED in 0.5s
+INFO: Elapsed time: 1.00s, Critical Path: 0.50s
+INFO: Build completed successfully, 4 total actions
+Executed 1 out of 1 test: 1 tests pass.";
+        let result = btest("", stderr);
+
+        assert!(!result.contains("Computing main repo"));
+        assert!(!result.contains("Loading:"));
+        assert!(!result.contains("Analyzing:"));
+        assert!(!result.contains("[0 / 4]"));
+        assert!(!result.contains("[5 / 14]"));
+        assert!(!result.contains("[14 / 14]"));
+        assert!(!result.contains("INFO:"));
+        assert!(!result.contains("DEBUG:"));
+        assert!(!result.contains("Note:"));
+        assert!(!result.contains("Target //src:target"));
+        assert!(!result.contains("bazel-bin/"));
+        assert!(!result.contains("Executed 1 out of"));
+        assert!(result.contains("\u{2713} bazel test: 1 passed, 0 failed"));
+    }
+
+    #[test]
+    fn test_filter_bazel_test_build_error() {
+        let stderr = "\
+Loading:
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//src:nonexistent': no such target '//src:nonexistent'
+ERROR: no such target '//src:nonexistent': target 'nonexistent' not declared
+INFO: Elapsed time: 0.142s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully";
+        let result = btest("", stderr);
+
+        assert!(result.contains("bazel test: build failed"));
+        assert!(result.contains("═══════════════════════════════════════"));
+        assert!(result.contains("ERROR: Skipping"));
+        assert!(result.contains("ERROR: no such target"));
+        // "Build did NOT complete successfully" stripped
+        assert!(!result.contains("Build did NOT complete successfully"));
+    }
+
+    #[test]
+    fn test_filter_bazel_test_empty() {
+        let result = btest("", "");
+        assert_eq!(result, "\u{2713} bazel test: 0 passed, 0 failed (0s)");
+    }
+
+    #[test]
+    fn test_filter_bazel_test_token_savings() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: 3 targets (81 packages loaded, 684 targets configured)
+Analyzing: 3 targets (81 packages loaded, 684 targets configured)
+INFO: Analyzed 3 targets (81 packages loaded, 684 targets configured).
+INFO: Found 3 test targets...
+[0 / 4] [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[1 / 14] Compiling src/test/java/com/google/devtools/build/lib/util/CommandUtilsTest.java; 0s worker
+[2 / 14] Compiling src/test/java/com/google/devtools/build/lib/util/DecimalBucketerTest.java; 0s worker
+[5 / 14] Compiling src/test/java/com/google/devtools/build/lib/util/StringEncodingTest.java; 0s worker
+[10 / 14] Building test deploy jar
+[14 / 14] 3 tests, 1 action running
+//src/test/java/com/google/devtools/build/lib/util:CommandUtilsTest    PASSED in 0.3s
+//src/test/java/com/google/devtools/build/lib/util:DecimalBucketerTest    PASSED in 0.3s
+//src/test/java/com/google/devtools/build/lib/util:StringEncodingTest    PASSED in 0.3s
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+INFO: Elapsed time: 5.164s, Critical Path: 3.89s
+INFO: 6 processes: 3 internal, 3 worker.
+INFO: Build completed successfully, 6 total actions
+Executed 3 out of 3 tests: 3 tests pass.";
+
+        let input_tokens = count_tokens(stderr);
+        let result = btest("", stderr);
+        let output_tokens = count_tokens(&result);
+
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Bazel test filter: expected ≥60% savings, got {:.1}% ({} → {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
+
+    #[test]
+    fn test_filter_bazel_test_strips_timeout_warnings() {
+        let stderr = "\
+INFO: Analyzed 1 target (0 packages loaded).
+INFO: Found 1 test target...
+//pkg:test    PASSED in 0.5s
+There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.
+INFO: Elapsed time: 1.00s, Critical Path: 0.50s
+INFO: Build completed successfully, 2 total actions
+Executed 1 out of 1 test: 1 tests pass.";
+        let result = btest("", stderr);
+
+        assert!(!result.contains("There were tests whose specified size"));
+        assert!(!result.contains("--test_verbose_timeout_warnings"));
+        assert!(result.contains("\u{2713} bazel test: 1 passed, 0 failed"));
     }
 }

@@ -925,6 +925,12 @@ enum BazelCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Test with compact output (failures only, 85% token reduction)
+    Test {
+        /// Additional bazel test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Query with grouped target output (85% token reduction)
     Query {
         /// Maximum depth of package tree to show (default: 1, "all" for unlimited)
@@ -1596,6 +1602,9 @@ fn main() -> Result<()> {
             }
             BazelCommands::Build { args } => {
                 bazel_cmd::run_build(&args, cli.verbose)?;
+            }
+            BazelCommands::Test { args } => {
+                bazel_cmd::run_test(&args, cli.verbose)?;
             }
             BazelCommands::Other(args) => {
                 bazel_cmd::run_other(&args, cli.verbose)?;
