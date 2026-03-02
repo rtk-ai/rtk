@@ -21,6 +21,10 @@ struct GoTestEvent {
     output: Option<String>,
     #[serde(rename = "Elapsed")]
     elapsed: Option<f64>,
+    #[serde(rename = "ImportPath")]
+    import_path: Option<String>,
+    #[serde(rename = "FailedBuild")]
+    failed_build: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -28,6 +32,8 @@ struct PackageResult {
     pass: usize,
     fail: usize,
     skip: usize,
+    build_failed: bool,
+    build_errors: Vec<String>,
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
 }
 
@@ -245,6 +251,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
 fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
     let mut current_test_output: HashMap<(String, String), Vec<String>> = HashMap::new(); // (package, test) -> outputs
+    let mut build_output: HashMap<String, Vec<String>> = HashMap::new(); // import_path -> error lines
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -257,6 +264,29 @@ fn filter_go_test_json(output: &str) -> String {
             Err(_) => continue, // Skip non-JSON lines
         };
 
+        // Handle build-output/build-fail events (use ImportPath, no Package)
+        match event.action.as_str() {
+            "build-output" => {
+                if let (Some(import_path), Some(output_text)) =
+                    (&event.import_path, &event.output)
+                {
+                    let text = output_text.trim_end().to_string();
+                    if !text.is_empty() {
+                        build_output
+                            .entry(import_path.clone())
+                            .or_default()
+                            .push(text);
+                    }
+                }
+                continue;
+            }
+            "build-fail" => {
+                // build-fail has ImportPath — we'll handle it when the package-level fail arrives
+                continue;
+            }
+            _ => {}
+        }
+
         let package = event.package.unwrap_or_else(|| "unknown".to_string());
         let pkg_result = packages.entry(package.clone()).or_default();
 
@@ -268,12 +298,22 @@ fn filter_go_test_json(output: &str) -> String {
             }
             "fail" => {
                 if let Some(test) = &event.test {
+                    // Individual test failure
                     pkg_result.fail += 1;
 
                     // Collect output for failed test
                     let key = (package.clone(), test.clone());
                     let outputs = current_test_output.remove(&key).unwrap_or_default();
                     pkg_result.failed_tests.push((test.clone(), outputs));
+                } else if event.failed_build.is_some() {
+                    // Package-level build failure
+                    pkg_result.build_failed = true;
+                    // Collect build errors from the import path
+                    if let Some(import_path) = &event.failed_build {
+                        if let Some(errors) = build_output.remove(import_path) {
+                            pkg_result.build_errors = errors;
+                        }
+                    }
                 }
             }
             "skip" => {
@@ -300,12 +340,15 @@ fn filter_go_test_json(output: &str) -> String {
     let total_pass: usize = packages.values().map(|p| p.pass).sum();
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
+    let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
 
-    if total_fail == 0 && total_pass == 0 {
+    let has_failures = total_fail > 0 || total_build_fail > 0;
+
+    if !has_failures && total_pass == 0 {
         return "Go test: No tests found".to_string();
     }
 
-    if total_fail == 0 {
+    if !has_failures {
         return format!(
             "✓ Go test: {} passed in {} packages",
             total_pass, total_packages
@@ -315,13 +358,34 @@ fn filter_go_test_json(output: &str) -> String {
     let mut result = String::new();
     result.push_str(&format!(
         "Go test: {} passed, {} failed",
-        total_pass, total_fail
+        total_pass,
+        total_fail + total_build_fail
     ));
     if total_skip > 0 {
         result.push_str(&format!(", {} skipped", total_skip));
     }
     result.push_str(&format!(" in {} packages\n", total_packages));
     result.push_str("═══════════════════════════════════════\n");
+
+    // Show build failures first
+    for (package, pkg_result) in packages.iter() {
+        if !pkg_result.build_failed {
+            continue;
+        }
+
+        result.push_str(&format!(
+            "\n📦 {} [build failed]\n",
+            compact_package_name(package)
+        ));
+
+        for line in &pkg_result.build_errors {
+            let trimmed = line.trim();
+            // Skip the "# package" header line
+            if !trimmed.starts_with('#') && !trimmed.is_empty() {
+                result.push_str(&format!("  {}\n", truncate(trimmed, 120)));
+            }
+        }
+    }
 
     // Show failed tests grouped by package
     for (package, pkg_result) in packages.iter() {

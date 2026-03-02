@@ -1,3 +1,4 @@
+use crate::mypy_cmd;
 use crate::ruff_cmd;
 use crate::tracking;
 use crate::utils::{package_manager_exec, truncate};
@@ -169,7 +170,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
             }
         }
         "pylint" => filter_pylint_json(&stdout),
-        "mypy" => filter_mypy_output(&raw),
+        "mypy" => mypy_cmd::filter_mypy_output(&raw),
         _ => filter_generic_lint(&raw),
     };
 
@@ -406,124 +407,6 @@ fn filter_pylint_json(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Filter mypy text output - parse and group by error code and file
-fn filter_mypy_output(output: &str) -> String {
-    // Regex pattern: path/to/file.py:line: error: message [error-code]
-    let re = Regex::new(r"^(.+\.py):(\d+): (error|warning|note): (.+?) \[(.+?)\]").unwrap();
-
-    let mut issues: Vec<(String, String, String, String)> = Vec::new(); // (file, line, level, code)
-    let mut errors = 0;
-    let mut warnings = 0;
-    let mut notes = 0;
-
-    for line in output.lines() {
-        if let Some(caps) = re.captures(line) {
-            let file = caps.get(1).map_or("", |m| m.as_str());
-            let line_num = caps.get(2).map_or("", |m| m.as_str());
-            let level = caps.get(3).map_or("", |m| m.as_str());
-            let code = caps.get(5).map_or("", |m| m.as_str());
-
-            match level {
-                "error" => errors += 1,
-                "warning" => warnings += 1,
-                "note" => notes += 1,
-                _ => {}
-            }
-
-            issues.push((
-                file.to_string(),
-                line_num.to_string(),
-                level.to_string(),
-                code.to_string(),
-            ));
-        }
-    }
-
-    if issues.is_empty() {
-        // Check if mypy output contains "Success" or similar
-        if output.contains("Success") || output.trim().is_empty() {
-            return "✓ Mypy: No issues found".to_string();
-        }
-        // Fallback to generic output if no regex matches
-        return format!("Mypy output:\n{}", truncate(output, 500));
-    }
-
-    // Count unique files
-    let unique_files: std::collections::HashSet<_> = issues.iter().map(|(f, _, _, _)| f).collect();
-    let total_files = unique_files.len();
-
-    // Group by error code
-    let mut by_code: HashMap<String, usize> = HashMap::new();
-    for (_, _, _, code) in &issues {
-        *by_code.entry(code.clone()).or_insert(0) += 1;
-    }
-
-    // Group by file
-    let mut by_file: HashMap<&str, usize> = HashMap::new();
-    for (file, _, _, _) in &issues {
-        *by_file.entry(file.as_str()).or_insert(0) += 1;
-    }
-
-    let mut file_counts: Vec<_> = by_file.iter().collect();
-    file_counts.sort_by(|a, b| b.1.cmp(a.1));
-
-    // Build output
-    let mut result = String::new();
-    result.push_str(&format!(
-        "Mypy: {} issues in {} files\n",
-        issues.len(),
-        total_files
-    ));
-
-    if errors > 0 || warnings > 0 {
-        result.push_str(&format!("  {} errors, {} warnings", errors, warnings));
-        if notes > 0 {
-            result.push_str(&format!(", {} notes", notes));
-        }
-        result.push('\n');
-    }
-
-    result.push_str("═══════════════════════════════════════\n");
-
-    // Show top error codes
-    let mut code_counts: Vec<_> = by_code.iter().collect();
-    code_counts.sort_by(|a, b| b.1.cmp(a.1));
-
-    if !code_counts.is_empty() {
-        result.push_str("Top error codes:\n");
-        for (code, count) in code_counts.iter().take(10) {
-            result.push_str(&format!("  {} ({}x)\n", code, count));
-        }
-        result.push('\n');
-    }
-
-    // Show top files
-    result.push_str("Top files:\n");
-    for (file, count) in file_counts.iter().take(10) {
-        let short_path = compact_path(file);
-        result.push_str(&format!("  {} ({} issues)\n", short_path, count));
-
-        // Show top 3 error codes in this file
-        let mut file_codes: HashMap<String, usize> = HashMap::new();
-        for (_f, _, _, code) in issues.iter().filter(|(f, _, _, _)| f == *file) {
-            *file_codes.entry(code.clone()).or_insert(0) += 1;
-        }
-
-        let mut file_code_counts: Vec<_> = file_codes.iter().collect();
-        file_code_counts.sort_by(|a, b| b.1.cmp(a.1));
-
-        for (code, count) in file_code_counts.iter().take(3) {
-            result.push_str(&format!("    {} ({})\n", code, count));
-        }
-    }
-
-    if file_counts.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", file_counts.len() - 10));
-    }
-
-    result.trim().to_string()
-}
-
 /// Filter generic linter output (fallback for non-ESLint linters)
 fn filter_generic_lint(output: &str) -> String {
     let mut warnings = 0;
@@ -693,33 +576,6 @@ mod tests {
         assert!(result.contains("1 errors, 2 warnings"));
         assert!(result.contains("unused-variable (W0612)"));
         assert!(result.contains("undefined-variable (E0602)"));
-        assert!(result.contains("main.py"));
-        assert!(result.contains("utils.py"));
-    }
-
-    #[test]
-    fn test_filter_mypy_no_issues() {
-        let output = "Success: no issues found in 5 source files";
-        let result = filter_mypy_output(output);
-        assert!(result.contains("✓ Mypy"));
-        assert!(result.contains("No issues found"));
-    }
-
-    #[test]
-    fn test_filter_mypy_with_errors() {
-        let output = r#"src/main.py:10: error: Incompatible return value type [return-value]
-src/main.py:15: error: Argument 1 has incompatible type "str"; expected "int" [arg-type]
-src/utils.py:20: error: Name "foo" is not defined [name-defined]
-src/utils.py:25: warning: Unused "type: ignore" comment [unused-ignore]
-Found 4 errors in 2 files (checked 5 source files)"#;
-
-        let result = filter_mypy_output(output);
-        assert!(result.contains("4 issues"));
-        assert!(result.contains("2 files"));
-        assert!(result.contains("3 errors, 1 warnings"));
-        assert!(result.contains("return-value"));
-        assert!(result.contains("arg-type"));
-        assert!(result.contains("name-defined"));
         assert!(result.contains("main.py"));
         assert!(result.contains("utils.py"));
     }
