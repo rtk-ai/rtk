@@ -68,8 +68,7 @@ lazy_static! {
     // Done in 3.4s
     static ref DONE_MSG: Regex = Regex::new(r"^Done in \d").unwrap();
     // ELIFECYCLE  Command failed with exit code 1.
-    static ref ELIFECYCLE: Regex = Regex::new(r"(?i)ELIFECYCLE|ERR_PNPM").unwrap();
-    // For stderr stripping: only match ELIFECYCLE, preserve ERR_PNPM messages (BUG-04)
+    // Matches only ELIFECYCLE, preserves ERR_PNPM messages (BUG-04)
     static ref ELIFECYCLE_ONLY: Regex = Regex::new(r"(?i)ELIFECYCLE").unwrap();
     // Progress: resolved 123, reused 120, downloaded 3
     static ref PROGRESS: Regex = Regex::new(r"^Progress:").unwrap();
@@ -659,7 +658,7 @@ pub(crate) fn filter_pnpm_run_output(output: &str) -> String {
         if DONE_MSG.is_match(trimmed) {
             continue;
         }
-        if ELIFECYCLE.is_match(trimmed) {
+        if ELIFECYCLE_ONLY.is_match(trimmed) {
             continue;
         }
         if PROGRESS.is_match(trimmed) {
@@ -1051,6 +1050,14 @@ Done in 5.2s
             "Expected ≥40% savings, got {:.1}%",
             savings
         );
+    }
+
+    #[test]
+    fn test_filter_pnpm_run_output_preserves_err_pnpm() {
+        let input = " ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND  No package.json (or package.yaml, or package.json5) was found in \"/Users/test\".";
+        let result = filter_pnpm_run_output(input);
+        assert!(result.contains("ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND"));
+        assert!(result.contains("No package.json"));
     }
 
     // ─── route_script tests ──────────────────────────────────────────────
