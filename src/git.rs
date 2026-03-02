@@ -800,6 +800,7 @@ fn run_push(args: &[String], verbose: u8) -> Result<()> {
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     Ok(())
@@ -885,6 +886,7 @@ fn run_pull(args: &[String], verbose: u8) -> Result<()> {
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     Ok(())
@@ -1063,7 +1065,7 @@ fn run_fetch(args: &[String], verbose: u8) -> Result<()> {
         if !stderr.trim().is_empty() {
             eprintln!("{}", stderr);
         }
-        return Ok(());
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     // Count new refs from stderr (git fetch outputs to stderr)
@@ -1163,6 +1165,10 @@ fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<(
                 &combined,
                 &msg,
             );
+
+            if !output.status.success() {
+                std::process::exit(output.status.code().unwrap_or(1));
+            }
         }
         _ => {
             // Default: git stash (push)
@@ -1195,6 +1201,10 @@ fn run_stash(subcommand: Option<&str>, args: &[String], verbose: u8) -> Result<(
             };
 
             timer.track("git stash", "rtk git stash", &combined, &msg);
+
+            if !output.status.success() {
+                std::process::exit(output.status.code().unwrap_or(1));
+            }
         }
     }
 
@@ -1265,6 +1275,7 @@ fn run_worktree(args: &[String], verbose: u8) -> Result<()> {
             if !stderr.trim().is_empty() {
                 eprintln!("{}", stderr);
             }
+            std::process::exit(output.status.code().unwrap_or(1));
         }
         return Ok(());
     }
