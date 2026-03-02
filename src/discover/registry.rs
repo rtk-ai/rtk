@@ -162,6 +162,12 @@ pub const ROUTES: &[Route] = &[
         subcmds: Subcmds::Any,
         rtk_cmd: "mypy",
     },
+    // Unix word/line/byte counting
+    Route {
+        binaries: &["wc"],
+        subcmds: Subcmds::Any,
+        rtk_cmd: "wc",
+    },
 ];
 
 /// Look up the routing entry for a binary + subcommand.
@@ -275,6 +281,7 @@ const PATTERNS: &[&str] = &[
     r"^(pip|pip3)\s+(list|outdated|install|show)(\s|$)",
     r"^golangci-lint(\s|$)",
     r"^(python3?\s+-m\s+)?mypy(\s|$)",
+    r"^wc(\s|$)",
 ];
 
 const RULES: &[RtkRule] = &[
@@ -473,6 +480,13 @@ const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        rtk_cmd: "rtk wc",
+        category: "Files",
+        savings_pct: 40.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 /// Commands to ignore (shell builtins, trivial, already rtk).
@@ -501,7 +515,6 @@ const IGNORED_PREFIXES: &[&str] = &[
     "kill ",
     "set ",
     "unset ",
-    "wc ",
     "sort ",
     "uniq ",
     "tr ",
@@ -1242,5 +1255,37 @@ mod tests {
                 status: RtkStatus::Existing,
             }
         );
+    }
+
+    #[test]
+    fn test_classify_wc() {
+        assert_eq!(
+            classify_command("wc -l src/main.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk wc",
+                category: "Files",
+                estimated_savings_pct: 40.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_wc_bare() {
+        assert_eq!(
+            classify_command("wc"),
+            Classification::Supported {
+                rtk_equivalent: "rtk wc",
+                category: "Files",
+                estimated_savings_pct: 40.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_route_wc() {
+        let route = lookup("wc", "").expect("wc should be in ROUTES");
+        assert_eq!(route.rtk_cmd, "wc");
     }
 }
