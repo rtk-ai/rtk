@@ -267,8 +267,7 @@ fn filter_go_test_json(output: &str) -> String {
         // Handle build-output/build-fail events (use ImportPath, no Package)
         match event.action.as_str() {
             "build-output" => {
-                if let (Some(import_path), Some(output_text)) =
-                    (&event.import_path, &event.output)
+                if let (Some(import_path), Some(output_text)) = (&event.import_path, &event.output)
                 {
                     let text = output_text.trim_end().to_string();
                     if !text.is_empty() {
