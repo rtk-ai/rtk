@@ -69,6 +69,8 @@ lazy_static! {
     static ref DONE_MSG: Regex = Regex::new(r"^Done in \d").unwrap();
     // ELIFECYCLE  Command failed with exit code 1.
     static ref ELIFECYCLE: Regex = Regex::new(r"(?i)ELIFECYCLE|ERR_PNPM").unwrap();
+    // For stderr stripping: only match ELIFECYCLE, preserve ERR_PNPM messages (BUG-04)
+    static ref ELIFECYCLE_ONLY: Regex = Regex::new(r"(?i)ELIFECYCLE").unwrap();
     // Progress: resolved 123, reused 120, downloaded 3
     static ref PROGRESS: Regex = Regex::new(r"^Progress:").unwrap();
 }
@@ -638,7 +640,8 @@ impl PackageScripts {
     }
 }
 
-/// Strip pnpm-specific boilerplate from script output
+/// Strip pnpm-specific boilerplate from script output.
+/// Returns empty string when all lines are boilerplate (BUG-04: caller decides what to show).
 pub(crate) fn filter_pnpm_run_output(output: &str) -> String {
     let mut result = Vec::new();
 
@@ -665,11 +668,21 @@ pub(crate) fn filter_pnpm_run_output(output: &str) -> String {
         result.push(line.to_string());
     }
 
-    if result.is_empty() {
-        "ok ✓".to_string()
-    } else {
-        result.join("\n")
-    }
+    result.join("\n")
+}
+
+/// Strip pnpm boilerplate from stderr for failure display.
+/// Removes ELIFECYCLE and Done lines but preserves ERR_PNPM messages
+/// (those are the actual error messages users need to see).
+pub(crate) fn strip_pnpm_stderr(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !ELIFECYCLE_ONLY.is_match(trimmed) && !DONE_MSG.is_match(trimmed)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Route a script name to a specialized filter (static rules + cached package.json detection)
@@ -779,7 +792,9 @@ pub(crate) fn apply_filter(route: FilterRoute, output: &str) -> Result<(String, 
     Ok((filtered, label))
 }
 
-/// Execute `pnpm run <script>` with smart routing to specialized filters
+/// Execute `pnpm run <script>` with smart routing to specialized filters.
+/// Stream-separated: feeds stdout-only to filters (BUG-01, BUG-02).
+/// Shows stderr on failure, "ok +" only on success with empty stdout (BUG-04).
 pub fn run_script(
     script: &str,
     args: &[String],
@@ -807,41 +822,81 @@ pub fn run_script(
     let output = cmd
         .output()
         .context(format!("Failed to run pnpm run {}", script))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.status.code().unwrap_or(1);
 
-    // On failure: show raw output + tee hint, exit
+    // For tee recovery: combined output (stdout+stderr)
+    let raw_for_tee = format!("{}\n{}", stdout_str, stderr_str);
+
+    // Stage 1: Strip pnpm boilerplate from STDOUT ONLY (BUG-01, BUG-02 fix)
+    let stripped = filter_pnpm_run_output(&stdout_str);
+
     if !output.status.success() {
-        let stripped = filter_pnpm_run_output(&raw);
-        if let Some(hint) =
-            crate::tee::tee_and_hint(&raw, &format!("pnpm-run-{}", script), exit_code)
-        {
-            println!("{}\n{}", stripped, hint);
+        // FAILURE PATH: filter stdout through specialized filter, show stderr
+        let filtered = if !stripped.is_empty() {
+            match route_script(script, pkg_scripts.as_ref()) {
+                Some(route) => match apply_filter(route, &stripped) {
+                    Ok((result, label)) => {
+                        if verbose > 0 {
+                            eprintln!("Routed to: {}", label);
+                        }
+                        result
+                    }
+                    Err(e) => {
+                        if verbose > 0 {
+                            eprintln!("[RTK:FALLBACK] filter error: {}", e);
+                        }
+                        stripped.clone()
+                    }
+                },
+                None => stripped.clone(),
+            }
         } else {
-            println!("{}", stripped);
+            String::new()
+        };
+
+        // Strip pnpm boilerplate from stderr but preserve ERR_PNPM messages (BUG-04)
+        let stderr_display = strip_pnpm_stderr(&stderr_str);
+
+        // Show: filtered stdout (if any) then stderr (if any)
+        let display = [filtered.as_str(), stderr_display.as_str()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if let Some(hint) =
+            crate::tee::tee_and_hint(&raw_for_tee, &format!("pnpm-run-{}", script), exit_code)
+        {
+            if display.is_empty() {
+                println!("{}", hint);
+            } else {
+                println!("{}\n{}", display, hint);
+            }
+        } else if !display.is_empty() {
+            println!("{}", display);
         }
+
         timer.track(
             &format!("pnpm run {} {}", script, args.join(" ")),
             &format!("rtk pnpm run {} {}", script, args.join(" ")),
-            &raw,
-            &stripped,
+            &raw_for_tee,
+            &display,
         );
         std::process::exit(exit_code);
     }
 
-    // Strip pnpm boilerplate
-    let stripped = filter_pnpm_run_output(&raw);
-
-    // If all output was boilerplate, just show ok
-    if stripped == "ok ✓" {
-        println!("{}", stripped);
+    // SUCCESS PATH: "ok +" only when exit 0 AND stripped stdout is empty (BUG-04)
+    if stripped.is_empty() {
+        let display = "ok \u{2713}".to_string();
+        println!("{}", display);
         timer.track(
             &format!("pnpm run {} {}", script, args.join(" ")),
             &format!("rtk pnpm run {} {}", script, args.join(" ")),
-            &raw,
-            &stripped,
+            &raw_for_tee,
+            &display,
         );
         return Ok(());
     }
@@ -865,7 +920,9 @@ pub fn run_script(
         None => stripped.clone(),
     };
 
-    if let Some(hint) = crate::tee::tee_and_hint(&raw, &format!("pnpm-run-{}", script), exit_code) {
+    if let Some(hint) =
+        crate::tee::tee_and_hint(&raw_for_tee, &format!("pnpm-run-{}", script), exit_code)
+    {
         println!("{}\n{}", filtered, hint);
     } else {
         println!("{}", filtered);
@@ -874,7 +931,7 @@ pub fn run_script(
     timer.track(
         &format!("pnpm run {} {}", script, args.join(" ")),
         &format!("rtk pnpm run {} {}", script, args.join(" ")),
-        &raw,
+        &raw_for_tee,
         &filtered,
     );
 
@@ -977,9 +1034,10 @@ mod tests {
 
     #[test]
     fn test_filter_pnpm_run_output_empty() {
+        // BUG-04: filter returns empty string for pure boilerplate (caller decides "ok +")
         let input = "> pkg@1.0.0 test\n$ vitest run\n\nDone in 2.1s\n";
         let result = filter_pnpm_run_output(input);
-        assert_eq!(result, "ok ✓");
+        assert_eq!(result, "");
     }
 
     #[test]
@@ -1223,11 +1281,11 @@ Done in 1.2s"#;
 
     #[test]
     fn test_ok_checkmark_guard_skips_routing() {
-        // When all output is boilerplate, we get "ok ✓" and skip routing
+        // BUG-04: filter returns empty for boilerplate; run_script adds "ok +" on success
         let raw = "> pkg@1.0.0 test\n$ vitest run\n\nDone in 2s\n";
         let stripped = filter_pnpm_run_output(raw);
-        assert_eq!(stripped, "ok ✓");
-        // In run_script, this would skip routing
+        assert_eq!(stripped, "");
+        // In run_script: if stripped.is_empty() && success -> println!("ok +")
     }
 
     // ─── is_pnpm_script tests ────────────────────────────────────────────
@@ -1322,5 +1380,96 @@ Done in 1.2s"#;
         assert!(!is_pnpm_script("start", &no_scripts));
         // "run" does not match route_script and no PackageScripts
         assert!(!is_pnpm_script("run", &no_scripts));
+    }
+
+    // ─── strip_pnpm_stderr tests ────────────────────────────────────────
+
+    #[test]
+    fn test_strip_pnpm_stderr_removes_elifecycle() {
+        let stderr = " ELIFECYCLE  Command failed with exit code 1.\nSome real error\nDone in 3s";
+        let result = strip_pnpm_stderr(stderr);
+        assert!(!result.contains("ELIFECYCLE"));
+        assert!(!result.contains("Done in"));
+        assert!(result.contains("Some real error"));
+    }
+
+    #[test]
+    fn test_strip_pnpm_stderr_preserves_err_pnpm() {
+        let stderr =
+            " ERR_PNPM_NO_PKG_MANIFEST  No package.json found\n ELIFECYCLE  Command failed";
+        let result = strip_pnpm_stderr(stderr);
+        assert!(
+            result.contains("ERR_PNPM_NO_PKG_MANIFEST"),
+            "ERR_PNPM messages should be preserved, got: {}",
+            result
+        );
+        assert!(!result.contains("ELIFECYCLE"));
+    }
+
+    #[test]
+    fn test_strip_pnpm_stderr_preserves_non_boilerplate() {
+        let stderr = "Error: Cannot find module 'express'\n    at Module._resolveFilename";
+        let result = strip_pnpm_stderr(stderr);
+        assert!(result.contains("Cannot find module"));
+        assert!(result.contains("_resolveFilename"));
+    }
+
+    #[test]
+    fn test_strip_pnpm_stderr_empty_input() {
+        let result = strip_pnpm_stderr("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_strip_pnpm_stderr_only_boilerplate() {
+        let stderr = " ELIFECYCLE  Command failed\n\nDone in 2s\n";
+        let result = strip_pnpm_stderr(stderr);
+        assert_eq!(result, "");
+    }
+
+    // ─── stream separation + failure behavior tests ─────────────────────
+
+    #[test]
+    fn test_filter_pnpm_run_output_returns_empty_for_boilerplate() {
+        // BUG-04: filter_pnpm_run_output returns empty string, not "ok +"
+        let input = "> pkg@1.0.0 build\n$ tsc\n\nDone in 1s\n";
+        let result = filter_pnpm_run_output(input);
+        assert!(
+            result.is_empty(),
+            "Expected empty string for boilerplate, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_failure_empty_stdout_no_ok_checkmark() {
+        // BUG-04: empty stdout + failure should NOT produce "ok +"
+        // Simulate the logic flow in run_script (can't call run_script since it calls exit)
+        let stdout = "> pkg@1.0.0 test\n$ vitest run\n";
+        let stderr = " ERR_PNPM_NO_PKG_MANIFEST  No package.json found";
+
+        let stripped = filter_pnpm_run_output(stdout);
+        assert!(stripped.is_empty(), "Stripped stdout should be empty");
+
+        // In run_script failure path: when stripped is empty, show stderr
+        let stderr_display = strip_pnpm_stderr(stderr);
+        assert!(
+            stderr_display.contains("ERR_PNPM"),
+            "Stderr should contain the error message"
+        );
+        // The display would be stderr_display, NOT "ok +"
+        assert!(
+            !stderr_display.contains("ok"),
+            "Should never show 'ok' on failure"
+        );
+    }
+
+    #[test]
+    fn test_success_empty_stdout_shows_ok() {
+        // On success with empty stripped stdout, run_script shows "ok +"
+        let stdout = "> pkg@1.0.0 build\n$ tsc --noEmit\n\nDone in 1s\n";
+        let stripped = filter_pnpm_run_output(stdout);
+        assert!(stripped.is_empty());
+        // In run_script success path: println!("ok +") -- verified by logic, not process::exit
     }
 }
