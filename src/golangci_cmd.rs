@@ -10,8 +10,10 @@ struct Position {
     #[serde(rename = "Filename")]
     filename: String,
     #[serde(rename = "Line")]
+    #[allow(dead_code)]
     line: usize,
     #[serde(rename = "Column")]
+    #[allow(dead_code)]
     column: usize,
 }
 
@@ -20,6 +22,7 @@ struct Issue {
     #[serde(rename = "FromLinter")]
     from_linter: String,
     #[serde(rename = "Text")]
+    #[allow(dead_code)]
     text: String,
     #[serde(rename = "Pos")]
     pos: Position,

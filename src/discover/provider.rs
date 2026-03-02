@@ -17,6 +17,7 @@ pub struct ExtractedCommand {
     pub output_content: Option<String>,
     /// Whether the tool_result indicated an error
     pub is_error: bool,
+    #[allow(dead_code)]
     /// Chronological sequence index within the session
     pub sequence_index: usize,
 }

@@ -5,6 +5,7 @@ use regex::Regex;
 pub enum ErrorType {
     UnknownFlag,
     CommandNotFound,
+    #[allow(dead_code)]
     WrongSyntax,
     WrongPath,
     MissingArg,

@@ -390,6 +390,7 @@ impl Tracker {
     ///     summary.total_saved, summary.avg_savings_pct);
     /// # Ok::<(), anyhow::Error>(())
     /// ```
+    #[allow(dead_code)]
     pub fn get_summary(&self) -> Result<GainSummary> {
         self.get_summary_filtered(None) // delegate to filtered variant
     }
@@ -753,6 +754,7 @@ impl Tracker {
     /// }
     /// # Ok::<(), anyhow::Error>(())
     /// ```
+    #[allow(dead_code)]
     pub fn get_recent(&self, limit: usize) -> Result<Vec<CommandRecord>> {
         self.get_recent_filtered(limit, None) // delegate to filtered variant
     }
@@ -991,6 +993,7 @@ pub fn args_display(args: &[OsString]) -> String {
 /// timer.track("ls -la", "rtk ls", "input", "output");
 /// ```
 #[deprecated(note = "Use TimedExecution instead")]
+#[allow(dead_code)]
 pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
     let input_tokens = estimate_tokens(input);
     let output_tokens = estimate_tokens(output);

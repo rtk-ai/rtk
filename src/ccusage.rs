@@ -115,6 +115,7 @@ fn build_command() -> Option<Command> {
 }
 
 /// Check if ccusage CLI is available (binary or via npx)
+#[allow(dead_code)]
 pub fn is_available() -> bool {
     build_command().is_some()
 }

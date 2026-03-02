@@ -558,7 +558,6 @@ fn clean_double_blanks(content: &str) -> String {
         if line.trim().is_empty() {
             // Count consecutive blank lines
             let mut blank_count = 0;
-            let start = i;
             while i < lines.len() && lines[i].trim().is_empty() {
                 blank_count += 1;
                 i += 1;
@@ -1429,14 +1428,7 @@ More notes
         let serialized = serde_json::to_string(&parsed).unwrap();
 
         // Keys should appear in same order
-        let original_keys: Vec<&str> = original.split("\"").filter(|s| s.contains(":")).collect();
-        let serialized_keys: Vec<&str> =
-            serialized.split("\"").filter(|s| s.contains(":")).collect();
-
-        // Just check that keys exist (preserve_order doesn't guarantee exact order in nested objects)
-        assert!(serialized.contains("\"env\""));
-        assert!(serialized.contains("\"permissions\""));
-        assert!(serialized.contains("\"model\""));
+        assert_eq!(original.replace(" ", ""), serialized);
     }
 
     // Tests for clean_double_blanks()

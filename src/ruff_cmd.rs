@@ -7,7 +7,9 @@ use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 struct RuffLocation {
+    #[allow(dead_code)]
     row: usize,
+    #[allow(dead_code)]
     column: usize,
 }
 
@@ -20,7 +22,9 @@ struct RuffFix {
 #[derive(Debug, Deserialize)]
 struct RuffDiagnostic {
     code: String,
+    #[allow(dead_code)]
     message: String,
+    #[allow(dead_code)]
     location: RuffLocation,
     #[allow(dead_code)]
     end_location: Option<RuffLocation>,
