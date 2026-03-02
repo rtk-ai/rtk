@@ -919,6 +919,12 @@ enum CargoCommands {
 
 #[derive(Subcommand)]
 enum BazelCommands {
+    /// Build with compact output (errors/warnings only, 85% token reduction)
+    Build {
+        /// Additional bazel build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Query with grouped target output (85% token reduction)
     Query {
         /// Maximum depth of package tree to show (default: 1, "all" for unlimited)
@@ -1587,6 +1593,9 @@ fn main() -> Result<()> {
         Commands::Bazel { command } => match command {
             BazelCommands::Query { depth, width, args } => {
                 bazel_cmd::run_query(&args, depth, width, cli.verbose)?;
+            }
+            BazelCommands::Build { args } => {
+                bazel_cmd::run_build(&args, cli.verbose)?;
             }
             BazelCommands::Other(args) => {
                 bazel_cmd::run_other(&args, cli.verbose)?;

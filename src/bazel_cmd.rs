@@ -8,25 +8,64 @@ use std::fmt;
 use std::process::Command;
 use std::str::FromStr;
 
+/**********************************************************************/
+/*                       Shared Bazel Utilities                       */
+/**********************************************************************/
+
 lazy_static! {
-    /// Matches timestamped INFO/WARNING/DEBUG lines from Bazel stderr
+    /// Matches Bazel INFO, WARNING, and DEBUG lines
+    ///
+    /// e.g. "INFO: Build option..."
+    static ref NOISE_PLAIN: Regex =
+        Regex::new(r"^(INFO|WARNING|DEBUG):").unwrap();
+
+    /// Matches Bazel INFO, WARNING, and DEBUG lines
+    ///
     /// e.g. "(10:23:45) INFO: Build option..."
     static ref NOISE_WITH_TIMESTAMP: Regex =
         Regex::new(r"^\(\d+:\d+:\d+\)\s*(INFO|WARNING|DEBUG):").unwrap();
 
-    /// Matches plain INFO/WARNING/DEBUG lines without timestamp
-    static ref NOISE_PLAIN: Regex =
-        Regex::new(r"^(INFO|WARNING|DEBUG):").unwrap();
-
-    /// Matches ERROR lines (with or without timestamp)
-    static ref ERROR_WITH_TIMESTAMP: Regex =
-        Regex::new(r"^\(\d+:\d+:\d+\)\s*ERROR:").unwrap();
+    /// Matches Bazel ERROR lines without timestamp
+    ///
+    /// e.g. "ERROR: Compilation failed..."
     static ref ERROR_PLAIN: Regex =
         Regex::new(r"^ERROR:").unwrap();
 
-    /// Matches Bazel target lines like //package/path:target_name or //:root_target
+    /// Matches Bazel ERROR lines with timestamp
+    ///
+    /// e.g. "(10:23:45) ERROR: Compilation failed..."
+    static ref ERROR_WITH_TIMESTAMP: Regex =
+        Regex::new(r"^\(\d+:\d+:\d+\)\s*ERROR:").unwrap();
+
+    /// Matches Bazel target lines
+    ///
+    /// e.g. "//package/path:target_name", "//:root_target"
     static ref TARGET_LINE: Regex =
         Regex::new(r"^(//[^:]*):(.+)$").unwrap();
+
+    /// Matches Bazel progress lines
+    ///
+    /// e.g. "[123 / 4,567] Progress message..."
+    static ref PROGRESS_LINE: Regex =
+        Regex::new(r"^\[[\d,]+ / [\d,]+\]").unwrap();
+
+    /// Matches INFO lines with action counts
+    ///
+    /// e.g. "123 total actions"
+    static ref ACTION_COUNT: Regex =
+        Regex::new(r"(\d[\d,]*)\s+total actions").unwrap();
+
+    /// Matches WARNING lines without timestamp
+    ///
+    /// e.g. "WARNING: Warning message..."
+    static ref WARNING_PLAIN: Regex =
+        Regex::new(r"^WARNING:").unwrap();
+
+    /// Matches WARNING lines with timestamp
+    ///
+    /// e.g. "(10:23:45) WARNING: Warning message..."
+    static ref WARNING_WITH_TIMESTAMP: Regex =
+        Regex::new(r"^\(\d+:\d+:\d+\)\s*WARNING:").unwrap();
 }
 
 /// A limit value that can be a specific number or unlimited ("all").
@@ -67,6 +106,287 @@ impl fmt::Display for Limit {
         }
     }
 }
+
+/**********************************************************************/
+/*                            bazel build                             */
+/**********************************************************************/
+
+/// Filter `bazel build` output.
+///
+/// # Arguments
+///
+/// * `stdout` - stdout output from `bazel build`
+/// * `stderr` - stderr output from `bazel build`
+///
+/// # Returns
+///
+/// The filtered `bazel build` output
+///
+/// # Notes
+///
+/// Strips progress and info noise, while keeping errors and warnings.
+/// Bazel sends most output to stderr. This function reads the combined
+/// stdout and stderr stream and filters the following:
+/// * Progress lines `[N / M]`
+/// * Loading/Analyzing
+/// * INFO
+/// * Note
+/// * Target/bazel-bin output paths
+///
+/// Meanwhile, the following lines are kept:
+/// * ERROR lines
+/// * WARNING lines
+/// * Build diagnostics (e.g. warnings/errors from gcc/clang)
+///
+pub fn filter_bazel_build(stdout: &str, stderr: &str) -> String {
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut error_count: usize = 0;
+    let mut warning_count: usize = 0;
+    let mut action_count: Option<String> = None;
+
+    // State for collecting multi-line compiler diagnostic blocks
+    let mut in_diagnostic = false;
+    let mut current_block: Vec<String> = Vec::new();
+    let mut current_is_error = false;
+
+    // Combine stdout and stderr (bazel sends most to stderr)
+    let combined = format!("{}\n{}", stderr, stdout);
+
+    for line in combined.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            // Blank line ends a diagnostic block
+            if in_diagnostic && !current_block.is_empty() {
+                if current_is_error {
+                    errors.push(current_block.join("\n"));
+                } else {
+                    warnings.push(current_block.join("\n"));
+                }
+                current_block.clear();
+                in_diagnostic = false;
+            }
+            continue;
+        }
+
+        // Extract action count from INFO lines before skipping them
+        if trimmed.starts_with("INFO:") || NOISE_WITH_TIMESTAMP.is_match(trimmed) {
+            if let Some(caps) = ACTION_COUNT.captures(trimmed) {
+                action_count = Some(caps[1].to_string());
+            }
+            // "INFO: From ..." lines precede compiler output — skip the INFO line itself
+            // but don't skip the following compiler diagnostic lines
+            continue;
+        }
+
+        // Strip progress lines: [N / M] ...
+        if PROGRESS_LINE.is_match(trimmed) {
+            continue;
+        }
+
+        // Strip loading/analyzing status
+        if trimmed.starts_with("Loading:")
+            || trimmed.starts_with("Analyzing:")
+            || trimmed.starts_with("Computing main repo mapping:")
+        {
+            continue;
+        }
+
+        // Strip Java notes
+        if trimmed.starts_with("Note: ") {
+            continue;
+        }
+
+        // Strip target output paths
+        if trimmed.starts_with("Target //") || trimmed.starts_with("bazel-bin/") {
+            continue;
+        }
+
+        // Strip DEBUG lines
+        if trimmed.starts_with("DEBUG:") {
+            continue;
+        }
+
+        // Bazel-level ERROR lines
+        if ERROR_PLAIN.is_match(trimmed) || ERROR_WITH_TIMESTAMP.is_match(trimmed) {
+            // Flush any in-progress diagnostic block
+            if in_diagnostic && !current_block.is_empty() {
+                if current_is_error {
+                    errors.push(current_block.join("\n"));
+                } else {
+                    warnings.push(current_block.join("\n"));
+                }
+                current_block.clear();
+                in_diagnostic = false;
+            }
+            // Skip the summary "Build did NOT complete successfully" — we show our own header
+            if trimmed.contains("Build did NOT complete successfully") {
+                error_count = error_count.max(1); // ensure we show error header
+                continue;
+            }
+            error_count += 1;
+            errors.push(trimmed.to_string());
+            continue;
+        }
+
+        // Bazel-level WARNING lines
+        if WARNING_PLAIN.is_match(trimmed) || WARNING_WITH_TIMESTAMP.is_match(trimmed) {
+            // Flush any in-progress diagnostic block
+            if in_diagnostic && !current_block.is_empty() {
+                if current_is_error {
+                    errors.push(current_block.join("\n"));
+                } else {
+                    warnings.push(current_block.join("\n"));
+                }
+                current_block.clear();
+                in_diagnostic = false;
+            }
+            warning_count += 1;
+            warnings.push(trimmed.to_string());
+            continue;
+        }
+
+        // Compiler diagnostic: "file:line:col: warning: ..." or "file:line:col: error: ..."
+        // These come from gcc/clang output embedded in bazel stderr
+        if trimmed.contains(": warning:") || trimmed.contains(": error:") {
+            // Flush previous block if any
+            if in_diagnostic && !current_block.is_empty() {
+                if current_is_error {
+                    errors.push(current_block.join("\n"));
+                } else {
+                    warnings.push(current_block.join("\n"));
+                }
+                current_block.clear();
+            }
+            current_is_error = trimmed.contains(": error:");
+            if current_is_error {
+                error_count += 1;
+            } else {
+                warning_count += 1;
+            }
+            in_diagnostic = true;
+            current_block.push(trimmed.to_string());
+            continue;
+        }
+
+        // Continuation of a compiler diagnostic block (source context, notes, etc.)
+        if in_diagnostic {
+            // Lines with ` | `, `note:`, source locations, or caret lines are context
+            current_block.push(trimmed.to_string());
+            continue;
+        }
+
+        // Anything else that doesn't match known noise — skip
+        // (indented bazel-bin paths, etc.)
+    }
+
+    // Flush final block
+    if in_diagnostic && !current_block.is_empty() {
+        if current_is_error {
+            errors.push(current_block.join("\n"));
+        } else {
+            warnings.push(current_block.join("\n"));
+        }
+    }
+
+    let actions_str = action_count.unwrap_or_else(|| "0".to_string());
+
+    // No errors or warnings: one-liner success
+    if error_count == 0 && warning_count == 0 {
+        return format!("✓ bazel build ({} actions)", actions_str);
+    }
+
+    // Format with header + blocks
+    let mut result = String::new();
+    result.push_str(&format!(
+        "bazel build: {} error{}, {} warning{} ({} actions)\n",
+        error_count,
+        if error_count == 1 { "" } else { "s" },
+        warning_count,
+        if warning_count == 1 { "" } else { "s" },
+        actions_str,
+    ));
+    result.push_str("═══════════════════════════════════════\n");
+
+    // Show errors first, then warnings
+    let all_blocks: Vec<&String> = errors.iter().chain(warnings.iter()).collect();
+    for (i, block) in all_blocks.iter().enumerate().take(15) {
+        result.push_str(block);
+        result.push('\n');
+        if i < all_blocks.len().min(15) - 1 {
+            result.push('\n');
+        }
+    }
+
+    if all_blocks.len() > 15 {
+        result.push_str(&format!("\n... +{} more issues\n", all_blocks.len() - 15));
+    }
+
+    result.trim().to_string()
+}
+
+/// Run `bazel build` while filtering the output.
+///
+/// # Arguments
+///
+/// * `args` - Arguments to pass to `bazel build`
+/// * `verbose` - Verbosity level
+///
+/// # Returns
+///
+/// Result of the operation
+///
+pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("bazel");
+    cmd.arg("build");
+
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: bazel build {}", args.join(" "));
+    }
+
+    let output = cmd
+        .output()
+        .context("Failed to run bazel build. Is Bazel installed?")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    let filtered = filter_bazel_build(&stdout, &stderr);
+
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_build", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
+
+    timer.track(
+        &format!("bazel build {}", args.join(" ")),
+        &format!("rtk bazel build {}", args.join(" ")),
+        &raw,
+        &filtered,
+    );
+
+    if !output.status.success() {
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
+}
+
+/**********************************************************************/
+/*                            bazel query                             */
+/**********************************************************************/
 
 /// Detect the query root from args.
 /// Scans for the first `//path/...` pattern and returns `(display_expr, root_path)`.
@@ -313,11 +633,25 @@ fn render_tree(
     }
 }
 
-/// Filter bazel query output with depth/width controls.
+/// Filter `bazel query` output.
 ///
-/// - `depth`: how many levels deep to show (usize::MAX for unlimited)
-/// - `width`: max items per level (usize::MAX for unlimited)
-/// - `root`: (display_expr, root_path) from detect_query_root
+/// # Arguments
+///
+/// * `stdout` - stdout output from `bazel query`
+/// * `stderr` - stderr output from `bazel query`
+/// * `depth` - Maxmimum depth of the package tree to show
+/// * `width` - Maximum number of items to show for each package
+/// * `root` - (`display_expr`, `root_path`) from detect_query_root
+///
+/// # Returns
+///
+/// The filtered `bazel query` output
+///
+/// # Notes
+///
+/// * `depth` and `width` can be set to [`usize::MAX`] to disable
+///   truncation.
+///
 pub fn filter_bazel_query(
     stdout: &str,
     stderr: &str,
@@ -380,6 +714,19 @@ pub fn filter_bazel_query(
     result.trim_end().to_string()
 }
 
+/// Run `bazel query` while filtering the output.
+///
+/// # Arguments
+///
+/// * `args` - Arguments to pass to `bazel query`
+/// * `depth` - Maximum depth of the package tree to show
+/// * `width` - Maximum number of items to show for each package
+/// * `verbose` - Verbosity level
+///
+/// # Returns
+///
+/// Result of the operation
+///
 pub fn run_query(args: &[String], depth: Limit, width: Limit, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
@@ -430,6 +777,21 @@ pub fn run_query(args: &[String], depth: Limit, width: Limit, verbose: u8) -> Re
     Ok(())
 }
 
+/**********************************************************************/
+/*                      Other bazel subcommands                       */
+/**********************************************************************/
+
+/// Run other `bazel` subcommands not handled by rtk.
+///
+/// # Arguments
+///
+/// * `args` - Arguments to pass to the `bazel` subcommand
+/// * `verbose` - Verbosity level
+///
+/// # Returns
+///
+/// Result of the operation
+///
 pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
     if args.is_empty() {
         anyhow::bail!("bazel: no subcommand specified");
@@ -478,16 +840,9 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn default_root() -> (String, String) {
-        ("//...".to_string(), "//".to_string())
-    }
-
-    fn query(stdout: &str, stderr: &str, depth: usize, width: usize) -> String {
-        filter_bazel_query(stdout, stderr, depth, width, &default_root())
-    }
-
-    // === Limit type tests ===
-
+    /******************************************************************/
+    /*                  Shared Bazel utilities tests                  */
+    /******************************************************************/
     #[test]
     fn test_limit_from_str() {
         assert_eq!("1".parse::<Limit>().unwrap(), Limit::N(1));
@@ -498,6 +853,287 @@ mod tests {
         assert_eq!("All".parse::<Limit>().unwrap(), Limit::All);
         assert!("invalid".parse::<Limit>().is_err());
         assert!("".parse::<Limit>().is_err());
+    }
+
+    /******************************************************************/
+    /*                       bazel build tests                        */
+    /******************************************************************/
+    fn build(stdout: &str, stderr: &str) -> String {
+        filter_bazel_build(stdout, stderr)
+    }
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_filter_bazel_build_success() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 1 packages loaded
+Analyzing: target //src:bazel-dev (6 packages loaded, 6 targets configured)
+INFO: Analyzed target //src:bazel-dev (563 packages loaded, 24852 targets configured, 175 aspect applications).
+[1 / 1] no actions running
+[889 / 4,978] Compiling absl/numeric/int128.cc; 0s processwrapper-sandbox ... (256 actions, 255 running)
+[1,084 / 4,978] Compiling absl/time/internal/cctz/src/time_zone_info.cc; 1s processwrapper-sandbox ... (256 actions, 255 running)
+[4,976 / 4,978] Executing genrule //src:package-zip_jdk_allmodules; 1s processwrapper-sandbox
+INFO: Found 1 target...
+Target //src:bazel-dev up-to-date:
+  bazel-bin/src/bazel-dev
+INFO: Elapsed time: 54.859s, Critical Path: 49.98s
+INFO: 2391 processes: 3 internal, 1537 processwrapper-sandbox, 881 worker.
+INFO: Build completed successfully, 2391 total actions";
+        let result = build("", stderr);
+        assert_eq!(result, "✓ bazel build (2391 actions)");
+    }
+
+    #[test]
+    fn test_filter_bazel_build_with_warnings() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 1 packages loaded
+Analyzing: target //src:bazel-dev (6 packages loaded, 6 targets configured)
+WARNING: /home/user/bazel/src/conditions/BUILD:119:15: select() on cpu is deprecated.
+WARNING: /home/user/bazel/src/conditions/BUILD:202:15: select() on cpu is deprecated.
+WARNING: /home/user/bazel/src/conditions/BUILD:193:15: select() on cpu is deprecated.
+INFO: Analyzed target //src:bazel-dev (563 packages loaded).
+[889 / 4,978] Compiling absl/numeric/int128.cc; 0s processwrapper-sandbox
+[4,976 / 4,978] Executing genrule //src:package-zip_jdk_allmodules; 1s
+INFO: Found 1 target...
+Target //src:bazel-dev up-to-date:
+  bazel-bin/src/bazel-dev
+INFO: Elapsed time: 54.859s, Critical Path: 49.98s
+INFO: Build completed successfully, 4978 total actions";
+        let result = build("", stderr);
+
+        assert!(result.contains("bazel build: 0 errors, 3 warnings (4978 actions)"));
+        assert!(result.contains("═══════════════════════════════════════"));
+        assert!(result.contains("WARNING:"));
+        assert!(result.contains("select() on cpu is deprecated"));
+        // Noise should be stripped
+        assert!(!result.contains("Loading:"));
+        assert!(!result.contains("Analyzing:"));
+        assert!(!result.contains("[889 / 4,978]"));
+        assert!(!result.contains("INFO:"));
+    }
+
+    #[test]
+    fn test_filter_bazel_build_errors() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//src:bazel-dev-NONEXISTENT': no such target '//src:bazel-dev-NONEXISTENT'
+ERROR: no such target '//src:bazel-dev-NONEXISTENT': target 'bazel-dev-NONEXISTENT' not declared in package 'src'
+INFO: Elapsed time: 0.142s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully";
+        let result = build("", stderr);
+
+        assert!(result.contains("bazel build: 2 errors, 1 warning"));
+        assert!(result.contains("(0 actions)"));
+        assert!(result.contains("ERROR: Skipping"));
+        assert!(result.contains("ERROR: no such target"));
+        assert!(result.contains("WARNING: Target pattern parsing failed"));
+        // "Build did NOT complete successfully" is stripped (we have our own header)
+        assert!(!result.contains("Build did NOT complete successfully"));
+        // Noise stripped
+        assert!(!result.contains("Loading:"));
+        assert!(!result.contains("INFO:"));
+    }
+
+    #[test]
+    fn test_filter_bazel_build_compiler_warnings() {
+        let stderr = "\
+INFO: Analyzed target //src:bazel-dev (563 packages loaded).
+[100 / 200] Compiling something.cc
+INFO: From Building external/protobuf+/java/core/liblite_runtime_only.jar (94 source files):
+bazel-out/k8-fastbuild/bin/src/main/protobuf/failure_details.pb.h:9953:111: warning: 'some_field' is deprecated [-Wdeprecated-declarations]
+ 9953 |   [[deprecated]] static constexpr Code FIELD = value;
+      |                                                ^~~~~
+bazel-out/k8-fastbuild/bin/src/main/protobuf/failure_details.pb.h:1690:3: note: declared here
+ 1690 |   SomeField [[deprecated]] = 2,
+      |   ^~~~~~~~~
+
+[200 / 200] Linking src/main/cpp/client
+INFO: Build completed successfully, 200 total actions";
+        let result = build("", stderr);
+
+        // Should keep the compiler warning block
+        assert!(result.contains("warning:"));
+        assert!(result.contains("deprecated"));
+        assert!(result.contains("note: declared here"));
+        // Should show warning count
+        assert!(result.contains("1 warning"));
+        // Noise stripped
+        assert!(!result.contains("[100 / 200]"));
+        assert!(!result.contains("[200 / 200]"));
+        assert!(!result.contains("INFO:"));
+    }
+
+    #[test]
+    fn test_filter_bazel_build_strips_progress() {
+        let stderr = "\
+[1 / 1] no actions running
+[889 / 4,978] Compiling absl/numeric/int128.cc; 0s processwrapper-sandbox
+[1,084 / 4,978] Compiling absl/time/internal/cctz/src/time_zone_info.cc; 1s
+[4,976 / 4,978] Executing genrule //src:package-zip; 1s
+INFO: Build completed successfully, 4978 total actions";
+        let result = build("", stderr);
+
+        assert!(!result.contains("[889"));
+        assert!(!result.contains("[1,084"));
+        assert!(!result.contains("[4,976"));
+        assert!(!result.contains("[1 / 1]"));
+        assert!(result.contains("✓ bazel build (4978 actions)"));
+    }
+
+    #[test]
+    fn test_filter_bazel_build_strips_info_noise() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 1 packages loaded
+Analyzing: target //src:bazel-dev (6 packages loaded)
+INFO: Analyzed target //src:bazel-dev
+INFO: Found 1 target...
+INFO: Elapsed time: 54.859s
+INFO: 2391 processes: 3 internal, 1537 processwrapper-sandbox
+INFO: Build completed successfully, 100 total actions
+Note: Some input files use or override a deprecated API.
+Note: Recompile with -Xlint:removal for details.
+Target //src:bazel-dev up-to-date:
+  bazel-bin/src/bazel-dev
+DEBUG: some debug info";
+        let result = build("", stderr);
+
+        assert!(!result.contains("Computing main repo"));
+        assert!(!result.contains("Loading:"));
+        assert!(!result.contains("Analyzing:"));
+        assert!(!result.contains("INFO:"));
+        assert!(!result.contains("Note:"));
+        assert!(!result.contains("Target //src:bazel-dev up-to-date"));
+        assert!(!result.contains("bazel-bin/"));
+        assert!(!result.contains("DEBUG:"));
+        assert!(result.contains("✓ bazel build (100 actions)"));
+    }
+
+    #[test]
+    fn test_filter_bazel_build_empty() {
+        let result = build("", "");
+        assert_eq!(result, "✓ bazel build (0 actions)");
+    }
+
+    #[test]
+    fn test_filter_bazel_build_token_savings() {
+        // Real-ish bazel build output (~80 lines of noise)
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 1 packages loaded
+Analyzing: target //src:bazel-dev (6 packages loaded, 6 targets configured)
+Analyzing: target //src:bazel-dev (6 packages loaded, 6 targets configured)
+WARNING: /home/user/bazel/src/conditions/BUILD:119:15: select() on cpu is deprecated.
+WARNING: /home/user/bazel/src/conditions/BUILD:202:15: select() on cpu is deprecated.
+WARNING: /home/user/bazel/src/conditions/BUILD:193:15: select() on cpu is deprecated.
+DEBUG: /home/user/.cache/bazel/external/grpc-java/java_grpc_library.bzl:202:14: Multiple values deprecated
+INFO: Analyzed target //src:bazel-dev (563 packages loaded, 24852 targets configured).
+[1 / 1] no actions running
+[889 / 4,978] Compiling absl/numeric/int128.cc; 0s processwrapper-sandbox ... (256 actions, 255 running)
+[1,084 / 4,978] Compiling absl/time/internal/cctz/src/time_zone_info.cc; 1s processwrapper-sandbox ... (256 actions, 255 running)
+[1,191 / 4,978] Compiling tools/cpp/modules_tools/common/common.cc; 2s processwrapper-sandbox ... (256 actions, 255 running)
+[1,348 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 3s processwrapper-sandbox ... (256 actions, 255 running)
+[1,469 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 4s processwrapper-sandbox ... (256 actions, 255 running)
+[1,540 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 6s processwrapper-sandbox ... (256 actions, 255 running)
+[1,605 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 7s processwrapper-sandbox ... (255 actions, 254 running)
+[1,642 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 8s processwrapper-sandbox ... (240 actions running)
+[1,681 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 9s processwrapper-sandbox ... (201 actions running)
+[1,751 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 10s processwrapper-sandbox ... (256 actions, 202 running)
+[1,810 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 12s processwrapper-sandbox ... (224 actions, 155 running)
+[1,846 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 13s processwrapper-sandbox ... (188 actions, 128 running)
+[1,904 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 14s processwrapper-sandbox ... (130 actions, 92 running)
+[1,970 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 15s processwrapper-sandbox ... (179 actions, 151 running)
+INFO: From Building external/zstd-jni+/libzstd-jni-class.jar (30 source files) [for tool]:
+Note: Some input files use or override a deprecated API that is marked for removal.
+Note: Recompile with -Xlint:removal for details.
+[2,149 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 16s processwrapper-sandbox ... (85 actions, 54 running)
+INFO: From Building external/zstd-jni+/libzstd-jni-class.jar (30 source files):
+Note: Some input files use or override a deprecated API that is marked for removal.
+Note: Recompile with -Xlint:removal for details.
+[2,318 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 17s processwrapper-sandbox
+[2,346 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 18s processwrapper-sandbox
+[2,368 / 4,978] Executing genrule //src:embedded_jdk_allmodules; 19s processwrapper-sandbox
+[4,974 / 4,978] Linking src/main/cpp/client; 1s processwrapper-sandbox
+[4,976 / 4,978] Executing genrule //src:package-zip_jdk_allmodules; 1s processwrapper-sandbox
+INFO: Found 1 target...
+Target //src:bazel-dev up-to-date:
+  bazel-bin/src/bazel-dev
+INFO: Elapsed time: 54.859s, Critical Path: 49.98s
+INFO: 2391 processes: 3 internal, 1537 processwrapper-sandbox, 881 worker.
+INFO: Build completed successfully, 2391 total actions";
+
+        let input_tokens = count_tokens(stderr);
+        let result = build("", stderr);
+        let output_tokens = count_tokens(&result);
+
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Bazel build filter: expected ≥60% savings, got {:.1}% ({} → {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
+
+    #[test]
+    fn test_filter_bazel_build_truncates_blocks() {
+        // More than 15 issues should truncate
+        let mut stderr = String::new();
+        for i in 0..20 {
+            stderr.push_str(&format!("ERROR: //pkg:target_{}: build failed\n\n", i));
+        }
+        let result = build("", &stderr);
+
+        assert!(result.contains("... +5 more issues"));
+    }
+
+    #[test]
+    fn test_filter_bazel_build_mixed_compiler_and_bazel_errors() {
+        let stderr = "\
+WARNING: /home/user/bazel/BUILD:10:5: select() on cpu is deprecated.
+INFO: Analyzed target //src:app
+[10 / 100] Compiling src/app.cc
+src/app.cc:42:10: error: use of undeclared identifier 'foo'
+   42 |   foo();
+      |   ^~~
+
+ERROR: //src:app failed to build
+INFO: Build completed, 0 total actions
+ERROR: Build did NOT complete successfully";
+        let result = build("", stderr);
+
+        // Should have 2 errors (compiler + bazel ERROR) and 1 warning
+        assert!(result.contains("2 errors"));
+        assert!(result.contains("1 warning"));
+        assert!(result.contains("error: use of undeclared identifier"));
+        assert!(result.contains("ERROR: //src:app failed to build"));
+        assert!(result.contains("WARNING:"));
+        assert!(result.contains("select() on cpu is deprecated"));
+    }
+
+    /******************************************************************/
+    /*                       bazel query tests                        */
+    /******************************************************************/
+    fn default_root() -> (String, String) {
+        ("//...".to_string(), "//".to_string())
+    }
+
+    fn query(stdout: &str, stderr: &str, depth: usize, width: usize) -> String {
+        filter_bazel_query(stdout, stderr, depth, width, &default_root())
     }
 
     #[test]
@@ -511,8 +1147,6 @@ mod tests {
         assert_eq!(Limit::N(5).to_string(), "5");
         assert_eq!(Limit::All.to_string(), "all");
     }
-
-    // === Helper function tests ===
 
     #[test]
     fn test_detect_query_root() {
@@ -561,8 +1195,6 @@ mod tests {
             "java-native"
         );
     }
-
-    // === Core filter tests ===
 
     #[test]
     fn test_strips_info_warning_noise() {
@@ -628,8 +1260,6 @@ some non-target output line
         assert!(result.contains("(1 target)"));
     }
 
-    // === Header line tests ===
-
     #[test]
     fn test_header_line() {
         let stdout = "\
@@ -641,8 +1271,6 @@ some non-target output line
         // Header has cumulative totals, no emoji
         assert!(result.starts_with("//... (3 targets, 3 packages)"));
     }
-
-    // === Depth tests ===
 
     #[test]
     fn test_depth_1_collapses_to_summary() {
@@ -727,8 +1355,6 @@ some non-target output line
         assert!(result.contains("  📦 java (1 target, 1 package)"));
     }
 
-    // === Width tests ===
-
     #[test]
     fn test_width_budget_packages_then_targets() {
         // Width 5: 3 sub-packages take 3 slots, 2 remaining for targets
@@ -808,8 +1434,6 @@ some non-target output line
         assert!(!result.contains("more target"));
     }
 
-    // === Root target tests ===
-
     #[test]
     fn test_root_targets_inline() {
         let stdout = "\
@@ -825,8 +1449,6 @@ some non-target output line
         assert!(result.contains("📦 src"));
     }
 
-    // === Relative names tests ===
-
     #[test]
     fn test_relative_names() {
         let stdout = "\
@@ -840,10 +1462,6 @@ some non-target output line
         assert!(!result.contains("examples/cpp"));
         assert!(!result.contains("examples/go"));
     }
-
-    // === Multi-root tests ===
-
-    // === Backward-compatible tests (ported from old tests) ===
 
     #[test]
     fn test_groups_targets_by_package() {
