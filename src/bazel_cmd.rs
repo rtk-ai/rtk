@@ -13,29 +13,9 @@ use std::str::FromStr;
 /**********************************************************************/
 
 lazy_static! {
-    /// Matches Bazel INFO, WARNING, and DEBUG lines
-    ///
-    /// e.g. "INFO: Build option..."
-    static ref NOISE_PLAIN: Regex =
-        Regex::new(r"^(INFO|WARNING|DEBUG):").unwrap();
-
-    /// Matches Bazel INFO, WARNING, and DEBUG lines
-    ///
-    /// e.g. "(10:23:45) INFO: Build option..."
-    static ref NOISE_WITH_TIMESTAMP: Regex =
-        Regex::new(r"^\(\d+:\d+:\d+\)\s*(INFO|WARNING|DEBUG):").unwrap();
-
-    /// Matches Bazel ERROR lines without timestamp
-    ///
-    /// e.g. "ERROR: Compilation failed..."
-    static ref ERROR_PLAIN: Regex =
-        Regex::new(r"^ERROR:").unwrap();
-
-    /// Matches Bazel ERROR lines with timestamp
-    ///
-    /// e.g. "(10:23:45) ERROR: Compilation failed..."
-    static ref ERROR_WITH_TIMESTAMP: Regex =
-        Regex::new(r"^\(\d+:\d+:\d+\)\s*ERROR:").unwrap();
+    /// Matches optional leading Bazel timestamp prefix: "(HH:MM:SS) "
+    static ref TIMESTAMP_PREFIX: Regex =
+        Regex::new(r"^\(\d+:\d+:\d+\)\s*").unwrap();
 
     /// Matches Bazel target lines
     ///
@@ -51,21 +31,9 @@ lazy_static! {
 
     /// Matches INFO lines with action counts
     ///
-    /// e.g. "123 total actions"
+    /// e.g. "123 total actions", "1 total action"
     static ref ACTION_COUNT: Regex =
-        Regex::new(r"(\d[\d,]*)\s+total actions").unwrap();
-
-    /// Matches WARNING lines without timestamp
-    ///
-    /// e.g. "WARNING: Warning message..."
-    static ref WARNING_PLAIN: Regex =
-        Regex::new(r"^WARNING:").unwrap();
-
-    /// Matches WARNING lines with timestamp
-    ///
-    /// e.g. "(10:23:45) WARNING: Warning message..."
-    static ref WARNING_WITH_TIMESTAMP: Regex =
-        Regex::new(r"^\(\d+:\d+:\d+\)\s*WARNING:").unwrap();
+        Regex::new(r"(\d[\d,]*)\s+total actions?").unwrap();
 
     /// Matches test result lines
     ///
@@ -102,6 +70,24 @@ lazy_static! {
     /// e.g. "INFO: Elapsed time: 3.89s, Critical Path: 1.23s"
     static ref ELAPSED_TIME: Regex =
         Regex::new(r"Elapsed time:\s*([\d.]+)s").unwrap();
+
+    /// Matches the "Running command line:" sentinel that separates build from execution
+    ///
+    /// e.g. "INFO: Running command line: bazel-bin/path/to/binary"
+    /// Note: timestamp prefix is already stripped by strip_timestamp() before matching
+    static ref RUN_SENTINEL: Regex =
+        Regex::new(r"^INFO: Running command line:").unwrap();
+}
+
+/// Strip optional leading Bazel timestamp prefix "(HH:MM:SS) " from a line.
+///
+/// Bazel may prepend timestamps to all output lines (e.g. `(17:17:06) Loading:`).
+/// This normalizes them so `starts_with` checks work regardless of timestamp presence.
+fn strip_timestamp(line: &str) -> &str {
+    TIMESTAMP_PREFIX
+        .find(line)
+        .map(|m| &line[m.end()..])
+        .unwrap_or(line)
 }
 
 /// A limit value that can be a specific number or unlimited ("all").
@@ -191,7 +177,9 @@ pub fn filter_bazel_build(stdout: &str, stderr: &str) -> String {
 
     for line in combined.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        // Strip optional "(HH:MM:SS) " timestamp prefix so starts_with checks work
+        let stripped = strip_timestamp(trimmed);
+        if stripped.is_empty() {
             // Blank line ends a diagnostic block
             if in_diagnostic && !current_block.is_empty() {
                 if current_is_error {
@@ -206,8 +194,8 @@ pub fn filter_bazel_build(stdout: &str, stderr: &str) -> String {
         }
 
         // Extract action count from INFO lines before skipping them
-        if trimmed.starts_with("INFO:") || NOISE_WITH_TIMESTAMP.is_match(trimmed) {
-            if let Some(caps) = ACTION_COUNT.captures(trimmed) {
+        if stripped.starts_with("INFO:") || stripped.starts_with("DEBUG:") {
+            if let Some(caps) = ACTION_COUNT.captures(stripped) {
                 action_count = Some(caps[1].to_string());
             }
             // "INFO: From ..." lines precede compiler output — skip the INFO line itself
@@ -216,35 +204,35 @@ pub fn filter_bazel_build(stdout: &str, stderr: &str) -> String {
         }
 
         // Strip progress lines: [N / M] ...
-        if PROGRESS_LINE.is_match(trimmed) {
+        if PROGRESS_LINE.is_match(stripped) {
             continue;
         }
 
         // Strip loading/analyzing status
-        if trimmed.starts_with("Loading:")
-            || trimmed.starts_with("Analyzing:")
-            || trimmed.starts_with("Computing main repo mapping:")
+        if stripped.starts_with("Loading:")
+            || stripped.starts_with("Analyzing:")
+            || stripped.starts_with("Computing main repo mapping:")
         {
             continue;
         }
 
         // Strip Java notes
-        if trimmed.starts_with("Note: ") {
+        if stripped.starts_with("Note: ") {
             continue;
         }
 
         // Strip target output paths
-        if trimmed.starts_with("Target //") || trimmed.starts_with("bazel-bin/") {
+        if stripped.starts_with("Target //") || stripped.starts_with("bazel-bin/") {
             continue;
         }
 
         // Strip DEBUG lines
-        if trimmed.starts_with("DEBUG:") {
+        if stripped.starts_with("DEBUG:") {
             continue;
         }
 
         // Bazel-level ERROR lines
-        if ERROR_PLAIN.is_match(trimmed) || ERROR_WITH_TIMESTAMP.is_match(trimmed) {
+        if stripped.starts_with("ERROR:") {
             // Flush any in-progress diagnostic block
             if in_diagnostic && !current_block.is_empty() {
                 if current_is_error {
@@ -256,17 +244,18 @@ pub fn filter_bazel_build(stdout: &str, stderr: &str) -> String {
                 in_diagnostic = false;
             }
             // Skip the summary "Build did NOT complete successfully" — we show our own header
-            if trimmed.contains("Build did NOT complete successfully") {
+            if stripped.contains("Build did NOT complete successfully") {
                 error_count = error_count.max(1); // ensure we show error header
                 continue;
             }
             error_count += 1;
-            errors.push(trimmed.to_string());
+            errors.push(stripped.to_string());
             continue;
         }
 
-        // Bazel-level WARNING lines
-        if WARNING_PLAIN.is_match(trimmed) || WARNING_WITH_TIMESTAMP.is_match(trimmed) {
+        // Bazel-level WARNING lines (already caught above in INFO/WARNING/DEBUG gate,
+        // but standalone WARNING lines without prior INFO context reach here)
+        if stripped.starts_with("WARNING:") {
             // Flush any in-progress diagnostic block
             if in_diagnostic && !current_block.is_empty() {
                 if current_is_error {
@@ -278,7 +267,7 @@ pub fn filter_bazel_build(stdout: &str, stderr: &str) -> String {
                 in_diagnostic = false;
             }
             warning_count += 1;
-            warnings.push(trimmed.to_string());
+            warnings.push(stripped.to_string());
             continue;
         }
 
@@ -460,11 +449,12 @@ pub fn filter_bazel_test(stdout: &str, stderr: &str) -> String {
 
     for line in combined.lines() {
         let trimmed = line.trim();
+        let stripped = strip_timestamp(trimmed);
 
         // Collecting inline test output between delimiter lines
         if in_test_output {
-            if TEST_OUTPUT_END.is_match(trimmed) {
-                current_output_block.push(trimmed.to_string());
+            if TEST_OUTPUT_END.is_match(stripped) {
+                current_output_block.push(stripped.to_string());
                 inline_output_blocks.push(current_output_block.join("\n"));
                 current_output_block.clear();
                 in_test_output = false;
@@ -474,59 +464,59 @@ pub fn filter_bazel_test(stdout: &str, stderr: &str) -> String {
             continue;
         }
 
-        if trimmed.is_empty() {
+        if stripped.is_empty() {
             continue;
         }
 
-        // Extract elapsed time before skipping INFO lines
-        if trimmed.starts_with("INFO:") || NOISE_WITH_TIMESTAMP.is_match(trimmed) {
-            if let Some(caps) = ELAPSED_TIME.captures(trimmed) {
+        // Extract elapsed time before skipping INFO/DEBUG lines
+        if stripped.starts_with("INFO:") || stripped.starts_with("DEBUG:") {
+            if let Some(caps) = ELAPSED_TIME.captures(stripped) {
                 elapsed = Some(caps[1].to_string());
             }
             continue;
         }
 
         // Strip progress lines: [N / M] ...
-        if PROGRESS_LINE.is_match(trimmed) {
+        if PROGRESS_LINE.is_match(stripped) {
             continue;
         }
 
         // Strip loading/analyzing status
-        if trimmed.starts_with("Loading:")
-            || trimmed.starts_with("Analyzing:")
-            || trimmed.starts_with("Computing main repo mapping:")
+        if stripped.starts_with("Loading:")
+            || stripped.starts_with("Analyzing:")
+            || stripped.starts_with("Computing main repo mapping:")
         {
             continue;
         }
 
         // Strip Java notes
-        if trimmed.starts_with("Note: ") {
+        if stripped.starts_with("Note: ") {
             continue;
         }
 
         // Strip target output paths
-        if trimmed.starts_with("Target //") || trimmed.starts_with("bazel-bin/") {
+        if stripped.starts_with("Target //") || stripped.starts_with("bazel-bin/") {
             continue;
         }
 
         // Strip DEBUG lines
-        if trimmed.starts_with("DEBUG:") {
+        if stripped.starts_with("DEBUG:") {
             continue;
         }
 
         // Strip timeout size warnings
-        if trimmed.starts_with("There were tests whose specified size") {
+        if stripped.starts_with("There were tests whose specified size") {
             continue;
         }
 
         // Test result lines: //pkg:test PASSED in 0.3s
-        if let Some(caps) = TEST_RESULT_LINE.captures(trimmed) {
+        if let Some(caps) = TEST_RESULT_LINE.captures(stripped) {
             let status = &caps[2];
             match status {
                 "PASSED" => passed += 1,
                 "FAILED" | "TIMEOUT" | "NO STATUS" => {
                     failed += 1;
-                    failed_result_lines.push(trimmed.to_string());
+                    failed_result_lines.push(stripped.to_string());
                 }
                 "FLAKY" => passed += 1, // flaky but passed on retry
                 _ => {}
@@ -535,42 +525,42 @@ pub fn filter_bazel_test(stdout: &str, stderr: &str) -> String {
         }
 
         // Executed summary line (skip — we produce our own)
-        if TEST_SUMMARY.is_match(trimmed) {
+        if TEST_SUMMARY.is_match(stripped) {
             continue;
         }
 
         // FAIL: lines
-        if FAIL_LINE.is_match(trimmed) {
-            fail_blocks.push(trimmed.to_string());
+        if FAIL_LINE.is_match(stripped) {
+            fail_blocks.push(stripped.to_string());
             continue;
         }
 
         // Inline test output start
-        if TEST_OUTPUT_START.is_match(trimmed) {
+        if TEST_OUTPUT_START.is_match(stripped) {
             in_test_output = true;
-            current_output_block.push(trimmed.to_string());
+            current_output_block.push(stripped.to_string());
             continue;
         }
 
         // ERROR lines
-        if ERROR_PLAIN.is_match(trimmed) || ERROR_WITH_TIMESTAMP.is_match(trimmed) {
-            if trimmed.contains("Build did NOT complete successfully")
-                || trimmed.contains("not all tests passed")
+        if stripped.starts_with("ERROR:") {
+            if stripped.contains("Build did NOT complete successfully")
+                || stripped.contains("not all tests passed")
             {
                 continue;
             }
-            error_lines.push(trimmed.to_string());
+            error_lines.push(stripped.to_string());
             continue;
         }
 
         // WARNING lines (strip — build noise)
-        if WARNING_PLAIN.is_match(trimmed) || WARNING_WITH_TIMESTAMP.is_match(trimmed) {
+        if stripped.starts_with("WARNING:") {
             continue;
         }
 
         // Indented log paths after FAILED lines (e.g. "  /path/to/test.log")
         // Keep only if we have failures
-        if trimmed.starts_with('/') && trimmed.ends_with(".log") && failed > 0 {
+        if stripped.starts_with('/') && stripped.ends_with(".log") && failed > 0 {
             continue; // skip log paths — we show inline output instead
         }
 
@@ -720,6 +710,173 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
     timer.track(
         &format!("bazel test {}", args.join(" ")),
         &format!("rtk bazel test {}", args.join(" ")),
+        &raw,
+        &filtered,
+    );
+
+    if !output.status.success() {
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
+}
+
+/**********************************************************************/
+/*                            bazel run                               */
+/**********************************************************************/
+
+/// Filter `bazel run` output.
+///
+/// # Arguments
+///
+/// * `stdout` - stdout output from `bazel run` (binary's stdout)
+/// * `stderr` - stderr output from `bazel run` (build noise + binary's stderr)
+///
+/// # Returns
+///
+/// The filtered output: build summary + binary output (forwarded verbatim)
+///
+/// # Notes
+///
+/// `bazel run` builds a target then executes it. The build phase produces
+/// noise on stderr identical to `bazel build`. After building, bazel prints
+/// a sentinel line `INFO: Running command line: ...` then exec's the binary.
+/// Everything after the sentinel in stderr is the binary's stderr output.
+/// All of stdout is the binary's stdout (bazel writes nothing to stdout).
+///
+/// This filter splits stderr at the sentinel, applies `filter_bazel_build`
+/// to the build phase, then appends the binary's output verbatim.
+///
+pub fn filter_bazel_run(stdout: &str, stderr: &str, args: &[String]) -> String {
+    // Split stderr at the sentinel line, collecting warnings separately
+    let mut build_stderr = String::new();
+    let mut build_warnings: Vec<String> = Vec::new();
+    let mut binary_stderr = String::new();
+    let mut found_sentinel = false;
+    let mut has_errors = false;
+
+    for line in stderr.lines() {
+        let stripped = strip_timestamp(line.trim());
+        if !found_sentinel {
+            if RUN_SENTINEL.is_match(stripped) {
+                found_sentinel = true;
+                continue;
+            }
+            // Collect warnings separately — only include if build has errors
+            if stripped.starts_with("WARNING:") {
+                build_warnings.push(line.to_string());
+                continue;
+            }
+            if stripped.starts_with("ERROR:") {
+                has_errors = true;
+            }
+            build_stderr.push_str(line);
+            build_stderr.push('\n');
+        } else {
+            // Drop trailing bazel INFO/WARNING/DEBUG lines after sentinel
+            if stripped.starts_with("INFO:")
+                || stripped.starts_with("WARNING:")
+                || stripped.starts_with("DEBUG:")
+            {
+                continue;
+            }
+            binary_stderr.push_str(line);
+            binary_stderr.push('\n');
+        }
+    }
+
+    // Re-inject warnings if build had errors (they provide context)
+    if has_errors {
+        for w in &build_warnings {
+            build_stderr.push_str(w);
+            build_stderr.push('\n');
+        }
+    }
+
+    // Filter the build phase using existing filter_bazel_build
+    let build_summary = filter_bazel_build("", &build_stderr);
+
+    // Combine binary output: stdout + post-sentinel stderr
+    let mut binary_output = String::new();
+    let stdout_trimmed = stdout.trim();
+    let stderr_trimmed = binary_stderr.trim();
+    if !stdout_trimmed.is_empty() {
+        binary_output.push_str(stdout_trimmed);
+    }
+    if !stderr_trimmed.is_empty() {
+        if !binary_output.is_empty() {
+            binary_output.push('\n');
+        }
+        binary_output.push_str(stderr_trimmed);
+    }
+
+    // Format output based on build result
+    let build_clean = build_summary.starts_with('\u{2713}');
+
+    if binary_output.is_empty() {
+        // No binary output — show build summary only
+        build_summary
+    } else if build_clean {
+        // Clean build — skip build summary, just show binary output
+        binary_output
+    } else {
+        // Build had warnings/errors — show both sections
+        let run_header = format!(
+            "\n\nbazel run {}\n═══════════════════════════════════════",
+            args.join(" ")
+        );
+        format!("{}{}\n{}", build_summary, run_header, binary_output)
+    }
+}
+
+/// Run `bazel run` while filtering the build output.
+///
+/// # Arguments
+///
+/// * `args` - Arguments to pass to `bazel run`
+/// * `verbose` - Verbosity level
+///
+/// # Returns
+///
+/// Result of the operation
+///
+pub fn run_run(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("bazel");
+    cmd.arg("run");
+
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: bazel run {}", args.join(" "));
+    }
+
+    let output = cmd
+        .output()
+        .context("Failed to run bazel run. Is Bazel installed?")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    let filtered = filter_bazel_run(&stdout, &stderr, args);
+
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_run", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
+
+    timer.track(
+        &format!("bazel run {}", args.join(" ")),
+        &format!("rtk bazel run {}", args.join(" ")),
         &raw,
         &filtered,
     );
@@ -1010,12 +1167,12 @@ pub fn filter_bazel_query(
 
     // Collect ERROR lines from stderr
     for line in stderr.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let stripped = strip_timestamp(line.trim());
+        if stripped.is_empty() {
             continue;
         }
-        if ERROR_WITH_TIMESTAMP.is_match(trimmed) || ERROR_PLAIN.is_match(trimmed) {
-            result.push_str(trimmed);
+        if stripped.starts_with("ERROR:") {
+            result.push_str(stripped);
             result.push('\n');
         }
     }
@@ -2094,5 +2251,311 @@ Executed 1 out of 1 test: 1 tests pass.";
         assert!(!result.contains("There were tests whose specified size"));
         assert!(!result.contains("--test_verbose_timeout_warnings"));
         assert!(result.contains("\u{2713} bazel test: 1 passed, 0 failed"));
+    }
+
+    /******************************************************************/
+    /*                       bazel run tests                          */
+    /******************************************************************/
+    fn brun(stdout: &str, stderr: &str) -> String {
+        brun_with_args(stdout, stderr, &[])
+    }
+
+    fn brun_with_args(stdout: &str, stderr: &str, args: &[String]) -> String {
+        filter_bazel_run(stdout, stderr, args)
+    }
+
+    #[test]
+    fn test_filter_bazel_run_success() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: target //src:my_binary (6 packages loaded)
+INFO: Analyzed target //src:my_binary (81 packages loaded, 684 targets configured).
+[0 / 4] [Prepa] BazelWorkspaceStatusAction stable-status.txt
+[10 / 14] Compiling src/main.cc
+INFO: Found 1 target...
+Target //src:my_binary up-to-date:
+  bazel-bin/src/my_binary
+INFO: Elapsed time: 3.50s, Critical Path: 2.10s
+INFO: 123 processes: 3 internal, 120 processwrapper-sandbox.
+INFO: Build completed successfully, 123 total actions
+INFO: Running command line: bazel-bin/src/my_binary
+binary stderr line";
+        let stdout = "Hello from binary!\nResult: 42";
+        let args: Vec<String> = vec!["//src:my_binary".into()];
+        let result = brun_with_args(stdout, stderr, &args);
+
+        // Clean build — no build summary, just binary output
+        assert!(!result.contains("bazel build"));
+        assert!(!result.contains("═══════════════════════════════════════"));
+        assert!(result.contains("Hello from binary!"));
+        assert!(result.contains("Result: 42"));
+        assert!(result.contains("binary stderr line"));
+        // Noise stripped
+        assert!(!result.contains("Loading:"));
+        assert!(!result.contains("[10 / 14]"));
+        assert!(!result.contains("INFO:"));
+        assert!(!result.contains("Computing main repo"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_warnings_stripped() {
+        let stderr = "\
+WARNING: /home/user/BUILD:10:5: select() on cpu is deprecated.
+WARNING: /home/user/BUILD:20:5: another deprecation warning.
+INFO: Analyzed target //src:app (10 packages loaded).
+[5 / 10] Compiling something.cc
+INFO: Found 1 target...
+Target //src:app up-to-date:
+  bazel-bin/src/app
+INFO: Build completed successfully, 100 total actions
+INFO: Running command line: bazel-bin/src/app
+app output here";
+        let stdout = "app stdout";
+        let result = brun(stdout, stderr);
+
+        // Warnings stripped — clean build, no build section
+        assert!(!result.contains("WARNING:"));
+        assert!(!result.contains("select() on cpu"));
+        assert!(!result.contains("bazel build"));
+        // Binary output only
+        assert!(result.contains("app stdout"));
+        assert!(result.contains("app output here"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_build_error() {
+        let stderr = "\
+Loading:
+WARNING: Target pattern parsing failed.
+ERROR: Skipping '//src:nonexistent': no such target '//src:nonexistent'
+ERROR: no such target '//src:nonexistent': target 'nonexistent' not declared
+INFO: Elapsed time: 0.142s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully";
+        let result = brun("", stderr);
+
+        assert!(result.contains("bazel build: 2 errors, 1 warning"));
+        assert!(result.contains("ERROR: Skipping"));
+        assert!(result.contains("ERROR: no such target"));
+        assert!(result.contains("WARNING: Target pattern parsing failed"));
+        assert!(!result.contains("Build did NOT complete successfully"));
+        // No binary output
+        assert!(!result.contains("Running command line"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_build_error_no_warnings() {
+        let stderr = "\
+Loading:
+ERROR: Skipping '//src:nonexistent': no such target '//src:nonexistent'
+INFO: Elapsed time: 0.142s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully";
+        let result = brun("", stderr);
+
+        assert!(result.contains("bazel build: 1 error, 0 warnings"));
+        assert!(result.contains("ERROR: Skipping"));
+        assert!(!result.contains("WARNING:"));
+        assert!(!result.contains("Build did NOT complete successfully"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_binary_stderr() {
+        let stderr = "\
+INFO: Analyzed target //src:app (0 packages loaded).
+INFO: Found 1 target...
+INFO: Build completed successfully, 50 total actions
+INFO: Running command line: bazel-bin/src/app
+Error: could not connect to database
+Stack trace:
+  at main.cc:42
+  at db.cc:100";
+        let result = brun("", stderr);
+
+        // Clean build — no build summary
+        assert!(!result.contains("bazel build"));
+        assert!(result.contains("Error: could not connect to database"));
+        assert!(result.contains("Stack trace:"));
+        assert!(result.contains("at main.cc:42"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_no_sentinel() {
+        // No sentinel = build-only, no binary ran (e.g. build phase completed but no run)
+        let stderr = "\
+INFO: Analyzed target //src:app (10 packages loaded).
+[5 / 10] Compiling something.cc
+INFO: Found 1 target...
+Target //src:app up-to-date:
+  bazel-bin/src/app
+INFO: Build completed successfully, 100 total actions";
+        let result = brun("", stderr);
+
+        // Falls back to filter_bazel_build behavior
+        assert!(result.contains("\u{2713} bazel build (100 actions)"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_strips_build_noise() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 1 packages loaded
+Analyzing: target //src:app (6 packages loaded)
+DEBUG: /some/debug/info
+Note: Some input files use deprecated API.
+[0 / 4] [Prepa] BazelWorkspaceStatusAction
+[100 / 200] Compiling something.cc
+Target //src:app up-to-date:
+  bazel-bin/src/app
+INFO: Elapsed time: 5.00s
+INFO: 200 processes: 3 internal, 197 processwrapper-sandbox.
+INFO: Build completed successfully, 200 total actions
+INFO: Running command line: bazel-bin/src/app";
+        let stdout = "output";
+        let result = brun(stdout, stderr);
+
+        assert!(!result.contains("Computing main repo"));
+        assert!(!result.contains("Loading:"));
+        assert!(!result.contains("Analyzing:"));
+        assert!(!result.contains("DEBUG:"));
+        assert!(!result.contains("Note:"));
+        assert!(!result.contains("[0 / 4]"));
+        assert!(!result.contains("[100 / 200]"));
+        assert!(!result.contains("Target //src:app"));
+        assert!(!result.contains("bazel-bin/src/app"));
+        assert!(!result.contains("INFO:"));
+        assert!(result.contains("output"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_empty() {
+        let result = brun("", "");
+        assert_eq!(result, "\u{2713} bazel build (0 actions)");
+    }
+
+    #[test]
+    fn test_filter_bazel_run_token_savings() {
+        let stderr = "\
+Computing main repo mapping:
+Loading:
+Loading: 0 packages loaded
+Analyzing: target //src:my_binary (6 packages loaded, 6 targets configured)
+Analyzing: target //src:my_binary (6 packages loaded, 6 targets configured)
+INFO: Analyzed target //src:my_binary (563 packages loaded, 24852 targets configured).
+[1 / 1] no actions running
+[889 / 4,978] Compiling absl/numeric/int128.cc; 0s processwrapper-sandbox ... (256 actions, 255 running)
+[1,084 / 4,978] Compiling absl/time/internal/cctz/src/time_zone_info.cc; 1s processwrapper-sandbox ... (256 actions, 255 running)
+[1,191 / 4,978] Compiling tools/cpp/modules_tools/common/common.cc; 2s processwrapper-sandbox ... (256 actions, 255 running)
+[1,348 / 4,978] Executing genrule //src:embedded_jdk; 3s processwrapper-sandbox
+[1,469 / 4,978] Executing genrule //src:embedded_jdk; 4s processwrapper-sandbox
+[1,540 / 4,978] Executing genrule //src:embedded_jdk; 6s processwrapper-sandbox
+[4,976 / 4,978] Executing genrule //src:package-zip; 1s processwrapper-sandbox
+INFO: Found 1 target...
+Target //src:my_binary up-to-date:
+  bazel-bin/src/my_binary
+INFO: Elapsed time: 54.859s, Critical Path: 49.98s
+INFO: 2391 processes: 3 internal, 1537 processwrapper-sandbox, 881 worker.
+INFO: Build completed successfully, 2391 total actions
+INFO: Running command line: bazel-bin/src/my_binary
+Hello World";
+
+        let input_tokens = count_tokens(stderr);
+        let result = brun("", stderr);
+        let output_tokens = count_tokens(&result);
+
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Bazel run filter: expected ≥60% savings, got {:.1}% ({} → {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
+
+    #[test]
+    fn test_filter_bazel_run_timestamp_sentinel() {
+        let stderr = "\
+(10:23:45) INFO: Analyzed target //src:app (10 packages loaded).
+(10:23:46) INFO: Found 1 target...
+(10:23:47) INFO: Build completed successfully, 50 total actions
+(10:23:48) INFO: Running command line: bazel-bin/src/app
+binary output on stderr";
+        let stdout = "binary output on stdout";
+        let result = brun(stdout, stderr);
+
+        // Clean build — no build summary
+        assert!(!result.contains("bazel build"));
+        assert!(result.contains("binary output on stdout"));
+        assert!(result.contains("binary output on stderr"));
+        // Sentinel itself should not appear
+        assert!(!result.contains("Running command line"));
+    }
+
+    #[test]
+    #[test]
+    fn test_filter_bazel_run_real_world_output() {
+        // Realistic output from `bazel run` with timestamped lines, env-prefixed
+        // sentinel, and trailing INFO after the sentinel
+        let stderr = "\
+(17:17:06) WARNING: some build config deprecation warning
+(17:17:06) INFO: Current date is 2026-03-02
+(17:17:06) Computing main repo mapping:
+(17:17:06) Loading:
+(17:17:06) Loading: 0 packages loaded
+(17:17:06) Analyzing: target //src/tools/my_tool:my_tool (0 packages loaded, 0 targets configured)
+[0 / 1] checking cached actions
+(17:17:06) INFO: Analyzed target //src/tools/my_tool:my_tool (0 packages loaded, 0 targets configured).
+(17:17:06) INFO: Found 1 target...
+Target //src/tools/my_tool:my_tool up-to-date:
+  bazel-bin/src/tools/my_tool/my_tool
+(17:17:06) INFO: Elapsed time: 0.518s, Critical Path: 0.09s
+(17:17:06) INFO: 1 process: 3 action cache hit, 1 internal.
+(17:17:06) INFO: Build completed successfully, 1 total action
+(17:17:06) INFO:
+(17:17:06) INFO: Running command line: env FOO=1 BAR=/tmp/cache bazel-bin/src/tools/my_tool/my_tool
+(17:17:06) INFO: Some trailing info line";
+        let stdout = "Processing input...\nDone.";
+        let args: Vec<String> = vec![
+            "//src/tools/my_tool".into(),
+            "--".into(),
+            "\"some-arg\"".into(),
+        ];
+        let result = brun_with_args(stdout, stderr, &args);
+
+        // WARNING stripped — clean build, no build section
+        assert!(!result.contains("WARNING:"));
+        assert!(!result.contains("bazel build"));
+        // Binary output only
+        assert!(result.contains("Processing input..."));
+        assert!(result.contains("Done."));
+        // All noise stripped
+        assert!(!result.contains("Computing main repo"));
+        assert!(!result.contains("Loading:"));
+        assert!(!result.contains("Analyzing:"));
+        assert!(!result.contains("[0 / 1]"));
+        assert!(!result.contains("INFO:"));
+        assert!(!result.contains("Running command line"));
+        assert!(!result.contains("FOO=1"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_post_sentinel_info_stripped() {
+        // Verify that INFO lines after the sentinel are stripped, not forwarded
+        let stderr = "\
+INFO: Build completed successfully, 10 total actions
+INFO: Running command line: bazel-bin/app
+INFO: Some trailing info line
+INFO: Another trailing info line
+actual binary error output";
+        let result = brun("binary stdout", stderr);
+
+        assert!(result.contains("binary stdout"));
+        assert!(result.contains("actual binary error output"));
+        assert!(!result.contains("Some trailing info"));
+        assert!(!result.contains("Another trailing info"));
     }
 }

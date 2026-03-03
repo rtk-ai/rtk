@@ -925,6 +925,12 @@ enum BazelCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run with filtered build noise (binary output forwarded verbatim, 85% build reduction)
+    Run {
+        /// Additional bazel run arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Test with compact output (failures only, 85% token reduction)
     Test {
         /// Additional bazel test arguments
@@ -1602,6 +1608,9 @@ fn main() -> Result<()> {
             }
             BazelCommands::Build { args } => {
                 bazel_cmd::run_build(&args, cli.verbose)?;
+            }
+            BazelCommands::Run { args } => {
+                bazel_cmd::run_run(&args, cli.verbose)?;
             }
             BazelCommands::Test { args } => {
                 bazel_cmd::run_test(&args, cli.verbose)?;
