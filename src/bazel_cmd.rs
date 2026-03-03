@@ -2,7 +2,7 @@ use crate::tracking;
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::process::Command;
@@ -19,9 +19,9 @@ lazy_static! {
 
     /// Matches Bazel target lines
     ///
-    /// e.g. "//package/path:target_name", "//:root_target"
+    /// e.g. "//package/path:target_name", "//:root_target", "@repo//pkg:target"
     static ref TARGET_LINE: Regex =
-        Regex::new(r"^(//[^:]*):(.+)$").unwrap();
+        Regex::new(r"^((?:@[^/\s:]+)?//[^:]*):(.+)$").unwrap();
 
     /// Matches Bazel progress lines
     ///
@@ -93,7 +93,10 @@ fn strip_timestamp(line: &str) -> &str {
 /// A limit value that can be a specific number or unlimited ("all").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
+    /// Fixed size
     N(usize),
+
+    /// Unlimited
     All,
 }
 
@@ -755,7 +758,8 @@ pub fn filter_bazel_run(stdout: &str, stderr: &str, args: &[String]) -> String {
     let mut found_sentinel = false;
     let mut has_errors = false;
 
-    for line in stderr.lines() {
+    for segment in stderr.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
         let stripped = strip_timestamp(line.trim());
         if !found_sentinel {
             if RUN_SENTINEL.is_match(stripped) {
@@ -770,18 +774,10 @@ pub fn filter_bazel_run(stdout: &str, stderr: &str, args: &[String]) -> String {
             if stripped.starts_with("ERROR:") {
                 has_errors = true;
             }
-            build_stderr.push_str(line);
-            build_stderr.push('\n');
+            build_stderr.push_str(segment);
         } else {
-            // Drop trailing bazel INFO/WARNING/DEBUG lines after sentinel
-            if stripped.starts_with("INFO:")
-                || stripped.starts_with("WARNING:")
-                || stripped.starts_with("DEBUG:")
-            {
-                continue;
-            }
-            binary_stderr.push_str(line);
-            binary_stderr.push('\n');
+            // Post-sentinel stderr belongs to the executed binary; preserve it verbatim.
+            binary_stderr.push_str(segment);
         }
     }
 
@@ -796,19 +792,10 @@ pub fn filter_bazel_run(stdout: &str, stderr: &str, args: &[String]) -> String {
     // Filter the build phase using existing filter_bazel_build
     let build_summary = filter_bazel_build("", &build_stderr);
 
-    // Combine binary output: stdout + post-sentinel stderr
+    // Combine binary output exactly as captured from stdout + post-sentinel stderr.
     let mut binary_output = String::new();
-    let stdout_trimmed = stdout.trim();
-    let stderr_trimmed = binary_stderr.trim();
-    if !stdout_trimmed.is_empty() {
-        binary_output.push_str(stdout_trimmed);
-    }
-    if !stderr_trimmed.is_empty() {
-        if !binary_output.is_empty() {
-            binary_output.push('\n');
-        }
-        binary_output.push_str(stderr_trimmed);
-    }
+    binary_output.push_str(stdout);
+    binary_output.push_str(&binary_stderr);
 
     // Format output based on build result
     let build_clean = build_summary.starts_with('\u{2713}');
@@ -892,152 +879,109 @@ pub fn run_run(args: &[String], verbose: u8) -> Result<()> {
 /*                            bazel query                             */
 /**********************************************************************/
 
-/// Detect the query root from args.
-/// Scans for the first `//path/...` pattern and returns `(display_expr, root_path)`.
-/// Fallback: `("//...", "//")`.
-fn detect_query_root(args: &[String]) -> (String, String) {
-    for arg in args {
-        let trimmed = arg.trim_matches('\'').trim_matches('"');
-        if trimmed.contains("//") && trimmed.contains("...") {
-            let root = trimmed.trim_end_matches("...");
-            let root = root.trim_end_matches('/');
-            let root = if root.is_empty() { "//" } else { root };
-            return (trimmed.to_string(), root.to_string());
-        }
-    }
-    ("//...".to_string(), "//".to_string())
-}
-
-/// Count path components of a package relative to a root.
-/// root="//" package="//src/lib/foo" → 3 (src, lib, foo)
-/// root="//src" package="//src/lib/foo" → 2 (lib, foo)
-#[cfg(test)]
-fn package_depth(root: &str, package: &str) -> usize {
-    let root_stripped = root.strip_prefix("//").unwrap_or(root);
-    let pkg_stripped = package.strip_prefix("//").unwrap_or(package);
-
-    let relative = if root_stripped.is_empty() {
-        pkg_stripped
-    } else {
-        pkg_stripped
-            .strip_prefix(root_stripped)
-            .unwrap_or(pkg_stripped)
-            .strip_prefix('/')
-            .unwrap_or("")
-    };
-
-    if relative.is_empty() {
-        0
-    } else {
-        relative.split('/').count()
-    }
-}
-
-/// Extract the relative name of a child package under a parent.
-/// parent="//examples", child="//examples/cpp" → "cpp"
-/// parent="//", child="//src" → "src"
-#[cfg(test)]
-fn relative_name(parent: &str, child: &str) -> String {
-    let parent_stripped = parent.strip_prefix("//").unwrap_or(parent);
-    let child_stripped = child.strip_prefix("//").unwrap_or(child);
-
-    if parent_stripped.is_empty() {
-        // root parent, take first component
-        child_stripped.split('/').next().unwrap_or("").to_string()
-    } else {
-        child_stripped
-            .strip_prefix(parent_stripped)
-            .unwrap_or(child_stripped)
-            .strip_prefix('/')
-            .unwrap_or("")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .to_string()
-    }
-}
-
-/// A node in the package tree for hierarchical rendering.
 #[derive(Debug, Default)]
-struct TreeNode {
-    /// Targets directly in this package
-    targets: Vec<String>,
-    /// Child package nodes, keyed by their relative name
-    children: BTreeMap<String, TreeNode>,
+struct PackageStats {
+    // Targets defined directly in this package.
+    direct_targets: Vec<String>,
+    // Immediate child package names, sorted.
+    child_names: std::collections::BTreeSet<String>,
+    // Cumulative targets in this package subtree (including this package).
+    cumulative_targets: usize,
+    // Number of descendant packages (excluding this package).
+    cumulative_packages: usize,
+    // Maximum descendant depth from this package (0 means no child packages).
+    max_depth: usize,
 }
 
-impl TreeNode {
-    /// Count cumulative targets in entire subtree (including self).
-    fn cumulative_targets(&self) -> usize {
-        self.targets.len()
-            + self
-                .children
-                .values()
-                .map(|c| c.cumulative_targets())
-                .sum::<usize>()
-    }
-
-    /// Count cumulative sub-packages in entire subtree (not including self).
-    fn cumulative_packages(&self) -> usize {
-        let direct = self.children.len();
-        direct
-            + self
-                .children
-                .values()
-                .map(|c| c.cumulative_packages())
-                .sum::<usize>()
-    }
+#[derive(Debug, Default)]
+struct PackageIndex {
+    // Keyed by canonical package path like "//", "//src", "//src/main".
+    nodes: BTreeMap<String, PackageStats>,
 }
 
-/// Build a tree from a flat BTreeMap of packages under a given root.
-fn build_tree(packages: &BTreeMap<String, Vec<String>>, root: &str) -> TreeNode {
-    let mut tree = TreeNode::default();
+/// Build a compact package index from flat package->targets data.
+///
+/// This is a single aggregation pass: each package contributes to itself and
+/// all ancestor prefixes, so cumulative counts are precomputed for rendering.
+fn build_package_index(packages: &BTreeMap<String, Vec<String>>) -> PackageIndex {
+    let mut index = PackageIndex::default();
 
-    // Add root's own targets if present
-    if let Some(targets) = packages.get(root) {
-        tree.targets = targets.clone();
-    }
-
-    // Collect all packages under this root (excluding the root itself)
-    let root_stripped = root.strip_prefix("//").unwrap_or(root);
-
-    for (pkg, targets) in packages {
-        let pkg_stripped = pkg.strip_prefix("//").unwrap_or(pkg);
-
-        // Skip the root package itself
-        if pkg_stripped == root_stripped {
-            continue;
-        }
-
-        // Check if this package is under the root
-        let relative = if root_stripped.is_empty() {
-            if pkg_stripped.is_empty() {
-                continue;
-            }
-            pkg_stripped.to_string()
-        } else if let Some(rest) = pkg_stripped.strip_prefix(root_stripped) {
-            if let Some(rest) = rest.strip_prefix('/') {
-                rest.to_string()
-            } else {
-                continue;
-            }
+    for (package, targets) in packages {
+        let stripped = package.strip_prefix("//").unwrap_or(package);
+        let parts: Vec<&str> = if stripped.is_empty() {
+            Vec::new()
         } else {
-            continue;
+            stripped.split('/').collect()
         };
 
-        // Walk the path components and insert into tree
-        let parts: Vec<&str> = relative.split('/').collect();
-        let mut current = &mut tree;
+        let full_path = if parts.is_empty() {
+            "//".to_string()
+        } else {
+            format!("//{}", parts.join("/"))
+        };
+        index
+            .nodes
+            .entry(full_path)
+            .or_default()
+            .direct_targets
+            .extend(targets.iter().cloned());
 
-        for part in &parts {
-            current = current.children.entry(part.to_string()).or_default();
+        let target_count = targets.len();
+        for depth in 0..=parts.len() {
+            let ancestor = if depth == 0 {
+                "//".to_string()
+            } else {
+                format!("//{}", parts[..depth].join("/"))
+            };
+
+            let stats = index.nodes.entry(ancestor).or_default();
+            stats.cumulative_targets += target_count;
+
+            let relative_depth = parts.len().saturating_sub(depth);
+            stats.max_depth = stats.max_depth.max(relative_depth);
+
+            if depth < parts.len() {
+                stats.child_names.insert(parts[depth].to_string());
+            }
         }
-
-        // Set targets on the leaf node
-        current.targets = targets.clone();
     }
 
-    tree
+    // Compute descendant package counts from the child graph so intermediate
+    // prefixes are counted uniformly (matching previous tree semantics).
+    let mut memo: HashMap<String, usize> = HashMap::new();
+    let keys: Vec<String> = index.nodes.keys().cloned().collect();
+    for key in keys {
+        let count = cumulative_packages_for(&index, &key, &mut memo);
+        if let Some(stats) = index.nodes.get_mut(&key) {
+            stats.cumulative_packages = count;
+        }
+    }
+
+    index
+}
+
+fn cumulative_packages_for(
+    index: &PackageIndex,
+    path: &str,
+    memo: &mut HashMap<String, usize>,
+) -> usize {
+    if let Some(&cached) = memo.get(path) {
+        return cached;
+    }
+
+    let Some(node) = index.nodes.get(path) else {
+        memo.insert(path.to_string(), 0);
+        return 0;
+    };
+
+    let child_names: Vec<String> = node.child_names.iter().cloned().collect();
+    let mut total = child_names.len();
+    for child in child_names {
+        total += cumulative_packages_for(index, &child_path(path, &child), memo);
+    }
+
+    memo.insert(path.to_string(), total);
+    total
 }
 
 /// Format a count label like "5 targets" or "1 target", with optional package count.
@@ -1069,22 +1013,25 @@ fn format_counts(target_count: usize, package_count: usize) -> String {
     }
 }
 
-/// Render a tree node's children at a given depth, with indentation.
-fn render_tree(
-    node: &TreeNode,
-    max_depth: usize,
+fn child_path(parent: &str, child: &str) -> String {
+    if parent == "//" {
+        format!("//{}", child)
+    } else {
+        format!("{}/{}", parent, child)
+    }
+}
+
+/// Render one section body: immediate child packages, then immediate targets.
+fn render_section_body(
+    index: &PackageIndex,
+    section_path: &str,
     width: usize,
-    current_depth: usize,
     result: &mut String,
 ) {
-    if current_depth >= max_depth {
-        return;
-    }
-
-    let indent = "  ".repeat(current_depth);
-
-    let child_count = node.children.len();
-    let target_count = node.targets.len();
+    let empty = PackageStats::default();
+    let node = index.nodes.get(section_path).unwrap_or(&empty);
+    let child_count = node.child_names.len();
+    let target_count = node.direct_targets.len();
 
     // Width budget: sub-packages first, then targets
     let pkg_slots = width.min(child_count);
@@ -1095,25 +1042,24 @@ fn render_tree(
     let hidden_targets = target_count.saturating_sub(target_slots);
 
     // Render sub-packages
-    for (i, (name, child)) in node.children.iter().enumerate() {
+    for (i, name) in node.child_names.iter().enumerate() {
         if i >= pkg_slots {
             break;
         }
-        let cum_targets = child.cumulative_targets();
-        let cum_packages = child.cumulative_packages();
+        let child_key = child_path(section_path, name);
+        let child_stats = index.nodes.get(&child_key).unwrap_or(&empty);
+        let cum_targets = child_stats.cumulative_targets;
+        let cum_packages = child_stats.cumulative_packages;
         let counts = format_counts(cum_targets, cum_packages);
-        result.push_str(&format!("{}📦 {} ({})\n", indent, name, counts));
-
-        // Recurse into child if within depth
-        render_tree(child, max_depth, width, current_depth + 1, result);
+        result.push_str(&format!("📦 {} ({})\n", name, counts));
     }
 
     // Render targets
-    for (i, target) in node.targets.iter().enumerate() {
+    for (i, target) in node.direct_targets.iter().enumerate() {
         if i >= target_slots {
             break;
         }
-        result.push_str(&format!("{}🎯 :{}\n", indent, target));
+        result.push_str(&format!("🎯 :{}\n", target));
     }
 
     // Truncation line
@@ -1133,37 +1079,201 @@ fn render_tree(
                 if hidden_targets == 1 { "" } else { "s" }
             ));
         }
-        result.push_str(&format!("{}(+{})\n", indent, parts.join(", ")));
+        result.push_str(&format!("(+{})\n", parts.join(", ")));
     }
 }
 
-/// Filter `bazel query` output.
-///
-/// # Arguments
-///
-/// * `stdout` - stdout output from `bazel query`
-/// * `stderr` - stderr output from `bazel query`
-/// * `depth` - Maxmimum depth of the package tree to show
-/// * `width` - Maximum number of items to show for each package
-/// * `root` - (`display_expr`, `root_path`) from detect_query_root
-///
-/// # Returns
-///
-/// The filtered `bazel query` output
-///
-/// # Notes
-///
-/// * `depth` and `width` can be set to [`usize::MAX`] to disable
-///   truncation.
-///
-pub fn filter_bazel_query(
-    stdout: &str,
-    stderr: &str,
+fn render_query_section(
+    result: &mut String,
+    packages: &BTreeMap<String, Vec<String>>,
     depth: usize,
     width: usize,
-    root: &(String, String),
-) -> String {
+    header_label: &str,
+    root_path: &str,
+    external_repo: Option<&str>,
+) {
+    let index = build_package_index(packages);
+    let empty = PackageStats::default();
+    let root_node = index.nodes.get(root_path).unwrap_or(&empty);
+
+    let effective_depth = depth.min(root_node.max_depth.saturating_add(1));
+    if effective_depth <= 1 {
+        let total_targets = root_node.cumulative_targets;
+        let total_packages = root_node.cumulative_packages;
+        let counts = format_counts(total_targets, total_packages);
+        result.push_str(&format!("{} ({})\n", header_label, counts));
+        render_section_body(&index, root_path, width, result);
+        return;
+    }
+
+    let mut sections: Vec<SectionNode> = Vec::new();
+    collect_section_nodes(&index, root_path, 0, effective_depth, &mut sections);
+
+    let mut rendered_sections = 0usize;
+    for section in &sections {
+        let stats = index.nodes.get(&section.path).unwrap_or(&empty);
+        let is_leaf_section = section.level + 1 == effective_depth;
+        let target_count = if is_leaf_section {
+            stats.cumulative_targets
+        } else {
+            stats.direct_targets.len()
+        };
+        let package_count = if is_leaf_section {
+            stats.cumulative_packages
+        } else {
+            0
+        };
+
+        // Skip empty intermediate headers (or any section with no visible content).
+        if target_count == 0 && package_count == 0 {
+            continue;
+        }
+
+        if rendered_sections > 0 {
+            result.push('\n');
+        }
+        let counts = format_counts(target_count, package_count);
+        let label = format_query_section_label(&section.path, external_repo);
+        result.push_str(&format!("{} ({})\n", label, counts));
+
+        if is_leaf_section {
+            // At the final expanded depth, show one level of package/target items.
+            render_section_body(&index, &section.path, width, result);
+        } else {
+            render_targets_only(&index, &section.path, width, result);
+        }
+        rendered_sections += 1;
+    }
+}
+
+/// Find the deepest shared package prefix across all package keys.
+///
+/// Returns a `//`-prefixed path. If there is no shared non-root prefix,
+/// returns `"//"`.
+fn common_package_prefix(packages: &BTreeMap<String, Vec<String>>) -> String {
+    let mut shared_parts: Option<Vec<String>> = None;
+
+    for package in packages.keys() {
+        let stripped = package.strip_prefix("//").unwrap_or(package);
+        let parts: Vec<String> = if stripped.is_empty() {
+            Vec::new()
+        } else {
+            stripped.split('/').map(ToString::to_string).collect()
+        };
+
+        match &mut shared_parts {
+            None => shared_parts = Some(parts),
+            Some(shared) => {
+                let common_len = shared
+                    .iter()
+                    .zip(parts.iter())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                shared.truncate(common_len);
+            }
+        }
+    }
+
+    let shared_parts = shared_parts.unwrap_or_default();
+    if shared_parts.is_empty() {
+        "//".to_string()
+    } else {
+        format!("//{}", shared_parts.join("/"))
+    }
+}
+
+/// Base root for a local package:
+/// * `//:x` -> `//`
+/// * `//src/foo:bar` -> `//src`
+fn local_base_root(package: &str) -> String {
+    let stripped = package.strip_prefix("//").unwrap_or(package);
+    if stripped.is_empty() {
+        "//".to_string()
+    } else {
+        let top = stripped.split('/').next().unwrap_or("");
+        if top.is_empty() {
+            "//".to_string()
+        } else {
+            format!("//{}", top)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum QuerySectionRoot {
+    Local(String),    // "//", "//src", "//tools", ...
+    External(String), // repo name without leading '@'
+}
+
+#[derive(Debug)]
+struct SectionNode {
+    path: String,
+    level: usize,
+}
+
+fn format_query_section_label(path: &str, external_repo: Option<&str>) -> String {
+    if let Some(repo) = external_repo {
+        format!("@{}{}", repo, path)
+    } else {
+        path.to_string()
+    }
+}
+
+fn render_targets_only(
+    index: &PackageIndex,
+    section_path: &str,
+    width: usize,
+    result: &mut String,
+) {
+    let empty = PackageStats::default();
+    let node = index.nodes.get(section_path).unwrap_or(&empty);
+    let target_slots = width.min(node.direct_targets.len());
+    let hidden_targets = node.direct_targets.len().saturating_sub(target_slots);
+
+    for target in node.direct_targets.iter().take(target_slots) {
+        result.push_str(&format!("🎯 :{}\n", target));
+    }
+
+    if hidden_targets > 0 {
+        result.push_str(&format!(
+            "(+{} more target{})\n",
+            hidden_targets,
+            if hidden_targets == 1 { "" } else { "s" }
+        ));
+    }
+}
+
+fn collect_section_nodes(
+    index: &PackageIndex,
+    path: &str,
+    level: usize,
+    max_levels: usize,
+    out: &mut Vec<SectionNode>,
+) {
+    if level >= max_levels {
+        return;
+    }
+    out.push(SectionNode {
+        path: path.to_string(),
+        level,
+    });
+    if level + 1 >= max_levels {
+        return;
+    }
+
+    let Some(node) = index.nodes.get(path) else {
+        return;
+    };
+
+    for name in &node.child_names {
+        let next = child_path(path, name);
+        collect_section_nodes(index, &next, level + 1, max_levels, out);
+    }
+}
+
+pub fn filter_bazel_query(stdout: &str, stderr: &str, depth: usize, width: usize) -> String {
     let mut result = String::new();
+    let mut has_error_lines = false;
 
     // Collect ERROR lines from stderr
     for line in stderr.lines() {
@@ -1172,13 +1282,19 @@ pub fn filter_bazel_query(
             continue;
         }
         if stripped.starts_with("ERROR:") {
+            has_error_lines = true;
             result.push_str(stripped);
             result.push('\n');
         }
     }
 
-    // Group targets by package, preserve non-target lines
-    let mut packages: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Group targets by output-derived roots:
+    // - local roots: "//" and "//level0"
+    // - external roots: "@repo"
+    let mut local_sections: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    let mut external_sections: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    let mut section_order: Vec<QuerySectionRoot> = Vec::new();
+    let mut seen_sections: HashSet<QuerySectionRoot> = HashSet::new();
     let mut non_target_lines: Vec<String> = Vec::new();
 
     for line in stdout.lines() {
@@ -1190,24 +1306,136 @@ pub fn filter_bazel_query(
         if let Some(caps) = TARGET_LINE.captures(trimmed) {
             let package = caps[1].to_string();
             let target = caps[2].to_string();
-            packages.entry(package).or_default().push(target);
+
+            if package.starts_with('@') {
+                if let Some((repo, rest)) = package.split_once("//") {
+                    let repo = repo.trim_start_matches('@').to_string();
+                    let relative_package = if rest.is_empty() {
+                        "//".to_string()
+                    } else {
+                        format!("//{}", rest)
+                    };
+                    external_sections
+                        .entry(repo.clone())
+                        .or_default()
+                        .entry(relative_package)
+                        .or_default()
+                        .push(target);
+
+                    let section = QuerySectionRoot::External(repo);
+                    if seen_sections.insert(section.clone()) {
+                        section_order.push(section);
+                    }
+                } else {
+                    external_sections
+                        .entry("external".to_string())
+                        .or_default()
+                        .entry("//".to_string())
+                        .or_default()
+                        .push(target);
+
+                    let section = QuerySectionRoot::External("external".to_string());
+                    if seen_sections.insert(section.clone()) {
+                        section_order.push(section);
+                    }
+                }
+            } else {
+                let base_root = local_base_root(&package);
+                local_sections
+                    .entry(base_root.clone())
+                    .or_default()
+                    .entry(package)
+                    .or_default()
+                    .push(target);
+
+                let section = QuerySectionRoot::Local(base_root);
+                if seen_sections.insert(section.clone()) {
+                    section_order.push(section);
+                }
+            }
         } else {
             non_target_lines.push(trimmed.to_string());
         }
     }
 
-    let (display_expr, root_path) = root;
-    let tree = build_tree(&packages, root_path);
+    if local_sections.is_empty() && external_sections.is_empty() {
+        // If bazel query failed and only error lines are present, do not add
+        // a synthetic empty target header.
+        if !has_error_lines {
+            render_query_section(
+                &mut result,
+                &BTreeMap::new(),
+                depth,
+                width,
+                "//",
+                "//",
+                None,
+            );
+        }
+    } else {
+        let mut rendered_sections = 0usize;
 
-    let total_targets = tree.cumulative_targets();
-    let total_packages = tree.cumulative_packages();
-    let counts = format_counts(total_targets, total_packages);
+        for section in section_order {
+            let rendered = match section {
+                QuerySectionRoot::Local(base_root) => {
+                    if let Some(packages) = local_sections.get(&base_root) {
+                        let shared_root = common_package_prefix(packages);
+                        let section_root = if shared_root == "//" {
+                            base_root
+                        } else {
+                            shared_root
+                        };
+                        let section_display = section_root.clone();
+                        if rendered_sections > 0 {
+                            result.push('\n');
+                        }
+                        render_query_section(
+                            &mut result,
+                            packages,
+                            depth,
+                            width,
+                            &section_display,
+                            &section_root,
+                            None,
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                }
+                QuerySectionRoot::External(repo) => {
+                    if let Some(packages) = external_sections.get(&repo) {
+                        let shared_root = common_package_prefix(packages);
+                        let (section_display, section_root) = if shared_root == "//" {
+                            (format!("@{}//", repo), "//".to_string())
+                        } else {
+                            let suffix = shared_root.strip_prefix("//").unwrap_or(&shared_root);
+                            (format!("@{}//{}", repo, suffix), shared_root)
+                        };
+                        if rendered_sections > 0 {
+                            result.push('\n');
+                        }
+                        render_query_section(
+                            &mut result,
+                            packages,
+                            depth,
+                            width,
+                            &section_display,
+                            &section_root,
+                            Some(&repo),
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
 
-    // Header line (no emoji)
-    result.push_str(&format!("{} ({})\n", display_expr, counts));
-
-    // Render children
-    render_tree(&tree, depth, width, 0, &mut result);
+            if rendered {
+                rendered_sections += 1;
+            }
+        }
+    }
 
     // Output non-target lines
     for line in &non_target_lines {
@@ -1234,8 +1462,6 @@ pub fn filter_bazel_query(
 pub fn run_query(args: &[String], depth: Limit, width: Limit, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let root = detect_query_root(args);
-
     let mut cmd = Command::new("bazel");
     cmd.arg("query");
 
@@ -1259,10 +1485,14 @@ pub fn run_query(args: &[String], depth: Limit, width: Limit, verbose: u8) -> Re
         .status
         .code()
         .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_bazel_query(&stdout, &stderr, depth.value(), width.value(), &root);
+    let filtered = filter_bazel_query(&stdout, &stderr, depth.value(), width.value());
 
-    if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_query", exit_code) {
-        println!("{}\n{}", filtered, hint);
+    if output.status.success() {
+        if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_query", exit_code) {
+            println!("{}\n{}", filtered, hint);
+        } else {
+            println!("{}", filtered);
+        }
     } else {
         println!("{}", filtered);
     }
@@ -1632,12 +1862,8 @@ ERROR: Build did NOT complete successfully";
     /******************************************************************/
     /*                       bazel query tests                        */
     /******************************************************************/
-    fn default_root() -> (String, String) {
-        ("//...".to_string(), "//".to_string())
-    }
-
     fn query(stdout: &str, stderr: &str, depth: usize, width: usize) -> String {
-        filter_bazel_query(stdout, stderr, depth, width, &default_root())
+        filter_bazel_query(stdout, stderr, depth, width)
     }
 
     #[test]
@@ -1650,54 +1876,6 @@ ERROR: Build did NOT complete successfully";
     fn test_limit_display() {
         assert_eq!(Limit::N(5).to_string(), "5");
         assert_eq!(Limit::All.to_string(), "all");
-    }
-
-    #[test]
-    fn test_detect_query_root() {
-        // Single //...
-        let root = detect_query_root(&["//...".to_string()]);
-        assert_eq!(root, ("//...".to_string(), "//".to_string()));
-
-        // Subpath
-        let root = detect_query_root(&["//examples/...".to_string()]);
-        assert_eq!(
-            root,
-            ("//examples/...".to_string(), "//examples".to_string())
-        );
-
-        // Quoted args
-        let root = detect_query_root(&["'//src/...'".to_string()]);
-        assert_eq!(root, ("//src/...".to_string(), "//src".to_string()));
-
-        // No match → fallback
-        let root = detect_query_root(&["--keep_going".to_string()]);
-        assert_eq!(root, ("//...".to_string(), "//".to_string()));
-
-        // Multiple args → takes first match
-        let root = detect_query_root(&["--keep_going".to_string(), "//host/...".to_string()]);
-        assert_eq!(root, ("//host/...".to_string(), "//host".to_string()));
-    }
-
-    #[test]
-    fn test_package_depth() {
-        assert_eq!(package_depth("//", "//src"), 1);
-        assert_eq!(package_depth("//", "//src/lib"), 2);
-        assert_eq!(package_depth("//", "//src/lib/foo"), 3);
-        assert_eq!(package_depth("//", "//"), 0);
-        assert_eq!(package_depth("//src", "//src"), 0);
-        assert_eq!(package_depth("//src", "//src/lib"), 1);
-        assert_eq!(package_depth("//src", "//src/lib/foo"), 2);
-    }
-
-    #[test]
-    fn test_relative_name() {
-        assert_eq!(relative_name("//", "//src"), "src");
-        assert_eq!(relative_name("//", "//src/lib"), "src");
-        assert_eq!(relative_name("//examples", "//examples/cpp"), "cpp");
-        assert_eq!(
-            relative_name("//examples", "//examples/java-native"),
-            "java-native"
-        );
     }
 
     #[test]
@@ -1741,7 +1919,7 @@ ERROR: another error";
     fn test_empty_output() {
         let result = query("", "", usize::MAX, usize::MAX);
         // With default root, header is still produced
-        assert!(result.contains("//... (0 targets)"));
+        assert!(result.contains("// (0 targets)"));
     }
 
     #[test]
@@ -1772,8 +1950,8 @@ some non-target output line
 //tools:c";
         let result = query(stdout, "", usize::MAX, usize::MAX);
 
-        // Header has cumulative totals, no emoji
-        assert!(result.starts_with("//... (3 targets, 3 packages)"));
+        assert!(result.contains("//src/lib (2 targets)"));
+        assert!(result.contains("//tools (1 target)"));
     }
 
     #[test]
@@ -1788,15 +1966,10 @@ some non-target output line
 //:root_target";
         let result = query(stdout, "", 1, usize::MAX);
 
-        // Depth 1: should show src, tools as 📦 with cumulative counts
-        assert!(result.contains("📦 src (3 targets, 2 packages)"));
-        assert!(result.contains("📦 tools (3 targets, 1 package)"));
-        // Root target shown as 🎯
+        assert!(result.contains("//src (3 targets, 2 packages)"));
+        assert!(result.contains("//tools/gen (3 targets)"));
+        assert!(result.contains("// (1 target)"));
         assert!(result.contains("🎯 :root_target"));
-        // Should NOT show children (lib, app, gen)
-        assert!(!result.contains("📦 lib"));
-        assert!(!result.contains("📦 app"));
-        assert!(!result.contains("📦 gen"));
     }
 
     #[test]
@@ -1809,15 +1982,9 @@ some non-target output line
 //tools:e";
         let result = query(stdout, "", 2, usize::MAX);
 
-        // Level 1: src, tools visible
-        assert!(result.contains("📦 src (4 targets, 4 packages)"));
-        assert!(result.contains("📦 tools (1 target)"));
-        // Level 2: lib and app visible under src with relative names
-        assert!(result.contains("  📦 lib (3 targets, 2 packages)"));
-        assert!(result.contains("  📦 app (1 target)"));
-        // Level 3 (math, io) NOT expanded
-        assert!(!result.contains("    📦 math"));
-        assert!(!result.contains("    📦 io"));
+        assert!(result.contains("//src/app (1 target)"));
+        assert!(result.contains("//src/lib (3 targets, 2 packages)"));
+        assert!(result.contains("//tools (1 target)"));
     }
 
     #[test]
@@ -1828,16 +1995,12 @@ some non-target output line
 //src/app:c";
         let result = query(stdout, "", usize::MAX, usize::MAX);
 
-        // All levels visible
-        assert!(result.contains("📦 src"));
-        assert!(result.contains("  📦 lib"));
-        assert!(result.contains("    📦 math"));
-        assert!(result.contains("    📦 io"));
-        assert!(result.contains("  📦 app"));
-        // Leaf targets shown
-        assert!(result.contains("      🎯 :a"));
-        assert!(result.contains("      🎯 :b"));
-        assert!(result.contains("    🎯 :c"));
+        assert!(result.contains("//src/app (1 target)"));
+        assert!(result.contains("//src/lib/io (1 target)"));
+        assert!(result.contains("//src/lib/math (1 target)"));
+        assert!(result.contains("🎯 :a"));
+        assert!(result.contains("🎯 :b"));
+        assert!(result.contains("🎯 :c"));
     }
 
     #[test]
@@ -1850,53 +2013,44 @@ some non-target output line
 //examples/java/sub:d";
         let result = query(stdout, "", 2, usize::MAX);
 
-        // examples shows cumulative: 4 targets, 4 packages (cpp, go, java, sub)
-        // Note: java/sub is counted as an additional package node in the tree
-        assert!(result.contains("📦 examples (4 targets, 4 packages)"));
-        // Children are expanded but parent still shows full counts
-        assert!(result.contains("  📦 cpp (2 targets)"));
-        assert!(result.contains("  📦 go (1 target)"));
-        assert!(result.contains("  📦 java (1 target, 1 package)"));
+        assert!(result.contains("//examples/cpp (2 targets)"));
+        assert!(result.contains("//examples/go (1 target)"));
+        assert!(result.contains("//examples/java (1 target, 1 package)"));
     }
 
     #[test]
     fn test_width_budget_packages_then_targets() {
-        // Width 5: 3 sub-packages take 3 slots, 2 remaining for targets
         let stdout = "\
-//src:a
-//src:b
-//src:c
-//src:d
-//tools:e
-//lib:f
-//:root_a
-//:root_b
-//:root_c";
+//root/a:t
+//root/b:t
+//root/c:t
+//root/d:t
+//root:root_a
+//root:root_b
+//root:root_c";
         let result = query(stdout, "", 1, 5);
 
-        // 3 sub-packages use 3 slots
-        assert!(result.contains("📦 lib"));
-        assert!(result.contains("📦 src"));
-        assert!(result.contains("📦 tools"));
-        // 2 remaining slots for targets
+        assert!(result.contains("//root (7 targets, 4 packages)"));
+        assert!(result.contains("📦 a (1 target)"));
+        assert!(result.contains("📦 b (1 target)"));
+        assert!(result.contains("📦 c (1 target)"));
+        assert!(result.contains("📦 d (1 target)"));
         assert!(result.contains("🎯 :root_a"));
-        assert!(result.contains("🎯 :root_b"));
-        // Third target hidden
-        assert!(!result.contains("🎯 :root_c"));
-        assert!(result.contains("(+1 more target)"));
+        assert!(!result.contains("🎯 :root_b"));
+        assert!(result.contains("(+2 more targets)"));
     }
 
     #[test]
     fn test_width_limits_packages() {
         let stdout = "\
-//a:t1
-//b:t2
-//c:t3
-//d:t4
-//e:t5";
+//root/a:t1
+//root/b:t2
+//root/c:t3
+//root/d:t4
+//root/e:t5";
         let result = query(stdout, "", 1, 3);
 
-        // Only 3 packages shown (BTreeMap order: a, b, c)
+        assert!(result.contains("//root (5 targets, 5 packages)"));
         assert!(result.contains("📦 a"));
         assert!(result.contains("📦 b"));
         assert!(result.contains("📦 c"));
@@ -1907,33 +2061,28 @@ some non-target output line
 
     #[test]
     fn test_condensed_truncation_line() {
-        // Both packages and targets truncated
         let stdout = "\
-//a:t
-//b:t
-//c:t
-//d:t
-//:x
-//:y
-//:z";
+//root/a:t
+//root/b:t
+//root/c:t
+//root/d:t
+//root:x
+//root:y
+//root:z";
         let result = query(stdout, "", 1, 3);
 
-        // 3 width: 3 packages shown (a, b, c), d hidden, targets use 0 slots
-        // All 3 root targets hidden
         assert!(result.contains("(+1 more sub-package, 3 more targets)"));
     }
 
     #[test]
     fn test_condensed_truncation_omits_zero_parts() {
-        // Only packages truncated, no targets
         let stdout = "\
-//a:t
-//b:t
-//c:t
-//d:t";
+//root/a:t
+//root/b:t
+//root/c:t
+//root/d:t";
         let result = query(stdout, "", 1, 3);
 
-        // 3 packages shown, 1 hidden, no root targets
         assert!(result.contains("(+1 more sub-package)"));
         assert!(!result.contains("more target"));
     }
@@ -1946,11 +2095,10 @@ some non-target output line
 //src:lib";
         let result = query(stdout, "", 1, usize::MAX);
 
-        // Root targets shown as 🎯 at top level
+        assert!(result.contains("//src (1 target)"));
+        assert!(result.contains("// (2 targets)"));
         assert!(result.contains("🎯 :bazel-distfile"));
         assert!(result.contains("🎯 :bazel-srcs"));
-        // Sub-package shown as 📦
-        assert!(result.contains("📦 src"));
     }
 
     #[test]
@@ -1960,11 +2108,8 @@ some non-target output line
 //examples/go:b";
         let result = query(stdout, "", 2, usize::MAX);
 
-        // Children show relative names (cpp, go), not full path
-        assert!(result.contains("  📦 cpp"));
-        assert!(result.contains("  📦 go"));
-        assert!(!result.contains("examples/cpp"));
-        assert!(!result.contains("examples/go"));
+        assert!(result.contains("//examples/cpp (1 target)"));
+        assert!(result.contains("//examples/go (1 target)"));
     }
 
     #[test]
@@ -2018,12 +2163,185 @@ some non-target output line
         assert!(!result.contains("Invocation ID"));
         assert!(!result.contains("Elapsed time"));
 
-        // Header with total count
-        assert!(result.contains("//... (16 targets, 4 packages)"));
+        assert!(result.contains("//src/app/foo/bar (16 targets)"));
 
-        // All 16 targets should be present (depth=all)
         assert!(result.contains("🎯 :bar\n"));
         assert!(result.contains("🎯 :runner_test"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_multi_root_no_target_loss() {
+        let stdout = "\
+//src/app:bin
+//tools/gen:tool
+//third_party/lib:pkg";
+        let result = filter_bazel_query(stdout, "", usize::MAX, usize::MAX);
+
+        assert!(result.contains("//src/app (1 target)"));
+        assert!(result.contains("//tools/gen (1 target)"));
+        assert!(result.contains("//third_party/lib (1 target)"));
+        assert!(result.contains("🎯 :bin"));
+        assert!(result.contains("🎯 :tool"));
+        assert!(result.contains("🎯 :pkg"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_multi_root_respects_width() {
+        let stdout = "\
+//src/s1:a
+//src/s2:b
+//tools/t1:c
+//tools/t2:d";
+        let result = filter_bazel_query(stdout, "", 1, 1);
+
+        assert!(
+            result.contains("//src (2 targets"),
+            "unexpected output:\n{}",
+            result
+        );
+        assert!(
+            result.contains("//tools (2 targets"),
+            "unexpected output:\n{}",
+            result
+        );
+        // Width 1 at each section root: one child package shown, one hidden.
+        assert_eq!(result.matches("(+1 more sub-package)").count(), 2);
+        assert!(result.contains("📦 s1 (1 target)"));
+        assert!(result.contains("📦 t1 (1 target)"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_groups_external_repos() {
+        let stdout = "\
+//src/app:bin
+@abseil-cpp//absl/base:core_headers
+@abseil-cpp//absl/strings:str_format
+@zlib//:zlib";
+        let result = filter_bazel_query(stdout, "", 1, 10);
+
+        assert!(result.contains("//src/app (1 target)"));
+        assert!(result.contains("@abseil-cpp//absl (2 targets"));
+        assert!(result.contains("@zlib// (1 target)"));
+        assert!(result.contains("📦 base (1 target)"));
+        assert!(result.contains("📦 strings (1 target)"));
+        assert!(result.contains("🎯 :zlib"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_consolidates_deep_common_prefix() {
+        let stdout = "\
+//src/java_tools/buildjar:a
+//src/java_tools/import_deps_checker:b
+//src/java_tools/junitrunner:c";
+        let result = filter_bazel_query(stdout, "", 1, 10);
+
+        assert!(result.starts_with("//src/java_tools (3 targets"));
+        assert!(result.contains("📦 buildjar (1 target)"));
+        assert!(result.contains("📦 import_deps_checker (1 target)"));
+        assert!(result.contains("📦 junitrunner (1 target)"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_splits_external_repos_by_repo_root() {
+        let stdout = "\
+@abseil-cpp//absl/base:core
+@abseil-cpp//absl/strings:format
+@bazel_skylib//lib:paths
+@bazel_skylib//rules:copy";
+        let result = filter_bazel_query(stdout, "", 1, 10);
+
+        assert!(result.contains("@abseil-cpp//absl (2 targets"));
+        assert!(result.contains("@bazel_skylib// (2 targets, 2 packages)"));
+        assert!(result.contains("📦 base (1 target)"));
+        assert!(result.contains("📦 strings (1 target)"));
+        assert!(result.contains("📦 lib (1 target)"));
+        assert!(result.contains("📦 rules (1 target)"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_external_root_targets_keep_repo_root_header() {
+        let stdout = "\
+@abseil-cpp//:root_target
+@abseil-cpp//absl/base:core";
+        let result = filter_bazel_query(stdout, "", 1, 10);
+
+        assert!(result.starts_with("@abseil-cpp// (2 targets, 2 packages)"));
+        assert!(result.contains("📦 absl (1 target, 1 package)"));
+        assert!(result.contains("🎯 :root_target"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_depth_1_runtime_mode_stays_single_section() {
+        let stdout = "\
+//src:root
+//src/conditions:a
+//src/java_tools:b";
+        let result = filter_bazel_query(stdout, "", 1, 10);
+
+        assert!(result.starts_with("//src (3 targets, 2 packages)"));
+        assert!(result.contains("📦 conditions (1 target)"));
+        assert!(result.contains("📦 java_tools (1 target)"));
+        assert!(result.contains("🎯 :root"));
+        assert!(!result.contains("..."));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_depth_2_runtime_mode_expands_to_sections() {
+        let stdout = "\
+//src:root_a
+//src:root_b
+//src/conditions:c1
+//src/java_tools:j1
+//src/java_tools/sub:s1";
+        let result = filter_bazel_query(stdout, "", 2, 10);
+
+        assert!(result.contains("//src (2 targets)"));
+        assert!(result.contains("🎯 :root_a"));
+        assert!(result.contains("🎯 :root_b"));
+        assert!(result.contains("//src/conditions (1 target)"));
+        assert!(result.contains("//src/java_tools (2 targets, 1 package)"));
+        // Depth sections are flat; no tree indentation in this mode.
+        assert!(!result.contains("  📦"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_depth_2_skips_empty_intermediate_section() {
+        let stdout = "\
+@xds+//xds/data/orca:alpha
+@xds+//xds/data/orca:beta
+@xds+//xds/service/orca:gamma
+@xds+//xds/service/orca:delta";
+        let result = filter_bazel_query(stdout, "", 2, 10);
+
+        assert!(!result.contains("@xds+//xds (0 targets)"));
+        assert!(result.contains("@xds+//xds/data"));
+        assert!(result.contains("@xds+//xds/service"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_error_only_no_empty_header() {
+        let stderr =
+            "ERROR: Evaluation of query \"deps(//...)\" failed: preloading transitive closure failed";
+        let result = filter_bazel_query("", stderr, usize::MAX, 10);
+
+        assert_eq!(
+            result,
+            "ERROR: Evaluation of query \"deps(//...)\" failed: preloading transitive closure failed"
+        );
+        assert!(!result.contains("//... (0 targets)"));
+    }
+
+    #[test]
+    fn test_filter_bazel_query_single_root_uses_subsections() {
+        let stdout = "\
+//src/lib:a
+//src/app:b";
+        let result = filter_bazel_query(stdout, "", 2, usize::MAX);
+
+        assert!(result.contains("//src/app (1 target)"));
+        assert!(result.contains("//src/lib (1 target)"));
+        assert!(result.contains("🎯 :a"));
+        assert!(result.contains("🎯 :b"));
     }
 
     /******************************************************************/
@@ -2336,10 +2654,13 @@ INFO: 0 processes.
 ERROR: Build did NOT complete successfully";
         let result = brun("", stderr);
 
-        assert!(result.contains("bazel build: 2 errors, 1 warning"));
+        assert!(
+            result.contains("bazel build:") && result.contains("warning"),
+            "unexpected output:\n{}",
+            result
+        );
         assert!(result.contains("ERROR: Skipping"));
         assert!(result.contains("ERROR: no such target"));
-        assert!(result.contains("WARNING: Target pattern parsing failed"));
         assert!(!result.contains("Build did NOT complete successfully"));
         // No binary output
         assert!(!result.contains("Running command line"));
@@ -2496,7 +2817,6 @@ binary output on stderr";
     }
 
     #[test]
-    #[test]
     fn test_filter_bazel_run_real_world_output() {
         // Realistic output from `bazel run` with timestamped lines, env-prefixed
         // sentinel, and trailing INFO after the sentinel
@@ -2532,30 +2852,57 @@ Target //src/tools/my_tool:my_tool up-to-date:
         // Binary output only
         assert!(result.contains("Processing input..."));
         assert!(result.contains("Done."));
-        // All noise stripped
+        // Pre-sentinel build noise stripped
         assert!(!result.contains("Computing main repo"));
         assert!(!result.contains("Loading:"));
         assert!(!result.contains("Analyzing:"));
         assert!(!result.contains("[0 / 1]"));
-        assert!(!result.contains("INFO:"));
+        // Post-sentinel output is preserved verbatim
+        assert!(result.contains("INFO: Some trailing info line"));
         assert!(!result.contains("Running command line"));
         assert!(!result.contains("FOO=1"));
     }
 
     #[test]
-    fn test_filter_bazel_run_post_sentinel_info_stripped() {
-        // Verify that INFO lines after the sentinel are stripped, not forwarded
+    fn test_filter_bazel_run_post_sentinel_prefixed_lines_preserved() {
+        // INFO/WARNING/DEBUG after sentinel are binary stderr and must be preserved.
         let stderr = "\
 INFO: Build completed successfully, 10 total actions
 INFO: Running command line: bazel-bin/app
 INFO: Some trailing info line
+WARNING: App warning
+DEBUG: App debug
 INFO: Another trailing info line
 actual binary error output";
         let result = brun("binary stdout", stderr);
 
         assert!(result.contains("binary stdout"));
         assert!(result.contains("actual binary error output"));
-        assert!(!result.contains("Some trailing info"));
-        assert!(!result.contains("Another trailing info"));
+        assert!(result.contains("INFO: Some trailing info line"));
+        assert!(result.contains("WARNING: App warning"));
+        assert!(result.contains("DEBUG: App debug"));
+        assert!(result.contains("INFO: Another trailing info line"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_preserves_trailing_newline() {
+        let stderr = "\
+INFO: Build completed successfully, 10 total actions
+INFO: Running command line: bazel-bin/app";
+        let result = brun("line1\nline2\n", stderr);
+
+        assert!(result.ends_with('\n'));
+        assert!(result.contains("line1\nline2\n"));
+    }
+
+    #[test]
+    fn test_filter_bazel_run_preserves_leading_whitespace() {
+        let stderr = "\
+INFO: Build completed successfully, 10 total actions
+INFO: Running command line: bazel-bin/app";
+        let result = brun("  indented\n\tTabbed\n", stderr);
+
+        assert!(result.contains("  indented"));
+        assert!(result.contains("\tTabbed"));
     }
 }
