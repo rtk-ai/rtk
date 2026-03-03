@@ -20,6 +20,7 @@ mod golangci_cmd;
 mod grep_cmd;
 mod hook_audit_cmd;
 mod init;
+mod integrity;
 mod json_cmd;
 mod learn;
 mod lint_cmd;
@@ -499,6 +500,9 @@ enum Commands {
         args: Vec<OsString>,
     },
 
+    /// Verify hook integrity (SHA-256 check)
+    Verify,
+
     /// Ruff linter/formatter with compact output
     Ruff {
         /// Ruff arguments (e.g., check, format --check)
@@ -865,6 +869,13 @@ enum GoCommands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Runtime integrity check for operational commands.
+    // Meta commands (init, gain, verify, config, etc.) skip the check
+    // because they don't go through the hook pipeline.
+    if is_operational_command(&cli.command) {
+        integrity::runtime_check()?;
+    }
 
     match cli.command {
         Commands::Ls { args } => {
@@ -1495,9 +1506,65 @@ fn main() -> Result<()> {
                 std::process::exit(output.status.code().unwrap_or(1));
             }
         }
+
+        Commands::Verify => {
+            integrity::run_verify(cli.verbose)?;
+        }
     }
 
     Ok(())
+}
+
+/// Returns true for commands that are invoked via the hook pipeline
+/// (i.e., commands that process rewritten shell commands).
+/// Meta commands (init, gain, verify, etc.) are excluded because
+/// they are run directly by the user, not through the hook.
+/// Returns true for commands that go through the hook pipeline
+/// and therefore require integrity verification.
+///
+/// SECURITY: whitelist pattern — new commands are NOT integrity-checked
+/// until explicitly added here. A forgotten command fails open (no check)
+/// rather than creating false confidence about what's protected.
+fn is_operational_command(cmd: &Commands) -> bool {
+    matches!(
+        cmd,
+        Commands::Ls { .. }
+            | Commands::Tree { .. }
+            | Commands::Read { .. }
+            | Commands::Smart { .. }
+            | Commands::Git { .. }
+            | Commands::Gh { .. }
+            | Commands::Pnpm { .. }
+            | Commands::Err { .. }
+            | Commands::Test { .. }
+            | Commands::Json { .. }
+            | Commands::Deps { .. }
+            | Commands::Env { .. }
+            | Commands::Find { .. }
+            | Commands::Diff { .. }
+            | Commands::Log { .. }
+            | Commands::Docker { .. }
+            | Commands::Kubectl { .. }
+            | Commands::Summary { .. }
+            | Commands::Grep { .. }
+            | Commands::Wget { .. }
+            | Commands::Vitest { .. }
+            | Commands::Prisma { .. }
+            | Commands::Tsc { .. }
+            | Commands::Next { .. }
+            | Commands::Lint { .. }
+            | Commands::Prettier { .. }
+            | Commands::Playwright { .. }
+            | Commands::Cargo { .. }
+            | Commands::Npm { .. }
+            | Commands::Npx { .. }
+            | Commands::Curl { .. }
+            | Commands::Ruff { .. }
+            | Commands::Pytest { .. }
+            | Commands::Pip { .. }
+            | Commands::Go { .. }
+            | Commands::GolangciLint { .. }
+    )
 }
 
 #[cfg(test)]
