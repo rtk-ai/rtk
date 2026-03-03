@@ -1565,6 +1565,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
     )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
