@@ -289,6 +289,7 @@ After install, **restart Claude Code**.
 | `cat/head/tail <file>` | `rtk read <file>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
 | `ls` | `rtk ls` |
+| `bazel build/test/run/query` | `rtk bazel ...` |
 | `vitest/jest` | `rtk vitest run` |
 | `tsc` | `rtk tsc` |
 | `eslint/biome` | `rtk lint` |

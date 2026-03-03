@@ -113,6 +113,14 @@ test_rewrite "cargo test" \
   "cargo test" \
   "rtk cargo test"
 
+test_rewrite "bazel query //src/..." \
+  "bazel query //src/..." \
+  "rtk bazel query //src/..."
+
+test_rewrite "bazel build //src:bazel-dev" \
+  "bazel build //src:bazel-dev" \
+  "rtk bazel build //src:bazel-dev"
+
 test_rewrite "npx prisma migrate" \
   "npx prisma migrate" \
   "rtk prisma migrate"
@@ -144,6 +152,10 @@ test_rewrite "env + ls" \
 test_rewrite "env + npm run" \
   "NODE_ENV=test npm run test:e2e" \
   "NODE_ENV=test rtk npm test:e2e"
+
+test_rewrite "env + bazel query" \
+  "USE_BAZEL_VERSION=8.2.0 bazel query //src/..." \
+  "USE_BAZEL_VERSION=8.2.0 rtk bazel query //src/..."
 
 test_rewrite "env + docker compose (unsupported subcommand, NOT rewritten)" \
   "COMPOSE_PROJECT_NAME=test docker compose up -d" \
@@ -331,6 +343,10 @@ test_rewrite "python3 (no pattern)" \
 
 test_rewrite "node (no pattern)" \
   "node -e 'console.log(1)'" \
+  ""
+
+test_rewrite "bazel startup flags before subcommand (NOT rewritten)" \
+  "bazel --output_base=/tmp/bazel query //src/..." \
   ""
 
 echo ""
