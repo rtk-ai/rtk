@@ -5,6 +5,128 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0](https://github.com/rtk-ai/rtk/compare/v0.22.2...v0.23.0) (2026-02-28)
+
+
+### Features
+
+* add mypy command with grouped error output ([#109](https://github.com/rtk-ai/rtk/issues/109)) ([e8ef341](https://github.com/rtk-ai/rtk/commit/e8ef3418537247043808dc3c88bfd189b717a0a1))
+* **gain:** add per-project token savings with -p flag ([#128](https://github.com/rtk-ai/rtk/issues/128)) ([2b550ee](https://github.com/rtk-ai/rtk/commit/2b550eebd6219a4844488d8fde1842ba3c6dec25))
+
+
+### Bug Fixes
+
+* eliminate duplicate output when grep-ing function names from git show ([#248](https://github.com/rtk-ai/rtk/issues/248)) ([a6f65f1](https://github.com/rtk-ai/rtk/commit/a6f65f11da71936d148a2562216ab45b4c4b04a0))
+* filter docker compose hook rewrites to supported subcommands ([#245](https://github.com/rtk-ai/rtk/issues/245)) ([dbbf980](https://github.com/rtk-ai/rtk/commit/dbbf980f3ba9a51d0f7eb703e7b3c52fde2b784f)), closes [#244](https://github.com/rtk-ai/rtk/issues/244)
+* **registry:** "fi" in IGNORED_PREFIXES shadows find commands ([#246](https://github.com/rtk-ai/rtk/issues/246)) ([48965c8](https://github.com/rtk-ai/rtk/commit/48965c85d2dd274bbdcf27b11850ccd38909e6f4))
+* remove personal preferences from project CLAUDE.md ([3a8044e](https://github.com/rtk-ai/rtk/commit/3a8044ef6991b2208d904b7401975fcfcb165cdb))
+* remove personal preferences from project CLAUDE.md ([d362ad0](https://github.com/rtk-ai/rtk/commit/d362ad0e4968cfc6aa93f9ef163512a692ca5d1b))
+* remove remaining personal project reference from CLAUDE.md ([5b59700](https://github.com/rtk-ai/rtk/commit/5b597002dcd99029cb9c0da9b6d38b44021bdb3a))
+* remove remaining personal project reference from CLAUDE.md ([dc09265](https://github.com/rtk-ai/rtk/commit/dc092655fb84a7c19a477e731eed87df5ad0b89f))
+* surface build failures in go test summary ([#274](https://github.com/rtk-ai/rtk/issues/274)) ([b405e48](https://github.com/rtk-ai/rtk/commit/b405e48ca6c4be3ba702a5d9092fa4da4dff51dc))
+
+## [0.22.2](https://github.com/rtk-ai/rtk/compare/v0.22.1...v0.22.2) (2026-02-20)
+
+
+### Bug Fixes
+
+* **grep:** accept -n flag for grep/rg compatibility ([7d561cc](https://github.com/rtk-ai/rtk/commit/7d561cca51e4e177d353e6514a618e5bb09eebc6))
+* **playwright:** fix JSON parser and binary resolution ([#215](https://github.com/rtk-ai/rtk/issues/215)) ([461856c](https://github.com/rtk-ai/rtk/commit/461856c8fd78cce8e2d875ae878111d7cb3610cd))
+* propagate rg exit code in rtk grep for CLI parity ([#227](https://github.com/rtk-ai/rtk/issues/227)) ([f1be885](https://github.com/rtk-ai/rtk/commit/f1be88565e602d3b6777f629d417e957a62daae2)), closes [#162](https://github.com/rtk-ai/rtk/issues/162)
+
+## [0.22.1](https://github.com/rtk-ai/rtk/compare/v0.22.0...v0.22.1) (2026-02-19)
+
+
+### Bug Fixes
+
+* git branch creation silently swallowed by list mode ([#194](https://github.com/rtk-ai/rtk/issues/194)) ([88dc752](https://github.com/rtk-ai/rtk/commit/88dc752220dc79dfa09b871065b28ae6ef907231))
+* **git:** support multiple -m flags in git commit ([292225f](https://github.com/rtk-ai/rtk/commit/292225f2dd09bfc5274cc8b4ed92d1a519929629))
+* **git:** support multiple -m flags in git commit ([c18553a](https://github.com/rtk-ai/rtk/commit/c18553a55c1192610525a5341a183da46c59d50c))
+* **grep:** translate BRE \| alternation and strip -r flag for rg ([#206](https://github.com/rtk-ai/rtk/issues/206)) ([70d1b04](https://github.com/rtk-ai/rtk/commit/70d1b04093a3dfcc99991502f1530cbb13bae872))
+* propagate linter exit code in rtk lint ([#207](https://github.com/rtk-ai/rtk/issues/207)) ([8e826fc](https://github.com/rtk-ai/rtk/commit/8e826fc89fe7350df82ee2b1bae8104da609f2b2)), closes [#185](https://github.com/rtk-ai/rtk/issues/185)
+* smart markdown body filter for gh issue/pr view ([#188](https://github.com/rtk-ai/rtk/issues/188)) ([#214](https://github.com/rtk-ai/rtk/issues/214)) ([4208015](https://github.com/rtk-ai/rtk/commit/4208015cce757654c150f3d71ddd004d22b4dd25))
+
+## [0.22.0](https://github.com/rtk-ai/rtk/compare/v0.21.1...v0.22.0) (2026-02-18)
+
+
+### Features
+
+* add `rtk wc` command for compact word/line/byte counts ([#175](https://github.com/rtk-ai/rtk/issues/175)) ([393fa5b](https://github.com/rtk-ai/rtk/commit/393fa5ba2bda0eb1f8655a34084ea4c1e08070ae))
+
+## [0.21.1](https://github.com/rtk-ai/rtk/compare/v0.21.0...v0.21.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* gh run view drops --log-failed, --log, --json flags ([#159](https://github.com/rtk-ai/rtk/issues/159)) ([d196c2d](https://github.com/rtk-ai/rtk/commit/d196c2d2df9b7a807e02ace557a4eea45cfee77d))
+
+## [0.21.0](https://github.com/rtk-ai/rtk/compare/v0.20.1...v0.21.0) (2026-02-17)
+
+
+### Features
+
+* **docker:** add docker compose support ([#110](https://github.com/rtk-ai/rtk/issues/110)) ([510c491](https://github.com/rtk-ai/rtk/commit/510c491238731b71b58923a0f20443ade6df5ae7))
+
+## [0.20.1](https://github.com/rtk-ai/rtk/compare/v0.20.0...v0.20.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* install to ~/.local/bin instead of /usr/local/bin (closes [#155](https://github.com/rtk-ai/rtk/issues/155)) ([#161](https://github.com/rtk-ai/rtk/issues/161)) ([0b34772](https://github.com/rtk-ai/rtk/commit/0b34772a679f3c6b5dd9609af2f6eec6d79e4a64))
+
+## [0.20.0](https://github.com/rtk-ai/rtk/compare/v0.19.0...v0.20.0) (2026-02-16)
+
+
+### Features
+
+* add hook audit mode for verifiable rewrite metrics ([#151](https://github.com/rtk-ai/rtk/issues/151)) ([70c3786](https://github.com/rtk-ai/rtk/commit/70c37867e7282ee0ccf200022ecef8c6e4ab52f4))
+
+## [0.19.0](https://github.com/rtk-ai/rtk/compare/v0.18.1...v0.19.0) (2026-02-16)
+
+
+### Features
+
+* tee raw output to file for LLM re-read without re-run ([#134](https://github.com/rtk-ai/rtk/issues/134)) ([a08a62b](https://github.com/rtk-ai/rtk/commit/a08a62b4e3b3c6a2ad933978b1143dcfc45cf891))
+
+## [0.18.1](https://github.com/rtk-ai/rtk/compare/v0.18.0...v0.18.1) (2026-02-15)
+
+
+### Bug Fixes
+
+* update ARCHITECTURE.md version to 0.18.0 ([398cb08](https://github.com/rtk-ai/rtk/commit/398cb08125410a4de11162720cf3499d3c76f12d))
+* update version references to 0.16.0 in README.md and CLAUDE.md ([ec54833](https://github.com/rtk-ai/rtk/commit/ec54833621c8ca666735e1a08ed5583624b250c1))
+* update version references to 0.18.0 in docs ([c73ed47](https://github.com/rtk-ai/rtk/commit/c73ed470a79ab9e4771d2ad65394859e672b4123))
+
+## [0.18.0](https://github.com/rtk-ai/rtk/compare/v0.17.0...v0.18.0) (2026-02-15)
+
+
+### Features
+
+* **gain:** colored dashboard with efficiency meter and impact bars ([#129](https://github.com/rtk-ai/rtk/issues/129)) ([606b86e](https://github.com/rtk-ai/rtk/commit/606b86ed43902dc894e6f1711f6fe7debedc2530))
+
+## [0.17.0](https://github.com/rtk-ai/rtk/compare/v0.16.0...v0.17.0) (2026-02-15)
+
+
+### Features
+
+* **cargo:** add cargo nextest support with failures-only output ([#107](https://github.com/rtk-ai/rtk/issues/107)) ([68fd570](https://github.com/rtk-ai/rtk/commit/68fd570f2b7d5aaae7b37b07eb24eae21542595e))
+* **hook:** handle global options before subcommands ([#99](https://github.com/rtk-ai/rtk/issues/99)) ([7401f10](https://github.com/rtk-ai/rtk/commit/7401f1099f3ef14598f11947262756e3f19fce8f))
+
+## [0.16.0](https://github.com/rtk-ai/rtk/compare/v0.15.4...v0.16.0) (2026-02-14)
+
+
+### Features
+
+* **python:** add lint dispatcher + universal format command ([#100](https://github.com/rtk-ai/rtk/issues/100)) ([4cae6b6](https://github.com/rtk-ai/rtk/commit/4cae6b6c9a4fbc91c56a99f640d217478b92e6d9))
+
+## [0.15.4](https://github.com/rtk-ai/rtk/compare/v0.15.3...v0.15.4) (2026-02-14)
+
+
+### Bug Fixes
+
+* **git:** fix for issue [#82](https://github.com/rtk-ai/rtk/issues/82) ([04e6bb0](https://github.com/rtk-ai/rtk/commit/04e6bb032ccd67b51fb69e326e27eff66c934043))
+* **git:** Returns "Not a git repository" when git status is executed in a non-repo folder [#82](https://github.com/rtk-ai/rtk/issues/82) ([d4cb2c0](https://github.com/rtk-ai/rtk/commit/d4cb2c08100d04755fa776ec8000c0b9673e4370))
+
 ## [0.15.3](https://github.com/rtk-ai/rtk/compare/v0.15.2...v0.15.3) (2026-02-13)
 
 

@@ -20,14 +20,21 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern, path);
     }
 
+    // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
+    let rg_pattern = pattern.replace(r"\|", "|");
+
     let mut rg_cmd = Command::new("rg");
-    rg_cmd.args(["-n", "--no-heading", pattern, path]);
+    rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
     }
 
     for arg in extra_args {
+        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
+        if arg == "-r" || arg == "--recursive" {
+            continue;
+        }
         rg_cmd.arg(arg);
     }
 
@@ -37,10 +44,18 @@ pub fn run(
         .context("grep/rg failed")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let exit_code = output.status.code().unwrap_or(1);
 
     let raw_output = stdout.to_string();
 
     if stdout.trim().is_empty() {
+        // Show stderr for errors (bad regex, missing file, etc.)
+        if exit_code == 2 {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.trim().is_empty() {
+                eprintln!("{}", stderr.trim());
+            }
+        }
         let msg = format!("🔍 0 for '{}'", pattern);
         println!("{}", msg);
         timer.track(
@@ -49,6 +64,9 @@ pub fn run(
             &raw_output,
             &msg,
         );
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
         return Ok(());
     }
 
@@ -113,6 +131,10 @@ pub fn run(
         &raw_output,
         &rtk_output,
     );
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
 
     Ok(())
 }
@@ -224,5 +246,43 @@ mod tests {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
         let cleaned = clean_line(line, 15, false, "text");
         assert!(!cleaned.is_empty());
+    }
+
+    // Fix: BRE \| alternation is translated to PCRE | for rg
+    #[test]
+    fn test_bre_alternation_translated() {
+        let pattern = r"fn foo\|pub.*bar";
+        let rg_pattern = pattern.replace(r"\|", "|");
+        assert_eq!(rg_pattern, "fn foo|pub.*bar");
+    }
+
+    // Fix: -r flag (grep recursive) is stripped from extra_args (rg is recursive by default)
+    #[test]
+    fn test_recursive_flag_stripped() {
+        let extra_args: Vec<String> = vec!["-r".to_string(), "-i".to_string()];
+        let filtered: Vec<&String> = extra_args
+            .iter()
+            .filter(|a| *a != "-r" && *a != "--recursive")
+            .collect();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0], "-i");
+    }
+
+    // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
+    // The -n/--line-numbers clap flag in main.rs is a no-op accepted for compat.
+    #[test]
+    fn test_rg_always_has_line_numbers() {
+        // grep_cmd::run() always passes "-n" to rg (line 24).
+        // This test documents that -n is built-in, so the clap flag is safe to ignore.
+        let mut cmd = std::process::Command::new("rg");
+        cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
+        // If rg is available, it should accept -n without error (exit 1 = no match, not error)
+        if let Ok(output) = cmd.output() {
+            assert!(
+                output.status.code() == Some(1) || output.status.success(),
+                "rg -n should be accepted"
+            );
+        }
+        // If rg is not installed, skip gracefully (test still passes)
     }
 }

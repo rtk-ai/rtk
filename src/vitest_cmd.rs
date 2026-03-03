@@ -260,12 +260,17 @@ fn run_vitest(args: &[String], verbose: u8) -> Result<()> {
         }
     };
 
-    println!("{}", filtered);
+    let exit_code = output.status.code().unwrap_or(1);
+    if let Some(hint) = crate::tee::tee_and_hint(&combined, "vitest_run", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
 
     timer.track("vitest run", "rtk vitest run", &combined, &filtered);
 
     // Propagate original exit code
-    std::process::exit(output.status.code().unwrap_or(1))
+    std::process::exit(exit_code)
 }
 
 #[cfg(test)]

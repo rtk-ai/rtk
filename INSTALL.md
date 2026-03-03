@@ -69,6 +69,24 @@ rtk gain  # MUST show token savings, not "command not found"
 
 ## Project Initialization
 
+### Which mode to choose?
+
+```
+  Do you want RTK active across ALL Claude Code projects?
+  │
+  ├─ YES → rtk init -g              (recommended)
+  │         Hook + RTK.md (~10 tokens in context)
+  │         Commands auto-rewritten transparently
+  │
+  ├─ YES, minimal → rtk init -g --hook-only
+  │         Hook only, nothing added to CLAUDE.md
+  │         Zero tokens in context
+  │
+  └─ NO, single project → rtk init
+            Local CLAUDE.md only (137 lines)
+            No hook, no global effect
+```
+
 ### Recommended: Global Hook-First Setup
 
 **Best for: All projects, automatic RTK usage**
@@ -93,6 +111,25 @@ rtk init --show  # Check hook is installed and executable
 
 **What is settings.json?**
 Claude Code's hook registry. RTK adds a PreToolUse hook that rewrites commands transparently. Without this, Claude won't invoke the hook automatically.
+
+```
+  Claude Code          settings.json        rtk-rewrite.sh        RTK binary
+       │                    │                     │                    │
+       │  "git status"      │                     │                    │
+       │ ──────────────────►│                     │                    │
+       │                    │  PreToolUse trigger  │                    │
+       │                    │ ───────────────────►│                    │
+       │                    │                     │  rewrite command   │
+       │                    │                     │  → rtk git status  │
+       │                    │◄────────────────────│                    │
+       │                    │  updated command     │                    │
+       │                    │                                          │
+       │  execute: rtk git status                                      │
+       │ ─────────────────────────────────────────────────────────────►│
+       │                                                               │  filter
+       │  "3 modified, 1 untracked ✓"                                  │
+       │◄──────────────────────────────────────────────────────────────│
+```
 
 **Backup Safety**:
 RTK backs up existing settings.json before changes. Restore if needed:

@@ -11,12 +11,14 @@ mod display_helpers;
 mod env_cmd;
 mod filter;
 mod find_cmd;
+mod format_cmd;
 mod gain;
 mod gh_cmd;
 mod git;
 mod go_cmd;
 mod golangci_cmd;
 mod grep_cmd;
+mod hook_audit_cmd;
 mod init;
 mod integrity;
 mod json_cmd;
@@ -25,6 +27,7 @@ mod lint_cmd;
 mod local_llm;
 mod log_cmd;
 mod ls;
+mod mypy_cmd;
 mod next_cmd;
 mod npm_cmd;
 mod parser;
@@ -38,11 +41,13 @@ mod read;
 mod ruff_cmd;
 mod runner;
 mod summary;
+mod tee;
 mod tracking;
 mod tree;
 mod tsc_cmd;
 mod utils;
 mod vitest_cmd;
+mod wc_cmd;
 mod wget_cmd;
 
 use anyhow::{Context, Result};
@@ -245,6 +250,9 @@ enum Commands {
         /// Filter by file type (e.g., ts, py, rust)
         #[arg(short = 't', long)]
         file_type: Option<String>,
+        /// Show line numbers (always on, accepted for grep/rg compatibility)
+        #[arg(short = 'n', long)]
+        line_numbers: bool,
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -293,8 +301,18 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Word/line/byte count with compact output (strips paths and padding)
+    Wc {
+        /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show token savings summary and history
     Gain {
+        /// Filter statistics to current project (current working directory) // added
+        #[arg(short, long)]
+        project: bool,
         /// Show ASCII graph of daily savings
         #[arg(short, long)]
         graph: bool,
@@ -386,6 +404,13 @@ enum Commands {
     /// Prettier format checker with compact output
     Prettier {
         /// Prettier arguments (e.g., --check, --write)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Universal format checker (prettier, black, ruff format)
+    Format {
+        /// Formatter arguments (auto-detects formatter from project files)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -492,6 +517,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Mypy type checker with grouped error output
+    Mypy {
+        /// Mypy arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Pip package manager with compact output (auto-detects uv)
     Pip {
         /// Pip arguments (e.g., list, outdated, install)
@@ -511,6 +543,14 @@ enum Commands {
         /// golangci-lint arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
+    #[command(name = "hook-audit")]
+    HookAudit {
+        /// Show entries from last N days (0 = all time)
+        #[arg(short, long, default_value = "7")]
+        since: u64,
     },
 }
 
@@ -548,9 +588,9 @@ enum GitCommands {
     },
     /// Commit → "ok ✓ \<hash\>"
     Commit {
-        /// Commit message
+        /// Commit message (can be repeated for multi-paragraph)
         #[arg(short, long)]
-        message: String,
+        message: Vec<String>,
     },
     /// Push → "ok ✓ \<branch\>"
     Push {
@@ -645,7 +685,31 @@ enum DockerCommands {
     Images,
     /// Show container logs (deduplicated)
     Logs { container: String },
+    /// Docker Compose commands with compact output
+    Compose {
+        #[command(subcommand)]
+        command: ComposeCommands,
+    },
     /// Passthrough: runs any unsupported docker subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum ComposeCommands {
+    /// List compose services (compact)
+    Ps,
+    /// Show compose logs (deduplicated)
+    Logs {
+        /// Optional service name
+        service: Option<String>,
+    },
+    /// Build compose services (summary)
+    Build {
+        /// Optional service name
+        service: Option<String>,
+    },
+    /// Passthrough: runs any unsupported compose subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -767,6 +831,12 @@ enum CargoCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Nextest with failures-only output
+    Nextest {
+        /// Additional cargo nextest arguments (e.g., run, list, --lib)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported cargo subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -854,7 +924,12 @@ fn main() -> Result<()> {
                 git::run(git::GitCommand::Add, &args, None, cli.verbose)?;
             }
             GitCommands::Commit { message } => {
-                git::run(git::GitCommand::Commit { message }, &[], None, cli.verbose)?;
+                git::run(
+                    git::GitCommand::Commit { messages: message },
+                    &[],
+                    None,
+                    cli.verbose,
+                )?;
             }
             GitCommands::Push { args } => {
                 git::run(git::GitCommand::Push, &args, None, cli.verbose)?;
@@ -974,6 +1049,20 @@ fn main() -> Result<()> {
             DockerCommands::Logs { container: c } => {
                 container::run(container::ContainerCmd::DockerLogs, &[c], cli.verbose)?;
             }
+            DockerCommands::Compose { command: compose } => match compose {
+                ComposeCommands::Ps => {
+                    container::run_compose_ps(cli.verbose)?;
+                }
+                ComposeCommands::Logs { service } => {
+                    container::run_compose_logs(service.as_deref(), cli.verbose)?;
+                }
+                ComposeCommands::Build { service } => {
+                    container::run_compose_build(service.as_deref(), cli.verbose)?;
+                }
+                ComposeCommands::Other(args) => {
+                    container::run_compose_passthrough(&args, cli.verbose)?;
+                }
+            },
             DockerCommands::Other(args) => {
                 container::run_docker_passthrough(&args, cli.verbose)?;
             }
@@ -1025,6 +1114,7 @@ fn main() -> Result<()> {
             max,
             context_only,
             file_type,
+            line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
             extra_args,
         } => {
             grep_cmd::run(
@@ -1072,7 +1162,12 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Wc { args } => {
+            wc_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::Gain {
+            project, // added
             graph,
             history,
             quota,
@@ -1084,6 +1179,7 @@ fn main() -> Result<()> {
             format,
         } => {
             gain::run(
+                project, // added: pass project flag
                 graph,
                 history,
                 quota,
@@ -1176,6 +1272,10 @@ fn main() -> Result<()> {
             prettier_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Format { args } => {
+            format_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::Playwright { args } => {
             playwright_cmd::run(&args, cli.verbose)?;
         }
@@ -1195,6 +1295,9 @@ fn main() -> Result<()> {
             }
             CargoCommands::Install { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Install, &args, cli.verbose)?;
+            }
+            CargoCommands::Nextest { args } => {
+                cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?;
             }
             CargoCommands::Other(args) => {
                 cargo_cmd::run_passthrough(&args, cli.verbose)?;
@@ -1325,6 +1428,10 @@ fn main() -> Result<()> {
             pytest_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Mypy { args } => {
+            mypy_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::Pip { args } => {
             pip_cmd::run(&args, cli.verbose)?;
         }
@@ -1346,6 +1453,10 @@ fn main() -> Result<()> {
 
         Commands::GolangciLint { args } => {
             golangci_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::HookAudit { since } => {
+            hook_audit_cmd::run(since, cli.verbose)?;
         }
 
         Commands::Proxy { args } => {
@@ -1454,4 +1565,67 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
     )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_git_commit_single_message() {
+        let cli = Cli::try_parse_from(["rtk", "git", "commit", "-m", "fix: typo"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["fix: typo"]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_multiple_messages() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "git",
+            "commit",
+            "-m",
+            "feat: add support",
+            "-m",
+            "Body paragraph here.",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["feat: add support", "Body paragraph here."]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_long_flag_multiple() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "git",
+            "commit",
+            "--message",
+            "title",
+            "--message",
+            "body",
+            "--message",
+            "footer",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message },
+            } => {
+                assert_eq!(message, vec!["title", "body", "footer"]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
 }

@@ -6,7 +6,7 @@ set -e
 
 REPO="rtk-ai/rtk"
 BINARY_NAME="rtk"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${RTK_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors
 RED='\033[0;31m'
@@ -57,7 +57,10 @@ get_latest_version() {
 get_target() {
     case "$OS" in
         linux)
-            TARGET="${ARCH}-unknown-linux-gnu"
+            case "$ARCH" in
+                x86_64)  TARGET="x86_64-unknown-linux-musl";;
+                aarch64) TARGET="aarch64-unknown-linux-gnu";;
+            esac
             ;;
         darwin)
             TARGET="${ARCH}-apple-darwin"
@@ -83,13 +86,8 @@ install() {
     info "Extracting..."
     tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
 
-    # Check if we need sudo
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/"
-    else
-        info "Requesting sudo to install to $INSTALL_DIR"
-        sudo mv "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/"
-    fi
+    mkdir -p "$INSTALL_DIR"
+    mv "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/"
 
     chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 
@@ -104,7 +102,8 @@ verify() {
     if command -v "$BINARY_NAME" >/dev/null 2>&1; then
         info "Verification: $($BINARY_NAME --version)"
     else
-        warn "Binary installed but not in PATH. Add $INSTALL_DIR to your PATH."
+        warn "Binary installed but not in PATH. Add to your shell profile:"
+        warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
     fi
 }
 

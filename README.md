@@ -22,7 +22,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 
 **How to verify you have the correct rtk:**
 ```bash
-rtk --version   # Should show "rtk X.Y.Z"
+rtk --version   # Should show "rtk 0.22.2"
 rtk gain        # Should show token savings stats
 ```
 
@@ -43,8 +43,11 @@ With rtk: **~45,000 tokens** → **70% reduction**
 | `git log` | 5× | 2,500 | 500 | -80% |
 | `git add/commit/push` | 8× | 1,600 | 120 | -92% |
 | `npm test` / `cargo test` | 5× | 25,000 | 2,500 | -90% |
+| `ruff check` | 3× | 3,000 | 600 | -80% |
+| `pytest` | 4× | 8,000 | 800 | -90% |
+| `go test` | 3× | 6,000 | 600 | -90% |
 | `docker ps` | 3× | 900 | 180 | -80% |
-| **Total** | | **~101,000** | **~22,000** | **-78%** |
+| **Total** | | **~118,000** | **~23,900** | **-80%** |
 
 > Estimates based on medium-sized TypeScript/Rust projects. Actual savings vary by project size.
 
@@ -62,11 +65,22 @@ which rtk            # Check installation path
 
 If already installed and `rtk gain` works, **DO NOT reinstall**. Skip to Quick Start.
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew install rtk
+```
+
 ### Quick Install (Linux/macOS)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 ```
+
+> **Note**: rtk installs to `~/.local/bin` by default. If this directory is not in your PATH, add it:
+> ```bash
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
+> ```
 
 After installation, **verify you have the correct rtk**:
 ```bash
@@ -156,6 +170,11 @@ rtk gh issue list                # Compact issue listing
 rtk gh run list                  # Workflow run status
 rtk wget https://example.com    # Download, strip progress bars
 rtk config                       # Show config (--create to generate)
+rtk ruff check                   # Python linting (JSON, 80% reduction)
+rtk pytest                       # Python tests (failures only, 90% reduction)
+rtk pip list                     # Python packages (auto-detect uv, 70% reduction)
+rtk go test                      # Go tests (NDJSON, 90% reduction)
+rtk golangci-lint run            # Go linting (JSON, 85% reduction)
 ```
 
 ### Data & Analytics
@@ -248,6 +267,23 @@ rtk prisma migrate dev --name x  # Migration summary
 rtk prisma db-push               # Schema push summary
 ```
 
+### Python & Go Stack
+```bash
+# Python
+rtk ruff check                   # Ruff linter (JSON, 80% reduction)
+rtk ruff format                  # Ruff formatter (text filter)
+rtk pytest                       # Test failures with state machine parser (90% reduction)
+rtk pip list                     # Package list (auto-detect uv, 70% reduction)
+rtk pip install <package>        # Install with compact output
+rtk pip outdated                 # Outdated packages (85% reduction)
+
+# Go
+rtk go test                      # NDJSON streaming parser (90% reduction)
+rtk go build                     # Build errors only (80% reduction)
+rtk go vet                       # Vet issues (75% reduction)
+rtk golangci-lint run            # JSON grouped by rule (85% reduction)
+```
+
 ## Examples
 
 ### Standard vs rtk
@@ -296,6 +332,31 @@ FAILED: 2/15 tests
 ```
 
 ## How It Works
+
+```
+  Without rtk:
+
+  ┌──────────┐  git status     ┌──────────┐  git status  ┌──────────┐
+  │  Claude  │ ─────────────── │  shell   │ ──────────── │   git    │
+  │   LLM    │                 │          │              │  (CLI)   │
+  └──────────┘                 └──────────┘              └──────────┘
+        ▲                                                      │
+        │              ~2,000 tokens (raw output)              │
+        └──────────────────────────────────────────────────────┘
+
+  With rtk:
+
+  ┌──────────┐  git status     ┌──────────┐  git status  ┌──────────┐
+  │  Claude  │ ─────────────── │   RTK    │ ──────────── │   git    │
+  │   LLM    │                 │  (proxy) │              │  (CLI)   │
+  └──────────┘                 └──────────┘              └──────────┘
+        ▲                           │  ~2,000 tokens raw       │
+        │                           └──────────────────────────┘
+        │  ~200 tokens (filtered)   filter · group · dedup · truncate
+        └───────────────────────────────────────────────────────
+```
+
+Four strategies applied per command type:
 
 1. **Smart Filtering**: Removes noise (comments, whitespace, boilerplate)
 2. **Grouping**: Aggregates similar items (files by directory, errors by type)
@@ -394,6 +455,36 @@ database_path = "/path/to/custom.db"
 
 Priority: `RTK_DB_PATH` env var > `config.toml` > default location.
 
+### Tee: Full Output Recovery
+
+When RTK filters command output, LLM agents lose failure details (stack traces, assertion messages) and may re-run the same command 2-3 times. The **tee** feature saves raw output to a file so the agent can read it without re-executing.
+
+**How it works**: On command failure, RTK writes the full unfiltered output to `~/.local/share/rtk/tee/` and prints a one-line hint:
+```
+✓ cargo test: 15 passed (1 suite, 0.01s)
+[full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
+```
+
+The agent reads the file instead of re-running the command — saving tokens.
+
+**Default behavior**: Tee only on failures (exit code != 0), skip outputs < 500 chars.
+
+**Config** (`~/.config/rtk/config.toml`):
+```toml
+[tee]
+enabled = true          # default: true
+mode = "failures"       # "failures" (default), "always", or "never"
+max_files = 20          # max files to keep (oldest rotated out)
+max_file_size = 1048576 # 1MB per file max
+# directory = "/custom/path"  # override default location
+```
+
+**Environment overrides**:
+- `RTK_TEE=0` — disable tee entirely
+- `RTK_TEE_DIR=/path` — override output directory
+
+**Supported commands**: cargo (build/test/clippy/check/install/nextest), vitest, pytest, lint (eslint/biome/ruff/pylint/mypy), tsc, go (test/build/vet), err, test.
+
 ## Auto-Rewrite Hook (Recommended)
 
 The most effective way to use rtk is with the **auto-rewrite hook** for Claude Code. Instead of relying on CLAUDE.md instructions (which subagents may ignore), this hook transparently intercepts Bash commands and rewrites them to their rtk equivalents before execution.
@@ -414,6 +505,30 @@ Yes. RTK creates a backup (`settings.json.bak`) before changes. The hook is read
 ### How It Works
 
 The hook runs as a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks). When Claude Code is about to execute a Bash command like `git status`, the hook rewrites it to `rtk git status` before the command reaches the shell. Claude Code never sees the rewrite — it's transparent.
+
+```
+  Claude Code types:  git status
+                           │
+                    ┌──────▼──────────────────────┐
+                    │  ~/.claude/settings.json     │
+                    │  PreToolUse hook registered  │
+                    └──────┬──────────────────────┘
+                           │
+                    ┌──────▼──────────────────────┐
+                    │  rtk-rewrite.sh              │
+                    │  "git status"                │
+                    │    →  "rtk git status"       │  transparent rewrite
+                    └──────┬──────────────────────┘
+                           │
+                    ┌──────▼──────────────────────┐
+                    │  RTK (Rust binary)           │
+                    │  executes real git status    │
+                    │  filters output              │
+                    └──────┬──────────────────────┘
+                           │
+  Claude receives:  "3 modified, 1 untracked ✓"
+                    ↑ not 50 lines of raw git output
+```
 
 ### Quick Install (Automated)
 
@@ -505,6 +620,11 @@ The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To us
 | `prettier` | `rtk prettier` |
 | `playwright` | `rtk playwright` |
 | `prisma` | `rtk prisma` |
+| `ruff check/format` | `rtk ruff ...` |
+| `pytest` | `rtk pytest` |
+| `pip list/install/outdated` | `rtk pip ...` |
+| `go test/build/vet` | `rtk go ...` |
+| `golangci-lint run` | `rtk golangci-lint run` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
