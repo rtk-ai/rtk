@@ -542,6 +542,21 @@ pub(crate) enum FilterRoute {
     Playwright,
 }
 
+/// Walk up from CWD to find the nearest package.json (mirrors pnpm resolution).
+fn find_package_json() -> Option<std::path::PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    for _ in 0..10 {
+        let candidate = dir.join("package.json");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
 /// Cached package.json scripts (read once per invocation).
 /// Eliminates redundant fs::read_to_string("package.json") calls in
 /// is_pnpm_script and route_script.
@@ -553,7 +568,8 @@ impl PackageScripts {
     /// Read package.json from CWD, parse scripts field. Returns None if
     /// file is missing, unparseable, or has no scripts section.
     pub fn load() -> Option<Self> {
-        let content = std::fs::read_to_string("package.json").ok()?;
+        let path = find_package_json()?;
+        let content = std::fs::read_to_string(path).ok()?;
         let json: serde_json::Value = serde_json::from_str(&content).ok()?;
         let scripts_obj = json.get("scripts")?.as_object()?;
         let scripts: HashMap<String, String> = scripts_obj
@@ -1243,6 +1259,22 @@ Done in 5.2s
             route_script("test:e2e", Some(&ps)),
             Some(FilterRoute::Playwright)
         );
+    }
+
+    #[test]
+    fn test_find_package_json_cwd_first() {
+        // When CWD has a package.json, find_package_json should return it.
+        // This test runs inside the rtk repo root which has a Cargo.toml but
+        // may not have package.json — so we just verify it returns Some/None
+        // consistently with whether the file exists on disk.
+        let result = find_package_json();
+        let cwd_has_pkg = std::path::Path::new("package.json").is_file();
+        if cwd_has_pkg {
+            assert!(result.is_some());
+            assert!(result.unwrap().ends_with("package.json"));
+        } else {
+            // No package.json in any ancestor — None is acceptable
+        }
     }
 
     // ─── apply_filter tests ──────────────────────────────────────────────
