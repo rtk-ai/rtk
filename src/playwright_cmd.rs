@@ -22,42 +22,51 @@ struct PlaywrightStats {
     expected: usize,
     unexpected: usize,
     skipped: usize,
+    /// Duration in milliseconds (float in real Playwright output)
     #[serde(default)]
-    duration: f64, // Playwright emits float ms, not integer
+    duration: f64,
 }
 
+/// File-level or describe-level suite
 #[derive(Debug, Deserialize)]
 struct PlaywrightSuite {
     title: String,
     #[serde(default)]
     file: Option<String>,
+    /// Individual test specs (test functions)
     #[serde(default)]
     specs: Vec<PlaywrightSpec>,
+    /// Nested describe blocks
     #[serde(default)]
     suites: Vec<PlaywrightSuite>,
 }
 
+/// A single test function (may run in multiple browsers/projects)
 #[derive(Debug, Deserialize)]
 struct PlaywrightSpec {
     title: String,
-    #[serde(default)]
+    /// Overall pass/fail status across all projects
     ok: bool,
+    /// Per-project/browser executions
     #[serde(default)]
     tests: Vec<PlaywrightExecution>,
 }
 
+/// A test execution in a specific browser/project
 #[derive(Debug, Deserialize)]
 struct PlaywrightExecution {
-    #[serde(default)]
+    /// "expected", "unexpected", "skipped", "flaky"
     status: String,
     #[serde(default)]
     results: Vec<PlaywrightAttempt>,
 }
 
+/// A single attempt/result for a test execution
 #[derive(Debug, Deserialize)]
 struct PlaywrightAttempt {
-    #[serde(default)]
+    /// "passed", "failed", "timedOut", "interrupted"
     status: String,
+    /// Error details (array in Playwright >= v1.30)
     #[serde(default)]
     errors: Vec<PlaywrightError>,
 }
@@ -121,6 +130,7 @@ fn collect_test_results(
             *total += 1;
 
             if !spec.ok {
+                // Find the first failed execution and its error message
                 let error_msg = spec
                     .tests
                     .iter()
@@ -143,7 +153,7 @@ fn collect_test_results(
             }
         }
 
-        // Recurse into nested suites
+        // Recurse into nested suites (describe blocks)
         collect_test_results(&suite.suites, total, failures);
     }
 }
@@ -327,10 +337,11 @@ mod tests {
 
     #[test]
     fn test_playwright_parser_json() {
+        // Real Playwright JSON structure: suites → specs, with float duration
         let json = r#"{
             "config": {},
             "stats": {
-                "startTime": "2026-01-01T00:00:00Z",
+                "startTime": "2026-01-01T00:00:00.000Z",
                 "expected": 1,
                 "unexpected": 0,
                 "skipped": 0,
@@ -376,6 +387,7 @@ mod tests {
 
     #[test]
     fn test_playwright_parser_json_float_duration() {
+        // Real Playwright output uses float duration (e.g. 3519.7039999999997)
         let json = r#"{
             "stats": {
                 "startTime": "2026-02-18T10:17:53.187Z",
