@@ -77,7 +77,7 @@
 // - run() is the single I/O point
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use super::hook::{
+use super::{
     check_for_hook, is_hook_disabled, should_passthrough, update_command_in_tool_input,
     HookResponse, HookResult,
 };

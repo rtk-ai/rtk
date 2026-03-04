@@ -1520,7 +1520,7 @@ fn main() -> Result<()> {
                 }
             }
             HookCommands::Claude => {
-                cmd::claude_hook::run()?;
+                cmd::hook::claude::run()?;
             }
         },
 

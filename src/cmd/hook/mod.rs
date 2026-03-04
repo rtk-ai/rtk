@@ -1,7 +1,7 @@
 //! Hook protocol for Claude Code and Gemini support.
 //!
 //! This module provides **shared decision logic** for both Claude Code and Gemini CLI hooks.
-//! Protocol-specific I/O handling lives in `claude_hook.rs` and `gemini_hook.rs`.
+//! Protocol-specific I/O handling lives in `hook/claude.rs` and `hook/gemini.rs`.
 //!
 //! ## Architecture: Separation of Concerns
 //!
@@ -10,18 +10,18 @@
 //!    ↓
 //! Commands::Hook match
 //!    ├─→ HookCommands::Check → hook::check_for_hook() (THIS MODULE - CAN use println!)
-//!    ├─→ HookCommands::Claude → claude_hook::run() [DENY ENFORCED - see claude_hook.rs:52]
-//!    └─→ HookCommands::Gemini → gemini_hook::run() [DENY ENFORCED - see gemini_hook.rs:42]
+//!    ├─→ HookCommands::Claude → hook::claude::run() [DENY ENFORCED - see hook/claude.rs]
+//!    └─→ HookCommands::Gemini → hook::gemini::run() [DENY ENFORCED - see hook/gemini.rs]
 //! ```
 //!
 //! **I/O Policy Scope:**
-//! - **This module (hook.rs)**: CAN use `println!`/`eprintln!` (used by `rtk hook check` text protocol)
+//! - **This module (hook/mod.rs)**: CAN use `println!`/`eprintln!` (used by `rtk hook check` text protocol)
 //! - **main.rs and all command modules**: CAN use `println!`/`eprintln!` (normal RTK behavior)
-//! - **claude_hook.rs, gemini_hook.rs ONLY**: CANNOT use `println!`/`eprintln!` (JSON protocols)
+//! - **hook/claude.rs, hook/gemini.rs ONLY**: CANNOT use `println!`/`eprintln!` (JSON protocols)
 //!
 //! The `#![deny(clippy::print_stdout, clippy::print_stderr)]` attribute is applied
 //! at the **module boundary** (earliest possible stage) — when control enters
-//! `claude_hook::run()` or `gemini_hook::run()`, the deny is enforced.
+//! `claude::run()` or `gemini::run()`, the deny is enforced.
 //!
 //! ## Protocol Differences
 //!
@@ -30,11 +30,14 @@
 //! - Blocked: error message on stderr, exit 2 (blocking error)
 //! - Other exit codes: non-blocking errors
 //!
-//! **Claude Code** (JSON protocol via `claude_hook.rs`):
-//! - See `claude_hook.rs` module documentation
+//! **Claude Code** (JSON protocol via `hook/claude.rs`):
+//! - See `claude` module documentation
 //!
-//! **Gemini CLI** (JSON protocol via `gemini_hook.rs`):
-//! - See `gemini_hook.rs` module documentation
+//! **Gemini CLI** (JSON protocol via `hook/gemini.rs`):
+//! - See `gemini` module documentation
+
+// LLM protocol adapters
+pub(crate) mod claude;
 
 use super::{analysis, lexer};
 // PR 2 adds: use super::safety;
