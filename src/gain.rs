@@ -18,10 +18,15 @@ pub fn run(
     monthly: bool,
     all: bool,
     format: &str,
+    failures: bool,
     _verbose: u8,
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
+
+    if failures {
+        return show_failures(&tracker);
+    }
 
     // Handle export formats
     match format {
@@ -580,6 +585,62 @@ fn export_csv(
                 month.avg_time_ms
             );
         }
+    }
+
+    Ok(())
+}
+
+fn show_failures(tracker: &Tracker) -> Result<()> {
+    let summary = tracker
+        .get_parse_failure_summary()
+        .context("Failed to load parse failure data")?;
+
+    if summary.total == 0 {
+        println!("No parse failures recorded.");
+        println!("This means all commands parsed successfully (or fallback hasn't triggered yet).");
+        return Ok(());
+    }
+
+    println!("{}", styled("RTK Parse Failures", true));
+    println!("{}", "═".repeat(60));
+    println!();
+
+    print_kpi("Total failures", summary.total.to_string());
+    print_kpi("Recovery rate", format!("{:.1}%", summary.recovery_rate));
+    println!();
+
+    if !summary.top_commands.is_empty() {
+        println!("{}", styled("Top Commands (by frequency)", true));
+        println!("{}", "─".repeat(60));
+        for (cmd, count) in &summary.top_commands {
+            let cmd_display = if cmd.len() > 50 {
+                format!("{}...", &cmd[..47])
+            } else {
+                cmd.clone()
+            };
+            println!("  {:>4}x  {}", count, cmd_display);
+        }
+        println!();
+    }
+
+    if !summary.recent.is_empty() {
+        println!("{}", styled("Recent Failures (last 10)", true));
+        println!("{}", "─".repeat(60));
+        for rec in &summary.recent {
+            let ts_short = if rec.timestamp.len() >= 16 {
+                &rec.timestamp[..16]
+            } else {
+                &rec.timestamp
+            };
+            let status = if rec.fallback_succeeded { "ok" } else { "FAIL" };
+            let cmd_display = if rec.raw_command.len() > 40 {
+                format!("{}...", &rec.raw_command[..37])
+            } else {
+                rec.raw_command.clone()
+            };
+            println!("  {} [{}] {}", ts_short, status, cmd_display);
+        }
+        println!();
     }
 
     Ok(())
