@@ -1905,15 +1905,10 @@ mod tests {
     }
 
     #[test]
-    fn test_try_parse_git_with_dash_c_fails() {
-        // This is the case that triggers fallback: git -C /path status
-        match Cli::try_parse_from(["rtk", "git", "-C", "/path", "status"]) {
-            Err(e) => assert!(!matches!(
-                e.kind(),
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-            )),
-            Ok(_) => panic!("Expected parse error for git -C"),
-        }
+    fn test_try_parse_git_with_dash_c_succeeds() {
+        // git -C /path status is now supported via global options
+        let result = Cli::try_parse_from(["rtk", "git", "-C", "/path", "status"]);
+        assert!(result.is_ok(), "git -C should parse successfully");
     }
 
     #[test]
