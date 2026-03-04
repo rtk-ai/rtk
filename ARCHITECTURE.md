@@ -288,7 +288,7 @@ SHARED            utils.rs          Helpers                N/A        ✓
                   tee.rs            Full output recovery   N/A        ✓
 ```
 
-**Total: 50 modules** (32 command modules + 18 infrastructure modules)
+**Total: 51 modules** (33 command modules + 18 infrastructure modules)
 
 ### Module Count Breakdown
 
@@ -1483,4 +1483,4 @@ When implementing a new command, consider:
 
 **Last Updated**: 2026-02-22
 **Architecture Version**: 2.2
-**rtk Version**: 0.22.2
+**rtk Version**: 0.23.0
