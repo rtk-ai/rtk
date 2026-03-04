@@ -285,6 +285,91 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Back up a file to `<filename>.rtk-backup` before RTK modifies it.
+///
+/// Uses "once" semantics: if the backup already exists it is left untouched so
+/// that the backup always reflects the *pre-RTK original*, not some intermediate
+/// state from a previous `rtk init` run.
+///
+/// Non-fatal: a backup failure emits a warning but does not abort the operation.
+/// Returns the backup path (whether it was just created or already existed).
+fn backup_file_once(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+    let backup_name = format!(
+        "{}.rtk-backup",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let backup_path = path.with_file_name(backup_name);
+    if !backup_path.exists() {
+        if let Err(e) = fs::copy(path, &backup_path) {
+            eprintln!(
+                "Warning: could not backup {}: {} (continuing without backup)",
+                path.display(),
+                e
+            );
+            return None;
+        }
+    }
+    // Register in the persistent backup list (idempotent — deduplicates on re-run).
+    if let Ok(claude_dir) = resolve_claude_dir() {
+        let registry = claude_dir.join("hooks").join("rtk-backups.json");
+        append_to_backup_registry(&registry, &backup_path);
+    }
+    Some(backup_path)
+}
+
+/// Append a backup path to the persistent registry, deduplicating across re-runs.
+/// Errors are non-fatal: the backup file itself already exists.
+fn append_to_backup_registry(registry_path: &Path, backup_path: &Path) {
+    let backup_str = backup_path.to_string_lossy().into_owned();
+
+    // Read existing entries (empty list if file absent or unparseable).
+    let mut entries: Vec<String> = registry_path
+        .exists()
+        .then(|| fs::read_to_string(registry_path).ok())
+        .flatten()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+
+    // Idempotent: skip if already registered.
+    if entries.iter().any(|e| e == &backup_str) {
+        return;
+    }
+    entries.push(backup_str);
+
+    if let Some(parent) = registry_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&entries) {
+        let _ = atomic_write(registry_path, &json);
+    }
+}
+
+/// Read backup paths from the registry; returns empty vec if absent or unparseable.
+fn read_backup_registry(claude_dir: &Path) -> Vec<String> {
+    let registry_path = claude_dir.join("hooks").join("rtk-backups.json");
+    registry_path
+        .exists()
+        .then(|| fs::read_to_string(&registry_path).ok())
+        .flatten()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default()
+}
+
+/// Print backup registry entries with a context-specific header and per-entry indent.
+/// No-op when the registry is empty or absent.
+fn print_backup_registry(claude_dir: &Path, header: &str, indent: &str) {
+    let backups = read_backup_registry(claude_dir);
+    if !backups.is_empty() {
+        println!("{header}");
+        for p in &backups {
+            println!("{indent}{p}");
+        }
+    }
+}
+
 /// Prompt user for consent to patch settings.json
 /// Prints to stderr (stdout may be piped), reads from stdin
 /// Default is No (capital N)
@@ -343,7 +428,10 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    if command.contains("rtk-rewrite.sh") {
+                    if command.contains("rtk-rewrite.sh")
+                        || command.contains("rtk hook claude")
+                        || command.contains("rtk-autorun-bash.sh")
+                    {
                         return false; // Remove this entry
                     }
                 }
@@ -381,10 +469,8 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     let removed = remove_hook_from_json(&mut root);
 
     if removed {
-        // Backup original
-        let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        // Backup before overwriting (once — preserves pre-RTK original across re-runs).
+        let _ = backup_file_once(&settings_path);
 
         // Atomic write
         let serialized =
@@ -447,7 +533,79 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
         }
     }
 
-    // 4. Remove hook entry from settings.json
+    // 4. Restore plugin caches from manifest and remove manifest
+    let manifest_path = claude_dir.join("hooks").join("rtk-bash-manifest.json");
+    if manifest_path.exists() {
+        if let Ok(content) = fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<BashManifest>(&content) {
+                for entry in &manifest.entries {
+                    // Restore original_matcher to the cache file
+                    let cache_path = std::path::Path::new(&entry.cache_path);
+                    if cache_path.exists() {
+                        if let Ok(cache_content) = fs::read_to_string(cache_path) {
+                            if let Ok(mut cache_json) =
+                                serde_json::from_str::<serde_json::Value>(&cache_content)
+                            {
+                                let mut matcher_restored = false;
+                                if let Some(pre_tool_use) = cache_json
+                                    .get_mut("hooks")
+                                    .and_then(|h| h.get_mut("PreToolUse"))
+                                    .and_then(|p| p.as_array_mut())
+                                {
+                                    for entry_obj in pre_tool_use.iter_mut() {
+                                        let patched = entry_obj
+                                            .get("matcher")
+                                            .and_then(|m| m.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        if patched == entry.patched_matcher {
+                                            if let Some(obj) = entry_obj.as_object_mut() {
+                                                obj.insert(
+                                                    "matcher".to_string(),
+                                                    serde_json::Value::String(
+                                                        entry.original_matcher.clone(),
+                                                    ),
+                                                );
+                                            }
+                                            matcher_restored = true;
+                                        }
+                                    }
+                                }
+                                if !matcher_restored {
+                                    eprintln!(
+                                        "Warning: could not restore '{}' — patched matcher '{}' \
+                                         not found. Plugin may have been updated since 'rtk init'.",
+                                        cache_path.display(),
+                                        entry.patched_matcher
+                                    );
+                                }
+                                if let Ok(restored) = serde_json::to_string_pretty(&cache_json) {
+                                    let _ = atomic_write(cache_path, &restored);
+                                    if matcher_restored {
+                                        removed.push(format!(
+                                            "Plugin cache restored: {}",
+                                            cache_path.display()
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_file(&manifest_path);
+        removed.push(format!("Manifest: {}", manifest_path.display()));
+    }
+
+    // 5. Remove Part 1 wrapper script (if present)
+    let wrapper_path = claude_dir.join("hooks").join("rtk-autorun-bash.sh");
+    if wrapper_path.exists() {
+        let _ = fs::remove_file(&wrapper_path);
+        removed.push(format!("Wrapper: {}", wrapper_path.display()));
+    }
+
+    // 6. Remove hook entry from settings.json
     if remove_hook_from_settings(verbose)? {
         removed.push("settings.json: removed RTK hook entry".to_string());
     }
@@ -462,6 +620,13 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
         }
         println!("\nRestart Claude Code to apply changes.");
     }
+
+    // Show preserved backups from the registry (never deleted — user's safety net).
+    print_backup_registry(
+        &claude_dir,
+        "\nBackups preserved (originals from before rtk init):",
+        "  ",
+    );
 
     Ok(())
 }
@@ -491,7 +656,10 @@ fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result
         serde_json::json!({})
     };
 
-    // Check idempotency
+    // Remove any stale RTK hooks first (idempotent upgrade path: wrapper → "rtk hook claude").
+    remove_hook_from_json(&mut root);
+
+    // Check idempotency after removal
     if hook_already_present(&root, hook_command) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
@@ -517,15 +685,14 @@ fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result
     }
 
     // Deep-merge hook
-    insert_hook_entry(&mut root, hook_command);
+    insert_hook_entry(&mut root, hook_command)?;
 
     // Backup original
-    if settings_path.exists() {
-        let backup_path = settings_path.with_extension("json.bak");
-        fs::copy(&settings_path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Backup: {}", backup_path.display());
+    // Backup before overwriting (once — preserves pre-RTK original across re-runs).
+    let backup_path = backup_file_once(&settings_path);
+    if verbose > 0 {
+        if let Some(ref bp) = backup_path {
+            eprintln!("Backup: {}", bp.display());
         }
     }
 
@@ -535,11 +702,8 @@ fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result
     atomic_write(&settings_path, &serialized)?;
 
     println!("\n  settings.json: hook added");
-    if settings_path.with_extension("json.bak").exists() {
-        println!(
-            "  Backup: {}",
-            settings_path.with_extension("json.bak").display()
-        );
+    if let Some(ref bp) = backup_path {
+        println!("  Backup: {}", bp.display());
     }
     println!("  Restart Claude Code. Test with: git status");
 
@@ -578,29 +742,35 @@ fn clean_double_blanks(content: &str) -> String {
 
 /// Deep-merge RTK hook entry into settings.json
 /// Creates hooks.PreToolUse structure if missing, preserves existing hooks
-fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
-    // Ensure root is an object
-    let root_obj = match root.as_object_mut() {
-        Some(obj) => obj,
-        None => {
-            *root = serde_json::json!({});
-            root.as_object_mut()
-                .expect("Just created object, must succeed")
-        }
-    };
+fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
+    if !root.is_object() {
+        *root = serde_json::json!({});
+    }
+    let root_obj = root
+        .as_object_mut()
+        .context("settings.json root is not a JSON object")?;
 
-    // Use entry() API for idiomatic insertion
+    // If 'hooks' exists but isn't an object, overwrite it and warn rather than panic.
+    if root_obj.get("hooks").is_some_and(|v| !v.is_object()) {
+        eprintln!("Warning: settings.json 'hooks' field is not an object; overwriting");
+        root_obj.insert("hooks".to_string(), serde_json::json!({}));
+    }
     let hooks = root_obj
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .expect("hooks must be an object");
+        .context("settings.json 'hooks' could not be treated as an object")?;
 
+    // Same guard for PreToolUse.
+    if hooks.get("PreToolUse").is_some_and(|v| !v.is_array()) {
+        eprintln!("Warning: settings.json 'hooks.PreToolUse' is not an array; overwriting");
+        hooks.insert("PreToolUse".to_string(), serde_json::json!([]));
+    }
     let pre_tool_use = hooks
         .entry("PreToolUse")
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
-        .expect("PreToolUse must be an array");
+        .context("settings.json 'hooks.PreToolUse' could not be treated as an array")?;
 
     // Append RTK hook entry
     pre_tool_use.push(serde_json::json!({
@@ -610,6 +780,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
             "command": hook_command
         }]
     }));
+    Ok(())
 }
 
 /// Check if RTK hook is already present in settings.json
@@ -694,6 +865,21 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
         }
     }
 
+    // 6. Patch plugin caches (remove Bash from matchers, write manifest for fallthrough)
+    if let Err(e) = patch_plugin_caches(verbose) {
+        // Non-fatal: RTK rewrites still work; autorun fallthrough unavailable until re-run
+        if verbose > 0 {
+            eprintln!("Warning: patch_plugin_caches failed: {e}");
+        }
+    }
+
+    // Show any backups created (or previously created on re-run).
+    print_backup_registry(
+        &claude_dir,
+        "  Backups:   (originals preserved for manual recovery)",
+        "             ",
+    );
+
     println!(); // Final newline
 
     Ok(())
@@ -737,6 +923,23 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
         }
         PatchResult::Declined | PatchResult::Skipped => {
             // Manual instructions already printed by patch_settings_json
+        }
+    }
+
+    // Patch plugin caches (remove Bash from matchers, write manifest for fallthrough)
+    if let Err(e) = patch_plugin_caches(verbose) {
+        if verbose > 0 {
+            eprintln!("Warning: patch_plugin_caches failed: {e}");
+        }
+    }
+
+    // Show any backups created (or previously created on re-run).
+    let claude_dir = resolve_claude_dir()?;
+    let backups = read_backup_registry(&claude_dir);
+    if !backups.is_empty() {
+        println!("  Backups:   (originals preserved for manual recovery)");
+        for p in &backups {
+            println!("             {p}");
         }
     }
 
@@ -969,6 +1172,404 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
     } else {
         (content.to_string(), false)
     }
+}
+
+// =========================================================================
+// PLUGIN CACHE PATCHING
+// Scans ~/.claude/plugins/cache/*/*/hooks/*.json for Bash matchers and
+// removes Bash from them so RTK can be the sole Bash hook responder.
+// Writes ~/.claude/hooks/rtk-bash-manifest.json for uninstall/restore.
+// =========================================================================
+
+/// One entry in the RTK bash manifest
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct ManifestEntry {
+    cache_path: String,
+    original_matcher: String,
+    patched_matcher: String,
+    fallthrough_command: String,
+}
+
+/// The RTK bash manifest (written by patch_plugin_caches, read by uninstall)
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct BashManifest {
+    #[serde(default = "BashManifest::default_version")]
+    version: u32,
+    #[serde(default)]
+    patched_at: String,
+    #[serde(default)]
+    entries: Vec<ManifestEntry>,
+}
+
+impl Default for BashManifest {
+    fn default() -> Self {
+        Self {
+            version: Self::default_version(),
+            patched_at: String::new(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl BashManifest {
+    fn default_version() -> u32 {
+        1
+    }
+}
+
+/// Scan all plugin caches for Bash matchers, remove Bash from each, write manifest.
+/// Returns (newly_patched, already_up_to_date) counts.
+/// Prints a user-visible summary of what changed so the user can verify the install.
+pub(crate) fn patch_plugin_caches(verbose: u8) -> Result<usize> {
+    let claude_dir = resolve_claude_dir()?;
+    let cache_root = claude_dir.join("plugins").join("cache");
+    let manifest_path = claude_dir.join("hooks").join("rtk-bash-manifest.json");
+
+    // Load existing manifest if present (for idempotency); fall back to a fresh one.
+    let mut manifest: BashManifest = manifest_path
+        .exists()
+        .then(|| fs::read_to_string(&manifest_path).ok())
+        .flatten()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+
+    if !cache_root.exists() {
+        if verbose > 0 {
+            eprintln!("Plugin cache directory not found: {}", cache_root.display());
+        }
+        return Ok(0);
+    }
+
+    // Settings JSON for CLAUDE_PLUGIN_ROOT resolution
+    let settings_path = claude_dir.join("settings.json");
+    let settings_root: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path).unwrap_or_default();
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let mut newly_patched = 0usize;
+    let mut already_present = 0usize;
+
+    // Walk cache/*/*/hooks/*.json
+    // Structure: cache/{vendor}/{plugin}/{version}/hooks/{file}.json
+    let vendors = match fs::read_dir(&cache_root) {
+        Ok(d) => d,
+        Err(_) => return Ok(0),
+    };
+
+    for vendor_entry in vendors.flatten() {
+        let vendor_path = vendor_entry.path();
+        if !vendor_path.is_dir() {
+            continue;
+        }
+        let vendor_name = vendor_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let plugins = match fs::read_dir(&vendor_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        for plugin_entry in plugins.flatten() {
+            let plugin_path = plugin_entry.path();
+            if !plugin_path.is_dir() {
+                continue;
+            }
+            let plugin_name = plugin_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let versions = match fs::read_dir(&plugin_path) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            for version_entry in versions.flatten() {
+                let version_path = version_entry.path();
+                if !version_path.is_dir() {
+                    continue;
+                }
+
+                let hooks_dir = version_path.join("hooks");
+                if !hooks_dir.exists() {
+                    continue;
+                }
+
+                let hook_files = match fs::read_dir(&hooks_dir) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+
+                for hook_file in hook_files.flatten() {
+                    let hook_path = hook_file.path();
+                    if hook_path.extension().and_then(|e| e.to_str()) != Some("json") {
+                        continue;
+                    }
+
+                    // Check before calling: was this file already patched by a previous run?
+                    let in_manifest = manifest
+                        .entries
+                        .iter()
+                        .any(|e| e.cache_path == hook_path.to_string_lossy().as_ref());
+
+                    match patch_single_cache_file(
+                        &hook_path,
+                        &vendor_name,
+                        &plugin_name,
+                        &settings_root,
+                        &mut manifest,
+                        verbose,
+                    ) {
+                        Ok(true) => newly_patched += 1,
+                        // Only count as "already up-to-date" if it was in the manifest.
+                        // Files that never had Bash are silently ignored (not confusing to users).
+                        Ok(false) if in_manifest => already_present += 1,
+                        Ok(false) => {} // No Bash matcher found; not our concern
+                        Err(e) => {
+                            eprintln!("Warning: failed to patch {}: {}", hook_path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Write updated manifest
+    if !manifest.entries.is_empty() {
+        manifest.patched_at = chrono::Utc::now().to_rfc3339();
+        manifest.version = 1;
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).context("Failed to serialize manifest")?;
+        // Ensure hooks dir exists
+        if let Some(parent) = manifest_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create hooks directory: {}", parent.display())
+            })?;
+        }
+        atomic_write(&manifest_path, &manifest_json)?;
+        if verbose > 0 {
+            eprintln!("Manifest written: {}", manifest_path.display());
+        }
+    }
+
+    // Always print a summary so the user can verify the install state.
+    if newly_patched > 0 {
+        println!(
+            "  Plugin caches: {} patched, {} already up-to-date",
+            newly_patched, already_present
+        );
+        for entry in &manifest.entries {
+            println!("    Patched: {}", entry.cache_path);
+            // Show backup path if it exists alongside the patched file
+            let bp_name = format!(
+                "{}.rtk-backup",
+                Path::new(&entry.cache_path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            );
+            let bp = Path::new(&entry.cache_path).with_file_name(bp_name);
+            if bp.exists() {
+                println!("    Backup:  {}", bp.display());
+            }
+            println!(
+                "      Matcher: \"{}\" → \"{}\"",
+                entry.original_matcher, entry.patched_matcher
+            );
+            println!("      Fallthrough: {}", entry.fallthrough_command);
+        }
+        println!("  Manifest: {}", manifest_path.display());
+        println!("  Re-run 'rtk init --global' after any plugin update to keep caches in sync.");
+    } else if already_present > 0 {
+        println!(
+            "  Plugin caches: {} already up-to-date (re-run safe)",
+            already_present
+        );
+    }
+
+    Ok(newly_patched)
+}
+
+/// Patch a single plugin cache JSON file: remove Bash from PreToolUse matchers.
+/// Appends to manifest if changed and not already present.
+/// Returns Ok(true) if newly patched, Ok(false) if already present or no Bash found.
+fn patch_single_cache_file(
+    hook_path: &Path,
+    vendor_name: &str,
+    plugin_name: &str,
+    settings_root: &serde_json::Value,
+    manifest: &mut BashManifest,
+    verbose: u8,
+) -> Result<bool> {
+    let content = fs::read_to_string(hook_path)
+        .with_context(|| format!("Failed to read {}", hook_path.display()))?;
+
+    let mut json: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", hook_path.display()))?;
+
+    // Pre-compute owned string once — used for idempotency check and ManifestEntry below.
+    let cache_path_str = hook_path.to_string_lossy().into_owned();
+
+    // Already in manifest with same path? Skip (idempotent second run).
+    if manifest
+        .entries
+        .iter()
+        .any(|e| e.cache_path == cache_path_str)
+    {
+        return Ok(false);
+    }
+
+    let pre_tool_use = match json
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("PreToolUse"))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return Ok(false), // No PreToolUse hooks → no Bash to remove
+    };
+
+    let mut any_patched = false;
+
+    for entry in pre_tool_use.iter_mut() {
+        // Immutable read phase: extract matcher and command before any mutable borrows.
+        let matcher = entry
+            .get("matcher")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if !matcher_contains_bash(&matcher) {
+            continue;
+        }
+
+        // Read command from the first hook entry (immutable).
+        let command = entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|h| h.get("command"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Resolve CLAUDE_PLUGIN_ROOT in command
+        let resolved_command =
+            resolve_plugin_root_in_command(&command, vendor_name, plugin_name, settings_root);
+        let new_matcher = remove_bash_from_matcher(&matcher);
+
+        // Guard: if Bash was the only token, the result would be an empty matcher string.
+        // Writing "" back would make Claude Code match the entry against no tools at all,
+        // silently disabling all non-Bash functionality of this plugin hook entry.
+        // Skip patching this entry; log a warning so the user can investigate.
+        if new_matcher.is_empty() {
+            if verbose > 0 || cfg!(test) {
+                eprintln!(
+                    "Warning: skipping '{}' — matcher '{}' contains only Bash; \
+                     cannot patch without breaking the entry.",
+                    hook_path.display(),
+                    matcher
+                );
+            }
+            continue;
+        }
+
+        // Mutable write phase: all reads done, no conflicting borrows.
+        if let Some(entry_obj) = entry.as_object_mut() {
+            entry_obj.insert(
+                "matcher".to_string(),
+                serde_json::Value::String(new_matcher.clone()),
+            );
+        }
+
+        manifest.entries.push(ManifestEntry {
+            cache_path: cache_path_str.clone(),
+            original_matcher: matcher,
+            patched_matcher: new_matcher,
+            fallthrough_command: resolved_command,
+        });
+
+        any_patched = true;
+    }
+
+    if any_patched {
+        // Backup before overwriting (once — preserves pre-RTK original across re-runs).
+        let _ = backup_file_once(hook_path);
+
+        let patched = serde_json::to_string_pretty(&json)
+            .context("Failed to serialize patched cache JSON")?;
+        atomic_write(hook_path, &patched)?;
+        if verbose > 0 {
+            eprintln!("Patched: {}", hook_path.display());
+        }
+    }
+
+    Ok(any_patched)
+}
+
+/// Returns true if a matcher string contains "Bash" as a whole token
+fn matcher_contains_bash(matcher: &str) -> bool {
+    matcher.split('|').any(|part| part.trim() == "Bash")
+}
+
+/// Remove "Bash" from a pipe-separated matcher string
+/// e.g. "Write|Edit|Bash|ExitPlanMode" -> "Write|Edit|ExitPlanMode"
+fn remove_bash_from_matcher(matcher: &str) -> String {
+    matcher
+        .split('|')
+        .filter(|part| part.trim() != "Bash")
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Resolve ${CLAUDE_PLUGIN_ROOT} in a command string to an absolute path.
+/// Looks up the vendor in extraKnownMarketplaces in settings.json.
+fn resolve_plugin_root_in_command(
+    command: &str,
+    vendor_name: &str,
+    plugin_name: &str,
+    settings_root: &serde_json::Value,
+) -> String {
+    if !command.contains("${CLAUDE_PLUGIN_ROOT}") {
+        return command.to_string();
+    }
+
+    // Try extraKnownMarketplaces first
+    if let Some(marketplace_path) = settings_root
+        .get("extraKnownMarketplaces")
+        .and_then(|m| m.get(vendor_name))
+        .and_then(|v| v.get("source"))
+        .and_then(|s| s.get("path"))
+        .and_then(|p| p.as_str())
+    {
+        let plugin_root = format!("{}/plugins/{}", marketplace_path, plugin_name);
+        return command.replace("${CLAUDE_PLUGIN_ROOT}", &plugin_root);
+    }
+
+    // Fall back to standard marketplace location
+    if let Ok(claude_dir) = resolve_claude_dir() {
+        let standard_root = claude_dir
+            .join("plugins")
+            .join(vendor_name)
+            .join(plugin_name);
+        if standard_root.exists() {
+            return command.replace("${CLAUDE_PLUGIN_ROOT}", &standard_root.to_string_lossy());
+        }
+    }
+
+    // Cannot resolve; log and return original (will fail at runtime, but non-blocking)
+    eprintln!(
+        "Warning: cannot resolve CLAUDE_PLUGIN_ROOT for vendor={} plugin={}. \
+         Fallthrough command will not work until re-run after plugin source is found.",
+        vendor_name, plugin_name
+    );
+    command.to_string()
 }
 
 /// Resolve ~/.claude directory with proper home expansion
@@ -1334,7 +1935,7 @@ More notes
         let mut json_content = serde_json::json!({});
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
 
-        insert_hook_entry(&mut json_content, hook_command);
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         // Should create full structure
         assert!(json_content.get("hooks").is_some());
@@ -1366,7 +1967,7 @@ More notes
         });
 
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
-        insert_hook_entry(&mut json_content, hook_command);
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 2); // Should have both hooks
@@ -1389,7 +1990,7 @@ More notes
         });
 
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
-        insert_hook_entry(&mut json_content, hook_command);
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         // Should preserve all other keys
         assert_eq!(json_content["env"]["PATH"], "/custom/path");

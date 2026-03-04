@@ -111,6 +111,19 @@ struct HookOutput {
     updated_input: Option<Value>,
 }
 
+// --- Manifest fallthrough structs ---
+// Minimal subset of rtk-bash-manifest.json needed for reading.
+
+#[derive(Deserialize)]
+struct ManifestFallthroughEntry {
+    fallthrough_command: String,
+}
+
+#[derive(Deserialize)]
+struct ManifestFallthrough {
+    entries: Vec<ManifestFallthroughEntry>,
+}
+
 // --- Guard logic (extracted for testability) ---
 
 /// Extract the command string from a parsed payload.
@@ -163,8 +176,12 @@ pub(crate) fn deny_response(reason: String) -> ClaudeResponse {
 /// Fail-open design: malformed input → exit 0, no output.
 /// Claude Code interprets this as "no opinion" and proceeds normally.
 pub fn run() -> anyhow::Result<()> {
+    // Read stdin once here so the raw payload is available for run_manifest_fallthrough.
+    let mut buffer = String::new();
+    io::stdin().read_to_string(&mut buffer)?;
+
     // Fail-open: wrap entire handler so ANY error → exit 0 (no opinion).
-    let response = match run_inner() {
+    let response = match run_inner(&buffer) {
         Ok(r) => r,
         Err(_) => HookResponse::NoOpinion, // Fail-open: swallow errors
     };
@@ -180,8 +197,12 @@ pub fn run() -> anyhow::Result<()> {
     // └────────────────────────────────────────────────────────────────┘
     match response {
         HookResponse::NoOpinion => {
-            // Exit 0, NO stdout, NO stderr
-            // Claude Code sees no output → proceeds with original command
+            // Exit 0, NO stdout, NO stderr.
+            // Invoke manifest fallthrough so registered Bash handlers (e.g. autorun)
+            // still see the payload. Inherits stdout/stderr from child; may exit(2) if denied.
+            // INVARIANT: only called here (NoOpinion) — payload is the original unmodified stdin.
+            // Do NOT call on Allow/Deny paths: child would receive stale pre-rewrite command.
+            run_manifest_fallthrough(&buffer);
         }
         HookResponse::Allow(json) => {
             // Exit 0, JSON to stdout, NO stderr
@@ -206,11 +227,8 @@ pub fn run() -> anyhow::Result<()> {
 
 /// Inner handler: pure decision logic, no I/O.
 /// Returns `HookResponse` for `run()` to output.
-fn run_inner() -> anyhow::Result<HookResponse> {
-    let mut buffer = String::new();
-    io::stdin().read_to_string(&mut buffer)?;
-
-    let payload: ClaudePayload = match serde_json::from_str(&buffer) {
+fn run_inner(buffer: &str) -> anyhow::Result<HookResponse> {
+    let payload: ClaudePayload = match serde_json::from_str(buffer) {
         Ok(p) => p,
         Err(_) => return Ok(HookResponse::NoOpinion),
     };
@@ -241,6 +259,73 @@ fn run_inner() -> anyhow::Result<HookResponse> {
             let json = serde_json::to_string(&response)?;
             Ok(HookResponse::Deny(json, msg))
         }
+    }
+}
+
+/// Path to the RTK bash manifest written by `rtk init`.
+fn manifest_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::Path::new(&home)
+            .join(".claude")
+            .join("hooks")
+            .join("rtk-bash-manifest.json"),
+    )
+}
+
+/// Spawn each registered fallthrough handler from the RTK bash manifest.
+///
+/// Called when RTK has NoOpinion so that other Bash hook handlers (e.g. autorun)
+/// still get to inspect the payload. Stdout/stderr are inherited so deny JSON
+/// and block reasons flow through to Claude Code unchanged.
+///
+/// Exit-code semantics:
+/// - Handler exits 2 → `std::process::exit(2)` (hard block forwarded).
+/// - Handler exits non-2 (including 1, 127) → fail-open, continue to next handler.
+/// - Manifest missing or unreadable → fast no-op.
+fn run_manifest_fallthrough(payload: &str) {
+    let path = match manifest_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if !path.exists() {
+        return;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let manifest: ManifestFallthrough = match serde_json::from_str(&content) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    for entry in &manifest.entries {
+        let mut child = match std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&entry.fallthrough_command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue, // fail-open: handler binary not found
+        };
+        // Write payload; track success so we don't propagate a false-positive exit 2
+        // if the write failed and the child received empty/partial stdin.
+        let write_ok = if let Some(mut stdin) = child.stdin.take() {
+            // stdin is dropped here (closes write end) → child receives EOF
+            io::Write::write_all(&mut stdin, payload.as_bytes()).is_ok()
+        } else {
+            false
+        };
+        let exit_code = child.wait().ok().and_then(|s| s.code()).unwrap_or(0);
+        if exit_code == 2 && write_ok {
+            // Hard block: propagate deny; stdout already inherited (deny JSON flowed through).
+            // Only honour exit 2 when the payload was delivered successfully.
+            std::process::exit(2);
+        }
+        // Any other exit (0, 1, 127, etc.), or write failure: fail-open, continue.
     }
 }
 
