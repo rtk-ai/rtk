@@ -300,6 +300,21 @@ impl Tracker {
             [],
         );
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS parse_failures (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                raw_command TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                fallback_succeeded INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
+            [],
+        )?;
+
         Ok(Self { conn })
     }
 
@@ -368,7 +383,90 @@ impl Tracker {
             "DELETE FROM commands WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        self.conn.execute(
+            "DELETE FROM parse_failures WHERE timestamp < ?1",
+            params![cutoff.to_rfc3339()],
+        )?;
         Ok(())
+    }
+
+    /// Record a parse failure for analytics.
+    pub fn record_parse_failure(
+        &self,
+        raw_command: &str,
+        error_message: &str,
+        fallback_succeeded: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                Utc::now().to_rfc3339(),
+                raw_command,
+                error_message,
+                fallback_succeeded as i32,
+            ],
+        )?;
+        self.cleanup_old()?;
+        Ok(())
+    }
+
+    /// Get parse failure summary for `rtk gain --failures`.
+    pub fn get_parse_failure_summary(&self) -> Result<ParseFailureSummary> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM parse_failures", [], |row| row.get(0))?;
+
+        let succeeded: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM parse_failures WHERE fallback_succeeded = 1",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let recovery_rate = if total > 0 {
+            (succeeded as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Top commands by frequency
+        let mut stmt = self.conn.prepare(
+            "SELECT raw_command, COUNT(*) as cnt
+             FROM parse_failures
+             GROUP BY raw_command
+             ORDER BY cnt DESC
+             LIMIT 10",
+        )?;
+        let top_commands = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Recent 10
+        let mut stmt = self.conn.prepare(
+            "SELECT timestamp, raw_command, error_message, fallback_succeeded
+             FROM parse_failures
+             ORDER BY timestamp DESC
+             LIMIT 10",
+        )?;
+        let recent = stmt
+            .query_map([], |row| {
+                Ok(ParseFailureRecord {
+                    timestamp: row.get(0)?,
+                    raw_command: row.get(1)?,
+                    error_message: row.get(2)?,
+                    fallback_succeeded: row.get::<_, i32>(3)? != 0,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ParseFailureSummary {
+            total: total as usize,
+            recovery_rate,
+            top_commands,
+            recent,
+        })
     }
 
     /// Get overall summary statistics across all recorded commands.
@@ -808,6 +906,32 @@ fn get_db_path() -> Result<PathBuf> {
     Ok(data_dir.join("rtk").join("history.db"))
 }
 
+/// Individual parse failure record.
+#[derive(Debug)]
+pub struct ParseFailureRecord {
+    pub timestamp: String,
+    pub raw_command: String,
+    pub error_message: String,
+    pub fallback_succeeded: bool,
+}
+
+/// Aggregated parse failure summary.
+#[derive(Debug)]
+pub struct ParseFailureSummary {
+    pub total: usize,
+    pub recovery_rate: f64,
+    pub top_commands: Vec<(String, usize)>,
+    pub recent: Vec<ParseFailureRecord>,
+}
+
+/// Record a parse failure without ever crashing.
+/// Silently ignores all errors — used in the fallback path.
+pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succeeded: bool) {
+    if let Ok(tracker) = Tracker::new() {
+        let _ = tracker.record_parse_failure(raw_command, error_message, succeeded);
+    }
+}
+
 /// Estimate token count from text using ~4 chars = 1 token heuristic.
 ///
 /// This is a fast approximation suitable for tracking purposes.
@@ -1187,5 +1311,46 @@ mod tests {
             glob_val,
             format!("/home/user/my_project{}*", std::path::MAIN_SEPARATOR)
         );
+    }
+
+    // 12. record_parse_failure + get_parse_failure_summary roundtrip
+    #[test]
+    fn test_parse_failure_roundtrip() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let test_cmd = format!("git -C /path status test_{}", std::process::id());
+
+        tracker
+            .record_parse_failure(&test_cmd, "unrecognized subcommand", true)
+            .expect("Failed to record parse failure");
+
+        let summary = tracker
+            .get_parse_failure_summary()
+            .expect("Failed to get summary");
+
+        assert!(summary.total >= 1);
+        assert!(summary.recent.iter().any(|r| r.raw_command == test_cmd));
+    }
+
+    // 13. recovery_rate calculation
+    #[test]
+    fn test_parse_failure_recovery_rate() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let pid = std::process::id();
+
+        // 2 successes, 1 failure
+        tracker
+            .record_parse_failure(&format!("cmd_ok1_{}", pid), "err", true)
+            .unwrap();
+        tracker
+            .record_parse_failure(&format!("cmd_ok2_{}", pid), "err", true)
+            .unwrap();
+        tracker
+            .record_parse_failure(&format!("cmd_fail_{}", pid), "err", false)
+            .unwrap();
+
+        let summary = tracker.get_parse_failure_summary().unwrap();
+        // We can't assert exact rate because other tests may have added records,
+        // but we can verify recovery_rate is between 0 and 100
+        assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
     }
 }

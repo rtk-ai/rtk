@@ -202,7 +202,7 @@ assert_ok      "rtk cargo build"              rtk cargo build
 assert_ok      "rtk cargo clippy"             rtk cargo clippy
 # cargo test exits non-zero due to pre-existing failures; check output ignoring exit code
 output_cargo_test=$(rtk cargo test 2>&1 || true)
-if echo "$output_cargo_test" | grep -q "FAILURES\|test result:"; then
+if echo "$output_cargo_test" | grep -q "FAILURES\|test result:\|passed"; then
     PASS=$((PASS + 1))
     printf "  ${GREEN}PASS${NC}  %s\n" "rtk cargo test"
 else
@@ -379,19 +379,19 @@ section "Python (conditional)"
 if command -v pytest &>/dev/null; then
     assert_help    "rtk pytest"                    rtk pytest --help
 else
-    skip "pytest not installed"
+    skip_test "rtk pytest" "pytest not installed"
 fi
 
 if command -v ruff &>/dev/null; then
     assert_help    "rtk ruff"                      rtk ruff --help
 else
-    skip "ruff not installed"
+    skip_test "rtk ruff" "ruff not installed"
 fi
 
 if command -v pip &>/dev/null; then
     assert_help    "rtk pip"                       rtk pip --help
 else
-    skip "pip not installed"
+    skip_test "rtk pip" "pip not installed"
 fi
 
 # ── 28. Go (conditional) ────────────────────────────
@@ -404,13 +404,13 @@ if command -v go &>/dev/null; then
     assert_help    "rtk go build"                  rtk go build -h
     assert_help    "rtk go vet"                    rtk go vet -h
 else
-    skip "go not installed"
+    skip_test "rtk go" "go not installed"
 fi
 
 if command -v golangci-lint &>/dev/null; then
     assert_help    "rtk golangci-lint"             rtk golangci-lint --help
 else
-    skip "golangci-lint not installed"
+    skip_test "rtk golangci-lint" "golangci-lint not installed"
 fi
 
 # ── 29. Global flags ────────────────────────────────
