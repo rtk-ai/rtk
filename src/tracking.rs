@@ -315,6 +315,15 @@ impl Tracker {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS kv_cache (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(Self { conn })
     }
 
@@ -885,6 +894,28 @@ impl Tracker {
         )?;
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Get a cached value by key, returning None if expired or missing.
+    pub fn cache_get(&self, key: &str) -> Result<Option<String>> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM kv_cache WHERE key = ?1 AND expires_at > datetime('now')",
+                params![key],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// Set a cached value with a TTL in seconds.
+    pub fn cache_set(&self, key: &str, value: &str, ttl_secs: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO kv_cache (key, value, expires_at) VALUES (?1, ?2, datetime('now', '+' || ?3 || ' seconds'))",
+            params![key, value, ttl_secs as i64],
+        )?;
+        Ok(())
     }
 }
 

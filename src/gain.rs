@@ -387,7 +387,7 @@ fn print_cache_compounding(total_saved: usize) {
         None => return,
     };
 
-    println!("{}", styled("Cache Compounding Effect", true));
+    println!("{}", styled("Max Theoretical Savings from Caching", true));
     println!("──────────────────────────────────────────────────────────────");
 
     print_kpi("Direct savings", format_tokens(compounding.direct_saved));
@@ -419,18 +419,21 @@ fn print_cache_compounding(total_saved: usize) {
     let effective_str = match compounding.dollar_savings {
         Some(dollars) => format!(
             "{} tokens  ({})",
-            format_tokens(compounding.effective_saved),
+            format_tokens(compounding.theoretical_max_saved),
             format_usd(dollars)
         ),
-        None => format!("{} tokens", format_tokens(compounding.effective_saved)),
+        None => format!(
+            "{} tokens",
+            format_tokens(compounding.theoretical_max_saved)
+        ),
     };
 
     println!("  ┌─────────────────────────────────────────────────────────┐");
-    println!("  │ Effective savings:   {:<35}│", effective_str);
+    println!("  │ Theoretical max:     {:<35}│", effective_str);
     println!("  └─────────────────────────────────────────────────────────┘");
 
-    println!("How: Saved tokens avoid 1.25x cache write + 0.1x per");
-    println!("subsequent turn. Longer sessions = bigger multiplier.");
+    println!("Assumes every saved token avoids 1.25x cache write + 0.1x");
+    println!("cache read per subsequent turn (prompt cache pricing model).");
 
     if compounding.dollar_savings.is_none() {
         println!("Tip: Install ccusage (npm i -g ccusage) for dollar amounts.");

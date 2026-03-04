@@ -10,14 +10,17 @@
 
 use crate::cc_economics::{WEIGHT_CACHE_CREATE, WEIGHT_CACHE_READ};
 use crate::discover::provider::{ClaudeProvider, SessionProvider};
+use crate::tracking::Tracker;
 use anyhow::{Context, Result};
-use serde::Serialize;
-use std::io::{BufRead, BufReader};
+use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::Path;
 
 const DEFAULT_AVG_TURNS: f64 = 20.0;
+const CACHE_KEY: &str = "session_stats";
+const CACHE_TTL_SECS: u64 = 86400; // 24 hours
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionStats {
     pub sessions_analyzed: usize,
     pub avg_turns_per_session: f64,
@@ -29,7 +32,7 @@ pub struct SessionStats {
 #[derive(Debug, Serialize)]
 pub struct CacheCompoundingSavings {
     pub direct_saved: usize,
-    pub effective_saved: usize,
+    pub theoretical_max_saved: usize,
     pub multiplier: f64,
     pub dollar_savings: Option<f64>,
     pub stats: SessionStats,
@@ -83,9 +86,41 @@ fn stats_from_turns(turn_counts: &[usize]) -> SessionStats {
     }
 }
 
+/// Compute session stats with 24h SQLite cache.
+/// Shows a spinner on cache miss since scanning sessions can take a few seconds.
+pub fn compute_session_stats(since_days: u64) -> Result<SessionStats> {
+    if let Ok(tracker) = Tracker::new() {
+        if let Ok(Some(cached)) = tracker.cache_get(CACHE_KEY) {
+            if let Ok(stats) = serde_json::from_str::<SessionStats>(&cached) {
+                return Ok(stats);
+            }
+        }
+    }
+
+    let is_tty = std::io::stderr().is_terminal();
+    if is_tty {
+        eprint!("Computing avg session duration... ");
+        let _ = std::io::stderr().flush();
+    }
+
+    let stats = scan_sessions(since_days)?;
+
+    if is_tty {
+        eprintln!("done.");
+    }
+
+    if let Ok(tracker) = Tracker::new() {
+        if let Ok(json) = serde_json::to_string(&stats) {
+            let _ = tracker.cache_set(CACHE_KEY, &json, CACHE_TTL_SECS);
+        }
+    }
+
+    Ok(stats)
+}
+
 /// Scan Claude Code JSONL sessions and compute average turn stats.
 /// Excludes subagent sessions (paths containing "/subagents/").
-pub fn compute_session_stats(since_days: u64) -> Result<SessionStats> {
+fn scan_sessions(since_days: u64) -> Result<SessionStats> {
     let provider = ClaudeProvider;
     let sessions = match provider.discover_sessions(None, Some(since_days)) {
         Ok(s) => s,
@@ -94,7 +129,6 @@ pub fn compute_session_stats(since_days: u64) -> Result<SessionStats> {
 
     let mut turn_counts = Vec::new();
     for path in &sessions {
-        // Skip subagent sessions
         if path.to_string_lossy().contains("/subagents/") {
             continue;
         }
@@ -114,12 +148,12 @@ pub fn compute_compounding(
     stats: SessionStats,
     weighted_input_cpt: Option<f64>,
 ) -> CacheCompoundingSavings {
-    let effective = (direct_saved as f64 * stats.cache_multiplier).round() as usize;
-    let dollar_savings = weighted_input_cpt.map(|cpt| effective as f64 * cpt);
+    let theoretical_max = (direct_saved as f64 * stats.cache_multiplier).round() as usize;
+    let dollar_savings = weighted_input_cpt.map(|cpt| theoretical_max as f64 * cpt);
 
     CacheCompoundingSavings {
         direct_saved,
-        effective_saved: effective,
+        theoretical_max_saved: theoretical_max,
         multiplier: stats.cache_multiplier,
         dollar_savings,
         stats,
@@ -165,7 +199,7 @@ mod tests {
 
         let result = compute_compounding(1_000_000, stats, None);
         assert_eq!(result.direct_saved, 1_000_000);
-        assert_eq!(result.effective_saved, 11_250_000);
+        assert_eq!(result.theoretical_max_saved, 11_250_000);
         assert!((result.multiplier - 11.25).abs() < 1e-6);
         assert!(result.dollar_savings.is_none());
     }
@@ -183,7 +217,7 @@ mod tests {
         // cpt = $3/MTok = 0.000003 per token
         let cpt = 0.000003;
         let result = compute_compounding(1_000_000, stats, Some(cpt));
-        assert_eq!(result.effective_saved, 11_250_000);
+        assert_eq!(result.theoretical_max_saved, 11_250_000);
         let expected_dollars = 11_250_000.0 * 0.000003; // $33.75
         assert!((result.dollar_savings.unwrap() - expected_dollars).abs() < 0.01);
     }
@@ -251,7 +285,7 @@ mod tests {
     fn test_compute_compounding_zero_saved() {
         let stats = stats_from_turns(&[100]);
         let result = compute_compounding(0, stats, Some(0.000003));
-        assert_eq!(result.effective_saved, 0);
+        assert_eq!(result.theoretical_max_saved, 0);
         assert!((result.dollar_savings.unwrap() - 0.0).abs() < 1e-6);
     }
 }
