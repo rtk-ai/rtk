@@ -25,6 +25,7 @@ struct RspecExample {
 struct RspecException {
     class: String,
     message: String,
+    #[serde(default)]
     backtrace: Vec<String>,
 }
 
