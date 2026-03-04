@@ -1,3 +1,4 @@
+mod aws_cmd;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
@@ -36,6 +37,7 @@ mod playwright_cmd;
 mod pnpm_cmd;
 mod prettier_cmd;
 mod prisma_cmd;
+mod psql_cmd;
 mod pytest_cmd;
 mod read;
 mod ruff_cmd;
@@ -166,6 +168,22 @@ enum Commands {
         /// Subcommand: pr, issue, run, repo
         subcommand: String,
         /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// AWS CLI with compact output (force JSON, compress)
+    Aws {
+        /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PostgreSQL client with compact output (strip borders, compress tables)
+    Psql {
+        /// psql arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1161,6 +1179,14 @@ fn main() -> Result<()> {
 
         Commands::Gh { subcommand, args } => {
             gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?;
+        }
+
+        Commands::Aws { subcommand, args } => {
+            aws_cmd::run(&subcommand, &args, cli.verbose)?;
+        }
+
+        Commands::Psql { args } => {
+            psql_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Pnpm { command } => match command {
