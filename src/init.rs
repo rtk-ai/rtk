@@ -4,6 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
+use crate::integrity;
+
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 
@@ -221,6 +223,50 @@ fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     Ok((hook_dir, hook_path))
 }
 
+/// Write hook file if missing or outdated, return true if changed
+#[cfg(unix)]
+fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
+    let changed = if hook_path.exists() {
+        let existing = fs::read_to_string(hook_path)
+            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+
+        if existing == REWRITE_HOOK {
+            if verbose > 0 {
+                eprintln!("Hook already up to date: {}", hook_path.display());
+            }
+            false
+        } else {
+            fs::write(hook_path, REWRITE_HOOK)
+                .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Updated hook: {}", hook_path.display());
+            }
+            true
+        }
+    } else {
+        fs::write(hook_path, REWRITE_HOOK)
+            .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Created hook: {}", hook_path.display());
+        }
+        true
+    };
+
+    // Set executable permissions
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+
+    // Store SHA-256 hash for runtime integrity verification.
+    integrity::store_hash(hook_path)
+        .with_context(|| format!("Failed to store integrity hash for {}", hook_path.display()))?;
+    if verbose > 0 && changed {
+        eprintln!("Stored integrity hash for hook");
+    }
+
+    Ok(changed)
+}
+
 /// Idempotent file write: create or update if content differs
 fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Result<bool> {
     if path.exists() {
@@ -412,6 +458,11 @@ pub fn uninstall(global: bool, verbose: u8, target: InitTarget) -> Result<()> {
         fs::remove_file(&hook_path)
             .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
         removed.push(format!("Hook: {}", hook_path.display()));
+    }
+
+    // 1b. Remove integrity hash file
+    if integrity::remove_hash(&hook_path)? {
+        removed.push("Integrity hash: removed".to_string());
     }
 
     // 2. Remove RTK.md
@@ -1360,6 +1411,26 @@ pub fn show_config(target: InitTarget) -> Result<()> {
         println!("✅ RTK.md: {} (slim mode)", rtk_md_path.display());
     } else {
         println!("⚪ RTK.md: not found");
+    }
+
+    // Check hook integrity
+    match integrity::verify_hook_at(&hook_path) {
+        Ok(integrity::IntegrityStatus::Verified) => {
+            println!("✅ Integrity: hook hash verified");
+        }
+        Ok(integrity::IntegrityStatus::Tampered { .. }) => {
+            println!("❌ Integrity: hook modified outside rtk init (run: rtk verify)");
+        }
+        Ok(integrity::IntegrityStatus::NoBaseline) => {
+            println!("⚠️  Integrity: no baseline hash (run: rtk init -g to establish)");
+        }
+        Ok(integrity::IntegrityStatus::NotInstalled)
+        | Ok(integrity::IntegrityStatus::OrphanedHash) => {
+            // Don't show integrity line if hook isn't installed
+        }
+        Err(_) => {
+            println!("⚠️  Integrity: check failed");
+        }
     }
 
     // Check global CLAUDE.md
