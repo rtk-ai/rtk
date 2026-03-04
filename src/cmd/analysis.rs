@@ -29,6 +29,9 @@ pub struct NativeCommand {
 /// - `2>/dev/null`    — Arg("2") + Redirect(">") + Arg("/dev/null")
 /// - `> /dev/null`    — Redirect(">") + Arg("/dev/null")
 /// - `>> <file>`      — Redirect(">>") + Arg(any)
+/// - `&`              — Shellism("&") at end, only when no other Shellism in core
+///   (`cargo build &` → core `cargo build`, suffix `&`; `cargo build 2>&1 &` → no strip,
+///   because the `&` in `2>&1` is already a Shellism in the core)
 pub fn split_safe_suffix(tokens: Vec<ParsedToken>) -> (Vec<ParsedToken>, String) {
     let n = tokens.len();
 
@@ -121,6 +124,20 @@ pub fn split_safe_suffix(tokens: Vec<ParsedToken>) -> (Vec<ParsedToken>, String)
         {
             let suffix = format!(">> {}", t[1].value);
             return (tokens[..n - 2].to_vec(), suffix);
+        }
+    }
+
+    // 1-token: & (trailing background job operator)
+    // Guard: strip only when no other Shellism exists in the core.
+    // `cargo build &`      → core=[cargo, build],          suffix="&"  ✅ RTK can rewrite
+    // `cargo build 2>&1 &` → core has Shellism from 2>&1   → NOT stripped ✅ shell handles
+    if n >= 2 {
+        let last = &tokens[n - 1];
+        if matches!(last.kind, TokenKind::Shellism) && last.value == "&" {
+            let core = &tokens[..n - 1];
+            if !core.iter().any(|t| matches!(t.kind, TokenKind::Shellism)) {
+                return (core.to_vec(), "&".to_string());
+            }
         }
     }
 
@@ -671,5 +688,63 @@ mod tests {
             needs_shell(&tokens),
             "complex redirect+pipe must trigger shell passthrough"
         );
+    }
+
+    // === BACKGROUND JOB SUFFIX TESTS ===
+    // These lock in correct behaviour for trailing `&` (background job operator).
+
+    #[test]
+    fn test_background_job_suffix_simple() {
+        // "cargo build &" → core "cargo build", suffix "&"
+        // RTK can rewrite the core; shell handles backgrounding.
+        let tokens = tokenize("cargo build &");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "&", "trailing & must be stripped as safe suffix");
+        assert_eq!(core.len(), 2, "core must contain only 'cargo' and 'build'");
+        assert!(
+            !needs_shell(&core),
+            "core with no Shellism must not require shell"
+        );
+    }
+
+    #[test]
+    fn test_background_job_suffix_git_status() {
+        // "git status &" — a common RTK-handled command with trailing &
+        let tokens = tokenize("git status &");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "&");
+        assert_eq!(core.len(), 2);
+        assert!(!needs_shell(&core));
+    }
+
+    #[test]
+    fn test_background_job_suffix_blocked_by_fd_redirect_shellism() {
+        // "cargo build 2>&1 &" — the & in 2>&1 is Shellism in the core.
+        // Guard must fire → trailing & NOT stripped → shell handles whole command.
+        let tokens = tokenize("cargo build 2>&1 &");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert!(
+            suffix.is_empty(),
+            "& must NOT be stripped when core contains Shellism from 2>&1; got suffix={:?}",
+            suffix
+        );
+        // core still has the & from 2>&1, so needs_shell must be true
+        assert!(
+            needs_shell(&core),
+            "2>&1 & must need shell (Shellism from 2>&1 in core)"
+        );
+    }
+
+    #[test]
+    fn test_background_job_suffix_single_token_not_stripped() {
+        // Edge case: a single "&" token with nothing before it.
+        // n >= 2 guard means we must have at least 1 core token to strip.
+        let tokens = tokenize("&");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert!(
+            suffix.is_empty(),
+            "bare & with no core command must not be stripped"
+        );
+        assert_eq!(core.len(), 1, "token list must be returned unchanged");
     }
 }
