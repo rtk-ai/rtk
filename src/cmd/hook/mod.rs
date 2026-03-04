@@ -1625,4 +1625,32 @@ mod tests {
              ({raw_tok} raw → {rtk_tok} rtk, ratio {ratio:.2})"
         );
     }
+
+    // === CAT BEHAVIOR TESTS ===
+    // Note: this branch does NOT include the data-safety rules system (that's in
+    // feat/multi-platform-hooks). Without safety rules, cat hits the defensive
+    // fallback in route_native_command() and rewrites to rtk read.
+    // In feat/multi-platform-hooks, cat is Blocked by src/rules/rtk.safety.block-cat.md.
+
+    #[test]
+    fn test_cat_multi_file_rewrites_to_rtk_read() {
+        // Without safety rules, cat→rtk read fallback fires for all arities.
+        let result = check_for_hook("cat file1.txt file2.txt", "claude");
+        assert!(
+            matches!(&result, HookResult::Rewrite(s) if s == "rtk read file1.txt file2.txt"),
+            "cat (multi-file) must rewrite to rtk read on this branch; got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_cat_single_file_rewrites_to_rtk_read() {
+        // Same fallback applies for single-file cat — no special-casing by arity.
+        let result = check_for_hook("cat CLAUDE.md", "claude");
+        assert!(
+            matches!(&result, HookResult::Rewrite(s) if s == "rtk read CLAUDE.md"),
+            "cat (single-file) must rewrite to rtk read on this branch; got: {:?}",
+            result
+        );
+    }
 }

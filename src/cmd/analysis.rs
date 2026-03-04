@@ -747,4 +747,42 @@ mod tests {
         );
         assert_eq!(core.len(), 1, "token list must be returned unchanged");
     }
+
+    #[test]
+    fn test_cargo_test_pipe_grep_is_not_safe_suffix() {
+        // "cargo test | grep FAILED" — the pipe to grep is NOT a safe suffix (grep is format-sensitive).
+        // This is the key regression guard: general non-transparent pipes must route to shell.
+        // split_safe_suffix must not strip "| grep FAILED"; needs_shell must be true for all tokens.
+        let tokens = tokenize("cargo test | grep FAILED");
+        let (_core, suffix) = split_safe_suffix(tokens.clone());
+        assert!(
+            suffix.is_empty(),
+            "| grep must NOT be a safe suffix; got: {:?}",
+            suffix
+        );
+        assert!(
+            needs_shell(&tokens),
+            "pipe to grep must trigger shell passthrough"
+        );
+    }
+
+    #[test]
+    fn test_nohup_background_strips_ampersand() {
+        // "nohup cargo build &" — nohup is a command, & is the trailing background operator.
+        // The & safe-suffix fix strips it; core = ["nohup", "cargo", "build"].
+        // nohup is not an RTK-routed command → routes to passthrough → correct behavior.
+        let tokens = tokenize("nohup cargo build &");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(
+            suffix, "&",
+            "trailing & after nohup must be stripped as safe suffix"
+        );
+        assert_eq!(core[0].value, "nohup", "first core token must be nohup");
+        assert_eq!(core.len(), 3, "core must be [nohup, cargo, build]");
+        // nohup is not in RTK routing table → passthrough (correct; nohup+RTK = double-wrapping)
+        assert!(
+            !needs_shell(&core),
+            "core with no Shellism must not require shell"
+        );
+    }
 }
