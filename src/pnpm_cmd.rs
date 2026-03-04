@@ -12,53 +12,6 @@ use crate::parser::{
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
 
-/// Native pnpm subcommands that must never be intercepted as scripts.
-/// Sorted alphabetically for binary_search lookup.
-/// Excludes: run, test, start -- those are pnpm script shortcuts that go through smart routing.
-const NATIVE_PNPM_COMMANDS: &[&str] = &[
-    "add",
-    "audit",
-    "bin",
-    "cache",
-    "cat-file",
-    "cat-index",
-    "completion",
-    "config",
-    "create",
-    "dedupe",
-    "deploy",
-    "dlx",
-    "doctor",
-    "env",
-    "exec",
-    "fetch",
-    "find-hash",
-    "import",
-    "init",
-    "install",
-    "install-test",
-    "licenses",
-    "link",
-    "list",
-    "outdated",
-    "pack",
-    "patch",
-    "patch-commit",
-    "patch-remove",
-    "prune",
-    "publish",
-    "rebuild",
-    "remove",
-    "root",
-    "self-update",
-    "server",
-    "setup",
-    "store",
-    "unlink",
-    "update",
-    "why",
-];
-
 // pnpm run output boilerplate patterns
 lazy_static! {
     // > my-project@1.0.0 test /path/to/project
@@ -701,19 +654,15 @@ pub(crate) fn route_script(
     pkg_scripts.and_then(|ps| ps.detect_tool(script))
 }
 
-/// Check if a name is a known pnpm script (static routing or cached package.json)
+/// Check if a name is a known pnpm script (static routing or cached package.json).
+/// Default: false (passthrough to pnpm as native command).
 pub fn is_pnpm_script(name: &str, pkg_scripts: &Option<PackageScripts>) -> bool {
-    // Native pnpm commands are never scripts
-    if NATIVE_PNPM_COMMANDS.binary_search(&name).is_ok() {
-        return false;
-    }
-
-    // Check static routing first (no I/O)
+    // Tier 1: Static routes (vitest, tsc, prettier — no I/O)
     if route_script(name, pkg_scripts.as_ref()).is_some() {
         return true;
     }
 
-    // Check cached package.json scripts
+    // Tier 2: Cached package.json scripts
     match pkg_scripts {
         Some(ps) => ps.contains(name),
         None => false,
@@ -1372,7 +1321,7 @@ Done in 1.2s"#;
 
     #[test]
     fn test_is_pnpm_script_routed_scripts() {
-        // Tier 1 names route without package.json
+        // Tier 1 static routes are recognized without package.json
         let no_scripts: Option<PackageScripts> = None;
         assert!(is_pnpm_script("vitest", &no_scripts));
         // Ambiguous names need package.json
@@ -1401,7 +1350,7 @@ Done in 1.2s"#;
 
     #[test]
     fn test_is_pnpm_script_none_scripts_falls_back() {
-        // With None pkg_scripts, only Tier 1 static routing works
+        // Without package.json, only Tier 1 static routes match; everything else defaults to passthrough
         let no_scripts: Option<PackageScripts> = None;
         assert!(!is_pnpm_script("my-custom-script", &no_scripts));
         assert!(!is_pnpm_script("lint", &no_scripts)); // needs package.json
@@ -1409,37 +1358,23 @@ Done in 1.2s"#;
     }
 
     #[test]
-    fn test_native_commands_not_intercepted() {
-        // These are native pnpm commands -- must never be treated as scripts
+    fn test_native_commands_fall_through_without_denylist() {
+        // Native pnpm commands (install, add, exec, dlx) naturally return false
+        // because they're neither static routes nor in package.json.
         let no_scripts: Option<PackageScripts> = None;
+        assert!(!is_pnpm_script("install", &no_scripts));
+        assert!(!is_pnpm_script("add", &no_scripts));
         assert!(!is_pnpm_script("exec", &no_scripts));
         assert!(!is_pnpm_script("dlx", &no_scripts));
-        assert!(!is_pnpm_script("audit", &no_scripts));
-        assert!(!is_pnpm_script("create", &no_scripts));
-        assert!(!is_pnpm_script("deploy", &no_scripts));
-        assert!(!is_pnpm_script("store", &no_scripts));
-        assert!(!is_pnpm_script("server", &no_scripts));
-        assert!(!is_pnpm_script("patch", &no_scripts));
-        assert!(!is_pnpm_script("env", &no_scripts));
-        assert!(!is_pnpm_script("doctor", &no_scripts));
-        assert!(!is_pnpm_script("why", &no_scripts));
-        assert!(!is_pnpm_script("init", &no_scripts));
-        assert!(!is_pnpm_script("config", &no_scripts));
-        assert!(!is_pnpm_script("setup", &no_scripts));
-        assert!(!is_pnpm_script("bin", &no_scripts));
-        assert!(!is_pnpm_script("self-update", &no_scripts));
-    }
 
-    #[test]
-    fn test_native_commands_sorted() {
-        // binary_search requires sorted array
-        let mut sorted = NATIVE_PNPM_COMMANDS.to_vec();
-        sorted.sort();
-        assert_eq!(
-            NATIVE_PNPM_COMMANDS,
-            &sorted[..],
-            "NATIVE_PNPM_COMMANDS must be sorted alphabetically for binary_search"
-        );
+        // Same result with package.json present (native names aren't user scripts)
+        let with_scripts = Some(PackageScripts {
+            scripts: HashMap::from([("dev".to_string(), "next dev".to_string())]),
+        });
+        assert!(!is_pnpm_script("install", &with_scripts));
+        assert!(!is_pnpm_script("add", &with_scripts));
+        assert!(!is_pnpm_script("exec", &with_scripts));
+        assert!(!is_pnpm_script("dlx", &with_scripts));
     }
 
     #[test]
@@ -1454,20 +1389,6 @@ Done in 1.2s"#;
         // Whitespace-only output triggers Err
         let result = apply_filter(FilterRoute::Lint, "   \n\n  ");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_native_denylist_does_not_block_script_shortcuts() {
-        // run, test, start are NOT in denylist -- but need package.json for routing
-        let no_scripts: Option<PackageScripts> = None;
-        assert!(!is_pnpm_script("test", &no_scripts)); // needs package.json
-        assert!(!is_pnpm_script("start", &no_scripts));
-        assert!(!is_pnpm_script("run", &no_scripts));
-        // With package.json, "test" routes correctly
-        let with_scripts = Some(PackageScripts {
-            scripts: HashMap::from([("test".to_string(), "vitest run".to_string())]),
-        });
-        assert!(is_pnpm_script("test", &with_scripts));
     }
 
     // ─── strip_pnpm_stderr tests ────────────────────────────────────────
