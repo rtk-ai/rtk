@@ -5,6 +5,20 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0](https://github.com/rtk-ai/rtk/compare/v0.26.0...v0.27.0) (2026-03-05)
+
+
+### Features
+
+* warn when installed hook is outdated ([#344](https://github.com/rtk-ai/rtk/issues/344)) ([#350](https://github.com/rtk-ai/rtk/issues/350)) ([3141fec](https://github.com/rtk-ai/rtk/commit/3141fecf958af5ae98c232543b913f3ca388254f))
+
+
+### Bug Fixes
+
+* bugs [#196](https://github.com/rtk-ai/rtk/issues/196) [#344](https://github.com/rtk-ai/rtk/issues/344) [#345](https://github.com/rtk-ai/rtk/issues/345) [#346](https://github.com/rtk-ai/rtk/issues/346) [#347](https://github.com/rtk-ai/rtk/issues/347) — gh --json, hook check, RTK_DISABLED, 2&gt;&1, json TOML ([8953af0](https://github.com/rtk-ai/rtk/commit/8953af0fc06759b37f16743ef383af0a52af2bed))
+* RTK_DISABLED ignored, 2&gt;&1 broken, json TOML error ([#345](https://github.com/rtk-ai/rtk/issues/345), [#346](https://github.com/rtk-ai/rtk/issues/346), [#347](https://github.com/rtk-ai/rtk/issues/347)) ([6c13d23](https://github.com/rtk-ai/rtk/commit/6c13d234364d314f53b6698c282a621019635fd6))
+* skip rewrite for gh --json/--jq/--template ([#196](https://github.com/rtk-ai/rtk/issues/196)) ([079ee9a](https://github.com/rtk-ai/rtk/commit/079ee9a4ea868ecf4e7beffcbc681ca1ba8b165c))
+
 ## [0.26.0](https://github.com/rtk-ai/rtk/compare/v0.25.0...v0.26.0) (2026-03-05)
 
 
