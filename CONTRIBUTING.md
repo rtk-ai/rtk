@@ -83,6 +83,9 @@ Every change **must** include documentation updates. See [Documentation](#docume
 All contributions must be signed off (git commit -s) to certify
 you have the right to submit the code under the project's license.
 
+Expected format: Signed-off-by: Your Name your@email.com
+https://developercertificate.org/
+
 By signing off, you agree to the DCO.
 
 ### 5. Merge into `develop`
