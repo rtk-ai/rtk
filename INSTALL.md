@@ -150,13 +150,28 @@ rtk init  # Creates ./CLAUDE.md with full RTK instructions (137 lines)
 
 ### Upgrading from Previous Version
 
-If you previously used `rtk init -g` with the old system (137-line injection):
+#### From old 137-line CLAUDE.md injection (pre-0.22)
 
 ```bash
 rtk init -g  # Automatically migrates to hook-first mode
 # → Removes old 137-line block
 # → Installs hook + RTK.md
 # → Adds @RTK.md reference
+```
+
+#### From old hook with inline logic (pre-0.24) — ⚠️ Breaking Change
+
+RTK 0.24.0 replaced the inline command-detection hook (~200 lines) with a **thin delegator** that calls `rtk rewrite`. The binary now contains the rewrite logic, so adding new commands no longer requires a hook update.
+
+The old hook still works but won't benefit from new rules added in future releases.
+
+```bash
+# Upgrade hook to thin delegator
+rtk init --global
+
+# Verify the new hook is active
+rtk init --show
+# Should show: ✅ Hook: ... (thin delegator, up to date)
 ```
 
 ## Common User Flows

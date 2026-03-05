@@ -349,6 +349,73 @@ fn route_npx(cmd: &analysis::NativeCommand, raw: &str) -> String {
 /// ## Safety interaction
 /// `safety::check` runs BEFORE this function. Blocked commands (cat, head, sed)
 /// never reach here. The `cat` arm is defensive for when `RTK_BLOCK_TOKEN_WASTE=0`.
+
+/// Subcommand-aware routing table for the binary hook.
+/// Returns (rtk_cmd_full, prefix_to_replace) when a command should be routed to an RTK subcommand.
+/// Conservative whitelist — excludes commands that are better handled by `rtk run -c`.
+fn hook_lookup<'a>(binary: &'a str, sub: &str) -> Option<(&'static str, &'a str)> {
+    // Direct routes: binary → rtk binary (same name, no rename)
+    // sub is the first argument (subcommand or first arg).
+    match binary {
+        "git" => {
+            // Only well-supported subcommands; others (checkout, rebase, cherry-pick) → rtk run
+            match sub {
+                "status" | "log" | "diff" | "show" | "add" | "commit" | "push" | "pull"
+                | "fetch" | "stash" => Some(("rtk git", binary)),
+                _ => None,
+            }
+        }
+        "gh" => match sub {
+            "pr" | "issue" | "run" => Some(("rtk gh", binary)),
+            _ => None,
+        },
+        "cargo" => match sub {
+            "test" | "build" | "clippy" | "check" | "install" | "fmt" => {
+                Some(("rtk cargo", binary))
+            }
+            _ => None,
+        },
+        "docker" => match sub {
+            "ps" | "images" | "logs" => Some(("rtk docker", binary)),
+            _ => None,
+        },
+        "kubectl" => match sub {
+            "get" | "logs" => Some(("rtk kubectl", binary)),
+            _ => None,
+        },
+        "go" => match sub {
+            "test" | "build" | "vet" => Some(("rtk go", binary)),
+            _ => None,
+        },
+        "ruff" => match sub {
+            "check" | "format" => Some(("rtk ruff", binary)),
+            _ => None,
+        },
+        "pip" | "pip3" => match sub {
+            "list" | "outdated" | "install" | "show" => Some(("rtk pip", binary)),
+            _ => None,
+        },
+        // Rename routes: binary → rtk subcommand (different name)
+        "grep" => Some(("rtk grep", binary)),
+        "rg" => Some(("rtk grep", binary)),
+        "ls" => Some(("rtk ls", binary)),
+        "eslint" => Some(("rtk lint", binary)),
+        "biome" => Some(("rtk lint", binary)),
+        "tsc" => Some(("rtk tsc", binary)),
+        "prettier" => Some(("rtk prettier", binary)),
+        "golangci-lint" | "golangci" => Some(("rtk golangci-lint", binary)),
+        "mypy" => Some(("rtk mypy", binary)),
+        // Any-subcommand direct routes
+        "playwright" => Some(("rtk playwright", binary)),
+        "prisma" => Some(("rtk prisma", binary)),
+        "curl" => Some(("rtk curl", binary)),
+        "pytest" => Some(("rtk pytest", binary)),
+        "wc" => Some(("rtk wc", binary)),
+        "wget" | "diff" | "tree" | "find" => None, // passthrough: builtins_not_blocked
+        _ => None,
+    }
+}
+
 pub(crate) fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
     // === ENV PREFIX STRIPPING ===
     // When the "binary" is actually a VAR=val env assignment (e.g. "GIT_PAGER=cat"),
@@ -397,16 +464,11 @@ pub(crate) fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> 
     let sub = cmd.args.first().map(String::as_str).unwrap_or("");
     let sub2 = cmd.args.get(1).map(String::as_str).unwrap_or("");
 
-    // 1. Static routing table: O(1) lookup via HashMap (built once at startup).
-    //    Covers all simple cases: direct routes and renames (rg→grep, eslint→lint).
-    if let Some(route) = crate::discover::registry::lookup(&cmd.binary, sub) {
-        return if route.rtk_cmd == cmd.binary.as_str() {
-            // Direct route (binary name == rtk subcommand): prepend "rtk "
-            format!("rtk {raw}")
-        } else {
-            // Rename route (rg → grep, eslint → lint): replace binary prefix
-            replace_first_word(raw, &cmd.binary, &format!("rtk {}", route.rtk_cmd))
-        };
+    // 1. Static routing table: subcommand-aware whitelist (hook_lookup).
+    //    More conservative than classify_command (discovery) — only routes
+    //    commands/subcommands that RTK optimizes well.
+    if let Some((rtk_full, prefix)) = hook_lookup(&cmd.binary, sub) {
+        return replace_first_word(raw, prefix, rtk_full);
     }
 
     // 2. Complex cases that require Rust logic and cannot be expressed as table entries.
