@@ -178,6 +178,8 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 - **Bug reports & features**: [Issues](../../issues)
 - **Discussions**: [GitHub Discussions](../../discussions)
 
+**For external contributors**: Your PR will undergo automated security review (see [SECURITY.md](SECURITY.md)). 
+This protects RTK's shell execution capabilities against injection attacks and supply chain vulnerabilities.
 ---
 
 **Thank you for contributing to rtk!**
