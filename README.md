@@ -22,7 +22,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 
 **How to verify you have the correct rtk:**
 ```bash
-rtk --version   # Should show "rtk 0.24.0"
+rtk --version   # Should show "rtk 0.25.0"
 rtk gain        # Should show token savings stats
 ```
 
@@ -454,6 +454,18 @@ database_path = "/path/to/custom.db"
 ```
 
 Priority: `RTK_DB_PATH` env var > `config.toml` > default location.
+
+### Excluding Commands from Auto-Rewrite
+
+By default, the hook rewrites all supported commands automatically. To exclude specific commands (e.g., keep raw `curl` output without schema extraction), add to your config:
+
+**Config file** (`~/.config/rtk/config.toml`, macOS: `~/Library/Application Support/rtk/config.toml`):
+```toml
+[hooks]
+exclude_commands = ["curl", "playwright"]
+```
+
+Excluded commands pass through the hook unchanged — no RTK filtering. This survives `rtk init -g` re-runs since the config file is user-owned.
 
 ### Tee: Full Output Recovery
 

@@ -5,6 +5,16 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+* **hooks:** `exclude_commands` config — exclude specific commands from auto-rewrite ([#243](https://github.com/rtk-ai/rtk/issues/243))
+
+### Bug Fixes
+
+* **curl:** skip JSON schema replacement when schema is larger than original payload ([#297](https://github.com/rtk-ai/rtk/issues/297))
+
 ## [0.25.0](https://github.com/rtk-ai/rtk/compare/v0.24.0...v0.25.0) (2026-03-05)
 
 
