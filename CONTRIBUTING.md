@@ -169,7 +169,17 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 
 ## Documentation
 
-à voir avec mainteners
+Every change **must** include documentation updates. Update the relevant file(s) depending on what you changed:
+
+| What you changed | Update |
+|------------------|--------|
+| New command or filter | [README.md](README.md) (command list + examples) and [CHANGELOG.md](CHANGELOG.md) |
+| Architecture or internal design | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Installation or setup | [INSTALL.md](INSTALL.md) |
+| Bug fix or breaking change | [CHANGELOG.md](CHANGELOG.md) |
+| Tracking / analytics | [docs/tracking.md](docs/tracking.md) |
+
+Keep documentation concise and practical -- examples over explanations.
 
 ---
 
