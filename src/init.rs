@@ -4,6 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
+use crate::integrity;
+
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 
@@ -223,6 +225,15 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
     fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
         .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
 
+    // Store SHA-256 hash for runtime integrity verification.
+    // Always store (idempotent) to ensure baseline exists even for
+    // hooks installed before integrity checks were added.
+    integrity::store_hash(hook_path)
+        .with_context(|| format!("Failed to store integrity hash for {}", hook_path.display()))?;
+    if verbose > 0 && changed {
+        eprintln!("Stored integrity hash for hook");
+    }
+
     Ok(changed)
 }
 
@@ -414,6 +425,11 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
         fs::remove_file(&hook_path)
             .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
         removed.push(format!("Hook: {}", hook_path.display()));
+    }
+
+    // 1b. Remove integrity hash file
+    if integrity::remove_hash(&hook_path)? {
+        removed.push("Integrity hash: removed".to_string());
     }
 
     // 2. Remove RTK.md
@@ -660,7 +676,7 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
 
     // 1. Prepare hook directory and install hook
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
-    ensure_hook_installed(&hook_path, verbose)?;
+    let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
     // 2. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
@@ -669,7 +685,12 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
     let migrated = patch_claude_md(&claude_md_path, verbose)?;
 
     // 4. Print success message
-    println!("\nRTK hook installed (global).\n");
+    let hook_status = if hook_changed {
+        "installed/updated"
+    } else {
+        "already up to date"
+    };
+    println!("\nRTK hook {} (global).\n", hook_status);
     println!("  Hook:      {}", hook_path.display());
     println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
     println!("  CLAUDE.md: @RTK.md reference added");
@@ -717,9 +738,14 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
 
     // Prepare and install hook
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
-    ensure_hook_installed(&hook_path, verbose)?;
+    let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
-    println!("\nRTK hook installed (hook-only mode).\n");
+    let hook_status = if hook_changed {
+        "installed/updated"
+    } else {
+        "already up to date"
+    };
+    println!("\nRTK hook {} (hook-only mode).\n", hook_status);
     println!("  Hook: {}", hook_path.display());
     println!(
         "  Note: No RTK.md created. Claude won't know about meta commands (gain, discover, proxy)."
@@ -1002,12 +1028,24 @@ pub fn show_config() -> Result<()> {
             let hook_content = fs::read_to_string(&hook_path)?;
             let has_guards =
                 hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
+            let is_thin_delegator = hook_content.contains("rtk rewrite");
 
-            if is_executable && has_guards {
-                println!("✅ Hook: {} (executable, with guards)", hook_path.display());
-            } else if !is_executable {
+            if !is_executable {
                 println!(
                     "⚠️  Hook: {} (NOT executable - run: chmod +x)",
+                    hook_path.display()
+                );
+            } else if !is_thin_delegator {
+                println!(
+                    "⚠️  Hook: {} (outdated — inline logic, not thin delegator)",
+                    hook_path.display()
+                );
+                println!(
+                    "   → Run `rtk init --global` to upgrade to the single source of truth hook"
+                );
+            } else if is_executable && has_guards {
+                println!(
+                    "✅ Hook: {} (thin delegator, up to date)",
                     hook_path.display()
                 );
             } else {
@@ -1028,6 +1066,26 @@ pub fn show_config() -> Result<()> {
         println!("✅ RTK.md: {} (slim mode)", rtk_md_path.display());
     } else {
         println!("⚪ RTK.md: not found");
+    }
+
+    // Check hook integrity
+    match integrity::verify_hook_at(&hook_path) {
+        Ok(integrity::IntegrityStatus::Verified) => {
+            println!("✅ Integrity: hook hash verified");
+        }
+        Ok(integrity::IntegrityStatus::Tampered { .. }) => {
+            println!("❌ Integrity: hook modified outside rtk init (run: rtk verify)");
+        }
+        Ok(integrity::IntegrityStatus::NoBaseline) => {
+            println!("⚠️  Integrity: no baseline hash (run: rtk init -g to establish)");
+        }
+        Ok(integrity::IntegrityStatus::NotInstalled)
+        | Ok(integrity::IntegrityStatus::OrphanedHash) => {
+            // Don't show integrity line if hook isn't installed
+        }
+        Err(_) => {
+            println!("⚠️  Integrity: check failed");
+        }
     }
 
     // Check global CLAUDE.md
@@ -1136,12 +1194,13 @@ mod tests {
     fn test_hook_has_guards() {
         assert!(REWRITE_HOOK.contains("command -v rtk"));
         assert!(REWRITE_HOOK.contains("command -v jq"));
-        // Guards must be BEFORE set -euo pipefail
-        let guard_pos = REWRITE_HOOK.find("command -v rtk").unwrap();
-        let set_pos = REWRITE_HOOK.find("set -euo pipefail").unwrap();
+        // Guards (rtk/jq availability checks) must appear before the actual delegation call.
+        // The thin delegating hook no longer uses set -euo pipefail.
+        let jq_pos = REWRITE_HOOK.find("command -v jq").unwrap();
+        let rtk_delegate_pos = REWRITE_HOOK.find("rtk rewrite \"$CMD\"").unwrap();
         assert!(
-            guard_pos < set_pos,
-            "Guards must come before set -euo pipefail"
+            jq_pos < rtk_delegate_pos,
+            "Guards must appear before rtk rewrite delegation"
         );
     }
 

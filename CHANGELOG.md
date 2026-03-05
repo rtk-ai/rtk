@@ -5,6 +5,73 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0](https://github.com/rtk-ai/rtk/compare/v0.24.0...v0.25.0) (2026-03-05)
+
+
+### Features
+
+* `rtk rewrite` — single source of truth for LLM hook rewrites ([#241](https://github.com/rtk-ai/rtk/issues/241)) ([f447a3d](https://github.com/rtk-ai/rtk/commit/f447a3d5b136dd5b1df3d5cc4969e29a68ba3f89))
+
+
+### Bug Fixes
+
+* **find:** accept native find flags (-name, -type, etc.) ([#211](https://github.com/rtk-ai/rtk/issues/211)) ([7ac5bc4](https://github.com/rtk-ai/rtk/commit/7ac5bc4bd3942841cc1abb53399025b4fcae10c9))
+
+## [Unreleased]
+
+### ⚠️ Migration Required
+
+**Hook must be updated after upgrading** (`rtk init --global`).
+
+The Claude Code hook is now a thin delegator: all rewrite logic lives in the
+`rtk rewrite` command (single source of truth). The old hook embedded the full
+if-else mapping inline — it still works after upgrading, but won't pick up new
+commands automatically.
+
+**Upgrade path:**
+```bash
+cargo install rtk          # upgrade binary
+rtk init --global          # replace old hook with thin delegator
+```
+
+Running `rtk init` without `--global` updates the project-level hook only.
+Users who skip this step keep the old hook working as before — no immediate
+breakage, but future rule additions won't take effect until they migrate.
+
+### Features
+
+* **rewrite**: add `rtk rewrite` command — single source of truth for hook rewrites ([#241](https://github.com/rtk-ai/rtk/pull/241))
+  - New `src/discover/registry.rs` handles all command → RTK mapping
+  - Hook reduced to ~50 lines (thin delegator), no duplicate logic
+  - New commands automatically available in hook without hook file changes
+  - Supports compound commands (`&&`, `||`, `;`, `|`, `&`) and env prefixes
+* **discover**: extract rules/patterns into `src/discover/rules.rs` — adding a command now means editing one file only
+* **fix**: add `aws` and `psql` to rewrite registry (were missing despite modules existing since 0.24.0)
+
+### Tests
+
+* +48 regression tests covering all command categories: aws, psql, Python, Go, JS/TS,
+  compound operators, sudo/env prefixes, registry invariants (607 total, was 559)
+
+## [0.24.0](https://github.com/rtk-ai/rtk/compare/v0.23.0...v0.24.0) (2026-03-04)
+
+
+### Features
+
+* add AWS CLI and psql modules with token-optimized output ([#216](https://github.com/rtk-ai/rtk/issues/216)) ([b934466](https://github.com/rtk-ai/rtk/commit/b934466364c131de2656eefabe933965f8424e18))
+* passthrough fallback when Clap parse fails + review fixes ([#200](https://github.com/rtk-ai/rtk/issues/200)) ([772b501](https://github.com/rtk-ai/rtk/commit/772b5012ede833c3f156816f212d469560449a30))
+* **security:** add SHA-256 hook integrity verification ([f2caca3](https://github.com/rtk-ai/rtk/commit/f2caca3abc330fb45a466af6a837ed79c3b00b40))
+
+
+### Bug Fixes
+
+* **git:** propagate exit codes in push/pull/fetch/stash/worktree ([#234](https://github.com/rtk-ai/rtk/issues/234)) ([5cfaecc](https://github.com/rtk-ai/rtk/commit/5cfaeccaba2fc6e1fe5284f57b7af7ec7c0a224d))
+* **playwright:** fix JSON parser to match real Playwright output format ([#193](https://github.com/rtk-ai/rtk/issues/193)) ([4eb6cf4](https://github.com/rtk-ai/rtk/commit/4eb6cf4b1a2333cb710970e40a96f1004d4ab0fa))
+* support additional git global options (--no-pager, --no-optional-locks, --bare, --literal-pathspecs) ([68ca712](https://github.com/rtk-ai/rtk/commit/68ca7126d45609a41dbff95e2770d58a11ebc0a3))
+* support git global options (-C, -c, --git-dir, --work-tree, --no-pager, --no-optional-locks, --bare, --literal-pathspecs) ([a6ccefe](https://github.com/rtk-ai/rtk/commit/a6ccefe8e71372b61e6e556f0d36a944d1bcbd70))
+* support git global options (-C, -c, --git-dir, --work-tree) ([982084e](https://github.com/rtk-ai/rtk/commit/982084ee34c17d2fe89ff9f4839374bf0caa2d19))
+* update version refs to 0.23.0, module count to 51, fmt upstream files ([eed0188](https://github.com/rtk-ai/rtk/commit/eed018814b141ada8140f350adc26d9f104cf368))
+
 ## [0.23.0](https://github.com/rtk-ai/rtk/compare/v0.22.2...v0.23.0) (2026-02-28)
 
 
