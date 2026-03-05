@@ -4,7 +4,7 @@
 
 **High-performance CLI proxy to minimize LLM token consumption.**
 
-[Website](https://www.rtk-ai.app) | [GitHub](https://github.com/rtk-ai/rtk) | [Install](INSTALL.md)
+[Website](https://www.rtk-ai.app) | [GitHub](https://github.com/rtk-ai/rtk) | [Install](INSTALL.md) | [Contributing](CONTRIBUTING.md)
 
 rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens on common operations.
 
@@ -22,7 +22,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 
 **How to verify you have the correct rtk:**
 ```bash
-rtk --version   # Should show "rtk 0.24.0"
+rtk --version   # Should show "rtk 0.23.0"
 rtk gain        # Should show token savings stats
 ```
 
@@ -175,6 +175,7 @@ rtk pytest                       # Python tests (failures only, 90% reduction)
 rtk pip list                     # Python packages (auto-detect uv, 70% reduction)
 rtk go test                      # Go tests (NDJSON, 90% reduction)
 rtk golangci-lint run            # Go linting (JSON, 85% reduction)
+rtk yarn test                    # Yarn (Vitest only) tests (failures only, 90% reduction)
 ```
 
 ### Data & Analytics
@@ -265,6 +266,13 @@ rtk playwright test              # E2E results (failures only)
 rtk prisma generate              # Schema generation (no ASCII art)
 rtk prisma migrate dev --name x  # Migration summary
 rtk prisma db-push               # Schema push summary
+```
+
+### Yarn
+```bash
+rtk yarn test                    # Jest test output, failures only (90% reduction)
+rtk yarn test --coverage         # With extra args passed through
+rtk yarn install                 # Passthrough for non-test subcommands
 ```
 
 ### Python & Go Stack
@@ -625,6 +633,8 @@ The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To us
 | `pip list/install/outdated` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint run` | `rtk golangci-lint run` |
+| `yarn test` | `rtk yarn test` |
+| `yarn <subcommand>` | `rtk yarn <subcommand>` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
@@ -847,7 +857,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-Contributions welcome! Please open an issue or PR on GitHub.
+Contributions welcome! See the **[Contributing Guide](CONTRIBUTING.md)** for branch naming, PR process, testing requirements, and coding practices.
 
 **For external contributors**: Your PR will undergo automated security review (see [SECURITY.md](SECURITY.md)). This protects RTK's shell execution capabilities against injection attacks and supply chain vulnerabilities.
 
