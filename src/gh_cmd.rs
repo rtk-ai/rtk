@@ -109,7 +109,17 @@ fn filter_markdown_segment(text: &str) -> String {
 }
 
 /// Run a gh command with token-optimized output
+/// Check if args contain --json flag (user wants specific JSON fields, not RTK filtering)
+fn has_json_flag(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--json")
+}
+
 pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
+    // When user explicitly passes --json, they want raw gh JSON output, not RTK filtering
+    if has_json_flag(args) {
+        return run_passthrough("gh", subcommand, args);
+    }
+
     match subcommand {
         "pr" => run_pr(args, verbose, ultra_compact),
         "issue" => run_issue(args, verbose, ultra_compact),
@@ -1303,6 +1313,30 @@ mod tests {
     #[test]
     fn test_run_view_no_passthrough_other_flags() {
         assert!(!should_passthrough_run_view(&["--web".into()]));
+    }
+
+    #[test]
+    fn test_has_json_flag_present() {
+        assert!(has_json_flag(&[
+            "view".into(),
+            "--json".into(),
+            "number,url".into()
+        ]));
+    }
+
+    #[test]
+    fn test_has_json_flag_absent() {
+        assert!(!has_json_flag(&["view".into(), "42".into()]));
+    }
+
+    #[test]
+    fn test_has_json_flag_in_pr_args() {
+        assert!(has_json_flag(&[
+            "pr".into(),
+            "view".into(),
+            "--json".into(),
+            "number,url".into()
+        ]));
     }
 
     // --- filter_markdown_body tests ---
