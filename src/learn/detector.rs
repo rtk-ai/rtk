@@ -1,5 +1,5 @@
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ErrorType {
@@ -45,32 +45,41 @@ pub struct CorrectionRule {
     pub example_error: String,
 }
 
-lazy_static! {
-    static ref UNKNOWN_FLAG_RE: Regex = Regex::new(
-        r"(?i)(unexpected argument|unknown (option|flag)|unrecognized (option|flag)|invalid (option|flag))"
-    ).unwrap();
+static UNKNOWN_FLAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(unexpected argument|unknown (option|flag)|unrecognized (option|flag)|invalid (option|flag))",
+    )
+    .unwrap()
+});
 
-    static ref CMD_NOT_FOUND_RE: Regex = Regex::new(
-        r"(?i)(command not found|not recognized as an internal|no such file or directory.*command)"
-    ).unwrap();
+static CMD_NOT_FOUND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(command not found|not recognized as an internal|no such file or directory.*command)",
+    )
+    .unwrap()
+});
 
-    static ref WRONG_PATH_RE: Regex = Regex::new(
-        r"(?i)(no such file or directory|cannot find the path|file not found)"
-    ).unwrap();
+static WRONG_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(no such file or directory|cannot find the path|file not found)").unwrap()
+});
 
-    static ref MISSING_ARG_RE: Regex = Regex::new(
-        r"(?i)(requires a value|requires an argument|missing (required )?argument|expected.*argument)"
-    ).unwrap();
+static MISSING_ARG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(requires a value|requires an argument|missing (required )?argument|expected.*argument)",
+    )
+    .unwrap()
+});
 
-    static ref PERMISSION_DENIED_RE: Regex = Regex::new(
-        r"(?i)(permission denied|access denied|not permitted)"
-    ).unwrap();
+static PERMISSION_DENIED_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(permission denied|access denied|not permitted)").unwrap());
 
-    // User rejection patterns - NOT actual errors
-    static ref USER_REJECTION_RE: Regex = Regex::new(
-        r"(?i)(user (doesn't want|declined|rejected|cancelled)|operation (cancelled|aborted) by user)"
-    ).unwrap();
-}
+// User rejection patterns - NOT actual errors
+static USER_REJECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(user (doesn't want|declined|rejected|cancelled)|operation (cancelled|aborted) by user)",
+    )
+    .unwrap()
+});
 
 /// Filters out user rejections - requires actual error-indicating content
 pub fn is_command_error(is_error: bool, output: &str) -> bool {

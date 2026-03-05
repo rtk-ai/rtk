@@ -637,7 +637,6 @@ dependencies = [
  "colored",
  "dirs",
  "ignore",
- "lazy_static",
  "regex",
  "rusqlite",
  "serde",

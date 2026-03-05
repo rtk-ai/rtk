@@ -1,6 +1,6 @@
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterLevel {
@@ -146,10 +146,8 @@ impl FilterStrategy for NoFilter {
 
 pub struct MinimalFilter;
 
-lazy_static! {
-    static ref MULTIPLE_BLANK_LINES: Regex = Regex::new(r"\n{3,}").unwrap();
-    static ref TRAILING_WHITESPACE: Regex = Regex::new(r"[ \t]+$").unwrap();
-}
+static MULTIPLE_BLANK_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+static TRAILING_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]+$").unwrap());
 
 impl FilterStrategy for MinimalFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
@@ -227,14 +225,14 @@ impl FilterStrategy for MinimalFilter {
 
 pub struct AggressiveFilter;
 
-lazy_static! {
-    static ref IMPORT_PATTERN: Regex =
-        Regex::new(r"^(use |import |from |require\(|#include)").unwrap();
-    static ref FUNC_SIGNATURE: Regex = Regex::new(
-        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+"
+static IMPORT_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(use |import |from |require\(|#include)").unwrap());
+static FUNC_SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+",
     )
-    .unwrap();
-}
+    .unwrap()
+});
 
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {

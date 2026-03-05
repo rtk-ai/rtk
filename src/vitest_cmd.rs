@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_output,
@@ -119,17 +120,13 @@ fn extract_failures_from_json(json: &VitestJsonOutput) -> Vec<TestFailure> {
 
 /// Tier 2: Extract test statistics using regex (degraded mode)
 fn extract_stats_regex(output: &str) -> Option<TestResult> {
-    lazy_static::lazy_static! {
-        static ref TEST_FILES_RE: Regex = Regex::new(
-            r"Test Files\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed"
-        ).unwrap();
-        static ref TESTS_RE: Regex = Regex::new(
-            r"Tests\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed"
-        ).unwrap();
-        static ref DURATION_RE: Regex = Regex::new(
-            r"Duration\s+([\d.]+)(ms|s)"
-        ).unwrap();
-    }
+    static TEST_FILES_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"Test Files\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed").unwrap()
+    });
+    static TESTS_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"Tests\s+(?:(\d+)\s+failed\s+\|\s+)?(\d+)\s+passed").unwrap());
+    static DURATION_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"Duration\s+([\d.]+)(ms|s)").unwrap());
 
     let clean_output = strip_ansi(output);
 

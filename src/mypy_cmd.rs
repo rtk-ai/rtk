@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::LazyLock;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -67,13 +68,11 @@ struct MypyError {
 }
 
 pub fn filter_mypy_output(output: &str) -> String {
-    lazy_static::lazy_static! {
-        // file.py:12: error: Message [error-code]
-        // file.py:12:5: error: Message [error-code]
-        static ref MYPY_DIAG: Regex = Regex::new(
-            r"^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$"
-        ).unwrap();
-    }
+    // file.py:12: error: Message [error-code]
+    // file.py:12:5: error: Message [error-code]
+    static MYPY_DIAG: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(.+?):(\d+)(?::\d+)?: (error|warning|note): (.+?)(?:\s+\[(.+)\])?$").unwrap()
+    });
 
     let lines: Vec<&str> = output.lines().collect();
     let mut errors: Vec<MypyError> = Vec::new();

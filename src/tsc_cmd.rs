@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::LazyLock;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -61,12 +62,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
 /// Filter TypeScript compiler output - group errors by file, show every error
 fn filter_tsc_output(output: &str) -> String {
-    lazy_static::lazy_static! {
-        // Pattern: src/file.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
-        static ref TSC_ERROR: Regex = Regex::new(
-            r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$"
-        ).unwrap();
-    }
+    // Pattern: src/file.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
+    static TSC_ERROR: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap()
+    });
 
     struct TsError {
         file: String,

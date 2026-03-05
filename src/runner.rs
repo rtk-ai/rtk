@@ -2,6 +2,7 @@ use crate::tracking;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
 
 /// Run a command and filter output to show only errors/warnings
 pub fn run_err(command: &str, verbose: u8) -> Result<()> {
@@ -104,8 +105,8 @@ pub fn run_test(command: &str, verbose: u8) -> Result<()> {
 }
 
 fn filter_errors(output: &str) -> String {
-    lazy_static::lazy_static! {
-        static ref ERROR_PATTERNS: Vec<Regex> = vec![
+    static ERROR_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+        vec![
             // Generic errors
             Regex::new(r"(?i)^.*error[\s:\[].*$").unwrap(),
             Regex::new(r"(?i)^.*\berr\b.*$").unwrap(),
@@ -125,8 +126,8 @@ fn filter_errors(output: &str) -> String {
             Regex::new(r"^\s*at .*:\d+:\d+.*$").unwrap(),
             // Go
             Regex::new(r"^.*\.go:\d+:.*$").unwrap(),
-        ];
-    }
+        ]
+    });
 
     let mut result = Vec::new();
     let mut in_error_block = false;

@@ -8,20 +8,19 @@ use crate::json_cmd;
 use crate::tracking;
 use crate::utils::{ok_confirmation, truncate};
 use anyhow::{Context, Result};
-use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
 use std::process::Command;
+use std::sync::LazyLock;
 
-lazy_static! {
-    static ref HTML_COMMENT_RE: Regex = Regex::new(r"(?s)<!--.*?-->").unwrap();
-    static ref BADGE_LINE_RE: Regex =
-        Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap();
-    static ref IMAGE_ONLY_LINE_RE: Regex = Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap();
-    static ref HORIZONTAL_RULE_RE: Regex =
-        Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap();
-    static ref MULTI_BLANK_RE: Regex = Regex::new(r"\n{3,}").unwrap();
-}
+static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
+static BADGE_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)\s*$").unwrap());
+static IMAGE_ONLY_LINE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*!\[[^\]]*\]\([^)]*\)\s*$").unwrap());
+static HORIZONTAL_RULE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$").unwrap());
+static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
 /// Filter markdown body to remove noise while preserving meaningful content.
 /// Removes HTML comments, badge lines, image-only lines, horizontal rules,

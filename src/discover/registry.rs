@@ -1,5 +1,5 @@
-use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
+use std::sync::LazyLock;
 
 /// A rule mapping a shell command pattern to its RTK equivalent.
 struct RtkRule {
@@ -292,15 +292,16 @@ const IGNORED_EXACT: &[&str] = &[
     "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
 ];
 
-lazy_static! {
-    static ref REGEX_SET: RegexSet = RegexSet::new(PATTERNS).expect("invalid regex patterns");
-    static ref COMPILED: Vec<Regex> = PATTERNS
+static REGEX_SET: LazyLock<RegexSet> =
+    LazyLock::new(|| RegexSet::new(PATTERNS).expect("invalid regex patterns"));
+static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    PATTERNS
         .iter()
         .map(|p| Regex::new(p).expect("invalid regex"))
-        .collect();
-    static ref ENV_PREFIX: Regex =
-        Regex::new(r"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=[^\s]*\s+)+").unwrap();
-}
+        .collect()
+});
+static ENV_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=[^\s]*\s+)+").unwrap());
 
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
