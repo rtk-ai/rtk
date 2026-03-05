@@ -12,6 +12,8 @@ pub struct Config {
     pub filters: FilterConfig,
     #[serde(default)]
     pub tee: crate::tee::TeeConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,6 +71,22 @@ impl Default for FilterConfig {
             ignore_files: vec!["*.lock".into(), "*.min.js".into(), "*.min.css".into()],
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    pub enabled: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Check if telemetry is enabled in config. Returns None if config can't be loaded.
+pub fn telemetry_enabled() -> Option<bool> {
+    Config::load().ok().map(|c| c.telemetry.enabled)
 }
 
 impl Config {

@@ -28,6 +28,8 @@ chrono = "0.4"
 thiserror = "1.0"
 tempfile = "3"
 sha2 = "0.10"
+ureq = "2"
+hostname = "0.4"
 
 [dev-dependencies]
 
