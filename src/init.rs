@@ -1218,7 +1218,10 @@ pub fn show_config() -> Result<()> {
                     old_hook_path.display()
                 );
             } else {
-                println!("⚠️  Hook: {} (no guards - outdated)", old_hook_path.display());
+                println!(
+                    "⚠️  Hook: {} (no guards - outdated)",
+                    old_hook_path.display()
+                );
             }
             println!("   Tip: use --native-hook for cross-platform support (Windows)");
         }
@@ -1360,6 +1363,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_hook_has_guards() {
         assert!(REWRITE_HOOK.contains("command -v rtk"));
         assert!(REWRITE_HOOK.contains("command -v jq"));
