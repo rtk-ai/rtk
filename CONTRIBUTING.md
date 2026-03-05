@@ -78,6 +78,13 @@ Every change **must** include tests. See [Testing](#testing) below.
 
 Every change **must** include documentation updates. See [Documentation](#documentation) below.
 
+### Developer Certificate of Origin (DCO)
+
+All contributions must be signed off (git commit -s) to certify
+you have the right to submit the code under the project's license.
+
+By signing off, you agree to the DCO.
+
 ### 5. Merge into `develop`
 
 Once your work is ready, open a Pull Request targeting the **`develop`** branch.
