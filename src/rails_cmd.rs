@@ -142,6 +142,21 @@ pub fn run_generate(args: &[String], verbose: u8) -> Result<()> {
     })
 }
 
+// ── Multi-DB variant detection ────────────────────────────────────────────────
+
+/// Detect multi-DB migration variants (e.g. db:migrate:primary, db:rollback:animals).
+/// Returns the filter type if the subcommand should be filtered, None for passthrough.
+/// Note: db:migrate:status is handled by its own Clap variant, not here.
+fn detect_multi_db_filter(subcommand: &str) -> Option<fn(&str) -> String> {
+    if subcommand.starts_with("db:migrate:") && subcommand != "db:migrate:status" {
+        return Some(filter_rails_migrate);
+    }
+    if subcommand.starts_with("db:rollback:") {
+        return Some(filter_rails_migrate);
+    }
+    None
+}
+
 // ── Passthrough for other rails subcommands ──────────────────────────────────
 
 pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
@@ -149,9 +164,20 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
         anyhow::bail!("rails: no subcommand specified");
     }
 
+    let subcommand = args[0].to_string_lossy().to_string();
+    let remaining: Vec<String> = args[1..]
+        .iter()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+
+    // Multi-DB variants: db:migrate:primary, db:rollback:animals, etc.
+    // Route to the same filters as their base commands since output format is identical.
+    if let Some(filter) = detect_multi_db_filter(&subcommand) {
+        return run_rails_filtered(&subcommand, &remaining, verbose, filter);
+    }
+
     let timer = tracking::TimedExecution::start();
 
-    let subcommand = args[0].to_string_lossy();
     let mut cmd = ruby_exec("rails");
     cmd.args(args);
 
@@ -1213,6 +1239,69 @@ Finished in 5.6789s, 3.5224 runs/s, 14.0896 assertions/s.
 
     #[test]
     fn test_filter_rails_rollback() {
+        let output = r#"== 20260228130000 CreateShortTermPriceLists: reverting =========================
+-- drop_table(:short_term_price_lists)
+   -> 0.0034s
+== 20260228130000 CreateShortTermPriceLists: reverted (0.0035s) ================
+"#;
+        let result = filter_rails_migrate(output);
+        assert!(result.contains("ok ✓ db:migrate"));
+        assert!(result.contains("reverted"));
+        assert!(result.contains("CreateShortTermPriceLists"));
+    }
+
+    // ── Multi-DB variant routing tests ──────────────────────────────────────
+
+    #[test]
+    fn test_detect_multi_db_migrate_primary() {
+        assert!(detect_multi_db_filter("db:migrate:primary").is_some());
+    }
+
+    #[test]
+    fn test_detect_multi_db_migrate_secondary() {
+        assert!(detect_multi_db_filter("db:migrate:secondary").is_some());
+    }
+
+    #[test]
+    fn test_detect_multi_db_migrate_animals() {
+        assert!(detect_multi_db_filter("db:migrate:animals").is_some());
+    }
+
+    #[test]
+    fn test_detect_multi_db_rollback_primary() {
+        assert!(detect_multi_db_filter("db:rollback:primary").is_some());
+    }
+
+    #[test]
+    fn test_detect_multi_db_status_not_routed() {
+        // db:migrate:status is handled by its own Clap variant, not multi-DB routing
+        assert!(detect_multi_db_filter("db:migrate:status").is_none());
+    }
+
+    #[test]
+    fn test_detect_multi_db_unrelated_not_routed() {
+        assert!(detect_multi_db_filter("db:seed").is_none());
+        assert!(detect_multi_db_filter("console").is_none());
+        assert!(detect_multi_db_filter("server").is_none());
+    }
+
+    #[test]
+    fn test_filter_multi_db_migrate_output() {
+        // Multi-DB migration output is identical to single-DB output
+        let output = r#"== 20240201120000 CreateUsersTable: migrating =================================
+-- create_table(:users)
+   -> 0.0042s
+== 20240201120000 CreateUsersTable: migrated (0.0043s) ========================
+"#;
+        let result = filter_rails_migrate(output);
+        assert!(result.contains("ok ✓ db:migrate"));
+        assert!(result.contains("1 migrations applied"));
+        assert!(result.contains("CreateUsersTable"));
+    }
+
+    #[test]
+    fn test_filter_multi_db_rollback_output() {
+        // Multi-DB rollback output is identical to single-DB output
         let output = r#"== 20260228130000 CreateShortTermPriceLists: reverting =========================
 -- drop_table(:short_term_price_lists)
    -> 0.0034s
