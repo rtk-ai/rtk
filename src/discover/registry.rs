@@ -31,6 +31,11 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         },
         "Tests" => 800,
         "Files" => 100,
+        "Bazel" => match subcmd {
+            "query" => 200,
+            "test" => 100,
+            _ => 200,
+        },
         "Build" => 300,
         "Infra" => 120,
         "Network" => 150,
@@ -794,6 +799,58 @@ mod tests {
     fn test_split_heredoc_no_split() {
         let cmd = "cat <<'EOF'\nhello && world\nEOF";
         assert_eq!(split_command_chain(cmd), vec![cmd]);
+    }
+
+    #[test]
+    fn test_classify_bazel_build() {
+        assert_eq!(
+            classify_command("bazel build //src:app"),
+            Classification::Supported {
+                rtk_equivalent: "rtk bazel",
+                category: "Bazel",
+                estimated_savings_pct: 97.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_bazel_test() {
+        assert_eq!(
+            classify_command("bazel test //src:test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk bazel",
+                category: "Bazel",
+                estimated_savings_pct: 82.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_bazel_query() {
+        assert_eq!(
+            classify_command("bazel query 'deps(//...)'"),
+            Classification::Supported {
+                rtk_equivalent: "rtk bazel",
+                category: "Bazel",
+                estimated_savings_pct: 98.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_bazel_run() {
+        assert_eq!(
+            classify_command("bazel run //src:bin"),
+            Classification::Supported {
+                rtk_equivalent: "rtk bazel",
+                category: "Bazel",
+                estimated_savings_pct: 97.0,
+                status: RtkStatus::Existing,
+            }
+        );
     }
 
     #[test]

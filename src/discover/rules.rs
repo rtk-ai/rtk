@@ -48,6 +48,8 @@ pub const PATTERNS: &[&str] = &[
     r"^aws\s+",
     // PostgreSQL
     r"^psql(\s|$)",
+    // Bazel
+    r"^bazel\s+(build|test|run|query)",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -315,6 +317,20 @@ pub const RULES: &[RtkRule] = &[
         category: "Infra",
         savings_pct: 75.0,
         subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Bazel
+    RtkRule {
+        rtk_cmd: "rtk bazel",
+        rewrite_prefixes: &["bazel"],
+        category: "Bazel",
+        savings_pct: 90.0,
+        subcmd_savings: &[
+            ("build", 97.0),
+            ("test", 82.0),
+            ("run", 97.0),
+            ("query", 98.0),
+        ],
         subcmd_status: &[],
     },
 ];
