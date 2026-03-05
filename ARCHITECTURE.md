@@ -102,7 +102,7 @@ Claude Code             settings.json        rtk-rewrite.sh        RTK binary
      │  Claude never sees the rewrite — it only sees optimized output.
 
 Files:
-  ~/.claude/hooks/rtk-rewrite.sh  ← shell script (command detection + rewrite)
+  ~/.claude/hooks/rtk-rewrite.sh  ← thin delegator (calls `rtk rewrite`, ~50 lines)
   ~/.claude/settings.json         ← hook registry (PreToolUse registration)
   ~/.claude/RTK.md                ← minimal context hint (10 lines)
 ```
@@ -273,6 +273,10 @@ GO                go_cmd.rs         go test/build/vet      75-90%     ✓
                   golangci_cmd.rs   golangci-lint          85%        ✓
 
 NETWORK           wget_cmd.rs       wget                   85-95%     ✓
+                  curl_cmd.rs       curl                   70%        ✓
+
+INFRA             aws_cmd.rs        aws                    80%        ✓
+                  psql_cmd.rs       psql                   75%        ✓
 
 DEPENDENCIES      deps.rs           deps                   80-90%     ✓
 
@@ -281,6 +285,7 @@ ENVIRONMENT       env_cmd.rs        env                    60-80%     ✓
 SYSTEM            init.rs           init                   N/A        ✓
                   gain.rs           gain                   N/A        ✓
                   config.rs         (internal)             N/A        ✓
+                  rewrite_cmd.rs    rewrite                N/A        ✓
 
 SHARED            utils.rs          Helpers                N/A        ✓
                   filter.rs         Language filters       N/A        ✓
@@ -288,11 +293,11 @@ SHARED            utils.rs          Helpers                N/A        ✓
                   tee.rs            Full output recovery   N/A        ✓
 ```
 
-**Total: 51 modules** (33 command modules + 18 infrastructure modules)
+**Total: 55 modules** (37 command modules + 18 infrastructure modules)
 
 ### Module Count Breakdown
 
-- **Command Modules**: 31 (directly exposed to users)
+- **Command Modules**: 34 (directly exposed to users)
 - **Infrastructure Modules**: 18 (utils, filter, tracking, tee, config, init, gain, etc.)
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
@@ -1483,4 +1488,4 @@ When implementing a new command, consider:
 
 **Last Updated**: 2026-02-22
 **Architecture Version**: 2.2
-**rtk Version**: 0.23.0
+**rtk Version**: 0.24.0

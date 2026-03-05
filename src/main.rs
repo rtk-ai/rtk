@@ -40,6 +40,7 @@ mod prisma_cmd;
 mod psql_cmd;
 mod pytest_cmd;
 mod read;
+mod rewrite_cmd;
 mod ruff_cmd;
 mod runner;
 mod summary;
@@ -597,6 +598,18 @@ enum Commands {
         /// Show entries from last N days (0 = all time)
         #[arg(short, long, default_value = "7")]
         since: u64,
+    },
+
+    /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
+    ///
+    /// Exits 0 and prints the rewritten command if supported.
+    /// Exits 1 with no output if the command has no RTK equivalent.
+    ///
+    /// Used by Claude Code, Gemini CLI, and other LLM hooks:
+    ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
+    Rewrite {
+        /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
+        cmd: String,
     },
 }
 
@@ -1672,6 +1685,10 @@ fn main() -> Result<()> {
 
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
+        }
+
+        Commands::Rewrite { cmd } => {
+            rewrite_cmd::run(&cmd)?;
         }
 
         Commands::Proxy { args } => {

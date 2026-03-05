@@ -60,10 +60,19 @@ jobs:
             exit 1
           fi
 
-          for cmd in ruff pytest pip "go " golangci; do
-            if ! grep -q "$cmd" "$HOOK_FILE"; then
-              echo "❌ Hook missing rewrite for: $cmd"
+          # Since PR #241, the hook delegates to `rtk rewrite` (single source of truth).
+          # Command coverage is now in src/discover/registry.rs, not the hook bash script.
+          if ! grep -q "rtk rewrite" "$HOOK_FILE"; then
+            echo "❌ Hook does not delegate to 'rtk rewrite'"
+            exit 1
+          fi
+
+          # Verify all Python/Go commands are covered in the registry
+          # Since PR #241, constants live in src/discover/rules.rs (extracted from registry.rs)
+          for cmd in ruff pytest pip golangci; do
+            if ! grep -qr "\"$cmd\"" src/discover/; then
+              echo "❌ Registry missing rewrite_prefixes for: $cmd"
               exit 1
             fi
           done
-          echo "✅ Hook rewrites present for Python/Go commands"
+          echo "✅ Hook delegates to rtk rewrite, registry covers all Python/Go commands"

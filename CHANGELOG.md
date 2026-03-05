@@ -5,6 +5,42 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### ⚠️ Migration Required
+
+**Hook must be updated after upgrading** (`rtk init --global`).
+
+The Claude Code hook is now a thin delegator: all rewrite logic lives in the
+`rtk rewrite` command (single source of truth). The old hook embedded the full
+if-else mapping inline — it still works after upgrading, but won't pick up new
+commands automatically.
+
+**Upgrade path:**
+```bash
+cargo install rtk          # upgrade binary
+rtk init --global          # replace old hook with thin delegator
+```
+
+Running `rtk init` without `--global` updates the project-level hook only.
+Users who skip this step keep the old hook working as before — no immediate
+breakage, but future rule additions won't take effect until they migrate.
+
+### Features
+
+* **rewrite**: add `rtk rewrite` command — single source of truth for hook rewrites ([#241](https://github.com/rtk-ai/rtk/pull/241))
+  - New `src/discover/registry.rs` handles all command → RTK mapping
+  - Hook reduced to ~50 lines (thin delegator), no duplicate logic
+  - New commands automatically available in hook without hook file changes
+  - Supports compound commands (`&&`, `||`, `;`, `|`, `&`) and env prefixes
+* **discover**: extract rules/patterns into `src/discover/rules.rs` — adding a command now means editing one file only
+* **fix**: add `aws` and `psql` to rewrite registry (were missing despite modules existing since 0.24.0)
+
+### Tests
+
+* +48 regression tests covering all command categories: aws, psql, Python, Go, JS/TS,
+  compound operators, sudo/env prefixes, registry invariants (607 total, was 559)
+
 ## [0.24.0](https://github.com/rtk-ai/rtk/compare/v0.23.0...v0.24.0) (2026-03-04)
 
 
