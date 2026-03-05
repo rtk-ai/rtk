@@ -195,10 +195,12 @@ struct EnvIssue {
 /// Run pre-flight environment checks before attempting hook installation.
 ///
 /// Checks (in order):
-/// 1. `~/.claude/` directory exists
-/// 2. `~/.claude/settings.json` exists
-/// 3. For `HookType::Script`: `jq` is on PATH (required by rtk-rewrite.sh)
-/// 4. `rtk` is on PATH (self-check)
+/// 1. `~/.claude/` directory exists → Claude Code has been launched at least once.
+/// 2. For `HookType::Script`: `jq` is on PATH → required by `rtk-rewrite.sh`.
+/// 3. `rtk hook` subcommand is responsive → correct binary (not reachingforthejack/rtk).
+///
+/// Note: missing `settings.json` is NOT checked here. `patch_settings_shared` creates
+/// it from scratch when absent, so a warning would be noise on new Claude Code installs.
 #[cfg(unix)]
 fn check_environment(hook_type: &HookType) -> Vec<EnvIssue> {
     let mut issues = Vec::new();
@@ -230,33 +232,17 @@ fn check_environment(hook_type: &HookType) -> Vec<EnvIssue> {
                 "Then re-run: rtk init -g".to_owned(),
             ],
             links: vec![
-                "https://docs.anthropic.com/en/docs/claude-code",
-                "https://docs.anthropic.com/en/docs/claude-code/settings",
+                "https://code.claude.com/docs/en/",
+                "https://code.claude.com/docs/en/settings",
             ],
         });
         return issues;
     }
 
-    let settings_path = claude_dir.join("settings.json");
-    if !settings_path.exists() {
-        issues.push(EnvIssue {
-            severity: IssueSeverity::Soft,
-            problem: format!("settings.json not found at {}", settings_path.display()),
-            instructions: vec![
-                "Launch Claude Code once to generate settings.json, then re-run rtk init -g.".to_owned(),
-                "Or run: rtk init -g --no-patch  (RTK installs but you add the hook entry manually)".to_owned(),
-                format!(
-                    r#"Manual hook entry to add to {}: {{"hooks":{{"PreToolUse":[{{"matcher":"Bash","hooks":[{{"type":"command","command":"rtk hook claude"}}]}}]}}}}"#,
-                    settings_path.display()
-                ),
-            ],
-            links: vec![
-                "https://docs.anthropic.com/en/docs/claude-code/hooks",
-                "https://docs.anthropic.com/en/docs/claude-code/settings",
-            ],
-        });
-    }
-
+    // jq — required only for Script mode (default on this branch).
+    // Uses `sh -c "command -v jq"` (POSIX built-in; same PATH Claude Code hooks see).
+    // If jq is only in an interactive shell profile (.zshrc, not .zprofile), sh won't
+    // see it — we note this in the instructions to avoid a false Hard failure.
     if *hook_type == HookType::Script {
         let jq_found = std::process::Command::new("sh")
             .args(["-c", "command -v jq"])
@@ -271,41 +257,77 @@ fn check_environment(hook_type: &HookType) -> Vec<EnvIssue> {
                     .to_owned(),
                 instructions: vec![
                     "Install jq using your system package manager:".to_owned(),
-                    "  macOS:  brew install jq".to_owned(),
-                    "  Ubuntu/Debian: sudo apt install jq".to_owned(),
-                    "  Fedora/RHEL:   sudo dnf install jq".to_owned(),
-                    "  Windows (WSL): sudo apt install jq".to_owned(),
+                    "  macOS:          brew install jq".to_owned(),
+                    "  Ubuntu/Debian:  sudo apt install jq".to_owned(),
+                    "  Fedora/RHEL:    sudo dnf install jq".to_owned(),
+                    "  Windows (WSL):  sudo apt install jq".to_owned(),
+                    "If jq is already installed but not detected, ensure PATH is exported in"
+                        .to_owned(),
+                    "  ~/.zprofile (macOS) or ~/.profile (Linux), not only in .zshrc/.bashrc."
+                        .to_owned(),
                     "Then re-run: rtk init -g --hook-type script".to_owned(),
                     "Or use the binary hook (no jq needed): rtk init -g --hook-type binary"
                         .to_owned(),
                 ],
                 links: vec![
                     "https://jqlang.org/download/",
-                    "https://docs.anthropic.com/en/docs/claude-code/hooks",
+                    "https://code.claude.com/docs/en/hooks",
                 ],
             });
         }
     }
 
-    let rtk_found = std::process::Command::new("sh")
-        .args(["-c", "command -v rtk"])
+    // rtk self-check: verify the correct binary is installed.
+    // Two "rtk" packages exist on crates.io:
+    //   - rtk-ai/rtk (Rust Token Killer) — has `rtk hook` subcommand
+    //   - reachingforthejack/rtk (Rust Type Kit) — does NOT
+    // We probe `rtk hook --help` to catch the name-collision case.
+    let rtk_hook_ok = std::process::Command::new("rtk")
+        .args(["hook", "--help"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
 
-    if !rtk_found {
-        issues.push(EnvIssue {
-            severity: IssueSeverity::Hard,
-            problem: "`rtk` not found on PATH after installation".to_owned(),
-            instructions: vec![
-                "Ensure your shell's PATH includes Cargo's bin directory.".to_owned(),
-                "Add to your shell profile (~/.zshrc, ~/.bashrc, etc.):".to_owned(),
-                r#"  export PATH="$HOME/.cargo/bin:$PATH""#.to_owned(),
-                "Then reload your shell: source ~/.zshrc  (or open a new terminal)".to_owned(),
-                "Then re-run: rtk init -g".to_owned(),
-            ],
-            links: vec!["https://doc.rust-lang.org/cargo/getting-started/installation.html"],
-        });
+    if !rtk_hook_ok {
+        let rtk_on_path = std::process::Command::new("sh")
+            .args(["-c", "command -v rtk"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if rtk_on_path {
+            issues.push(EnvIssue {
+                severity: IssueSeverity::Hard,
+                problem:
+                    "`rtk` on PATH does not support `hook` subcommand (wrong package installed)"
+                        .to_owned(),
+                instructions: vec![
+                    "Two packages share the name 'rtk' on crates.io:".to_owned(),
+                    "  ✅ rtk-ai/rtk    (Rust Token Killer — this project)".to_owned(),
+                    "  ❌ reachingforthejack/rtk  (Rust Type Kit — unrelated)".to_owned(),
+                    "Uninstall the wrong one:  cargo uninstall rtk".to_owned(),
+                    "Install the correct one:  cargo install --git https://github.com/rtk-ai/rtk"
+                        .to_owned(),
+                    "Verify: rtk --version  (should show 'rtk X.Y.Z')".to_owned(),
+                    "        rtk gain       (should show token savings stats)".to_owned(),
+                ],
+                links: vec!["https://github.com/rtk-ai/rtk"],
+            });
+        } else {
+            issues.push(EnvIssue {
+                severity: IssueSeverity::Hard,
+                problem: "`rtk` not found on PATH after installation".to_owned(),
+                instructions: vec![
+                    "Ensure your shell's PATH includes Cargo's bin directory.".to_owned(),
+                    "Add to your shell profile (~/.zprofile on macOS, ~/.profile on Linux):"
+                        .to_owned(),
+                    r#"  export PATH="$HOME/.cargo/bin:$PATH""#.to_owned(),
+                    "Reload: source ~/.zprofile  (or open a new terminal)".to_owned(),
+                    "Then re-run: rtk init -g".to_owned(),
+                ],
+                links: vec!["https://doc.rust-lang.org/cargo/getting-started/installation.html"],
+            });
+        }
     }
 
     issues
