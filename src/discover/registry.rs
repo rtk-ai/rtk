@@ -480,6 +480,18 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
         return None;
     }
 
+    // #196: gh with --json/--jq/--template produces structured output that
+    // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
+    if rule.rtk_cmd == "rtk gh" {
+        let args_lower = cmd_clean.to_lowercase();
+        if args_lower.contains("--json")
+            || args_lower.contains("--jq")
+            || args_lower.contains("--template")
+        {
+            return None;
+        }
+    }
+
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
@@ -1761,5 +1773,47 @@ mod tests {
                 "PATTERNS[{i}] = '{pattern}' is not a valid regex"
             );
         }
+    }
+
+    // --- #196: gh --json/--jq/--template passthrough ---
+
+    #[test]
+    fn test_rewrite_gh_json_skipped() {
+        assert_eq!(
+            rewrite_command("gh pr list --json number,title", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_jq_skipped() {
+        assert_eq!(
+            rewrite_command("gh pr list --json number --jq '.[].number'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_template_skipped() {
+        assert_eq!(
+            rewrite_command("gh pr view 42 --template '{{.title}}'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_api_json_skipped() {
+        assert_eq!(
+            rewrite_command("gh api repos/owner/repo --jq '.name'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_without_json_still_works() {
+        assert_eq!(
+            rewrite_command("gh pr list", &[]),
+            Some("rtk gh pr list".into())
+        );
     }
 }
