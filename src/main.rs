@@ -326,6 +326,10 @@ enum Commands {
         #[arg(short, long)]
         global: bool,
 
+        /// Install OpenCode plugin (in addition to Claude Code)
+        #[arg(long)]
+        opencode: bool,
+
         /// Show current configuration
         #[arg(long)]
         show: bool,
@@ -1584,6 +1588,7 @@ fn main() -> Result<()> {
 
         Commands::Init {
             global,
+            opencode,
             show,
             claude_md,
             hook_only,
@@ -1596,6 +1601,9 @@ fn main() -> Result<()> {
             } else if uninstall {
                 init::uninstall(global, cli.verbose)?;
             } else {
+                let install_opencode = opencode;
+                let install_claude = !opencode;
+
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
                 } else if no_patch {
@@ -1603,7 +1611,15 @@ fn main() -> Result<()> {
                 } else {
                     init::PatchMode::Ask
                 };
-                init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                init::run(
+                    global,
+                    install_claude,
+                    install_opencode,
+                    claude_md,
+                    hook_only,
+                    patch_mode,
+                    cli.verbose,
+                )?;
             }
         }
 
