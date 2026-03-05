@@ -44,8 +44,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Check if tree is installed
-    let tree_check = Command::new("which").arg("tree").output();
-    if tree_check.is_err() || !tree_check.unwrap().status.success() {
+    if !crate::utils::command_in_path("tree") {
         anyhow::bail!(
             "tree command not found. Install it first:\n\
              - macOS: brew install tree\n\

@@ -7,10 +7,12 @@ fn default_log_path() -> PathBuf {
     if let Ok(dir) = std::env::var("RTK_AUDIT_DIR") {
         PathBuf::from(dir).join("hook-audit.log")
     } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        PathBuf::from(home)
-            .join(".local/share/rtk")
-            .join("hook-audit.log")
+        // Use dirs for cross-platform home: ~/.local/share/rtk/ on Unix,
+        // %APPDATA%\rtk\ on Windows (dirs::data_local_dir handles both).
+        let base = dirs::data_local_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))
+            .unwrap_or_else(std::env::temp_dir);
+        base.join("rtk").join("hook-audit.log")
     }
 }
 

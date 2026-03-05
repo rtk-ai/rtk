@@ -295,7 +295,10 @@ fn run_inner(buffer: &str) -> anyhow::Result<HookResponse> {
 
 /// Path to the RTK bash manifest written by `rtk init`.
 fn manifest_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
+    // Check HOME first (Unix), then USERPROFILE (Windows) as fallback.
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
     Some(
         std::path::Path::new(&home)
             .join(".claude")

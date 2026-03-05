@@ -9,6 +9,43 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::Command;
 
+/// Check whether a command exists in PATH.
+///
+/// Uses `which` on Unix/macOS and `where` on Windows.
+/// Returns `false` rather than panicking if the probe command itself fails.
+pub fn command_in_path(cmd: &str) -> bool {
+    if cfg!(windows) {
+        Command::new("where")
+    } else {
+        Command::new("which")
+    }
+    .arg(cmd)
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false)
+}
+
+/// Return the resolved path of `cmd` in PATH, or `None` if not found.
+///
+/// Uses `which` on Unix/macOS and `where` on Windows.
+/// On Windows `where` prints all matches; this returns only the first match.
+pub fn which_command(cmd: &str) -> Option<String> {
+    let out = if cfg!(windows) {
+        Command::new("where")
+    } else {
+        Command::new("which")
+    }
+    .arg(cmd)
+    .output()
+    .ok()
+    .filter(|o| o.status.success())?;
+
+    String::from_utf8(out.stdout)
+        .ok()
+        .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Tronque une chaîne à `max_len` caractères avec "..." si nécessaire.
 ///
 /// # Arguments
@@ -195,11 +232,7 @@ pub fn detect_package_manager() -> &'static str {
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
 pub fn package_manager_exec(tool: &str) -> Command {
-    let tool_exists = Command::new("which")
-        .arg(tool)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let tool_exists = command_in_path(tool);
 
     if tool_exists {
         Command::new(tool)

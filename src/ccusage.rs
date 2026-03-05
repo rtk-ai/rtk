@@ -84,11 +84,7 @@ struct MonthlyEntry {
 
 /// Check if ccusage binary exists in PATH
 fn binary_exists() -> bool {
-    Command::new("which")
-        .arg("ccusage")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    crate::utils::command_in_path("ccusage")
 }
 
 /// Build the ccusage command, falling back to npx if binary not in PATH
