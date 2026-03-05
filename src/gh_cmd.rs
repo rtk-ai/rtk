@@ -136,8 +136,8 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
-        "comment" => pr_action("commented", &args[1..], verbose),
-        "edit" => pr_action("edited", &args[1..], verbose),
+        "comment" => pr_action("comment", "commented", &args[1..], verbose),
+        "edit" => pr_action("edit", "edited", &args[1..], verbose),
         _ => run_passthrough("gh", "pr", args),
     }
 }
@@ -1068,25 +1068,25 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
 }
 
 /// Generic PR action handler for comment/edit
-fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
+fn pr_action(subcmd: &str, display_label: &str, args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
-    cmd.args(["pr", action]);
+    cmd.args(["pr", subcmd]);
     for arg in args {
         cmd.arg(arg);
     }
 
     let output = cmd
         .output()
-        .context(format!("Failed to run gh pr {}", action))?;
+        .context(format!("Failed to run gh pr {}", subcmd))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         timer.track(
-            &format!("gh pr {}", action),
-            &format!("rtk gh pr {}", action),
+            &format!("gh pr {}", subcmd),
+            &format!("rtk gh pr {}", subcmd),
             &stderr,
             &stderr,
         );
@@ -1101,7 +1101,7 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
         .map(|s| format!("#{}", s))
         .unwrap_or_default();
 
-    let filtered = ok_confirmation(action, &pr_num);
+    let filtered = ok_confirmation(display_label, &pr_num);
     println!("{}", filtered);
 
     // Use stdout or pr_num as raw input
@@ -1112,8 +1112,8 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
     };
 
     timer.track(
-        &format!("gh pr {}", action),
-        &format!("rtk gh pr {}", action),
+        &format!("gh pr {}", subcmd),
+        &format!("rtk gh pr {}", subcmd),
         &raw,
         &filtered,
     );
