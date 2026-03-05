@@ -1120,6 +1120,13 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
     Ok(())
 }
 
+/// Returns true if the args contain a --jq flag (with or without =value).
+/// When --jq is present, gh has already filtered the output to exactly what
+/// the user asked for, so RTK must not apply schema extraction on top of it.
+fn has_jq_flag(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--jq" || a.starts_with("--jq="))
+}
+
 fn run_api(args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
@@ -1137,6 +1144,15 @@ fn run_api(args: &[String], _verbose: u8) -> Result<()> {
         timer.track("gh api", "rtk gh api", &stderr, &stderr);
         eprintln!("{}", stderr.trim());
         std::process::exit(output.status.code().unwrap_or(1));
+    }
+
+    // When --jq is present, gh has already applied the user's filter.
+    // Passing the result through schema extraction would replace real values
+    // with type placeholders (e.g. "104" -> "int"). Pass through as-is.
+    if has_jq_flag(args) {
+        print!("{}", raw);
+        timer.track("gh api", "rtk gh api", &raw, &raw);
+        return Ok(());
     }
 
     // Try to parse as JSON and filter
@@ -1454,5 +1470,53 @@ ___
         assert!(result.contains("## Changes"));
         assert!(result.contains("## Test Plan"));
         assert!(result.contains("Filter HTML comments"));
+    }
+
+    #[test]
+    fn test_has_jq_flag_long_form() {
+        assert!(has_jq_flag(&["--jq".into(), ".total_count".into()]));
+    }
+
+    #[test]
+    fn test_has_jq_flag_equals_form() {
+        assert!(has_jq_flag(&["--jq=.total_count".into()]));
+    }
+
+    #[test]
+    fn test_has_jq_flag_absent() {
+        assert!(!has_jq_flag(&[
+            "/repos/rtk-ai/rtk/releases".into(),
+            "--per-page=1".into()
+        ]));
+    }
+
+    #[test]
+    fn test_has_jq_flag_empty() {
+        assert!(!has_jq_flag(&[]));
+    }
+
+    #[test]
+    fn test_api_jq_output_not_schema_filtered() {
+        // Simulate what gh api --jq returns: a scalar value.
+        // Verify that filter_json_string would have mangled it, confirming
+        // our passthrough path is necessary.
+        let scalar_output = "104\n";
+        // The schema extractor turns a bare integer into "int"
+        let schema = json_cmd::filter_json_string(scalar_output.trim(), 5);
+        assert_eq!(schema.unwrap(), "int");
+        // This confirms that without the --jq passthrough, "104" would become "int".
+        // The actual passthrough is tested via has_jq_flag above.
+    }
+
+    #[test]
+    fn test_api_jq_object_would_be_schema_mangled() {
+        // Simulate what gh api --jq '.[0] | {tag_name,published_at}' returns.
+        // Verify filter_json_string would replace values with type placeholders.
+        let jq_output = r#"{"tag_name":"v0.23.0","published_at":"2026-02-28T21:10:20Z"}"#;
+        let schema = json_cmd::filter_json_string(jq_output, 5).unwrap();
+        // Without passthrough, real values are lost
+        assert!(!schema.contains("v0.23.0"));
+        assert!(!schema.contains("2026-02-28"));
+        // With passthrough (has_jq_flag == true), jq_output is printed as-is
     }
 }
