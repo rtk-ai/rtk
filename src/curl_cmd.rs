@@ -55,7 +55,10 @@ fn filter_curl_output(output: &str) -> String {
         && (trimmed.ends_with('}') || trimmed.ends_with(']'))
     {
         if let Ok(schema) = json_cmd::filter_json_string(trimmed, 5) {
-            return schema;
+            // Only use schema if it's actually shorter than the original (saves tokens)
+            if schema.len() < trimmed.len() {
+                return schema;
+            }
         }
     }
 
@@ -85,12 +88,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_curl_json() {
-        let output = r#"{"name": "test", "count": 42, "items": [1, 2, 3]}"#;
+    fn test_filter_curl_json_large() {
+        // Large JSON where schema is shorter than original
+        let output = r#"{"name": "test value here", "count": 42, "items": [1, 2, 3], "description": "a longer description value", "active": true, "nested": {"key1": "val1", "key2": "val2"}}"#;
         let result = filter_curl_output(output);
         assert!(result.contains("name"));
         assert!(result.contains("string"));
         assert!(result.contains("int"));
+        assert!(
+            result.len() < output.len(),
+            "Schema should be shorter than original for large JSON"
+        );
+    }
+
+    #[test]
+    fn test_filter_curl_json_small_returns_original() {
+        // Small JSON where schema would be same size or larger
+        let output = r#"{"ok": true}"#;
+        let result = filter_curl_output(output);
+        // Should return original JSON since schema isn't shorter
+        assert!(
+            result.contains("true"),
+            "Small JSON should preserve original values"
+        );
     }
 
     #[test]
