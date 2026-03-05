@@ -178,6 +178,174 @@ Overall average: **60-90% token reduction** on common development operations.
 <!-- /rtk-instructions -->
 "##;
 
+/// Severity of an environment check result.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum IssueSeverity {
+    Hard,
+    Soft,
+}
+
+struct EnvIssue {
+    severity: IssueSeverity,
+    problem: String,
+    instructions: Vec<String>,
+    links: Vec<&'static str>,
+}
+
+/// Run pre-flight environment checks before attempting hook installation.
+///
+/// Checks (in order):
+/// 1. `~/.claude/` directory exists
+/// 2. `~/.claude/settings.json` exists
+/// 3. For `HookType::Script`: `jq` is on PATH (required by rtk-rewrite.sh)
+/// 4. `rtk` is on PATH (self-check)
+#[cfg(unix)]
+fn check_environment(hook_type: &HookType) -> Vec<EnvIssue> {
+    let mut issues = Vec::new();
+
+    let claude_dir = match dirs::home_dir() {
+        Some(h) => h.join(".claude"),
+        None => {
+            issues.push(EnvIssue {
+                severity: IssueSeverity::Hard,
+                problem: "$HOME is not set; cannot locate ~/.claude/".to_owned(),
+                instructions: vec![
+                    "Ensure the HOME environment variable points to your home directory."
+                        .to_owned(),
+                ],
+                links: vec![],
+            });
+            return issues;
+        }
+    };
+
+    if !claude_dir.exists() {
+        issues.push(EnvIssue {
+            severity: IssueSeverity::Hard,
+            problem: format!("Claude Code directory not found: {}", claude_dir.display()),
+            instructions: vec![
+                "Install Claude Code if you haven't already.".to_owned(),
+                "Launch Claude Code at least once so it creates its configuration directory."
+                    .to_owned(),
+                "Then re-run: rtk init -g".to_owned(),
+            ],
+            links: vec![
+                "https://docs.anthropic.com/en/docs/claude-code",
+                "https://docs.anthropic.com/en/docs/claude-code/settings",
+            ],
+        });
+        return issues;
+    }
+
+    let settings_path = claude_dir.join("settings.json");
+    if !settings_path.exists() {
+        issues.push(EnvIssue {
+            severity: IssueSeverity::Soft,
+            problem: format!("settings.json not found at {}", settings_path.display()),
+            instructions: vec![
+                "Launch Claude Code once to generate settings.json, then re-run rtk init -g.".to_owned(),
+                "Or run: rtk init -g --no-patch  (RTK installs but you add the hook entry manually)".to_owned(),
+                format!(
+                    r#"Manual hook entry to add to {}: {{"hooks":{{"PreToolUse":[{{"matcher":"Bash","hooks":[{{"type":"command","command":"rtk hook claude"}}]}}]}}}}"#,
+                    settings_path.display()
+                ),
+            ],
+            links: vec![
+                "https://docs.anthropic.com/en/docs/claude-code/hooks",
+                "https://docs.anthropic.com/en/docs/claude-code/settings",
+            ],
+        });
+    }
+
+    if *hook_type == HookType::Script {
+        let jq_found = std::process::Command::new("sh")
+            .args(["-c", "command -v jq"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !jq_found {
+            issues.push(EnvIssue {
+                severity: IssueSeverity::Hard,
+                problem: "`jq` not found on PATH (required by rtk-rewrite.sh hook script)"
+                    .to_owned(),
+                instructions: vec![
+                    "Install jq using your system package manager:".to_owned(),
+                    "  macOS:  brew install jq".to_owned(),
+                    "  Ubuntu/Debian: sudo apt install jq".to_owned(),
+                    "  Fedora/RHEL:   sudo dnf install jq".to_owned(),
+                    "  Windows (WSL): sudo apt install jq".to_owned(),
+                    "Then re-run: rtk init -g --hook-type script".to_owned(),
+                    "Or use the binary hook (no jq needed): rtk init -g --hook-type binary"
+                        .to_owned(),
+                ],
+                links: vec![
+                    "https://jqlang.org/download/",
+                    "https://docs.anthropic.com/en/docs/claude-code/hooks",
+                ],
+            });
+        }
+    }
+
+    let rtk_found = std::process::Command::new("sh")
+        .args(["-c", "command -v rtk"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !rtk_found {
+        issues.push(EnvIssue {
+            severity: IssueSeverity::Hard,
+            problem: "`rtk` not found on PATH after installation".to_owned(),
+            instructions: vec![
+                "Ensure your shell's PATH includes Cargo's bin directory.".to_owned(),
+                "Add to your shell profile (~/.zshrc, ~/.bashrc, etc.):".to_owned(),
+                r#"  export PATH="$HOME/.cargo/bin:$PATH""#.to_owned(),
+                "Then reload your shell: source ~/.zshrc  (or open a new terminal)".to_owned(),
+                "Then re-run: rtk init -g".to_owned(),
+            ],
+            links: vec!["https://doc.rust-lang.org/cargo/getting-started/installation.html"],
+        });
+    }
+
+    issues
+}
+
+/// Print environment issues to stderr with clear formatting.
+/// Returns `true` if any hard issues were found (caller should bail).
+#[cfg(unix)]
+fn report_env_issues(issues: &[EnvIssue]) -> bool {
+    let mut has_hard = false;
+    for issue in issues {
+        let label = match issue.severity {
+            IssueSeverity::Hard => "❌ SETUP REQUIRED",
+            IssueSeverity::Soft => "⚠️  WARNING",
+        };
+        eprintln!("\n{}: {}", label, issue.problem);
+        if !issue.instructions.is_empty() {
+            eprintln!("\n  How to fix:");
+            for (i, step) in issue.instructions.iter().enumerate() {
+                eprintln!("  {}. {}", i + 1, step);
+            }
+        }
+        if !issue.links.is_empty() {
+            eprintln!("\n  Reference:");
+            for link in &issue.links {
+                eprintln!("    → {}", link);
+            }
+        }
+        if issue.severity == IssueSeverity::Hard {
+            has_hard = true;
+        }
+    }
+    if has_hard {
+        eprintln!(
+            "\n💡 Tip: If you need help setting this up, copy the output above and paste it\n   into your AI assistant (e.g., Claude) — it can walk you through the steps.\n"
+        );
+    }
+    has_hard
+}
+
 /// Main entry point for `rtk init`
 pub fn run(
     global: bool,
@@ -898,6 +1066,12 @@ fn run_default_mode(
         return run_claude_md_mode(false, verbose);
     }
 
+    // Pre-flight: detect unsupportable configurations before modifying anything.
+    let issues = check_environment(&hook_type);
+    if report_env_issues(&issues) {
+        anyhow::bail!("Unsupportable configuration detected. See above for setup instructions.");
+    }
+
     let claude_dir = resolve_claude_dir()?;
     let rtk_md_path = claude_dir.join("RTK.md");
     let claude_md_path = claude_dir.join("CLAUDE.md");
@@ -982,6 +1156,12 @@ fn run_hook_only_mode(
         eprintln!("⚠️  Warning: --hook-only only makes sense with --global");
         eprintln!("    For local projects, use default mode or --claude-md");
         return Ok(());
+    }
+
+    // Pre-flight: detect unsupportable configurations before modifying anything.
+    let issues = check_environment(&hook_type);
+    if report_env_issues(&issues) {
+        anyhow::bail!("Unsupportable configuration detected. See above for setup instructions.");
     }
 
     // Prepare and install hook
