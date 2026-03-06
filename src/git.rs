@@ -18,7 +18,9 @@ pub enum GitCommand {
     Pull,
     Branch,
     Fetch,
-    Stash { subcommand: Option<String> },
+    Stash {
+        subcommand: Option<String>,
+    },
     Worktree,
 }
 
@@ -45,9 +47,10 @@ pub fn run(
         GitCommand::Status => run_status(args, verbose, global_args),
         GitCommand::Show => run_show(args, max_lines, verbose, global_args),
         GitCommand::Add => run_add(args, verbose, global_args),
-        GitCommand::Commit { messages, extra_args } => {
-            run_commit(&messages, &extra_args, verbose, global_args)
-        }
+        GitCommand::Commit {
+            messages,
+            extra_args,
+        } => run_commit(&messages, &extra_args, verbose, global_args),
         GitCommand::Push => run_push(args, verbose, global_args),
         GitCommand::Pull => run_pull(args, verbose, global_args),
         GitCommand::Branch => run_branch(args, verbose, global_args),
@@ -1801,11 +1804,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
     #[test]
     fn test_commit_amend_no_edit() {
-        let cmd = build_commit_command(
-            &[],
-            &["--amend".to_string(), "--no-edit".to_string()],
-            &[],
-        );
+        let cmd = build_commit_command(&[], &["--amend".to_string(), "--no-edit".to_string()], &[]);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())

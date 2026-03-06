@@ -1173,7 +1173,10 @@ fn main() -> Result<()> {
                 GitCommands::Add { args } => {
                     git::run(git::GitCommand::Add, &args, None, cli.verbose, &global_args)?;
                 }
-                GitCommands::Commit { message, extra_args } => {
+                GitCommands::Commit {
+                    message,
+                    extra_args,
+                } => {
                     git::run(
                         git::GitCommand::Commit {
                             messages: message,
@@ -1911,7 +1914,11 @@ mod tests {
         let cli = Cli::try_parse_from(["rtk", "git", "commit", "-m", "fix: typo"]).unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message, extra_args },
+                command:
+                    GitCommands::Commit {
+                        message,
+                        extra_args,
+                    },
                 ..
             } => {
                 assert_eq!(message, vec!["fix: typo"]);
@@ -1935,7 +1942,11 @@ mod tests {
         .unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message, extra_args },
+                command:
+                    GitCommands::Commit {
+                        message,
+                        extra_args,
+                    },
                 ..
             } => {
                 assert_eq!(message, vec!["feat: add support", "Body paragraph here."]);
@@ -1947,11 +1958,14 @@ mod tests {
 
     #[test]
     fn test_git_commit_file_flag() {
-        let cli =
-            Cli::try_parse_from(["rtk", "git", "commit", "-F", "/tmp/msg.txt"]).unwrap();
+        let cli = Cli::try_parse_from(["rtk", "git", "commit", "-F", "/tmp/msg.txt"]).unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message, extra_args },
+                command:
+                    GitCommands::Commit {
+                        message,
+                        extra_args,
+                    },
                 ..
             } => {
                 assert!(message.is_empty());
@@ -1963,11 +1977,14 @@ mod tests {
 
     #[test]
     fn test_git_commit_amend_no_edit() {
-        let cli =
-            Cli::try_parse_from(["rtk", "git", "commit", "--amend", "--no-edit"]).unwrap();
+        let cli = Cli::try_parse_from(["rtk", "git", "commit", "--amend", "--no-edit"]).unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message, extra_args },
+                command:
+                    GitCommands::Commit {
+                        message,
+                        extra_args,
+                    },
                 ..
             } => {
                 assert!(message.is_empty());
@@ -1979,13 +1996,15 @@ mod tests {
 
     #[test]
     fn test_git_commit_message_and_amend() {
-        let cli = Cli::try_parse_from([
-            "rtk", "git", "commit", "-m", "fix: update", "--amend",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["rtk", "git", "commit", "-m", "fix: update", "--amend"]).unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message, extra_args },
+                command:
+                    GitCommands::Commit {
+                        message,
+                        extra_args,
+                    },
                 ..
             } => {
                 assert_eq!(message, vec!["fix: update"]);
@@ -2033,7 +2052,11 @@ mod tests {
         .unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message, extra_args },
+                command:
+                    GitCommands::Commit {
+                        message,
+                        extra_args,
+                    },
                 ..
             } => {
                 assert_eq!(message, vec!["title", "body", "footer"]);

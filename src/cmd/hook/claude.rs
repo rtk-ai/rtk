@@ -432,6 +432,7 @@ fn run_manifest_handlers(payload: &str) -> ManifestResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::test_helpers::EnvGuard;
 
     // =========================================================================
     // CLAUDE CODE WIRE FORMAT CONFORMANCE
@@ -652,16 +653,16 @@ mod tests {
 
     #[test]
     fn test_shared_is_hook_disabled_hook_enabled_zero() {
+        let _env = EnvGuard::new();
         std::env::set_var("RTK_HOOK_ENABLED", "0");
         assert!(is_hook_disabled());
-        std::env::remove_var("RTK_HOOK_ENABLED");
     }
 
     #[test]
     fn test_shared_is_hook_disabled_rtk_active() {
+        let _env = EnvGuard::new();
         std::env::set_var("RTK_ACTIVE", "1");
         assert!(is_hook_disabled());
-        std::env::remove_var("RTK_ACTIVE");
     }
 
     // --- Integration: Bug #4669 workaround verification ---
