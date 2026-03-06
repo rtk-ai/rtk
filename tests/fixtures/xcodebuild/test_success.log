@@ -1,0 +1,11 @@
+Command line invocation:
+    /usr/bin/xcodebuild test -scheme AppTests
+
+Target 'AppTests' in project 'AppProject'
+Test Suite 'Selected tests' started at 2026-03-06 11:00:00.000
+Test Suite 'AppTests.xctest' started at 2026-03-06 11:00:00.000
+Test Case '-[AppTests.LoginTests testHappyPath]' started.
+Test Case '-[AppTests.LoginTests testHappyPath]' passed (0.111 seconds).
+Test Suite 'AppTests.xctest' passed at 2026-03-06 11:00:01.000.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.111 (0.118) seconds
+** TEST SUCCEEDED **

@@ -1577,6 +1577,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_classify_xcodebuild() {
+        assert!(matches!(
+            classify_command("xcodebuild test -scheme DemoApp"),
+            Classification::Supported {
+                rtk_equivalent: "rtk xcodebuild",
+                category: "Build",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_xcodebuild() {
+        assert_eq!(
+            rewrite_command("xcodebuild test -scheme DemoApp", &[]),
+            Some("rtk xcodebuild test -scheme DemoApp".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefixed_xcodebuild() {
+        assert_eq!(
+            rewrite_command(
+                "DEVELOPER_DIR=/Applications/Xcode.app xcodebuild -list",
+                &[]
+            ),
+            Some("DEVELOPER_DIR=/Applications/Xcode.app rtk xcodebuild -list".into())
+        );
+    }
+
     // --- JS/TS tooling ---
 
     #[test]

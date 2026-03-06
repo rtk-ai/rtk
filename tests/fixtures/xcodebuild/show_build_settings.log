@@ -1,0 +1,5 @@
+Build settings for action build and target App:
+    PRODUCT_BUNDLE_IDENTIFIER = com.example.app
+    SDKROOT = iphonesimulator
+    SWIFT_VERSION = 5.10
+    TARGET_NAME = App

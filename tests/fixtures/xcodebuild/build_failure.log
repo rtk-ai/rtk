@@ -1,0 +1,14 @@
+Command line invocation:
+    /usr/bin/xcodebuild build -scheme App
+
+Target 'App' in project 'AppProject'
+WriteAuxiliaryFile /Users/me/Library/Developer/Xcode/DerivedData/App
+/Users/me/App/Sources/AppDelegate.swift:11:9: warning: variable 'unused' was never used; consider replacing with '_' or removing it
+/Users/me/App/Sources/HomeView.swift:42:18: error: cannot find 'MissingType' in scope
+builtin-SwiftDriver -- /Users/me/Toolchains
+Command PhaseScriptExecution failed with a nonzero exit code
+The following build commands failed:
+	SwiftCompile normal arm64 /Users/me/App/Sources/HomeView.swift
+	SwiftEmitModule normal arm64 Emitting\ module\ for\ App
+(2 failures)
+** BUILD FAILED **

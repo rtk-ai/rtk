@@ -1,0 +1,14 @@
+Command line invocation:
+    /usr/bin/xcodebuild build -scheme App
+
+Resolved source packages:
+  alamofire: https://github.com/Alamofire/Alamofire.git @ 5.8.1
+  snapshot-testing: https://github.com/pointfreeco/swift-snapshot-testing @ 1.17.0
+
+note: Building targets in dependency order
+Target 'App' in project 'AppProject'
+WriteAuxiliaryFile /Users/me/Library/Developer/Xcode/DerivedData/App
+SwiftCompile normal arm64 Compiling\ AppDelegate.swift /Users/me/App/Sources/AppDelegate.swift
+CompileSwift normal arm64 /Users/me/App/Sources/LegacyFeature.swift
+CodeSign /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Products/Debug-iphonesimulator/App.app
+** BUILD SUCCEEDED **

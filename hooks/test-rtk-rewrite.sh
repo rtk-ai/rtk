@@ -2,9 +2,23 @@
 # Test suite for rtk-rewrite.sh
 # Feeds mock JSON through the hook and verifies the rewritten commands.
 #
-# Usage: bash ~/.claude/hooks/test-rtk-rewrite.sh
+# Usage: bash hooks/test-rtk-rewrite.sh
 
-HOOK="${HOOK:-$HOME/.claude/hooks/rtk-rewrite.sh}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_HOOK="$REPO_ROOT/.claude/hooks/rtk-rewrite.sh"
+
+if [ -x "$REPO_ROOT/target/debug/rtk" ]; then
+  PATH="$REPO_ROOT/target/debug:$PATH"
+fi
+
+if [ -z "${HOOK:-}" ]; then
+  if [ -f "$REPO_HOOK" ]; then
+    HOOK="$REPO_HOOK"
+  else
+    HOOK="$HOME/.claude/hooks/rtk-rewrite.sh"
+  fi
+fi
 PASS=0
 FAIL=0
 TOTAL=0
@@ -143,7 +157,7 @@ test_rewrite "env + ls" \
 
 test_rewrite "env + npm run" \
   "NODE_ENV=test npm run test:e2e" \
-  "NODE_ENV=test rtk npm test:e2e"
+  "NODE_ENV=test rtk npm run test:e2e"
 
 test_rewrite "env + docker compose (unsupported subcommand, NOT rewritten)" \
   "COMPOSE_PROJECT_NAME=test docker compose up -d" \
@@ -159,23 +173,23 @@ echo ""
 echo "--- New patterns ---"
 test_rewrite "npm run test:e2e" \
   "npm run test:e2e" \
-  "rtk npm test:e2e"
+  "rtk npm run test:e2e"
 
 test_rewrite "npm run build" \
   "npm run build" \
-  "rtk npm build"
+  "rtk npm run build"
 
 test_rewrite "npm test" \
   "npm test" \
-  "rtk npm test"
+  ""
 
 test_rewrite "vue-tsc -b" \
   "vue-tsc -b" \
-  "rtk tsc -b"
+  ""
 
 test_rewrite "npx vue-tsc --noEmit" \
   "npx vue-tsc --noEmit" \
-  "rtk tsc --noEmit"
+  "rtk npx vue-tsc --noEmit"
 
 test_rewrite "docker compose up -d (NOT rewritten — unsupported by rtk)" \
   "docker compose up -d" \
@@ -209,17 +223,17 @@ test_rewrite "docker exec -it db psql" \
   "docker exec -it db psql" \
   "rtk docker exec -it db psql"
 
-test_rewrite "find (NOT rewritten — different arg format)" \
+test_rewrite "find" \
   "find . -name '*.ts'" \
-  ""
+  "rtk find . -name '*.ts'"
 
-test_rewrite "tree (NOT rewritten — different arg format)" \
+test_rewrite "tree" \
   "tree src/" \
-  ""
+  "rtk tree src/"
 
-test_rewrite "wget (NOT rewritten — different arg format)" \
+test_rewrite "wget" \
   "wget https://example.com/file" \
-  ""
+  "rtk wget https://example.com/file"
 
 test_rewrite "gh api repos/owner/repo" \
   "gh api repos/owner/repo" \
@@ -236,6 +250,14 @@ test_rewrite "kubectl describe pod foo" \
 test_rewrite "kubectl apply -f deploy.yaml" \
   "kubectl apply -f deploy.yaml" \
   "rtk kubectl apply -f deploy.yaml"
+
+test_rewrite "xcodebuild test -scheme DemoApp" \
+  "xcodebuild test -scheme DemoApp" \
+  "rtk xcodebuild test -scheme DemoApp"
+
+test_rewrite "env + xcodebuild -list" \
+  "DEVELOPER_DIR=/Applications/Xcode.app xcodebuild -list" \
+  "DEVELOPER_DIR=/Applications/Xcode.app rtk xcodebuild -list"
 
 echo ""
 
@@ -267,13 +289,10 @@ test_rewrite "cargo test &>/dev/null" \
   "cargo test &>/dev/null" \
   "rtk cargo test &>/dev/null"
 
-# Note: the bash hook rewrites only the first command segment (sed-based);
-# full compound rewriting (both sides of &) is handled by `rtk rewrite` (Rust).
-# The critical behavior tested here: `&` after `cargo test` is NOT mistaken for
-# a redirect — the hook still rewrites cargo test, no crash.
-test_rewrite "cargo test & git status (bash hook rewrites first segment only)" \
+# The hook delegates to `rtk rewrite`, so both command segments are rewritten.
+test_rewrite "cargo test & git status" \
   "cargo test & git status" \
-  "rtk cargo test & git status"
+  "rtk cargo test & rtk git status"
 
 echo ""
 
@@ -281,7 +300,7 @@ echo ""
 echo "--- Vitest run dedup ---"
 test_rewrite "vitest (no args)" \
   "vitest" \
-  "rtk vitest run"
+  "rtk vitest"
 
 test_rewrite "vitest run (no double run)" \
   "vitest run" \

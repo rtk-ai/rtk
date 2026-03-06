@@ -124,6 +124,10 @@ elif echo "$FIRST_CMD" | grep -qE '^docker\s+(ps|images|logs)(\s|$)'; then
 elif echo "$FIRST_CMD" | grep -qE '^kubectl\s+(get|logs)(\s|$)'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^kubectl /rtk kubectl /')
 
+# --- Apple tooling ---
+elif echo "$FIRST_CMD" | grep -qE '^xcodebuild(\s|$)'; then
+  SUGGESTION=$(echo "$CMD" | sed 's/^xcodebuild /rtk xcodebuild /')
+
 # --- Network ---
 elif echo "$FIRST_CMD" | grep -qE '^curl\s+'; then
   SUGGESTION=$(echo "$CMD" | sed 's/^curl /rtk curl /')

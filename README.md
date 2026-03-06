@@ -90,7 +90,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.27.1"
+rtk --version   # Should show "rtk 0.27.2"
 rtk gain        # Should show token savings stats
 ```
 
@@ -181,6 +181,7 @@ rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
+rtk xcodebuild test -scheme App # Xcode build/test logs, conservatively compressed
 ```
 
 ### Package Managers
@@ -300,6 +301,7 @@ After install, **restart Claude Code**.
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint` | `rtk golangci-lint` |
+| `xcodebuild ...` | `rtk xcodebuild ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |

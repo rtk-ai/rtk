@@ -1,0 +1,23 @@
+Command line invocation:
+    /usr/bin/xcodebuild test -scheme AppTests
+
+Resolved source packages:
+  nimble: https://github.com/Quick/Nimble.git @ 13.2.1
+
+Target 'AppTests' in project 'AppProject'
+WriteAuxiliaryFile /Users/me/Library/Developer/Xcode/DerivedData/App
+Test Suite 'Selected tests' started at 2026-03-06 10:00:00.000
+Test Suite 'AppTests.xctest' started at 2026-03-06 10:00:00.000
+Test Case '-[AppTests.LoginTests testHappyPath]' started.
+Test Case '-[AppTests.LoginTests testHappyPath]' passed (0.121 seconds).
+Test Case '-[AppTests.LoginTests testLoginFlow]' started.
+/Users/me/App/Tests/LoginTests.swift:87: error: -[AppTests.LoginTests testLoginFlow] : XCTAssertEqual failed: ("403") is not equal to ("200")
+Test Case '-[AppTests.LoginTests testLoginFlow]' failed (0.045 seconds).
+Test Suite 'AppTests.xctest' failed at 2026-03-06 10:00:01.000.
+	 Executed 2 tests, with 1 failure (0 unexpected) in 0.166 (0.170) seconds
+Testing failed:
+	AppTests.LoginTests/testLoginFlow
+The following build commands failed:
+	SwiftCompile normal arm64 /Users/me/App/Sources/TestSupport.swift
+(1 failure)
+** TEST FAILED **
