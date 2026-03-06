@@ -18,6 +18,7 @@ mod gh_cmd;
 mod git;
 mod go_cmd;
 mod golangci_cmd;
+mod gradle_cmd;
 mod grep_cmd;
 mod hook_audit_cmd;
 mod hook_check;
@@ -584,6 +585,13 @@ enum Commands {
     Go {
         #[command(subcommand)]
         command: GoCommands,
+    },
+
+    /// Gradle commands with compact output (auto-detects gradlew)
+    Gradle {
+        /// Gradle arguments (any task: build, test, smartbuild, compile.complete, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// golangci-lint with compact output
@@ -1687,6 +1695,10 @@ fn main() -> Result<()> {
             }
         },
 
+        Commands::Gradle { args } => {
+            gradle_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::GolangciLint { args } => {
             golangci_cmd::run(&args, cli.verbose)?;
         }
@@ -1804,6 +1816,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
+            | Commands::Gradle { .. }
     )
 }
 
