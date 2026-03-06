@@ -351,12 +351,19 @@ brew uninstall rtk           # If installed via Homebrew
 - **[SECURITY.md](SECURITY.md)** - Security policy and PR review process
 - **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
 
+
 ## Contributing
 
-Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/rtk-ai/rtk).
+Contributions welcome! See the **[Contributing Guide](CONTRIBUTING.md)** for branch naming, PR process, testing requirements, and coding practices.
 
 Join the community on [Discord](https://discord.gg/pvHdzAec).
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+## Contact
+
+- Website: https://www.rtk-ai.app
+- Email: contact@rtk-ai.app
+- Issues: https://github.com/rtk-ai/rtk/issues
