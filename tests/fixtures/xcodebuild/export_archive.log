@@ -1,0 +1,8 @@
+Command line invocation:
+    /usr/bin/xcodebuild -exportArchive -archivePath App.xcarchive -exportOptionsPlist ExportOptions.plist -exportPath out
+
+Target 'App' in project 'AppProject'
+Signing Identity: "Apple Distribution: Example, Inc. (ABCDE12345)"
+IDEDistribution: Created bundle at path "/tmp/out/App.ipa"
+exportArchive: Exported App.ipa
+** ARCHIVE SUCCEEDED **

@@ -53,6 +53,7 @@ mod utils;
 mod vitest_cmd;
 mod wc_cmd;
 mod wget_cmd;
+mod xcodebuild_cmd;
 
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
@@ -589,6 +590,13 @@ enum Commands {
     #[command(name = "golangci-lint")]
     GolangciLint {
         /// golangci-lint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Xcode build/test commands with conservative output compression
+    Xcodebuild {
+        /// xcodebuild arguments (supports native subcommands and flags)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1687,6 +1695,10 @@ fn main() -> Result<()> {
             golangci_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Xcodebuild { args } => {
+            xcodebuild_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
         }
@@ -1800,6 +1812,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
+            | Commands::Xcodebuild { .. }
     )
 }
 
@@ -1864,6 +1877,36 @@ mod tests {
                 assert!(!literal_pathspecs);
             }
             _ => panic!("Expected Git command"),
+        }
+    }
+
+    #[test]
+    fn test_xcodebuild_args_preserved() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "xcodebuild",
+            "test",
+            "-scheme",
+            "DemoApp",
+            "-destination",
+            "platform=iOS Simulator,name=iPhone 16",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Xcodebuild { args } => {
+                assert_eq!(
+                    args,
+                    vec![
+                        "test",
+                        "-scheme",
+                        "DemoApp",
+                        "-destination",
+                        "platform=iOS Simulator,name=iPhone 16",
+                    ]
+                );
+            }
+            _ => panic!("Expected Xcodebuild command"),
         }
     }
 

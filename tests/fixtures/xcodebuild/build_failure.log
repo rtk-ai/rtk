@@ -1,0 +1,38 @@
+Command line invocation:
+    /usr/bin/xcodebuild build -scheme App
+
+Resolve Package Graph
+Resolved source packages:
+  Alamofire: https://github.com/Alamofire/Alamofire @ 5.9.1
+
+note: Building targets in dependency order
+Target 'App' in project 'AppProject'
+WriteAuxiliaryFile /Users/me/Library/Developer/Xcode/DerivedData/App
+WriteFile /Users/me/Library/Developer/Xcode/DerivedData/App/build.db
+MkDir /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Intermediates.noindex
+SwiftDriver App normal arm64 com.apple.xcode.tools.swift.compiler
+SwiftDriverJobDiscovery normal arm64 Compiling HomeView.swift AppDelegate.swift
+SwiftDriver\ Compilation\ Requirements App normal arm64 com.apple.xcode.tools.swift.compiler
+SwiftEmitModule normal arm64 Emitting\ module\ for\ App
+SwiftCompile normal arm64 Compiling\ HomeView.swift /Users/me/App/Sources/HomeView.swift
+SwiftCompile normal arm64 Compiling\ AppDelegate.swift /Users/me/App/Sources/AppDelegate.swift
+CompileSwift normal arm64 /Users/me/App/Sources/LegacyFeature.swift
+Ld /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Intermediates.noindex/App.build/Debug-iphonesimulator/App.build/Objects-normal/arm64/App.debug.dylib normal arm64
+Ld /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Products/Debug-iphonesimulator/App.app/App normal arm64
+CodeSign /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Products/Debug-iphonesimulator/App.app
+RegisterExecutionPolicyException /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Products/Debug-iphonesimulator/App.app
+ProcessInfoPlistFile /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Products/Debug-iphonesimulator/App.app/Info.plist /Users/me/App/Info.plist
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Users/me/Library/Developer/Xcode/DerivedData
+builtin-infoPlistUtility /Users/me/App/Info.plist -producttype com.apple.product-type.application
+builtin-swiftTaskExecution -- /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Intermediates.noindex/App.build/Objects-normal/arm64/App.TaskData
+builtin-productPackagingUtility /Users/me/App/App.entitlements -o /Users/me/Library/Developer/Xcode/DerivedData/App/App.xcent
+builtin-validationUtility /Users/me/Library/Developer/Xcode/DerivedData/App/Build/Products/Debug-iphonesimulator/App.app -validate-for-store
+/Users/me/App/Sources/AppDelegate.swift:11:9: warning: variable 'unused' was never used; consider replacing with '_' or removing it
+/Users/me/App/Sources/HomeView.swift:42:18: error: cannot find 'MissingType' in scope
+builtin-SwiftDriver -- /Users/me/Toolchains
+Command PhaseScriptExecution failed with a nonzero exit code
+The following build commands failed:
+	SwiftCompile normal arm64 /Users/me/App/Sources/HomeView.swift
+	SwiftEmitModule normal arm64 Emitting\ module\ for\ App
+(2 failures)
+** BUILD FAILED **

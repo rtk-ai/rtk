@@ -272,6 +272,8 @@ PYTHON            ruff_cmd.rs       ruff check/format      80%+       ✓
 GO                go_cmd.rs         go test/build/vet      75-90%     ✓
                   golangci_cmd.rs   golangci-lint          85%        ✓
 
+APPLE             xcodebuild_cmd.rs xcodebuild             60-85%     ✓
+
 NETWORK           wget_cmd.rs       wget                   85-95%     ✓
                   curl_cmd.rs       curl                   70%        ✓
 
@@ -293,16 +295,17 @@ SHARED            utils.rs          Helpers                N/A        ✓
                   tee.rs            Full output recovery   N/A        ✓
 ```
 
-**Total: 55 modules** (37 command modules + 18 infrastructure modules)
+**Total: 57 modules** (develop baseline + `xcodebuild` support)
 
 ### Module Count Breakdown
 
-- **Command Modules**: 34 (directly exposed to users)
-- **Infrastructure Modules**: 18 (utils, filter, tracking, tee, config, init, gain, etc.)
+- **Command Modules**: 35+ (directly exposed to users)
+- **Infrastructure Modules**: 18+ (utils, filter, tracking, tee, config, init, gain, etc.)
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
 - **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
+- **Apple Tooling**: 1 module (`xcodebuild`)
 
 ---
 
@@ -1488,4 +1491,4 @@ When implementing a new command, consider:
 
 **Last Updated**: 2026-02-22
 **Architecture Version**: 2.2
-**rtk Version**: 0.24.0
+**rtk Version**: 0.25.0

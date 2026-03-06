@@ -37,8 +37,9 @@ if [ -f "ARCHITECTURE.md" ]; then
   fi
 fi
 
-# 3. Commandes Python/Go présentes partout
+# 3. Language/platform commands present in docs
 PYTHON_GO_CMDS=("ruff" "pytest" "pip" "go" "golangci")
+APPLE_CMDS=("xcodebuild")
 echo "🐍 Checking Python/Go commands documentation..."
 
 for cmd in "${PYTHON_GO_CMDS[@]}"; do
@@ -54,6 +55,21 @@ for cmd in "${PYTHON_GO_CMDS[@]}"; do
   done
 done
 echo "✅ Python/Go commands: documented in README.md and CLAUDE.md"
+
+echo "🍎 Checking Apple command documentation..."
+for cmd in "${APPLE_CMDS[@]}"; do
+  for file in README.md INSTALL.md ARCHITECTURE.md CLAUDE.md; do
+    if [ ! -f "$file" ]; then
+      echo "⚠️  $file not found, skipping"
+      continue
+    fi
+    if ! grep -q "$cmd" "$file"; then
+      echo "❌ $file ne mentionne pas commande $cmd"
+      exit 1
+    fi
+  done
+done
+echo "✅ Apple commands: documented in README.md, INSTALL.md, ARCHITECTURE.md, and CLAUDE.md"
 
 # 4. Hooks cohérents avec doc
 HOOK_FILE=".claude/hooks/rtk-rewrite.sh"

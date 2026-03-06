@@ -137,6 +137,8 @@ RTK backs up existing settings.json before changes. Restore if needed:
 cp ~/.claude/settings.json.bak ~/.claude/settings.json
 ```
 
+Once the hook is installed, RTK rewrites supported commands like `git status`, `cargo test`, and `xcodebuild test -scheme App` through the same `rtk rewrite` entrypoint. New rewrite support ships in the binary, not in per-command hook logic.
+
 ### Alternative: Local Project Setup
 
 **Best for: Single project without hook**
