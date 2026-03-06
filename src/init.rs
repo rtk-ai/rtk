@@ -225,15 +225,11 @@ fn path_setup_instructions(cargo_bin: &str) -> Vec<String> {
         ],
         "nu" | "nush" | "nushell" => vec![
             "Add to ~/.config/nushell/env.nu:".to_owned(),
-            format!(
-                r#"  $env.PATH = ($env.PATH | split row (char esep) | append "{cargo_bin}")"#
-            ),
+            format!(r#"  $env.PATH = ($env.PATH | split row (char esep) | append "{cargo_bin}")"#),
             "Then restart nushell or run: source ~/.config/nushell/env.nu".to_owned(),
         ],
         _ => vec![
-            format!(
-                "Add {cargo_bin} to your shell's PATH (consult your shell's documentation)."
-            ),
+            format!("Add {cargo_bin} to your shell's PATH (consult your shell's documentation)."),
             "For POSIX shells (sh, dash, ksh, etc.) add to ~/.profile:".to_owned(),
             format!(r#"  export PATH="{cargo_bin}:$PATH""#),
             "Then open a new terminal or reload your profile.".to_owned(),
@@ -338,8 +334,7 @@ fn check_environment(hook_type: &HookType) -> Vec<EnvIssue> {
                 "  Windows (WSL):  sudo apt install jq".to_owned(),
                 jq_path_profile_hint(),
                 "Then re-run: rtk init -g --hook-type script".to_owned(),
-                "Or use the binary hook (no jq needed): rtk init -g --hook-type binary"
-                    .to_owned(),
+                "Or use the binary hook (no jq needed): rtk init -g --hook-type binary".to_owned(),
             ];
             instrs.retain(|s| !s.is_empty());
             issues.push(EnvIssue {
@@ -398,16 +393,10 @@ fn check_environment(hook_type: &HookType) -> Vec<EnvIssue> {
         } else {
             // rtk not on PATH at all — provide shell-specific PATH setup instructions.
             let cargo_bin = dirs::home_dir()
-                .map(|h| {
-                    h.join(".cargo")
-                        .join("bin")
-                        .to_string_lossy()
-                        .into_owned()
-                })
+                .map(|h| h.join(".cargo").join("bin").to_string_lossy().into_owned())
                 .unwrap_or_else(|| "$HOME/.cargo/bin".to_owned());
-            let mut instrs = vec![
-                "Ensure your shell's PATH includes Cargo's bin directory.".to_owned(),
-            ];
+            let mut instrs =
+                vec!["Ensure your shell's PATH includes Cargo's bin directory.".to_owned()];
             instrs.extend(path_setup_instructions(&cargo_bin));
             instrs.push("Then re-run: rtk init -g".to_owned());
             issues.push(EnvIssue {

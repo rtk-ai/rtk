@@ -1787,7 +1787,6 @@ fn main() -> Result<()> {
             rewrite_cmd::run(&cmd)?;
         }
 
-
         Commands::Proxy { args } => {
             use std::process::Command;
 
