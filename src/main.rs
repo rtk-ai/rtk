@@ -701,6 +701,9 @@ enum GitCommands {
         /// Commit message (can be repeated for multi-paragraph)
         #[arg(short, long)]
         message: Vec<String>,
+        /// Pass-through flags: -F <file>, --amend, -a, --no-verify, --allow-empty, etc.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
     },
     /// Push → "ok ✓ \<branch\>"
     Push {
@@ -1170,9 +1173,12 @@ fn main() -> Result<()> {
                 GitCommands::Add { args } => {
                     git::run(git::GitCommand::Add, &args, None, cli.verbose, &global_args)?;
                 }
-                GitCommands::Commit { message } => {
+                GitCommands::Commit { message, extra_args } => {
                     git::run(
-                        git::GitCommand::Commit { messages: message },
+                        git::GitCommand::Commit {
+                            messages: message,
+                            extra_args,
+                        },
                         &[],
                         None,
                         cli.verbose,
@@ -1905,10 +1911,11 @@ mod tests {
         let cli = Cli::try_parse_from(["rtk", "git", "commit", "-m", "fix: typo"]).unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message },
+                command: GitCommands::Commit { message, extra_args },
                 ..
             } => {
                 assert_eq!(message, vec!["fix: typo"]);
+                assert!(extra_args.is_empty());
             }
             _ => panic!("Expected Git Commit command"),
         }
@@ -1928,10 +1935,61 @@ mod tests {
         .unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message },
+                command: GitCommands::Commit { message, extra_args },
                 ..
             } => {
                 assert_eq!(message, vec!["feat: add support", "Body paragraph here."]);
+                assert!(extra_args.is_empty());
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_file_flag() {
+        let cli =
+            Cli::try_parse_from(["rtk", "git", "commit", "-F", "/tmp/msg.txt"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message, extra_args },
+                ..
+            } => {
+                assert!(message.is_empty());
+                assert_eq!(extra_args, vec!["-F", "/tmp/msg.txt"]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_amend_no_edit() {
+        let cli =
+            Cli::try_parse_from(["rtk", "git", "commit", "--amend", "--no-edit"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message, extra_args },
+                ..
+            } => {
+                assert!(message.is_empty());
+                assert_eq!(extra_args, vec!["--amend", "--no-edit"]);
+            }
+            _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_git_commit_message_and_amend() {
+        let cli = Cli::try_parse_from([
+            "rtk", "git", "commit", "-m", "fix: update", "--amend",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Commit { message, extra_args },
+                ..
+            } => {
+                assert_eq!(message, vec!["fix: update"]);
+                assert_eq!(extra_args, vec!["--amend"]);
             }
             _ => panic!("Expected Git Commit command"),
         }
@@ -1975,10 +2033,11 @@ mod tests {
         .unwrap();
         match cli.command {
             Commands::Git {
-                command: GitCommands::Commit { message },
+                command: GitCommands::Commit { message, extra_args },
                 ..
             } => {
                 assert_eq!(message, vec!["title", "body", "footer"]);
+                assert!(extra_args.is_empty());
             }
             _ => panic!("Expected Git Commit command"),
         }
