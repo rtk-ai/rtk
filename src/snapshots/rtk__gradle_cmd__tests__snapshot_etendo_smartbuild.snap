@@ -1,0 +1,15 @@
+---
+source: src/gradle_cmd.rs
+expression: filter_gradle_output(ETENDO_SMARTBUILD)
+---
+[ant:smartbuild] Smartbuild started
+[ant:smartbuild] Compiling module com.etendo.mymodule
+[ant:smartbuild] Generating entities for module com.etendo.mymodule
+[ant:smartbuild] Updating database for module com.etendo.mymodule
+[ant:smartbuild] Database updated successfully
+[ant:smartbuild] Deploying to tomcat
+[ant:smartbuild] Tomcat deployment complete
+[ant:smartbuild] Smartbuild completed successfully
+
+BUILD SUCCESSFUL in 45s
+12 actionable tasks: 4 executed, 8 up-to-date

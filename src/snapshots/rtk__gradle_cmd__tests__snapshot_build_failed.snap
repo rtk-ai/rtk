@@ -1,0 +1,26 @@
+---
+source: src/gradle_cmd.rs
+expression: filter_gradle_output(BUILD_FAILED)
+---
+> Task :compileTestJava FAILED
+/src/test/java/com/example/UserServiceTest.java:15: error: cannot find symbol
+    UserService service = new UserService();
+                              ^
+  symbol:   class UserService
+  location: class UserServiceTest
+/src/test/java/com/example/UserServiceTest.java:22: error: method create in class UserService cannot be applied to given types;
+    service.create(user);
+           ^
+  required: String,String
+  found: User
+1 error
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileTestJava'.
+> Compilation failed; see the compiler error output for details.
+
+
+BUILD FAILED in 5s
+3 actionable tasks: 3 executed

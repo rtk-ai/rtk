@@ -1,0 +1,6 @@
+---
+source: src/gradle_cmd.rs
+expression: filter_gradle_output(INFO_VERBOSE)
+---
+BUILD SUCCESSFUL in 1s
+7 actionable tasks: 7 up-to-date

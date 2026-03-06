@@ -154,17 +154,17 @@ pub fn filter_gradle_output(output: &str) -> String {
             continue;
         }
 
-        // === * Try: block ===
+        // === * Try: block — skip all suggestion lines ===
         if trimmed == "* Try:" {
             in_try_block = true;
             continue;
         }
         if in_try_block {
-            if trimmed.starts_with("> Run with") || trimmed.starts_with("> Get more help") {
+            if trimmed.starts_with('>') || trimmed.starts_with("* ") {
                 continue;
             }
             in_try_block = false;
-            // fall through
+            // fall through — non-suggestion line ends the block
         }
 
         // === TASK LINES ===
@@ -210,9 +210,12 @@ pub fn filter_gradle_output(output: &str) -> String {
                 }
                 continue;
             }
-            if trimmed.is_empty() || trimmed.starts_with("> Task") {
+            if trimmed.starts_with("> Task")
+                || trimmed.starts_with("BUILD")
+                || trimmed.contains("tests completed")
+            {
                 in_failed_test = false;
-                // fall through
+                // fall through to process this line
             } else {
                 result.push(line.to_string());
                 continue;
@@ -263,17 +266,16 @@ pub fn filter_gradle_output(output: &str) -> String {
             continue;
         }
         if in_dep_tree {
-            // Count tree depth by pipe/space prefix
-            let depth = count_dep_depth(trimmed);
-            if depth <= dep_depth_limit {
-                // Collapse (*) duplicates
-                let clean = trimmed.replace(" (*)", "");
-                result.push(clean);
-            }
-            if trimmed.is_empty() || trimmed.starts_with("BUILD") {
+            if trimmed.starts_with("BUILD") {
                 in_dep_tree = false;
-                // fall through
+                // fall through to BUILD summary handler
             } else {
+                // Count tree depth by pipe/space prefix
+                let depth = count_dep_depth(trimmed);
+                if depth <= dep_depth_limit {
+                    let clean = trimmed.replace(" (*)", "");
+                    result.push(clean);
+                }
                 continue;
             }
         }
@@ -384,6 +386,7 @@ fn count_dep_depth(line: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_snapshot;
 
     fn count_tokens(text: &str) -> usize {
         text.split_whitespace().count()
@@ -841,8 +844,8 @@ BUILD SUCCESSFUL in 45s
         let output_tokens = count_tokens(&filtered);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
-            savings >= 40.0,
-            "Dependency tree should have >=40% savings, got {:.1}%",
+            savings >= 60.0,
+            "Dependency tree should have >=60% savings, got {:.1}%",
             savings
         );
         // Should keep top-level deps
@@ -968,5 +971,37 @@ BUILD SUCCESSFUL in 45s
         // (this test runs from the rtk project root which has no gradlew)
         let bin = detect_gradle_binary();
         assert_eq!(bin, "gradle");
+    }
+
+    // --- Snapshot tests ---
+
+    #[test]
+    fn test_snapshot_build_success() {
+        assert_snapshot!(filter_gradle_output(BUILD_SUCCESS));
+    }
+
+    #[test]
+    fn test_snapshot_build_failed() {
+        assert_snapshot!(filter_gradle_output(BUILD_FAILED));
+    }
+
+    #[test]
+    fn test_snapshot_test_failures() {
+        assert_snapshot!(filter_gradle_output(TEST_FAILURES));
+    }
+
+    #[test]
+    fn test_snapshot_info_verbose() {
+        assert_snapshot!(filter_gradle_output(INFO_VERBOSE));
+    }
+
+    #[test]
+    fn test_snapshot_dependency_tree() {
+        assert_snapshot!(filter_gradle_output(DEPENDENCY_TREE));
+    }
+
+    #[test]
+    fn test_snapshot_etendo_smartbuild() {
+        assert_snapshot!(filter_gradle_output(ETENDO_SMARTBUILD));
     }
 }

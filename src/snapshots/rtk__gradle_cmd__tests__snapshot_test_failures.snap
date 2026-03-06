@@ -1,0 +1,29 @@
+---
+source: src/gradle_cmd.rs
+expression: filter_gradle_output(TEST_FAILURES)
+---
+> Task :test FAILED
+
+com.example.UserServiceTest > testCreate FAILED
+    java.lang.AssertionError: expected:<200> but was:<404>
+        at org.junit.Assert.fail(Assert.java:89)
+        at org.junit.Assert.failNotEquals(Assert.java:835)
+        at org.junit.Assert.assertEquals(Assert.java:120)
+        at com.example.UserServiceTest.testCreate(UserServiceTest.java:25)
+
+com.example.OrderTest > testCancel FAILED
+    java.lang.NullPointerException
+        at com.example.OrderTest.testCancel(OrderTest.java:42)
+
+
+4 tests completed, 2 failed
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':test'.
+> There were failing tests. See the report at: file:///build/reports/tests/test/index.html
+
+
+BUILD FAILED in 8s
+5 actionable tasks: 1 executed, 4 up-to-date

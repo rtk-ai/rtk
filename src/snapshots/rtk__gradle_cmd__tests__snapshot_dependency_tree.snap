@@ -1,0 +1,18 @@
+---
+source: src/gradle_cmd.rs
+expression: filter_gradle_output(DEPENDENCY_TREE)
+---
+compileClasspath - Compile classpath for source set 'main'.
++--- org.springframework.boot:spring-boot-starter-web:3.2.0
+|    +--- org.springframework.boot:spring-boot-starter:3.2.0
+|    +--- org.springframework.boot:spring-boot-starter-json:3.2.0
+|    +--- org.springframework:spring-web:6.1.1
+|    \--- org.springframework.boot:spring-boot-starter-tomcat:3.2.0
+|         +--- jakarta.annotation:jakarta.annotation-api:2.1.1
+|         +--- org.apache.tomcat.embed:tomcat-embed-core:10.1.16
+|         \--- org.apache.tomcat.embed:tomcat-embed-websocket:10.1.16
++--- org.projectlombok:lombok:1.18.30
+\--- com.google.guava:guava:32.1.3-jre
+
+BUILD SUCCESSFUL in 1s
+1 actionable task: 1 executed
