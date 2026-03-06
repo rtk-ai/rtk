@@ -5,6 +5,16 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.1](https://github.com/rtk-ai/rtk/compare/v0.27.0...v0.27.1) (2026-03-06)
+
+
+### Bug Fixes
+
+* only rewrite docker compose ps/logs/build, skip unsupported subcommands ([#336](https://github.com/rtk-ai/rtk/issues/336)) ([#363](https://github.com/rtk-ai/rtk/issues/363)) ([dbc9503](https://github.com/rtk-ai/rtk/commit/dbc950395e31b4b0bc48710dc52ad01d4d73f9ba))
+* preserve -- separator for cargo commands and silence fallback ([#326](https://github.com/rtk-ai/rtk/issues/326)) ([45f9344](https://github.com/rtk-ai/rtk/commit/45f9344f033d27bc370ff54c4fc0c61e52446076)), closes [#286](https://github.com/rtk-ai/rtk/issues/286) [#287](https://github.com/rtk-ai/rtk/issues/287)
+* prettier false positive when not installed ([#221](https://github.com/rtk-ai/rtk/issues/221)) ([#359](https://github.com/rtk-ai/rtk/issues/359)) ([85b0b3e](https://github.com/rtk-ai/rtk/commit/85b0b3eb0bad9cbacdc32d2e9ba525728acd7cbe))
+* support git commit -am, --amend and other flags ([#327](https://github.com/rtk-ai/rtk/issues/327)) ([#360](https://github.com/rtk-ai/rtk/issues/360)) ([409aed6](https://github.com/rtk-ai/rtk/commit/409aed6dbcdd7cac2a48ec5655e6f1fd8d5248e3))
+
 ## [0.27.0](https://github.com/rtk-ai/rtk/compare/v0.26.0...v0.27.0) (2026-03-05)
 
 
