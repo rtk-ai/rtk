@@ -19,7 +19,7 @@
   <a href="#installation">Install</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> &bull;
   <a href="ARCHITECTURE.md">Architecture</a> &bull;
-  <a href="https://discord.gg/pvHdzAec">Discord</a>
+  <a href="https://discord.gg/gFwRPEKq4p">Discord</a>
 </p>
 
 <p align="center">
