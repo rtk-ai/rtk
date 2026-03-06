@@ -1166,6 +1166,13 @@ pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1293,13 +1300,18 @@ mod tests {
     fn test_custom_db_path_env() {
         use std::env;
 
-        let custom_path = "/tmp/rtk_test_custom.db";
-        env::set_var("RTK_DB_PATH", custom_path);
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let original = env::var_os("RTK_DB_PATH");
+        let custom_path = env::temp_dir().join("rtk_test_custom.db");
+        env::set_var("RTK_DB_PATH", &custom_path);
 
         let db_path = get_db_path().expect("Failed to get db path");
-        assert_eq!(db_path, PathBuf::from(custom_path));
+        assert_eq!(db_path, custom_path);
 
-        env::remove_var("RTK_DB_PATH");
+        match original {
+            Some(value) => env::set_var("RTK_DB_PATH", value),
+            None => env::remove_var("RTK_DB_PATH"),
+        }
     }
 
     // 8. get_db_path falls back to default when no custom config
@@ -1307,11 +1319,17 @@ mod tests {
     fn test_default_db_path() {
         use std::env;
 
-        // Ensure no env var is set
+        let _guard = env_lock().lock().expect("env lock poisoned");
+        let original = env::var_os("RTK_DB_PATH");
         env::remove_var("RTK_DB_PATH");
 
         let db_path = get_db_path().expect("Failed to get db path");
-        assert!(db_path.ends_with("rtk/history.db"));
+        assert!(db_path.ends_with(Path::new("rtk").join("history.db")));
+
+        match original {
+            Some(value) => env::set_var("RTK_DB_PATH", value),
+            None => env::remove_var("RTK_DB_PATH"),
+        }
     }
 
     // 9. project_filter_params uses GLOB pattern with * wildcard // added

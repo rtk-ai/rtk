@@ -48,6 +48,10 @@ breakage, but future rule additions won't take effect until they migrate.
 * **discover**: extract rules/patterns into `src/discover/rules.rs` — adding a command now means editing one file only
 * **fix**: add `aws` and `psql` to rewrite registry (were missing despite modules existing since 0.24.0)
 
+### Bug Fixes
+
+* **windows:** fix native startup stack overflow, add Git Bash integration coverage, and document Windows-native setup
+
 ### Tests
 
 * +48 regression tests covering all command categories: aws, psql, Python, Go, JS/TS,

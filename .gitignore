@@ -36,3 +36,4 @@ benchmark-report.md
 *.sqlite3
 rtk_tracking.db
 claudedocs
+.history

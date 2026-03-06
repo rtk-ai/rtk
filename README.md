@@ -719,9 +719,10 @@ sudo dnf remove rtk         # Fedora/RHEL
 
 ## Documentation
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - ⚠️ Fix common issues (wrong rtk installed, missing commands, PATH issues)
+- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Fix common issues
 - **[INSTALL.md](INSTALL.md)** - Detailed installation guide with verification steps
-- **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Complete guide to token savings analytics, temporal breakdowns, and data export
+- **[WINDOWS.md](WINDOWS.md)** - Native Windows status, limitations, and usage notes
+- **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
 - **[CLAUDE.md](CLAUDE.md)** - Claude Code integration instructions and project context
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture and development guide
 - **[SECURITY.md](SECURITY.md)** - Security policy, vulnerability reporting, and PR review process
