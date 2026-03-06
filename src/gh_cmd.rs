@@ -108,8 +108,58 @@ fn filter_markdown_segment(text: &str) -> String {
     s
 }
 
+/// Check if args contain --json flag (user wants specific JSON fields, not RTK filtering)
+fn has_json_flag(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--json")
+}
+
+/// Extract a positional identifier (PR/issue number) from args, returning it
+/// separately from the remaining extra flags (like -R, --repo, etc.).
+/// Handles both `view 123 -R owner/repo` and `view -R owner/repo 123`.
+fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<String>)> {
+    if args.is_empty() {
+        return None;
+    }
+
+    // Known gh flags that take a value — skip these and their values
+    let flags_with_value = ["-R", "--repo", "-q", "--jq", "-t", "--template"];
+    let mut identifier = None;
+    let mut extra = Vec::new();
+    let mut skip_next = false;
+
+    for arg in args {
+        if skip_next {
+            extra.push(arg.clone());
+            skip_next = false;
+            continue;
+        }
+        if flags_with_value.contains(&arg.as_str()) {
+            extra.push(arg.clone());
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with('-') {
+            extra.push(arg.clone());
+            continue;
+        }
+        // First non-flag arg is the identifier (number/URL)
+        if identifier.is_none() {
+            identifier = Some(arg.clone());
+        } else {
+            extra.push(arg.clone());
+        }
+    }
+
+    identifier.map(|id| (id, extra))
+}
+
 /// Run a gh command with token-optimized output
 pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
+    // When user explicitly passes --json, they want raw gh JSON output, not RTK filtering
+    if has_json_flag(args) {
+        return run_passthrough("gh", subcommand, args);
+    }
+
     match subcommand {
         "pr" => run_pr(args, verbose, ultra_compact),
         "issue" => run_issue(args, verbose, ultra_compact),
@@ -229,20 +279,22 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("PR number required"));
-    }
-
-    let pr_number = &args[0];
+    let (pr_number, extra_args) = match extract_identifier_and_extra_args(args) {
+        Some(result) => result,
+        None => return Err(anyhow::anyhow!("PR number required")),
+    };
 
     let mut cmd = Command::new("gh");
     cmd.args([
         "pr",
         "view",
-        pr_number,
+        &pr_number,
         "--json",
         "number,title,state,author,body,url,mergeable,reviews,statusCheckRollup",
     ]);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh pr view")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -398,14 +450,16 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
 fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("PR number required"));
-    }
-
-    let pr_number = &args[0];
+    let (pr_number, extra_args) = match extract_identifier_and_extra_args(args) {
+        Some(result) => result,
+        None => return Err(anyhow::anyhow!("PR number required")),
+    };
 
     let mut cmd = Command::new("gh");
-    cmd.args(["pr", "checks", pr_number]);
+    cmd.args(["pr", "checks", &pr_number]);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh pr checks")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -607,20 +661,22 @@ fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()>
 fn view_issue(args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("Issue number required"));
-    }
-
-    let issue_number = &args[0];
+    let (issue_number, extra_args) = match extract_identifier_and_extra_args(args) {
+        Some(result) => result,
+        None => return Err(anyhow::anyhow!("Issue number required")),
+    };
 
     let mut cmd = Command::new("gh");
     cmd.args([
         "issue",
         "view",
-        issue_number,
+        &issue_number,
         "--json",
         "number,title,state,author,body,url",
     ]);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh issue view")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -796,22 +852,23 @@ fn should_passthrough_run_view(extra_args: &[String]) -> bool {
 }
 
 fn view_run(args: &[String], _verbose: u8) -> Result<()> {
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("Run ID required"));
-    }
-
-    let run_id = &args[0];
-    let extra_args = &args[1..];
+    let (run_id, extra_args) = match extract_identifier_and_extra_args(args) {
+        Some(result) => result,
+        None => return Err(anyhow::anyhow!("Run ID required")),
+    };
 
     // Pass through when user requests logs or JSON — the filter would strip them
-    if should_passthrough_run_view(extra_args) {
-        return run_passthrough_with_extra("gh", &["run", "view", run_id], extra_args);
+    if should_passthrough_run_view(&extra_args) {
+        return run_passthrough_with_extra("gh", &["run", "view", &run_id], &extra_args);
     }
 
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
-    cmd.args(["run", "view", run_id]);
+    cmd.args(["run", "view", &run_id]);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh run view")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1276,6 +1333,75 @@ mod tests {
     fn test_ok_confirmation_pr_edit() {
         let result = ok_confirmation("edited", "#42");
         assert_eq!(result, "ok edited #42");
+    }
+
+    #[test]
+    fn test_has_json_flag_present() {
+        assert!(has_json_flag(&[
+            "view".into(),
+            "--json".into(),
+            "number,url".into()
+        ]));
+    }
+
+    #[test]
+    fn test_has_json_flag_absent() {
+        assert!(!has_json_flag(&["view".into(), "42".into()]));
+    }
+
+    #[test]
+    fn test_extract_identifier_simple() {
+        let args: Vec<String> = vec!["123".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "123");
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_extract_identifier_with_repo_flag_after() {
+        // gh issue view 185 -R rtk-ai/rtk
+        let args: Vec<String> = vec!["185".into(), "-R".into(), "rtk-ai/rtk".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "185");
+        assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_repo_flag_before() {
+        // gh issue view -R rtk-ai/rtk 185
+        let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into(), "185".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "185");
+        assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_long_repo_flag() {
+        let args: Vec<String> = vec!["42".into(), "--repo".into(), "owner/repo".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "42");
+        assert_eq!(extra, vec!["--repo", "owner/repo"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_empty() {
+        let args: Vec<String> = vec![];
+        assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    #[test]
+    fn test_extract_identifier_only_flags() {
+        // No positional identifier, only flags
+        let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into()];
+        assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    #[test]
+    fn test_extract_identifier_with_web_flag() {
+        let args: Vec<String> = vec!["123".into(), "--web".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "123");
+        assert_eq!(extra, vec!["--web"]);
     }
 
     #[test]
