@@ -9,6 +9,43 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::Command;
 
+/// Check whether a command exists in PATH.
+///
+/// Uses `which` on Unix/macOS and `where` on Windows.
+/// Returns `false` rather than panicking if the probe command itself fails.
+pub fn command_in_path(cmd: &str) -> bool {
+    if cfg!(windows) {
+        Command::new("where")
+    } else {
+        Command::new("which")
+    }
+    .arg(cmd)
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false)
+}
+
+/// Return the resolved path of `cmd` in PATH, or `None` if not found.
+///
+/// Uses `which` on Unix/macOS and `where` on Windows.
+/// On Windows `where` prints all matches; this returns only the first match.
+pub fn which_command(cmd: &str) -> Option<String> {
+    let out = if cfg!(windows) {
+        Command::new("where")
+    } else {
+        Command::new("which")
+    }
+    .arg(cmd)
+    .output()
+    .ok()
+    .filter(|o| o.status.success())?;
+
+    String::from_utf8(out.stdout)
+        .ok()
+        .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Tronque une chaîne à `max_len` caractères avec "..." si nécessaire.
 ///
 /// # Arguments
@@ -155,6 +192,40 @@ pub fn format_cpt(cpt: f64) -> String {
     format!("${:.2}/MTok", cpt_per_million)
 }
 
+/// Join items into a newline-separated string, appending an overflow hint when total > max.
+///
+/// # Examples
+/// ```
+/// use rtk::utils::join_with_overflow;
+/// let items = vec!["a".to_string(), "b".to_string()];
+/// assert_eq!(join_with_overflow(&items, 5, 3, "items"), "a\nb\n... +2 more items");
+/// assert_eq!(join_with_overflow(&items, 2, 3, "items"), "a\nb");
+/// ```
+pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &str) -> String {
+    let mut out = items.join("\n");
+    if total > max {
+        out.push_str(&format!("\n... +{} more {}", total - max, label));
+    }
+    out
+}
+
+/// Truncate an ISO 8601 datetime string to just the date portion (first 10 chars).
+///
+/// # Examples
+/// ```
+/// use rtk::utils::truncate_iso_date;
+/// assert_eq!(truncate_iso_date("2024-01-15T10:30:00Z"), "2024-01-15");
+/// assert_eq!(truncate_iso_date("2024-01-15"), "2024-01-15");
+/// assert_eq!(truncate_iso_date("short"), "short");
+/// ```
+pub fn truncate_iso_date(date: &str) -> &str {
+    if date.len() >= 10 {
+        &date[..10]
+    } else {
+        date
+    }
+}
+
 /// Format a confirmation message: "ok \<action\> \<detail\>"
 /// Used for write operations (merge, create, comment, edit, etc.)
 ///
@@ -195,11 +266,7 @@ pub fn detect_package_manager() -> &'static str {
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
 pub fn package_manager_exec(tool: &str) -> Command {
-    let tool_exists = Command::new("which")
-        .arg(tool)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let tool_exists = command_in_path(tool);
 
     if tool_exists {
         Command::new(tool)

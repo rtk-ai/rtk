@@ -19,11 +19,11 @@ pub(crate) mod filters;
 // Exec (depends on analysis, builtins, filters, lexer)
 pub mod exec;
 
-// Hook logic (depends on analysis, lexer)
+// Hook logic + LLM protocol adapters (hook/mod.rs, hook/claude.rs)
 pub mod hook;
 
-// Claude hook protocol (depends on hook)
-pub mod claude_hook;
+// Safety wrapper for rm→trash (renamed from trash_cmd.rs; wired up in main branch)
+// pub(crate) mod trash;  // not declared here to avoid name collision with external `trash` crate
 
 // Gemini hook protocol (depends on hook)
 pub mod gemini_hook;

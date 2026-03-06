@@ -1,4 +1,3 @@
-use crate::stream::{FilterMode, StdinMode, StreamFilter};
 use crate::tracking;
 use crate::utils::truncate;
 use anyhow::{Context, Result};
@@ -22,6 +21,10 @@ struct GoTestEvent {
     output: Option<String>,
     #[serde(rename = "Elapsed")]
     elapsed: Option<f64>,
+    #[serde(rename = "ImportPath")]
+    import_path: Option<String>,
+    #[serde(rename = "FailedBuild")]
+    failed_build: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -29,88 +32,9 @@ struct PackageResult {
     pass: usize,
     fail: usize,
     skip: usize,
+    build_failed: bool,
+    build_errors: Vec<String>,
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
-}
-
-/// Progressive streaming filter for `go test -json` NDJSON output.
-///
-/// Accumulates test events line-by-line via `feed_line`, emits the full
-/// summary on `flush()` when the process exits. This matches the behavior of
-/// the buffered `filter_go_test_json` but works with the streaming pipeline.
-pub struct GoTestStreamFilter {
-    packages: HashMap<String, PackageResult>,
-    current_test_output: HashMap<(String, String), Vec<String>>,
-}
-
-impl GoTestStreamFilter {
-    pub fn new() -> Self {
-        Self {
-            packages: HashMap::new(),
-            current_test_output: HashMap::new(),
-        }
-    }
-}
-
-impl Default for GoTestStreamFilter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl StreamFilter for GoTestStreamFilter {
-    /// Parse one NDJSON line and accumulate state. Returns `None` — output is
-    /// deferred until `flush()` so we can produce the package summary.
-    fn feed_line(&mut self, line: &str) -> Option<String> {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        let event: GoTestEvent = match serde_json::from_str(trimmed) {
-            Ok(e) => e,
-            Err(_) => return None, // skip non-JSON lines
-        };
-
-        let package = event.package.unwrap_or_else(|| "unknown".to_string());
-        let pkg_result = self.packages.entry(package.clone()).or_default();
-
-        match event.action.as_str() {
-            "pass" => {
-                if event.test.is_some() {
-                    pkg_result.pass += 1;
-                }
-            }
-            "fail" => {
-                if let Some(test) = &event.test {
-                    pkg_result.fail += 1;
-                    let key = (package.clone(), test.clone());
-                    let outputs = self.current_test_output.remove(&key).unwrap_or_default();
-                    pkg_result.failed_tests.push((test.clone(), outputs));
-                }
-            }
-            "skip" => {
-                if event.test.is_some() {
-                    pkg_result.skip += 1;
-                }
-            }
-            "output" => {
-                if let (Some(test), Some(output_text)) = (&event.test, &event.output) {
-                    let key = (package.clone(), test.clone());
-                    self.current_test_output
-                        .entry(key)
-                        .or_default()
-                        .push(output_text.trim_end().to_string());
-                }
-            }
-            _ => {}
-        }
-
-        None
-    }
-
-    fn flush(&mut self) -> String {
-        build_go_test_summary(&self.packages)
-    }
 }
 
 pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
@@ -132,29 +56,41 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: go test -json {}", args.join(" "));
     }
 
-    let filter = GoTestStreamFilter::new();
-    let result = crate::stream::run_streaming(
-        &mut cmd,
-        StdinMode::Inherit,
-        FilterMode::Streaming(Box::new(filter)),
-    )
-    .context("Failed to run go test. Is Go installed?")?;
+    let output = cmd
+        .output()
+        .context("Failed to run go test. Is Go installed?")?;
 
-    if let Some(hint) = crate::tee::tee_and_hint(&result.raw, "go_test", result.exit_code) {
-        println!("{}\n{}", result.filtered, hint);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    let filtered = filter_go_test_json(&stdout);
+
+    if let Some(hint) = crate::tee::tee_and_hint(&raw, "go_test", exit_code) {
+        println!("{}\n{}", filtered, hint);
     } else {
-        println!("{}", result.filtered);
+        println!("{}", filtered);
+    }
+
+    // Include stderr if present (build errors, etc.)
+    if !stderr.trim().is_empty() {
+        eprintln!("{}", stderr.trim());
     }
 
     timer.track(
         &format!("go test {}", args.join(" ")),
         &format!("rtk go test {}", args.join(" ")),
-        &result.raw,
-        &result.filtered,
+        &raw,
+        &filtered,
     );
 
-    if result.exit_code != 0 {
-        std::process::exit(result.exit_code);
+    // Preserve exit code for CI/CD
+    if !output.status.success() {
+        std::process::exit(exit_code);
     }
 
     Ok(())
@@ -311,21 +247,107 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Build the human-readable summary from accumulated package results.
-///
-/// Shared by both `filter_go_test_json` (buffered) and `GoTestStreamFilter`
-/// (streaming) to ensure identical output format.
-fn build_go_test_summary(packages: &HashMap<String, PackageResult>) -> String {
+/// Parse go test -json output (NDJSON format)
+pub fn filter_go_test_json(output: &str) -> String {
+    let mut packages: HashMap<String, PackageResult> = HashMap::new();
+    let mut current_test_output: HashMap<(String, String), Vec<String>> = HashMap::new(); // (package, test) -> outputs
+    let mut build_output: HashMap<String, Vec<String>> = HashMap::new(); // import_path -> error lines
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let event: GoTestEvent = match serde_json::from_str(trimmed) {
+            Ok(e) => e,
+            Err(_) => continue, // Skip non-JSON lines
+        };
+
+        // Handle build-output/build-fail events (use ImportPath, no Package)
+        match event.action.as_str() {
+            "build-output" => {
+                if let (Some(import_path), Some(output_text)) = (&event.import_path, &event.output)
+                {
+                    let text = output_text.trim_end().to_string();
+                    if !text.is_empty() {
+                        build_output
+                            .entry(import_path.clone())
+                            .or_default()
+                            .push(text);
+                    }
+                }
+                continue;
+            }
+            "build-fail" => {
+                // build-fail has ImportPath — we'll handle it when the package-level fail arrives
+                continue;
+            }
+            _ => {}
+        }
+
+        let package = event.package.unwrap_or_else(|| "unknown".to_string());
+        let pkg_result = packages.entry(package.clone()).or_default();
+
+        match event.action.as_str() {
+            "pass" => {
+                if event.test.is_some() {
+                    pkg_result.pass += 1;
+                }
+            }
+            "fail" => {
+                if let Some(test) = &event.test {
+                    // Individual test failure
+                    pkg_result.fail += 1;
+
+                    // Collect output for failed test
+                    let key = (package.clone(), test.clone());
+                    let outputs = current_test_output.remove(&key).unwrap_or_default();
+                    pkg_result.failed_tests.push((test.clone(), outputs));
+                } else if event.failed_build.is_some() {
+                    // Package-level build failure
+                    pkg_result.build_failed = true;
+                    // Collect build errors from the import path
+                    if let Some(import_path) = &event.failed_build {
+                        if let Some(errors) = build_output.remove(import_path) {
+                            pkg_result.build_errors = errors;
+                        }
+                    }
+                }
+            }
+            "skip" => {
+                if event.test.is_some() {
+                    pkg_result.skip += 1;
+                }
+            }
+            "output" => {
+                // Collect output for current test
+                if let (Some(test), Some(output_text)) = (&event.test, &event.output) {
+                    let key = (package.clone(), test.clone());
+                    current_test_output
+                        .entry(key)
+                        .or_default()
+                        .push(output_text.trim_end().to_string());
+                }
+            }
+            _ => {} // run, pause, cont, etc.
+        }
+    }
+
+    // Build summary
     let total_packages = packages.len();
     let total_pass: usize = packages.values().map(|p| p.pass).sum();
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
+    let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
 
-    if total_fail == 0 && total_pass == 0 {
+    let has_failures = total_fail > 0 || total_build_fail > 0;
+
+    if !has_failures && total_pass == 0 {
         return "Go test: No tests found".to_string();
     }
 
-    if total_fail == 0 {
+    if !has_failures {
         return format!(
             "✓ Go test: {} passed in {} packages",
             total_pass, total_packages
@@ -335,13 +357,34 @@ fn build_go_test_summary(packages: &HashMap<String, PackageResult>) -> String {
     let mut result = String::new();
     result.push_str(&format!(
         "Go test: {} passed, {} failed",
-        total_pass, total_fail
+        total_pass,
+        total_fail + total_build_fail
     ));
     if total_skip > 0 {
         result.push_str(&format!(", {} skipped", total_skip));
     }
     result.push_str(&format!(" in {} packages\n", total_packages));
     result.push_str("═══════════════════════════════════════\n");
+
+    // Show build failures first
+    for (package, pkg_result) in packages.iter() {
+        if !pkg_result.build_failed {
+            continue;
+        }
+
+        result.push_str(&format!(
+            "\n📦 {} [build failed]\n",
+            compact_package_name(package)
+        ));
+
+        for line in &pkg_result.build_errors {
+            let trimmed = line.trim();
+            // Skip the "# package" header line
+            if !trimmed.starts_with('#') && !trimmed.is_empty() {
+                result.push_str(&format!("  {}\n", truncate(trimmed, 120)));
+            }
+        }
+    }
 
     // Show failed tests grouped by package
     for (package, pkg_result) in packages.iter() {
@@ -385,21 +428,8 @@ fn build_go_test_summary(packages: &HashMap<String, PackageResult>) -> String {
     result.trim().to_string()
 }
 
-/// Parse go test -json output (NDJSON format).
-///
-/// Buffered variant — for use when input is already fully accumulated (e.g.
-/// `rtk pipe --filter go-test`). For live subprocess output, prefer
-/// `GoTestStreamFilter` with `run_streaming`.
-pub(crate) fn filter_go_test_json(output: &str) -> String {
-    let mut filter = GoTestStreamFilter::new();
-    for line in output.lines() {
-        filter.feed_line(line);
-    }
-    filter.flush()
-}
-
 /// Filter go build output - show only errors
-pub(crate) fn filter_go_build(output: &str) -> String {
+pub fn filter_go_build(output: &str) -> String {
     let mut errors: Vec<String> = Vec::new();
 
     for line in output.lines() {
@@ -558,90 +588,5 @@ utils.go:15:5: unreachable code"#;
         assert_eq!(compact_package_name("github.com/user/repo/pkg"), "pkg");
         assert_eq!(compact_package_name("example.com/foo"), "foo");
         assert_eq!(compact_package_name("simple"), "simple");
-    }
-
-    // ── GoTestStreamFilter tests ───────────────────────────────────────────────
-
-    const ALL_PASS_NDJSON: &str = r#"{"Time":"2024-01-01T10:00:00Z","Action":"run","Package":"example.com/foo","Test":"TestBar"}
-{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"TestBar","Output":"=== RUN   TestBar\n"}
-{"Time":"2024-01-01T10:00:02Z","Action":"pass","Package":"example.com/foo","Test":"TestBar","Elapsed":0.5}
-{"Time":"2024-01-01T10:00:02Z","Action":"pass","Package":"example.com/foo","Elapsed":0.5}"#;
-
-    const WITH_FAILURE_NDJSON: &str = r#"{"Time":"2024-01-01T10:00:00Z","Action":"run","Package":"example.com/foo","Test":"TestFail"}
-{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"=== RUN   TestFail\n"}
-{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"    Error: expected 5, got 3\n"}
-{"Time":"2024-01-01T10:00:03Z","Action":"fail","Package":"example.com/foo","Test":"TestFail","Elapsed":0.5}
-{"Time":"2024-01-01T10:00:03Z","Action":"fail","Package":"example.com/foo","Elapsed":0.5}"#;
-
-    #[test]
-    fn test_go_test_stream_filter_feed_and_flush_all_pass() {
-        let mut f = GoTestStreamFilter::new();
-        // feed_line returns None for all NDJSON events (output deferred to flush)
-        for line in ALL_PASS_NDJSON.lines() {
-            assert_eq!(
-                f.feed_line(line),
-                None,
-                "streaming filter must defer output"
-            );
-        }
-        let output = f.flush();
-        assert!(output.contains("✓ Go test"), "output={}", output);
-        assert!(output.contains("1 passed"), "output={}", output);
-    }
-
-    #[test]
-    fn test_go_test_stream_filter_feed_and_flush_with_failure() {
-        let mut f = GoTestStreamFilter::new();
-        for line in WITH_FAILURE_NDJSON.lines() {
-            f.feed_line(line);
-        }
-        let output = f.flush();
-        assert!(output.contains("1 failed"), "output={}", output);
-        assert!(output.contains("TestFail"), "output={}", output);
-        assert!(output.contains("expected 5, got 3"), "output={}", output);
-    }
-
-    #[test]
-    fn test_go_test_stream_filter_matches_buffered() {
-        // Streaming result must be identical to buffered result for same input.
-        let buffered = filter_go_test_json(ALL_PASS_NDJSON);
-        let mut f = GoTestStreamFilter::new();
-        for line in ALL_PASS_NDJSON.lines() {
-            f.feed_line(line);
-        }
-        let streamed = f.flush();
-        assert_eq!(streamed.trim(), buffered.trim());
-    }
-
-    #[test]
-    fn test_go_test_stream_filter_matches_buffered_with_failures() {
-        let buffered = filter_go_test_json(WITH_FAILURE_NDJSON);
-        let mut f = GoTestStreamFilter::new();
-        for line in WITH_FAILURE_NDJSON.lines() {
-            f.feed_line(line);
-        }
-        let streamed = f.flush();
-        assert_eq!(streamed.trim(), buffered.trim());
-    }
-
-    #[test]
-    fn test_go_test_stream_filter_skips_non_json() {
-        let mut f = GoTestStreamFilter::new();
-        // Non-JSON lines (e.g. build noise) must not panic
-        f.feed_line("not json at all");
-        f.feed_line("");
-        f.feed_line("   ");
-        let output = f.flush();
-        assert!(output.contains("No tests found"), "output={}", output);
-    }
-
-    #[test]
-    fn test_go_test_stream_filter_default_equals_new() {
-        let f1 = GoTestStreamFilter::new();
-        let f2 = GoTestStreamFilter::default();
-        // Both start empty — verify by flushing immediately
-        let mut f1 = f1;
-        let mut f2 = f2;
-        assert_eq!(f1.flush(), f2.flush());
     }
 }

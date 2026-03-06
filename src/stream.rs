@@ -220,7 +220,7 @@ pub fn run_streaming(
                 let stdin_handle = io::stdin();
                 for line in BufReader::new(stdin_handle.lock())
                     .lines()
-                    .filter_map(Result::ok)
+                    .map_while(Result::ok)
                 {
                     if let Some(out) = filter.feed_line(&line) {
                         if writeln!(writer, "{}", out).is_err() {
@@ -250,7 +250,7 @@ pub fn run_streaming(
         let mut raw_err = String::new();
         let stderr_out = io::stderr();
         let mut err_out = stderr_out.lock(); // RAII: released when closure completes
-        for line in BufReader::new(stderr).lines().filter_map(Result::ok) {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             writeln!(err_out, "{}", line).ok(); // emit immediately (responsive)
             raw_err.push_str(&line);
             raw_err.push('\n');
@@ -273,7 +273,7 @@ pub fn run_streaming(
 
         match stdout_mode {
             FilterMode::Passthrough => {
-                for line in BufReader::new(stdout).lines().filter_map(Result::ok) {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if raw_stdout.len() < RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
@@ -287,7 +287,7 @@ pub fn run_streaming(
                 filtered = raw_stdout.clone();
             }
             FilterMode::Streaming(mut filter) => {
-                for line in BufReader::new(stdout).lines().filter_map(Result::ok) {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if raw_stdout.len() < RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
@@ -311,7 +311,7 @@ pub fn run_streaming(
                 }
             }
             FilterMode::Buffered(filter_fn) => {
-                for line in BufReader::new(stdout).lines().filter_map(Result::ok) {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if raw_stdout.len() < RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');

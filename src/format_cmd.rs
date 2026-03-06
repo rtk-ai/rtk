@@ -169,7 +169,7 @@ fn filter_black_output(output: &str) -> String {
             // Split by comma to handle both parts
             for part in trimmed.split(',') {
                 let part_lower = part.to_lowercase();
-                let words: Vec<&str> = part.trim().split_whitespace().collect();
+                let words: Vec<&str> = part.split_whitespace().collect();
 
                 if part_lower.contains("would be reformatted") {
                     // Parse "X file(s) would be reformatted"

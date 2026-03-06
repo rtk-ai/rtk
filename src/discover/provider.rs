@@ -347,7 +347,7 @@ mod tests {
         let cmds = provider.extract_commands(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "git commit --ammend");
-        assert_eq!(cmds[0].is_error, true);
+        assert!(cmds[0].is_error);
         assert!(cmds[0].output_content.is_some());
         assert_eq!(
             cmds[0].output_content.as_ref().unwrap(),
@@ -365,8 +365,8 @@ mod tests {
         let provider = ClaudeProvider;
         let cmds = provider.extract_commands(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 2);
-        assert_eq!(cmds[0].is_error, false);
-        assert_eq!(cmds[1].is_error, true);
+        assert!(!cmds[0].is_error);
+        assert!(cmds[1].is_error);
     }
 
     #[test]

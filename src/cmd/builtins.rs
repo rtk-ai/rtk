@@ -18,10 +18,23 @@ pub fn builtin_cd(args: &[String]) -> Result<bool> {
     Ok(true)
 }
 
+/// Returns true if the name is a valid POSIX shell identifier: [A-Za-z_][A-Za-z0-9_]*
+fn is_valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Export environment variable
 pub fn builtin_export(args: &[String]) -> Result<bool> {
     for arg in args {
         if let Some((key, value)) = arg.split_once('=') {
+            // Reject invalid identifiers (e.g. "123=x") — fail-open: skip without error.
+            // bash rejects these with "not a valid identifier"; we silently skip to preserve
+            // RTK's fail-open principle (user workflow is never broken).
+            if !is_valid_env_name(key) {
+                continue;
+            }
             // Handle quoted values: export FOO="bar baz"
             let clean_value = value
                 .strip_prefix('"')
@@ -159,6 +172,39 @@ mod tests {
         // Should be silently ignored (like bash)
         let result = builtin_export(&["NO_EQUALS_HERE".to_string()]).unwrap();
         assert!(result);
+    }
+
+    #[test]
+    fn test_export_invalid_identifier_ignored() {
+        // "export 123=x" — identifier starts with digit; must be silently skipped (fail-open).
+        // bash rejects this: "123: not a valid identifier"
+        let result = builtin_export(&["123=x".to_string()]).unwrap();
+        assert!(
+            result,
+            "builtin_export must succeed even with invalid identifier"
+        );
+        assert!(
+            env::var("123").is_err(),
+            "var with numeric-start name must not be set"
+        );
+    }
+
+    #[test]
+    fn test_export_empty_name_ignored() {
+        // "export =x" — empty key before =; must be skipped
+        let result = builtin_export(&["=x".to_string()]).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_valid_env_name() {
+        assert!(is_valid_env_name("FOO"));
+        assert!(is_valid_env_name("_FOO"));
+        assert!(is_valid_env_name("foo_bar_123"));
+        assert!(!is_valid_env_name("123foo"));
+        assert!(!is_valid_env_name(""));
+        assert!(!is_valid_env_name("foo-bar"));
+        assert!(!is_valid_env_name("foo bar"));
     }
 
     // === IS_BUILTIN TESTS ===

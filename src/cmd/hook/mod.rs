@@ -1,7 +1,7 @@
 //! Hook protocol for Claude Code and Gemini support.
 //!
 //! This module provides **shared decision logic** for both Claude Code and Gemini CLI hooks.
-//! Protocol-specific I/O handling lives in `claude_hook.rs` and `gemini_hook.rs`.
+//! Protocol-specific I/O handling lives in `hook/claude.rs` and `hook/gemini.rs`.
 //!
 //! ## Architecture: Separation of Concerns
 //!
@@ -10,18 +10,18 @@
 //!    ↓
 //! Commands::Hook match
 //!    ├─→ HookCommands::Check → hook::check_for_hook() (THIS MODULE - CAN use println!)
-//!    ├─→ HookCommands::Claude → claude_hook::run() [DENY ENFORCED - see claude_hook.rs:52]
-//!    └─→ HookCommands::Gemini → gemini_hook::run() [DENY ENFORCED - see gemini_hook.rs:42]
+//!    ├─→ HookCommands::Claude → hook::claude::run() [DENY ENFORCED - see hook/claude.rs]
+//!    └─→ HookCommands::Gemini → hook::gemini::run() [DENY ENFORCED - see hook/gemini.rs]
 //! ```
 //!
 //! **I/O Policy Scope:**
-//! - **This module (hook.rs)**: CAN use `println!`/`eprintln!` (used by `rtk hook check` text protocol)
+//! - **This module (hook/mod.rs)**: CAN use `println!`/`eprintln!` (used by `rtk hook check` text protocol)
 //! - **main.rs and all command modules**: CAN use `println!`/`eprintln!` (normal RTK behavior)
-//! - **claude_hook.rs, gemini_hook.rs ONLY**: CANNOT use `println!`/`eprintln!` (JSON protocols)
+//! - **hook/claude.rs, hook/gemini.rs ONLY**: CANNOT use `println!`/`eprintln!` (JSON protocols)
 //!
 //! The `#![deny(clippy::print_stdout, clippy::print_stderr)]` attribute is applied
 //! at the **module boundary** (earliest possible stage) — when control enters
-//! `claude_hook::run()` or `gemini_hook::run()`, the deny is enforced.
+//! `claude::run()` or `gemini::run()`, the deny is enforced.
 //!
 //! ## Protocol Differences
 //!
@@ -30,11 +30,14 @@
 //! - Blocked: error message on stderr, exit 2 (blocking error)
 //! - Other exit codes: non-blocking errors
 //!
-//! **Claude Code** (JSON protocol via `claude_hook.rs`):
-//! - See `claude_hook.rs` module documentation
+//! **Claude Code** (JSON protocol via `hook/claude.rs`):
+//! - See `claude` module documentation
 //!
-//! **Gemini CLI** (JSON protocol via `gemini_hook.rs`):
-//! - See `gemini_hook.rs` module documentation
+//! **Gemini CLI** (JSON protocol via `hook/gemini.rs`):
+//! - See `gemini` module documentation
+
+// LLM protocol adapters
+pub(crate) mod claude;
 
 use super::{analysis, lexer};
 // PR 2 adds: use super::safety;
@@ -148,7 +151,19 @@ pub fn is_hook_disabled() -> bool {
 /// - Already routed through rtk (`rtk ...` or `/path/to/rtk ...`)
 /// - Contains heredoc (`<<`) which needs raw shell processing
 pub fn should_passthrough(cmd: &str) -> bool {
-    cmd.starts_with("rtk ") || cmd.contains("/rtk ") || cmd.contains("<<")
+    // Already rtk or heredoc → no-op
+    if cmd.starts_with("rtk ") || cmd.contains("/rtk ") || cmd.contains("<<") {
+        return true;
+    }
+    // #196: gh --json/--jq/--template produces structured output that rtk gh
+    // would corrupt. Pass through unchanged so callers get raw JSON.
+    // Mirrors the guard in registry::rewrite_segment.
+    if (cmd.starts_with("gh ") || cmd.contains(" gh "))
+        && (cmd.contains("--json") || cmd.contains("--jq") || cmd.contains("--template"))
+    {
+        return true;
+    }
+    false
 }
 
 /// Replace the command field in a tool_input object, preserving other fields.
@@ -194,6 +209,8 @@ pub enum HookResponse {
 /// Commands whose RTK output format matches their raw output, making them
 /// safe as the left side of any pipe.
 ///
+/// Commands whose RTK output format matches raw output (format-preserving).
+///
 /// For a command to be format-preserving, RTK must emit the same logical
 /// lines as the underlying tool — just possibly with ANSI codes stripped.
 /// These can be substituted on the left of a pipe without breaking the
@@ -203,7 +220,8 @@ pub enum HookResponse {
 /// `cargo test`, `git log`, `pytest`, `go test` etc. heavily compress output.
 /// They must **not** appear here — substituting them as a pipe-left would
 /// break right-side semantic sinks (`grep`, `jq`, `awk`, `patch`, `xargs`).
-pub(crate) const FORMAT_PRESERVING: &[&str] = &["tail", "echo", "cat", "find", "fd"];
+#[cfg(test)]
+const FORMAT_PRESERVING: &[&str] = &["tail", "echo", "cat", "find", "fd"];
 
 /// Right-side commands that accept any input format (transparent sinks).
 ///
@@ -211,7 +229,8 @@ pub(crate) const FORMAT_PRESERVING: &[&str] = &["tail", "echo", "cat", "find", "
 /// structure, so RTK's compressed output is always compatible with them.
 /// Already handled at the routing level by `split_safe_suffix` — listed here
 /// for classification documentation and future pipe-left substitution logic.
-pub(crate) const TRANSPARENT_SINKS: &[&str] = &["tee", "head", "tail", "cat"];
+#[cfg(test)]
+const TRANSPARENT_SINKS: &[&str] = &["tee", "head", "tail", "cat"];
 
 /// Escape single quotes for shell
 fn escape_quotes(s: &str) -> String {
@@ -229,7 +248,7 @@ fn is_env_assign(s: &str) -> bool {
             && key
                 .chars()
                 .next()
-                .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     } else {
         false
@@ -340,9 +359,76 @@ fn route_npx(cmd: &analysis::NativeCommand, raw: &str) -> String {
 /// `vitest run` double-"run" bug by using parsed args rather than regex substitution.
 ///
 /// ## Safety interaction
-/// PR 2 adds safety::check before this function. The `cat` arm is defensive for
-/// when `RTK_BLOCK_TOKEN_WASTE=0`.
-fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
+/// `safety::check` runs BEFORE this function. Blocked commands (cat, head, sed)
+/// never reach here. The `cat` arm is defensive for when `RTK_BLOCK_TOKEN_WASTE=0`.
+
+/// Subcommand-aware routing table for the binary hook.
+/// Returns (rtk_cmd_full, prefix_to_replace) when a command should be routed to an RTK subcommand.
+/// Conservative whitelist — excludes commands that are better handled by `rtk run -c`.
+fn hook_lookup<'a>(binary: &'a str, sub: &str) -> Option<(&'static str, &'a str)> {
+    // Direct routes: binary → rtk binary (same name, no rename)
+    // sub is the first argument (subcommand or first arg).
+    match binary {
+        "git" => {
+            // Only well-supported subcommands; others (checkout, rebase, cherry-pick) → rtk run
+            match sub {
+                "status" | "log" | "diff" | "show" | "add" | "commit" | "push" | "pull"
+                | "fetch" | "stash" => Some(("rtk git", binary)),
+                _ => None,
+            }
+        }
+        "gh" => match sub {
+            "pr" | "issue" | "run" => Some(("rtk gh", binary)),
+            _ => None,
+        },
+        "cargo" => match sub {
+            "test" | "build" | "clippy" | "check" | "install" | "fmt" => {
+                Some(("rtk cargo", binary))
+            }
+            _ => None,
+        },
+        "docker" => match sub {
+            "ps" | "images" | "logs" => Some(("rtk docker", binary)),
+            _ => None,
+        },
+        "kubectl" => match sub {
+            "get" | "logs" => Some(("rtk kubectl", binary)),
+            _ => None,
+        },
+        "go" => match sub {
+            "test" | "build" | "vet" => Some(("rtk go", binary)),
+            _ => None,
+        },
+        "ruff" => match sub {
+            "check" | "format" => Some(("rtk ruff", binary)),
+            _ => None,
+        },
+        "pip" | "pip3" => match sub {
+            "list" | "outdated" | "install" | "show" => Some(("rtk pip", binary)),
+            _ => None,
+        },
+        // Rename routes: binary → rtk subcommand (different name)
+        "grep" => Some(("rtk grep", binary)),
+        "rg" => Some(("rtk grep", binary)),
+        "ls" => Some(("rtk ls", binary)),
+        "eslint" => Some(("rtk lint", binary)),
+        "biome" => Some(("rtk lint", binary)),
+        "tsc" => Some(("rtk tsc", binary)),
+        "prettier" => Some(("rtk prettier", binary)),
+        "golangci-lint" | "golangci" => Some(("rtk golangci-lint", binary)),
+        "mypy" => Some(("rtk mypy", binary)),
+        // Any-subcommand direct routes
+        "playwright" => Some(("rtk playwright", binary)),
+        "prisma" => Some(("rtk prisma", binary)),
+        "curl" => Some(("rtk curl", binary)),
+        "pytest" => Some(("rtk pytest", binary)),
+        "wc" => Some(("rtk wc", binary)),
+        "wget" | "diff" | "tree" | "find" => None, // passthrough: builtins_not_blocked
+        _ => None,
+    }
+}
+
+pub(crate) fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
     // === ENV PREFIX STRIPPING ===
     // When the "binary" is actually a VAR=val env assignment (e.g. "GIT_PAGER=cat"),
     // collect all leading env assigns, find the real binary in args, route it, and
@@ -390,16 +476,11 @@ fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
     let sub = cmd.args.first().map(String::as_str).unwrap_or("");
     let sub2 = cmd.args.get(1).map(String::as_str).unwrap_or("");
 
-    // 1. Static routing table: O(1) lookup via HashMap (built once at startup).
-    //    Covers all simple cases: direct routes and renames (rg→grep, eslint→lint).
-    if let Some(route) = crate::discover::registry::lookup(&cmd.binary, sub) {
-        return if route.rtk_cmd == cmd.binary.as_str() {
-            // Direct route (binary name == rtk subcommand): prepend "rtk "
-            format!("rtk {raw}")
-        } else {
-            // Rename route (rg → grep, eslint → lint): replace binary prefix
-            replace_first_word(raw, &cmd.binary, &format!("rtk {}", route.rtk_cmd))
-        };
+    // 1. Static routing table: subcommand-aware whitelist (hook_lookup).
+    //    More conservative than classify_command (discovery) — only routes
+    //    commands/subcommands that RTK optimizes well.
+    if let Some((rtk_full, prefix)) = hook_lookup(&cmd.binary, sub) {
+        return replace_first_word(raw, prefix, rtk_full);
     }
 
     // 2. Complex cases that require Rust logic and cannot be expressed as table entries.
@@ -425,6 +506,12 @@ fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
             replace_first_word(raw, &prefix, "rtk pytest")
         }
 
+        // python/python3 -m mypy: two-arg prefix replacement
+        "python" | "python3" if sub == "-m" && sub2 == "mypy" => {
+            let prefix = format!("{} -m mypy", cmd.binary);
+            replace_first_word(raw, &prefix, "rtk mypy")
+        }
+
         // pnpm / npx: delegated to helpers (complex sub-routing)
         "pnpm" => route_pnpm(cmd, raw),
         "npx" => route_npx(cmd, raw),
@@ -441,7 +528,7 @@ fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
 ///
 /// This avoids embedding nested `rtk run -c` calls inside an outer shell string,
 /// which would require double-escaping and never improves token savings.
-fn try_route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> Option<String> {
+pub(crate) fn try_route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> Option<String> {
     let routed = route_native_command(cmd, raw);
     if routed.starts_with("rtk run -c") {
         None // passthrough — keep original
@@ -529,8 +616,10 @@ mod tests {
         }
     }
 
-    fn assert_blocked(input: &str, contains: &str) {
-        match check_for_hook(input, "claude") {
+    /// Assert that a command at the given rewrite depth produces a Blocked result
+    /// containing the expected message substring.
+    fn assert_blocked(input: &str, depth: usize, contains: &str) {
+        match check_for_hook_inner(input, depth) {
             HookResult::Blocked(msg) => assert!(
                 msg.contains(contains),
                 "'{}' block msg should contain '{}', got '{}'",
@@ -1024,12 +1113,13 @@ mod tests {
     // === RECURSION DEPTH LIMIT ===
 
     #[test]
-    fn test_rewrite_depth_limit() {
-        // At max depth → blocked
-        match check_for_hook_inner("echo hello", MAX_REWRITE_DEPTH) {
-            HookResult::Blocked(msg) => assert!(msg.contains("loop"), "msg: {}", msg),
-            _ => panic!("Expected Blocked at max depth"),
-        }
+    fn test_rewrite_depth_limit_blocked() {
+        // At max depth → blocked with loop detection message
+        assert_blocked("echo hello", MAX_REWRITE_DEPTH, "loop");
+    }
+
+    #[test]
+    fn test_rewrite_depth_limit_allowed() {
         // At depth 0 → normal rewrite
         match check_for_hook_inner("echo hello", 0) {
             HookResult::Rewrite(cmd) => assert!(cmd.contains("rtk run")),
@@ -1175,7 +1265,7 @@ mod tests {
             ("pnpm test", "rtk vitest run"),
             ("pnpm vitest", "rtk vitest run"),
             ("pnpm lint", "rtk lint"),
-            ("pnpm eslint src/", "rtk lint"), // pnpm eslint → rtk lint (TDD Red)
+            ("pnpm eslint src/", "rtk lint"), // pnpm eslint → rtk lint
             ("pnpm eslint .", "rtk lint ."),  // pnpm eslint bare form
             ("pnpm eslint --fix src/", "rtk lint"), // pnpm eslint with flag
             ("npx tsc --noEmit", "rtk tsc --noEmit"),
@@ -1608,5 +1698,52 @@ mod tests {
             "rtk git log must not significantly bloat output vs raw git log \
              ({raw_tok} raw → {rtk_tok} rtk, ratio {ratio:.2})"
         );
+    }
+
+    // === CAT BEHAVIOR TESTS ===
+    // Note: this branch does NOT include the data-safety rules system (that's in
+    // feat/multi-platform-hooks). Without safety rules, cat hits the defensive
+    // fallback in route_native_command() and rewrites to rtk read.
+    // In feat/multi-platform-hooks, cat is Blocked by src/rules/rtk.safety.block-cat.md.
+
+    #[test]
+    fn test_cat_multi_file_rewrites_to_rtk_read() {
+        // Without safety rules, cat→rtk read fallback fires for all arities.
+        let result = check_for_hook("cat file1.txt file2.txt", "claude");
+        assert!(
+            matches!(&result, HookResult::Rewrite(s) if s == "rtk read file1.txt file2.txt"),
+            "cat (multi-file) must rewrite to rtk read on this branch; got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_cat_single_file_rewrites_to_rtk_read() {
+        // Same fallback applies for single-file cat — no special-casing by arity.
+        let result = check_for_hook("cat CLAUDE.md", "claude");
+        assert!(
+            matches!(&result, HookResult::Rewrite(s) if s == "rtk read CLAUDE.md"),
+            "cat (single-file) must rewrite to rtk read on this branch; got: {:?}",
+            result
+        );
+    }
+    // --- #196: gh --json/--jq/--template passthrough ---
+
+    #[test]
+    fn test_gh_json_flag_passes_through() {
+        // gh --json produces structured JSON that rtk gh would corrupt
+        assert!(should_passthrough("gh pr list --json number,title"));
+        assert!(should_passthrough(
+            "gh pr list --json number --jq '.[].number'"
+        ));
+        assert!(should_passthrough("gh pr view 42 --template '{{.title}}'"));
+        assert!(should_passthrough("gh api repos/owner/repo --jq '.name'"));
+    }
+
+    #[test]
+    fn test_gh_without_json_not_passthrough() {
+        // gh without structured output flags → still eligible for rewriting
+        assert!(!should_passthrough("gh pr list"));
+        assert!(!should_passthrough("gh issue list"));
     }
 }

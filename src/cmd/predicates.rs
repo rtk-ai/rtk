@@ -78,17 +78,17 @@ mod tests {
     // === INTERACTIVE TESTS ===
 
     #[test]
-    fn test_is_interactive() {
-        // This will be false when running tests
-        // Just ensure it doesn't panic
-        let _ = is_interactive();
+    fn test_is_interactive_returns_false_in_tests() {
+        // When running under cargo test, stderr is not a terminal
+        assert!(!is_interactive(), "Tests should report non-interactive");
     }
 
     // === GIT PREDICATE TESTS ===
 
     #[test]
-    fn test_has_unstaged_changes() {
-        // Just ensure it doesn't panic
-        let _ = has_unstaged_changes();
+    fn test_has_unstaged_changes_does_not_panic() {
+        // In a git repo, this should return a valid bool (not panic).
+        // The actual value depends on repo state.
+        let _result: bool = has_unstaged_changes();
     }
 }

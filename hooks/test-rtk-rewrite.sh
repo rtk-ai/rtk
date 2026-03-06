@@ -145,9 +145,13 @@ test_rewrite "env + npm run" \
   "NODE_ENV=test npm run test:e2e" \
   "NODE_ENV=test rtk npm test:e2e"
 
-test_rewrite "env + docker compose" \
+test_rewrite "env + docker compose (unsupported subcommand, NOT rewritten)" \
   "COMPOSE_PROJECT_NAME=test docker compose up -d" \
-  "COMPOSE_PROJECT_NAME=test rtk docker compose up -d"
+  ""
+
+test_rewrite "env + docker compose logs (supported, rewritten)" \
+  "COMPOSE_PROJECT_NAME=test docker compose logs web" \
+  "COMPOSE_PROJECT_NAME=test rtk docker compose logs web"
 
 echo ""
 
@@ -173,17 +177,29 @@ test_rewrite "npx vue-tsc --noEmit" \
   "npx vue-tsc --noEmit" \
   "rtk tsc --noEmit"
 
-test_rewrite "docker compose up -d" \
+test_rewrite "docker compose up -d (NOT rewritten — unsupported by rtk)" \
   "docker compose up -d" \
-  "rtk docker compose up -d"
+  ""
 
 test_rewrite "docker compose logs postgrest" \
   "docker compose logs postgrest" \
   "rtk docker compose logs postgrest"
 
-test_rewrite "docker compose down" \
+test_rewrite "docker compose ps" \
+  "docker compose ps" \
+  "rtk docker compose ps"
+
+test_rewrite "docker compose build" \
+  "docker compose build" \
+  "rtk docker compose build"
+
+test_rewrite "docker compose down (NOT rewritten — unsupported by rtk)" \
   "docker compose down" \
-  "rtk docker compose down"
+  ""
+
+test_rewrite "docker compose -f file.yml up (NOT rewritten — flag before subcommand)" \
+  "docker compose -f docker-compose.preview.yml --project-name myapp up -d --build" \
+  ""
 
 test_rewrite "docker run --rm postgres" \
   "docker run --rm postgres" \
@@ -220,6 +236,44 @@ test_rewrite "kubectl describe pod foo" \
 test_rewrite "kubectl apply -f deploy.yaml" \
   "kubectl apply -f deploy.yaml" \
   "rtk kubectl apply -f deploy.yaml"
+
+echo ""
+
+# ---- SECTION 3b: RTK_DISABLED and redirect fixes (#345, #346) ----
+echo "--- RTK_DISABLED (#345) ---"
+test_rewrite "RTK_DISABLED=1 git status (no rewrite)" \
+  "RTK_DISABLED=1 git status" \
+  ""
+
+test_rewrite "RTK_DISABLED=1 cargo test (no rewrite)" \
+  "RTK_DISABLED=1 cargo test" \
+  ""
+
+test_rewrite "FOO=1 RTK_DISABLED=1 git status (no rewrite)" \
+  "FOO=1 RTK_DISABLED=1 git status" \
+  ""
+
+echo ""
+echo "--- Redirect operators (#346) ---"
+test_rewrite "cargo test 2>&1 | head" \
+  "cargo test 2>&1 | head" \
+  "rtk cargo test 2>&1 | head"
+
+test_rewrite "cargo test 2>&1" \
+  "cargo test 2>&1" \
+  "rtk cargo test 2>&1"
+
+test_rewrite "cargo test &>/dev/null" \
+  "cargo test &>/dev/null" \
+  "rtk cargo test &>/dev/null"
+
+# Note: the bash hook rewrites only the first command segment (sed-based);
+# full compound rewriting (both sides of &) is handled by `rtk rewrite` (Rust).
+# The critical behavior tested here: `&` after `cargo test` is NOT mistaken for
+# a redirect — the hook still rewrites cargo test, no crash.
+test_rewrite "cargo test & git status (bash hook rewrites first segment only)" \
+  "cargo test & git status" \
+  "rtk cargo test & git status"
 
 echo ""
 

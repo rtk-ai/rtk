@@ -8,11 +8,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Try next directly first, fallback to npx if not found
-    let next_exists = Command::new("which")
-        .arg("next")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let next_exists = crate::utils::command_in_path("next");
 
     let mut cmd = if next_exists {
         Command::new("next")
