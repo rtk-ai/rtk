@@ -1779,10 +1779,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_gh_json_skipped() {
-        assert_eq!(
-            rewrite_command("gh pr list --json number,title", &[]),
-            None
-        );
+        assert_eq!(rewrite_command("gh pr list --json number,title", &[]), None);
     }
 
     #[test]
