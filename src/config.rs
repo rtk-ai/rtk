@@ -201,17 +201,18 @@ history_days = 90
 
     #[test]
     fn test_claude_config_dir_env_override() {
-        std::env::set_var("CLAUDE_CONFIG_DIR", "/tmp/custom-claude");
-        let dir = claude_config_dir().unwrap();
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
-        assert_eq!(dir, PathBuf::from("/tmp/custom-claude"));
+        temp_env::with_var("CLAUDE_CONFIG_DIR", Some("/tmp/custom-claude"), || {
+            let dir = claude_config_dir().unwrap();
+            assert_eq!(dir, PathBuf::from("/tmp/custom-claude"));
+        });
     }
 
     #[test]
     fn test_claude_config_dir_default() {
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
-        let dir = claude_config_dir().unwrap();
-        let home = dirs::home_dir().unwrap();
-        assert_eq!(dir, home.join(".claude"));
+        temp_env::with_var_unset("CLAUDE_CONFIG_DIR", || {
+            let dir = claude_config_dir().unwrap();
+            let home = dirs::home_dir().unwrap();
+            assert_eq!(dir, home.join(".claude"));
+        });
     }
 }

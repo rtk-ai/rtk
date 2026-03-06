@@ -1291,27 +1291,20 @@ mod tests {
     // 7. get_db_path respects environment variable RTK_DB_PATH
     #[test]
     fn test_custom_db_path_env() {
-        use std::env;
-
         let custom_path = "/tmp/rtk_test_custom.db";
-        env::set_var("RTK_DB_PATH", custom_path);
-
-        let db_path = get_db_path().expect("Failed to get db path");
-        assert_eq!(db_path, PathBuf::from(custom_path));
-
-        env::remove_var("RTK_DB_PATH");
+        temp_env::with_var("RTK_DB_PATH", Some(custom_path), || {
+            let db_path = get_db_path().expect("Failed to get db path");
+            assert_eq!(db_path, PathBuf::from(custom_path));
+        });
     }
 
     // 8. get_db_path falls back to default when no custom config
     #[test]
     fn test_default_db_path() {
-        use std::env;
-
-        // Ensure no env var is set
-        env::remove_var("RTK_DB_PATH");
-
-        let db_path = get_db_path().expect("Failed to get db path");
-        assert!(db_path.ends_with("rtk/history.db"));
+        temp_env::with_var_unset("RTK_DB_PATH", || {
+            let db_path = get_db_path().expect("Failed to get db path");
+            assert!(db_path.ends_with("rtk/history.db"));
+        });
     }
 
     // 9. project_filter_params uses GLOB pattern with * wildcard // added
