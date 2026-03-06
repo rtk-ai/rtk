@@ -1,0 +1,28 @@
+{
+  "id": "rtk-rewrite",
+  "name": "RTK Token Optimizer",
+  "version": "0.15.1",
+  "description": "Transparently rewrites shell commands to their RTK equivalents for 60-90% LLM token savings",
+  "homepage": "https://github.com/aimagist/openrtklaw",
+  "license": "MIT",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable automatic command rewriting to RTK equivalents"
+      },
+      "verbose": {
+        "type": "boolean",
+        "default": false,
+        "description": "Log rewrite decisions to console for debugging"
+      }
+    }
+  },
+  "uiHints": {
+    "enabled": { "label": "Enable RTK rewriting" },
+    "verbose": { "label": "Verbose logging" }
+  }
+}
