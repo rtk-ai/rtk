@@ -694,6 +694,7 @@ rtk init -g --uninstall
 #   - ~/.claude/hooks/rtk-rewrite.sh
 #   - ~/.claude/RTK.md
 #   - @RTK.md reference from ~/.claude/CLAUDE.md
+#   - <!-- rtk-instructions --> block from ~/.claude/CLAUDE.md (Windows/--claude-md mode)
 #   - RTK hook entry from ~/.claude/settings.json
 
 # Restart Claude Code after uninstall
@@ -778,8 +779,8 @@ rm ~/.claude/hooks/rtk-rewrite.sh
 # Remove RTK.md
 rm ~/.claude/RTK.md
 
-# Remove @RTK.md reference
-nano ~/.claude/CLAUDE.md  # Delete @RTK.md line
+# Remove @RTK.md reference or <!-- rtk-instructions --> block
+nano ~/.claude/CLAUDE.md  # Delete @RTK.md line or rtk-instructions block
 
 # Remove from settings.json
 nano ~/.claude/settings.json  # Remove RTK hook entry

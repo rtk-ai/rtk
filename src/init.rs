@@ -12,6 +12,12 @@ const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 
+// Marker strings for RTK instructions block in CLAUDE.md.
+// RTK_BLOCK_START is a prefix: matches any version like `<!-- rtk-instructions v2 -->`.
+// RTK_BLOCK_END is the exact closing tag.
+const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
+const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
+
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
@@ -446,20 +452,46 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
         let content = fs::read_to_string(&claude_md_path)
             .with_context(|| format!("Failed to read CLAUDE.md: {}", claude_md_path.display()))?;
 
-        if content.contains("@RTK.md") {
-            let new_content = content
+        let mut claude_md_changed = false;
+        let mut working_content = content.clone();
+
+        if working_content.contains("@RTK.md") {
+            let new_content = working_content
                 .lines()
                 .filter(|line| !line.trim().starts_with("@RTK.md"))
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            // Clean up double blanks
-            let cleaned = clean_double_blanks(&new_content);
+            working_content = clean_double_blanks(&new_content);
+            claude_md_changed = true;
+            removed.push("CLAUDE.md: removed @RTK.md reference".to_string());
+        }
 
-            fs::write(&claude_md_path, cleaned).with_context(|| {
-                format!("Failed to write CLAUDE.md: {}", claude_md_path.display())
-            })?;
-            removed.push(format!("CLAUDE.md: removed @RTK.md reference"));
+        if working_content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&working_content);
+            if did_remove {
+                working_content = cleaned;
+                claude_md_changed = true;
+                removed.push("CLAUDE.md: removed rtk-instructions block".to_string());
+            }
+        }
+
+        if claude_md_changed {
+            let trimmed = working_content.trim();
+            if trimmed.is_empty() {
+                fs::remove_file(&claude_md_path).with_context(|| {
+                    format!(
+                        "Failed to remove empty CLAUDE.md: {}",
+                        claude_md_path.display()
+                    )
+                })?;
+                removed.retain(|r| !r.starts_with("CLAUDE.md:"));
+                removed.push("CLAUDE.md: removed (was empty after cleanup)".to_string());
+            } else {
+                fs::write(&claude_md_path, &working_content).with_context(|| {
+                    format!("Failed to write CLAUDE.md: {}", claude_md_path.display())
+                })?;
+            }
         }
     }
 
@@ -471,6 +503,10 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     // Report results
     if removed.is_empty() {
         println!("RTK was not installed (nothing to remove)");
+        println!("  Checked: {}", hook_path.display());
+        println!("  Checked: {}", claude_dir.join("RTK.md").display());
+        println!("  Checked: {}", claude_md_path.display());
+        println!("  Checked: {}", claude_dir.join("settings.json").display());
     } else {
         println!("RTK uninstalled:");
         for item in removed {
@@ -814,14 +850,15 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
             }
             RtkBlockUpsert::Malformed => {
                 eprintln!(
-                    "⚠️  Warning: Found '<!-- rtk-instructions' without closing marker in {}",
+                    "⚠️  Warning: Found '{}' without closing marker in {}",
+                    RTK_BLOCK_START,
                     path.display()
                 );
 
                 if let Some((line_num, _)) = existing
                     .lines()
                     .enumerate()
-                    .find(|(_, line)| line.contains("<!-- rtk-instructions"))
+                    .find(|(_, line)| line.contains(RTK_BLOCK_START))
                 {
                     eprintln!("    Location: line {}", line_num + 1);
                 }
@@ -868,8 +905,8 @@ enum RtkBlockUpsert {
 /// Returns `(new_content, action)` describing what happened.
 /// The caller decides whether to write `new_content` based on `action`.
 fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
-    let start_marker = "<!-- rtk-instructions";
-    let end_marker = "<!-- /rtk-instructions -->";
+    let start_marker = RTK_BLOCK_START;
+    let end_marker = RTK_BLOCK_END;
 
     if let Some(start) = content.find(start_marker) {
         if let Some(relative_end) = content[start..].find(end_marker) {
@@ -923,7 +960,7 @@ fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
     let mut migrated = false;
 
     // Check for old block and migrate
-    if content.contains("<!-- rtk-instructions") {
+    if content.contains(RTK_BLOCK_START) {
         let (new_content, did_migrate) = remove_rtk_block(&content);
         if did_migrate {
             content = new_content;
@@ -963,11 +1000,8 @@ fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
 
 /// Remove old RTK block from CLAUDE.md (migration helper)
 fn remove_rtk_block(content: &str) -> (String, bool) {
-    if let (Some(start), Some(end)) = (
-        content.find("<!-- rtk-instructions"),
-        content.find("<!-- /rtk-instructions -->"),
-    ) {
-        let end_pos = end + "<!-- /rtk-instructions -->".len();
+    if let (Some(start), Some(end)) = (content.find(RTK_BLOCK_START), content.find(RTK_BLOCK_END)) {
+        let end_pos = end + RTK_BLOCK_END.len();
         let before = content[..start].trim_end();
         let after = content[end_pos..].trim_start();
 
@@ -978,15 +1012,18 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
         };
 
         (result, true) // migrated
-    } else if content.contains("<!-- rtk-instructions") {
-        eprintln!("⚠️  Warning: Found '<!-- rtk-instructions' without closing marker.");
+    } else if content.contains(RTK_BLOCK_START) {
+        eprintln!(
+            "⚠️  Warning: Found '{}' without closing marker.",
+            RTK_BLOCK_START
+        );
         eprintln!("    This can happen if CLAUDE.md was manually edited.");
 
         // Find line number
         if let Some((line_num, _)) = content
             .lines()
             .enumerate()
-            .find(|(_, line)| line.contains("<!-- rtk-instructions"))
+            .find(|(_, line)| line.contains(RTK_BLOCK_START))
         {
             eprintln!("    Location: line {}", line_num + 1);
         }
@@ -1003,7 +1040,11 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
 fn resolve_claude_dir() -> Result<PathBuf> {
     dirs::home_dir()
         .map(|h| h.join(".claude"))
-        .context("Cannot determine home directory. Is $HOME set?")
+        .context(if cfg!(windows) {
+            "Cannot determine home directory. Is %USERPROFILE% set?"
+        } else {
+            "Cannot determine home directory. Is $HOME set?"
+        })
 }
 
 /// Show current rtk configuration
@@ -1093,7 +1134,7 @@ pub fn show_config() -> Result<()> {
         let content = fs::read_to_string(&global_claude_md)?;
         if content.contains("@RTK.md") {
             println!("✅ Global (~/.claude/CLAUDE.md): @RTK.md reference");
-        } else if content.contains("<!-- rtk-instructions") {
+        } else if content.contains(RTK_BLOCK_START) {
             println!(
                 "⚠️  Global (~/.claude/CLAUDE.md): old RTK block (run: rtk init -g to migrate)"
             );
@@ -1185,8 +1226,12 @@ mod tests {
     #[test]
     fn test_init_has_version_marker() {
         assert!(
-            RTK_INSTRUCTIONS.contains("<!-- rtk-instructions"),
-            "RTK_INSTRUCTIONS must have version marker for idempotency"
+            RTK_INSTRUCTIONS.contains(RTK_BLOCK_START),
+            "RTK_INSTRUCTIONS must start with RTK_BLOCK_START marker"
+        );
+        assert!(
+            RTK_INSTRUCTIONS.contains(RTK_BLOCK_END),
+            "RTK_INSTRUCTIONS must end with RTK_BLOCK_END marker"
         );
     }
 
@@ -1206,15 +1251,12 @@ mod tests {
 
     #[test]
     fn test_migration_removes_old_block() {
-        let input = r#"# My Config
+        let input = format!(
+            "# My Config\n\n{} v2 -->\nOLD RTK STUFF\n{}\n\nMore content",
+            RTK_BLOCK_START, RTK_BLOCK_END
+        );
 
-<!-- rtk-instructions v2 -->
-OLD RTK STUFF
-<!-- /rtk-instructions -->
-
-More content"#;
-
-        let (result, migrated) = remove_rtk_block(input);
+        let (result, migrated) = remove_rtk_block(&input);
         assert!(migrated);
         assert!(!result.contains("OLD RTK STUFF"));
         assert!(result.contains("# My Config"));
@@ -1223,8 +1265,8 @@ More content"#;
 
     #[test]
     fn test_migration_warns_on_missing_end_marker() {
-        let input = "<!-- rtk-instructions v2 -->\nOLD STUFF\nNo end marker";
-        let (result, migrated) = remove_rtk_block(input);
+        let input = format!("{} v2 -->\nOLD STUFF\nNo end marker", RTK_BLOCK_START);
+        let (result, migrated) = remove_rtk_block(&input);
         assert!(!migrated);
         assert_eq!(result, input);
     }
@@ -1252,9 +1294,9 @@ More content"#;
     #[test]
     fn test_claude_md_mode_creates_full_injection() {
         // Just verify RTK_INSTRUCTIONS constant has the right content
-        assert!(RTK_INSTRUCTIONS.contains("<!-- rtk-instructions"));
+        assert!(RTK_INSTRUCTIONS.contains(RTK_BLOCK_START));
         assert!(RTK_INSTRUCTIONS.contains("rtk cargo test"));
-        assert!(RTK_INSTRUCTIONS.contains("<!-- /rtk-instructions -->"));
+        assert!(RTK_INSTRUCTIONS.contains(RTK_BLOCK_END));
         assert!(RTK_INSTRUCTIONS.len() > 4000);
     }
 
@@ -1266,21 +1308,17 @@ More content"#;
         let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
         assert_eq!(action, RtkBlockUpsert::Added);
         assert!(content.contains("# Team instructions"));
-        assert!(content.contains("<!-- rtk-instructions"));
+        assert!(content.contains(RTK_BLOCK_START));
     }
 
     #[test]
     fn test_upsert_rtk_block_updates_stale_block() {
-        let input = r#"# Team instructions
+        let input = format!(
+            "# Team instructions\n\n{} v1 -->\nOLD RTK CONTENT\n{}\n\nMore notes\n",
+            RTK_BLOCK_START, RTK_BLOCK_END
+        );
 
-<!-- rtk-instructions v1 -->
-OLD RTK CONTENT
-<!-- /rtk-instructions -->
-
-More notes
-"#;
-
-        let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
+        let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
         assert_eq!(action, RtkBlockUpsert::Updated);
         assert!(!content.contains("OLD RTK CONTENT"));
         assert!(content.contains("rtk cargo test")); // from current RTK_INSTRUCTIONS
@@ -1301,8 +1339,8 @@ More notes
 
     #[test]
     fn test_upsert_rtk_block_detects_malformed_block() {
-        let input = "<!-- rtk-instructions v2 -->\npartial";
-        let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
+        let input = format!("{} v2 -->\npartial", RTK_BLOCK_START);
+        let (content, action) = upsert_rtk_block(&input, RTK_INSTRUCTIONS);
         assert_eq!(action, RtkBlockUpsert::Malformed);
         assert_eq!(content, input);
     }
@@ -1328,7 +1366,7 @@ More notes
         fs::write(&claude_md, RTK_INSTRUCTIONS).unwrap();
         let content = fs::read_to_string(&claude_md).unwrap();
 
-        assert!(content.contains("<!-- rtk-instructions"));
+        assert!(content.contains(RTK_BLOCK_START));
     }
 
     // Tests for hook_already_present()
@@ -1569,5 +1607,171 @@ More notes
 
         let removed = remove_hook_from_json(&mut json_content);
         assert!(!removed);
+    }
+
+    // Tests for uninstall rtk-instructions block removal
+
+    #[test]
+    fn test_uninstall_removes_rtk_instructions_block() {
+        let temp = TempDir::new().unwrap();
+        let claude_md = temp.path().join("CLAUDE.md");
+
+        fs::write(&claude_md, RTK_INSTRUCTIONS).unwrap();
+        assert!(claude_md.exists());
+
+        let content = fs::read_to_string(&claude_md).unwrap();
+        assert!(content.contains(RTK_BLOCK_START));
+
+        let (cleaned, did_remove) = remove_rtk_block(&content);
+        assert!(did_remove);
+        assert!(!cleaned.contains(RTK_BLOCK_START));
+        assert!(!cleaned.contains("rtk cargo test"));
+    }
+
+    #[test]
+    fn test_uninstall_preserves_non_rtk_content() {
+        let temp = TempDir::new().unwrap();
+        let claude_md = temp.path().join("CLAUDE.md");
+
+        let content = format!(
+            "# My Project\n\nSome custom instructions.\n\n{}\n\n## Other Notes\n\nKeep this.",
+            RTK_INSTRUCTIONS
+        );
+        fs::write(&claude_md, &content).unwrap();
+
+        let content = fs::read_to_string(&claude_md).unwrap();
+        let (cleaned, did_remove) = remove_rtk_block(&content);
+
+        assert!(did_remove);
+        assert!(cleaned.contains("# My Project"));
+        assert!(cleaned.contains("Some custom instructions."));
+        assert!(cleaned.contains("## Other Notes"));
+        assert!(cleaned.contains("Keep this."));
+        assert!(!cleaned.contains(RTK_BLOCK_START));
+    }
+
+    #[test]
+    fn test_uninstall_handles_both_artifacts() {
+        // Edge case: CLAUDE.md has BOTH @RTK.md AND <!-- rtk-instructions --> block
+        let content = format!("# Config\n\n@RTK.md\n\n{}\n\nMore stuff", RTK_INSTRUCTIONS);
+
+        let after_at_removal: String = content
+            .lines()
+            .filter(|line| !line.trim().starts_with("@RTK.md"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!after_at_removal.contains("@RTK.md"));
+        assert!(after_at_removal.contains(RTK_BLOCK_START));
+
+        let (final_content, did_remove) = remove_rtk_block(&after_at_removal);
+        assert!(did_remove);
+        assert!(!final_content.contains(RTK_BLOCK_START));
+        assert!(final_content.contains("# Config"));
+        assert!(final_content.contains("More stuff"));
+    }
+
+    #[test]
+    fn test_uninstall_integration_claude_md_only() {
+        let temp = TempDir::new().unwrap();
+        let claude_md = temp.path().join("CLAUDE.md");
+
+        // install
+        fs::write(&claude_md, RTK_INSTRUCTIONS).unwrap();
+
+        // uninstall
+        let content = fs::read_to_string(&claude_md).unwrap();
+        assert!(content.contains(RTK_BLOCK_START));
+        assert!(content.contains(RTK_BLOCK_END));
+        assert!(content.contains("rtk cargo test"));
+
+        let mut removed = Vec::new();
+        let mut claude_md_changed = false;
+        let mut working_content = content.clone();
+
+        if working_content.contains("@RTK.md") {
+            unreachable!("Windows/--claude-md install should not have @RTK.md");
+        }
+
+        if working_content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&working_content);
+            assert!(did_remove, "remove_rtk_block must succeed for valid block");
+            working_content = cleaned;
+            claude_md_changed = true;
+            removed.push("CLAUDE.md: removed rtk-instructions block".to_string());
+        }
+
+        assert!(
+            claude_md_changed,
+            "uninstall must detect the rtk-instructions block"
+        );
+        assert!(!removed.is_empty(), "must have recorded removal");
+
+        let trimmed = working_content.trim();
+        if trimmed.is_empty() {
+            fs::remove_file(&claude_md).unwrap();
+            removed.retain(|r| !r.starts_with("CLAUDE.md:"));
+            removed.push("CLAUDE.md: removed (was empty after cleanup)".to_string());
+        } else {
+            fs::write(&claude_md, &working_content).unwrap();
+        }
+
+        assert!(
+            !claude_md.exists(),
+            "CLAUDE.md should be deleted when it only contained RTK instructions"
+        );
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].contains("was empty after cleanup"));
+    }
+
+    #[test]
+    fn test_uninstall_integration_preserves_user_content() {
+        let temp = TempDir::new().unwrap();
+        let claude_md = temp.path().join("CLAUDE.md");
+
+        // install
+        let user_content = "# My Project Rules\n\nAlways use snake_case.\n";
+        let installed = format!("{}\n{}", user_content, RTK_INSTRUCTIONS);
+        fs::write(&claude_md, &installed).unwrap();
+
+        // uninstall
+        let content = fs::read_to_string(&claude_md).unwrap();
+        let mut working_content = content.clone();
+        let mut claude_md_changed = false;
+
+        if working_content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&working_content);
+            assert!(did_remove);
+            working_content = cleaned;
+            claude_md_changed = true;
+        }
+
+        assert!(claude_md_changed);
+        let trimmed = working_content.trim();
+        assert!(!trimmed.is_empty(), "user content should remain");
+        fs::write(&claude_md, &working_content).unwrap();
+
+        let final_content = fs::read_to_string(&claude_md).unwrap();
+        assert!(claude_md.exists(), "CLAUDE.md should still exist");
+        assert!(
+            final_content.contains("My Project Rules"),
+            "user content must be preserved"
+        );
+        assert!(
+            final_content.contains("snake_case"),
+            "user content must be preserved"
+        );
+        assert!(
+            !final_content.contains(RTK_BLOCK_START),
+            "RTK block must be fully removed"
+        );
+        assert!(
+            !final_content.contains(RTK_BLOCK_END),
+            "RTK end marker must be removed"
+        );
+        assert!(
+            !final_content.contains("rtk cargo test"),
+            "RTK content must be removed"
+        );
     }
 }

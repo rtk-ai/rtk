@@ -48,10 +48,19 @@ breakage, but future rule additions won't take effect until they migrate.
 * **discover**: extract rules/patterns into `src/discover/rules.rs` — adding a command now means editing one file only
 * **fix**: add `aws` and `psql` to rewrite registry (were missing despite modules existing since 0.24.0)
 
+### Bug Fixes
+
+* **init:** `rtk init -g --uninstall` now removes `<!-- rtk-instructions -->` block from CLAUDE.md ([#384](https://github.com/rtk-ai/rtk/issues/384))
+  - On Windows, `rtk init -g` falls back to `--claude-md` mode, which injects instructions directly into CLAUDE.md. Uninstall previously only looked for Unix-mode artifacts (hook, RTK.md, @RTK.md, settings.json), so it reported "nothing to remove" on Windows.
+  - Uninstall now prints checked paths when nothing is found, to help diagnose path issues
+  - Cross-platform error message: shows `%USERPROFILE%` on Windows, `$HOME` on Unix
+  - Extracted marker constants (`RTK_BLOCK_START`, `RTK_BLOCK_END`) to prevent string drift
+
 ### Tests
 
 * +48 regression tests covering all command categories: aws, psql, Python, Go, JS/TS,
   compound operators, sudo/env prefixes, registry invariants (607 total, was 559)
+* +5 tests for uninstall `--claude-md` artifact cleanup (614 total)
 
 ## [0.24.0](https://github.com/rtk-ai/rtk/compare/v0.23.0...v0.24.0) (2026-03-04)
 
