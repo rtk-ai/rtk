@@ -51,9 +51,6 @@ pub const PATTERNS: &[&str] = &[
     // Ruby tooling
     r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
     r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
-    r"^bundle\s+(list|outdated|install|update)(?:\s|$)",
-    r"^(?:bundle\s+exec\s+)?rails\s+(test|routes|db:migrate:status|db:migrate|db:rollback|g(?:enerate)?)(?:\s|$)",
-    r"^bin/rails\s+(test|routes|db:migrate:status|db:migrate|db:rollback|g(?:enerate)?)(?:\s|$)",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -338,48 +335,6 @@ pub const RULES: &[RtkRule] = &[
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    RtkRule {
-        rtk_cmd: "rtk bundle",
-        rewrite_prefixes: &["bundle"],
-        category: "PackageManager",
-        savings_pct: 20.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    // Pattern: (bundle exec)?rails test/routes/db:migrate/db:rollback/generate
-    RtkRule {
-        rtk_cmd: "rtk rails",
-        rewrite_prefixes: &["bundle exec rails", "rails"],
-        category: "Tests",
-        savings_pct: 50.0,
-        subcmd_savings: &[
-            ("test", 50.0),
-            ("routes", 50.0),
-            ("db:migrate:status", 40.0),
-            ("db:migrate", 40.0),
-            ("db:rollback", 40.0),
-            ("generate", 20.0),
-            ("g", 20.0),
-        ],
-        subcmd_status: &[],
-    },
-    // Pattern: bin/rails test/routes/db:migrate/db:rollback/generate (same config)
-    RtkRule {
-        rtk_cmd: "rtk rails",
-        rewrite_prefixes: &["bin/rails"],
-        category: "Tests",
-        savings_pct: 50.0,
-        subcmd_savings: &[
-            ("test", 50.0),
-            ("routes", 50.0),
-            ("db:migrate:status", 40.0),
-            ("db:migrate", 40.0),
-            ("db:rollback", 40.0),
-            ("generate", 20.0),
-            ("g", 20.0),
-        ],
         subcmd_status: &[],
     },
 ];

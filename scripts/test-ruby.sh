@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# RTK Smoke Tests — Ruby on Rails (temp app)
-# Creates a minimal Rails app, exercises all RTK Ruby/Rails filters, then cleans up.
-# Usage: bash scripts/test-rails.sh
+# RTK Smoke Tests — Ruby (RSpec + RuboCop only)
+# Creates a minimal Rails app, exercises RTK rspec/rubocop filters, then cleans up.
+# Usage: bash scripts/test-ruby.sh
 #
 # Prerequisites: rtk, ruby, bundler, rails gem
 # Duration: ~60-120s (rails new + bundle install dominate)
@@ -127,7 +127,7 @@ fi
 
 # ── Preamble ─────────────────────────────────────────
 
-printf "${BOLD}RTK Smoke Tests — Ruby on Rails${NC}\n"
+printf "${BOLD}RTK Smoke Tests — Ruby (RSpec + RuboCop)${NC}\n"
 printf "Binary: %s (%s)\n" "$RTK" "$(rtk --version)"
 printf "Ruby: %s\n" "$(ruby --version)"
 printf "Rails: %s\n" "$(rails --version)"
@@ -136,7 +136,7 @@ printf "Date: %s\n\n" "$(date '+%Y-%m-%d %H:%M')"
 
 # ── Temp dir + cleanup trap ──────────────────────────
 
-TMPDIR=$(mktemp -d /tmp/rtk-rails-smoke-XXXXXX)
+TMPDIR=$(mktemp -d /tmp/rtk-ruby-smoke-XXXXXX)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 printf "${BOLD}Setting up temporary Rails app in %s ...${NC}\n" "$TMPDIR"
@@ -163,7 +163,7 @@ GEMFILE
 printf "  → bundle install ...\n"
 bundle install --quiet 2>&1 | tail -1 || true
 
-# 4. Generate scaffold (creates minitest tests in test/)
+# 4. Generate scaffold (creates model for specs)
 printf "  → rails generate scaffold Post ...\n"
 rails generate scaffold Post title:string body:text published:boolean --quiet 2>&1 | tail -1 || true
 
@@ -188,35 +188,7 @@ printf "  → rails db:create && db:migrate ...\n"
 rails db:create --quiet 2>&1 | tail -1 || true
 rails db:migrate --quiet 2>&1 | tail -1 || true
 
-# 7. Configure multi-DB (primary alias) for multi-DB variant tests
-printf "  → configuring multi-DB (primary) ...\n"
-cat > config/database.yml <<'DBYML'
-default: &default
-  adapter: sqlite3
-  pool: 5
-  timeout: 5000
-
-development:
-  primary:
-    <<: *default
-    database: storage/development.sqlite3
-
-test:
-  primary:
-    <<: *default
-    database: storage/test.sqlite3
-
-production:
-  primary:
-    <<: *default
-    database: storage/production.sqlite3
-DBYML
-
-# Re-create + migrate with multi-DB config
-rails db:create --quiet 2>&1 || true
-rails db:migrate --quiet 2>&1 || true
-
-# 8. Create a file with intentional RuboCop offenses
+# 7. Create a file with intentional RuboCop offenses
 printf "  → creating rubocop_bait.rb with intentional offenses ...\n"
 cat > app/models/rubocop_bait.rb <<'BAIT'
 class RubocopBait < ApplicationRecord
@@ -231,20 +203,7 @@ class RubocopBait < ApplicationRecord
 end
 BAIT
 
-# 9. Create a failing minitest test
-printf "  → creating failing minitest test ...\n"
-cat > test/models/post_fail_test.rb <<'FAILTEST'
-require "test_helper"
-
-class PostFailTest < ActiveSupport::TestCase
-  test "this test intentionally fails" do
-    post = Post.new(title: nil, body: nil, published: nil)
-    assert_equal "Expected Title", post.title, "Title should match but won't"
-  end
-end
-FAILTEST
-
-# 10. Create a failing RSpec spec
+# 8. Create a failing RSpec spec
 printf "  → creating failing rspec spec ...\n"
 cat > spec/models/post_fail_spec.rb <<'FAILSPEC'
 require 'rails_helper'
@@ -257,7 +216,7 @@ RSpec.describe Post, type: :model do
 end
 FAILSPEC
 
-# 11. Create an RSpec spec with pending example
+# 9. Create an RSpec spec with pending example
 printf "  → creating rspec spec with pending example ...\n"
 cat > spec/models/post_pending_spec.rb <<'PENDSPEC'
 require 'rails_helper'
@@ -275,85 +234,13 @@ RSpec.describe Post, type: :model do
 end
 PENDSPEC
 
-# 12. Create a passing-only minitest test (no failures)
-printf "  → creating passing-only minitest test ...\n"
-cat > test/models/post_pass_test.rb <<'PASSTEST'
-require "test_helper"
-
-class PostPassTest < ActiveSupport::TestCase
-  test "title can be set" do
-    post = Post.new(title: "Hello")
-    assert_equal "Hello", post.title
-  end
-
-  test "body can be set" do
-    post = Post.new(body: "World")
-    assert_equal "World", post.body
-  end
-end
-PASSTEST
-
 printf "\n${BOLD}Setup complete. Running tests...${NC}\n"
 
 # ══════════════════════════════════════════════════════
 # Test sections
 # ══════════════════════════════════════════════════════
 
-# ── 1. rails generate ───────────────────────────────
-
-section "Rails generate"
-
-assert_output "rtk rails generate model Comment" \
-    "files" \
-    rtk rails generate model Comment post:references body:text
-
-# Migrate the new model for later tests
-rails db:migrate --quiet 2>&1 || true
-
-# ── 2. rails db:migrate ─────────────────────────────
-
-section "Rails db:migrate"
-
-assert_output "rtk rails db:migrate (no-op)" \
-    "db:migrate\|migrate\|already" \
-    rtk rails db:migrate
-
-# ── 3. rails db:migrate:status ──────────────────────
-
-section "Rails db:migrate:status"
-
-assert_output "rtk rails db:migrate:status" \
-    "migration" \
-    rtk rails db:migrate:status
-
-# ── 4. rails db:rollback ────────────────────────────
-
-section "Rails db:rollback"
-
-assert_output "rtk rails db:rollback" \
-    "db:migrate\|rollback\|revert" \
-    rtk rails db:rollback
-
-# Re-migrate so later tests have all tables
-rails db:migrate --quiet 2>&1 || true
-
-# ── 5. rails test ───────────────────────────────────
-
-section "Rails test (Minitest)"
-
-assert_output "rtk rails test (with failure)" \
-    "failed\|failure\|FAIL" \
-    rtk rails test
-
-# ── 6. rails routes ─────────────────────────────────
-
-section "Rails routes"
-
-assert_output "rtk rails routes" \
-    "Routes\|route" \
-    rtk rails routes
-
-# ── 7. rspec ────────────────────────────────────────
+# ── 1. rspec ────────────────────────────────────────
 
 section "RSpec"
 
@@ -369,7 +256,7 @@ assert_output "rtk rspec spec/models/post_fail_spec.rb (fail)" \
     "failed\|❌" \
     rtk rspec spec/models/post_fail_spec.rb
 
-# ── 8. rubocop ──────────────────────────────────────
+# ── 2. rubocop ──────────────────────────────────────
 
 section "RuboCop"
 
@@ -381,48 +268,9 @@ assert_output "rtk rubocop app/ (with offenses)" \
     "rubocop_bait\|offense" \
     rtk rubocop app/
 
-# ── 9. bundle list ──────────────────────────────────
-
-section "Bundle"
-
-assert_output "rtk bundle list" \
-    "gems\|Bundle" \
-    rtk bundle list
-
-assert_output "rtk bundle outdated" \
-    "Bundle\|outdated\|up to date\|Gem\|Current" \
-    rtk bundle outdated
-
-assert_output "rtk bundle install (idempotent)" \
-    "bundle install\|gems" \
-    rtk bundle install
-
-assert_output "rtk bundle update" \
-    "gems\|bundle" \
-    rtk bundle update
-
-# ── 10. Multi-DB variants ─────────────────────────────
-
-section "Multi-DB variants"
-
-assert_output "rtk rails db:migrate:primary" \
-    "migrate\|primary\|already" \
-    rtk rails db:migrate:primary
-
-assert_output "rtk rails db:rollback:primary" \
-    "rollback\|revert\|migrate" \
-    rtk rails db:rollback:primary
-
-# Re-migrate after rollback
-rails db:migrate --quiet 2>&1 || true
-
-# ── 11. Exit code preservation ────────────────────────
+# ── 3. Exit code preservation ────────────────────────
 
 section "Exit code preservation"
-
-assert_exit_nonzero "rtk rails test exits non-zero on failure" \
-    "failed\|failure\|FAIL" \
-    rtk rails test
 
 assert_exit_nonzero "rtk rspec exits non-zero on failure" \
     "failed\|failure" \
@@ -432,7 +280,7 @@ assert_exit_nonzero "rtk rubocop exits non-zero on offenses" \
     "offense" \
     rtk rubocop app/models/rubocop_bait.rb
 
-# ── 12. bundle exec variants ─────────────────────────
+# ── 4. bundle exec variants ─────────────────────────
 
 section "bundle exec variants"
 
@@ -444,54 +292,7 @@ assert_output "bundle exec rubocop app/" \
     "offense" \
     rtk bundle exec rubocop app/
 
-assert_output "bundle exec rails routes" \
-    "Routes\|route\|Prefix" \
-    rtk bundle exec rails routes
-
-# ── 13. bin/rails variants ────────────────────────────
-
-section "bin/rails variants"
-
-assert_output "bin/rails routes" \
-    "Routes\|route\|Prefix" \
-    rtk bin/rails routes
-
-assert_output "bin/rails db:migrate:status" \
-    "migration\|Status" \
-    rtk bin/rails db:migrate:status
-
-# ── 14. rake variants ────────────────────────────────
-
-section "rake variants"
-
-assert_output "rake routes" \
-    "Routes\|route\|Prefix" \
-    rtk rake routes
-
-assert_output "rake db:migrate:status" \
-    "migration\|Status" \
-    rtk rake db:migrate:status
-
-# ── 15. Rails passthrough ─────────────────────────────
-
-section "Rails passthrough"
-
-assert_output "rtk rails runner (passthrough)" \
-    "42" \
-    rtk rails runner "puts 42"
-
-# ── 16. rails destroy ─────────────────────────────────
-
-section "Rails destroy"
-
-assert_output "rtk rails destroy model Comment" \
-    "files\|remove\|destroy" \
-    rtk rails destroy model Comment
-
-# Re-migrate to clean up
-rails db:migrate --quiet 2>&1 || true
-
-# ── 17. rubocop autocorrect ───────────────────────────
+# ── 5. rubocop autocorrect ───────────────────────────
 
 section "RuboCop autocorrect"
 
@@ -506,7 +307,7 @@ assert_output "rtk rubocop -A (autocorrect)" \
 # Clean up autocorrect test file
 rm -f app/models/rubocop_bait_ac.rb app/models/rubocop_bait_ac.rb.bak
 
-# ── 18. rspec with pending ────────────────────────────
+# ── 6. rspec with pending ────────────────────────────
 
 section "RSpec pending"
 
@@ -514,45 +315,25 @@ assert_output "rtk rspec with pending example" \
     "pending" \
     rtk rspec spec/models/post_pending_spec.rb
 
-# ── 19. rails test (passing only, no failures) ───────
+# ── 7. rspec --format documentation (text fallback) ─
 
-section "Rails test (pass only)"
+section "RSpec text fallback"
 
-assert_output "rtk rails test passing file" \
-    "passed\|✓" \
-    rtk rails test test/models/post_pass_test.rb
+assert_output "rtk rspec --format documentation (text path)" \
+    "valid\|example\|post" \
+    rtk rspec --format documentation spec/models/post_spec.rb
 
-# ── 20. rails routes -g (grep mode) ──────────────────
+# ── 8. rspec empty suite (no matching specs) ─────────
 
-section "Rails routes grep"
+section "RSpec empty suite"
 
-assert_output "rtk rails routes -g posts" \
-    "post\|POST\|route" \
-    rtk rails routes -g posts
+assert_output "rtk rspec nonexistent tag" \
+    "0 examples\|No examples" \
+    rtk rspec --tag nonexistent spec/models/post_spec.rb
 
-# ── 21. bundle passthrough (unknown subcommand) ──────
-
-section "Bundle passthrough"
-
-assert_output "bundle exec rake -T (passthrough)" \
-    "rake\|task" \
-    rtk bundle exec rake -T
-
-# ── 22. Token savings (multi-command) ─────────────────
+# ── 9. Token savings ─────────────────────────────────
 
 section "Token savings"
-
-# rails routes
-raw_len=$( (rails routes 2>&1 || true) | wc -c | tr -d ' ')
-rtk_len=$( (rtk rails routes 2>&1 || true) | wc -c | tr -d ' ')
-if [[ "$rtk_len" -lt "$raw_len" ]]; then
-    PASS=$((PASS + 1))
-    printf "  ${GREEN}PASS${NC}  rails routes: rtk (%s bytes) < raw (%s bytes)\n" "$rtk_len" "$raw_len"
-else
-    FAIL=$((FAIL + 1))
-    FAILURES+=("token savings: rails routes")
-    printf "  ${RED}FAIL${NC}  rails routes: rtk (%s bytes) >= raw (%s bytes)\n" "$rtk_len" "$raw_len"
-fi
 
 # rspec (passing spec)
 raw_len=$( (bundle exec rspec spec/models/post_spec.rb 2>&1 || true) | wc -c | tr -d ' ')
@@ -578,64 +359,13 @@ else
     printf "  ${RED}FAIL${NC}  rubocop: rtk (%s bytes) >= raw (%s bytes)\n" "$rtk_len" "$raw_len"
 fi
 
-# ── 23. Rails passthrough (unknown subcommands) ──────
-
-section "Rails passthrough (unknown subcommands)"
-
-assert_output "rtk rails console --help (passthrough)" \
-    "console\|Usage\|help\|IRB" \
-    rtk rails console --help
-
-assert_output "rtk rails server --help (passthrough)" \
-    "server\|Usage\|help\|Puma\|port" \
-    rtk rails server --help
-
-# ── 24. rspec --format documentation (text fallback) ─
-
-section "RSpec text fallback"
-
-assert_output "rtk rspec --format documentation (text path)" \
-    "valid\|example\|post" \
-    rtk rspec --format documentation spec/models/post_spec.rb
-
-# ── 25. rspec empty suite (no matching specs) ─────────
-
-section "RSpec empty suite"
-
-assert_output "rtk rspec nonexistent tag" \
-    "0 examples\|No examples" \
-    rtk rspec --tag nonexistent spec/models/post_spec.rb
-
-# ── 26. rails test single file ────────────────────────
-
-section "Rails test single file"
-
-assert_output "rtk rails test single file (fail)" \
-    "failed\|failure\|FAIL" \
-    rtk rails test test/models/post_fail_test.rb
-
-# ── 27. verbose flag ─────────────────────────────────
+# ── 10. Verbose flag ─────────────────────────────────
 
 section "Verbose flag (-v)"
-
-assert_output "rtk -v rails routes (verbose)" \
-    "route\|Routes\|Running" \
-    rtk -v rails routes
 
 assert_output "rtk -v rspec (verbose)" \
     "RSpec\|passed\|Running\|example" \
     rtk -v rspec spec/models/post_spec.rb
-
-# ── 28. db:migrate:status all-up ──────────────────────
-
-section "db:migrate:status (all up)"
-
-# Make sure everything is migrated
-rails db:migrate --quiet 2>&1 || true
-
-assert_output "rtk rails db:migrate:status (all up)" \
-    "all up\|0 pending\|migration" \
-    rtk rails db:migrate:status
 
 # ══════════════════════════════════════════════════════
 # Report

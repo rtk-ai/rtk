@@ -1,5 +1,4 @@
 mod aws_cmd;
-mod bundle_cmd;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
@@ -42,7 +41,6 @@ mod prettier_cmd;
 mod prisma_cmd;
 mod psql_cmd;
 mod pytest_cmd;
-mod rails_cmd;
 mod read;
 mod rewrite_cmd;
 mod rspec_cmd;
@@ -578,13 +576,6 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Bundle (Bundler) package manager with compact output (Ruby)
-    Bundle {
-        /// Bundle arguments (e.g., list, outdated, install)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
     /// RuboCop linter with compact output (Ruby)
     Rubocop {
         /// RuboCop arguments (e.g., --auto-correct, -A)
@@ -624,12 +615,6 @@ enum Commands {
         /// golangci-lint arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-    },
-
-    /// Rails commands with compact output
-    Rails {
-        #[command(subcommand)]
-        command: RailsCommands,
     },
 
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
@@ -962,53 +947,6 @@ enum GoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported go subcommand directly
-    #[command(external_subcommand)]
-    Other(Vec<OsString>),
-}
-
-#[derive(Subcommand)]
-enum RailsCommands {
-    /// Run minitest tests with compact output (50%+ token reduction)
-    Test {
-        /// Additional rails test arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Show routes with compact output (grouped by controller)
-    Routes {
-        /// Additional rails routes arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Run migrations with compact output
-    #[command(name = "db:migrate")]
-    DbMigrate {
-        /// Additional migration arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Show migration status (pending/applied)
-    #[command(name = "db:migrate:status")]
-    DbMigrateStatus {
-        /// Additional arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Rollback migrations with compact output
-    #[command(name = "db:rollback")]
-    DbRollback {
-        /// Additional rollback arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Run rails generate with compact output
-    #[command(alias = "g")]
-    Generate {
-        /// Additional generate arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Passthrough: runs any unsupported rails subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1788,10 +1726,6 @@ fn main() -> Result<()> {
             mypy_cmd::run(&args, cli.verbose)?;
         }
 
-        Commands::Bundle { args } => {
-            bundle_cmd::run(&args, cli.verbose)?;
-        }
-
         Commands::Rubocop { args } => {
             rubocop_cmd::run(&args, cli.verbose)?;
         }
@@ -1846,30 +1780,6 @@ fn main() -> Result<()> {
         Commands::GolangciLint { args } => {
             golangci_cmd::run(&args, cli.verbose)?;
         }
-
-        Commands::Rails { command } => match command {
-            RailsCommands::Test { args } => {
-                rails_cmd::run_test(&args, cli.verbose)?;
-            }
-            RailsCommands::Routes { args } => {
-                rails_cmd::run_routes(&args, cli.verbose)?;
-            }
-            RailsCommands::DbMigrate { args } => {
-                rails_cmd::run_db_migrate(&args, cli.verbose)?;
-            }
-            RailsCommands::DbMigrateStatus { args } => {
-                rails_cmd::run_db_migrate_status(&args, cli.verbose)?;
-            }
-            RailsCommands::DbRollback { args } => {
-                rails_cmd::run_db_rollback(&args, cli.verbose)?;
-            }
-            RailsCommands::Generate { args } => {
-                rails_cmd::run_generate(&args, cli.verbose)?;
-            }
-            RailsCommands::Other(args) => {
-                rails_cmd::run_other(&args, cli.verbose)?;
-            }
-        },
 
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
