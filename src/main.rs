@@ -1616,7 +1616,7 @@ fn main() -> Result<()> {
                 bazel_cmd::run_test(&args, cli.verbose)?;
             }
             BazelCommands::Other(args) => {
-                bazel_cmd::run_other(&args, cli.verbose)?;
+                bazel_cmd::run_passthrough(&args, cli.verbose)?;
             }
         },
 

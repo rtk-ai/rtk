@@ -1,11 +1,11 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
-use std::process::Command;
 use std::str::FromStr;
 
 /**********************************************************************/
@@ -120,6 +120,83 @@ impl fmt::Display for Limit {
     }
 }
 
+/// Run a bazel subcommand and filtering the output.
+///
+/// # Arguments
+///
+/// * `subcommand` - Bazel subcommand to run
+/// * `args` - Subcommand arguments
+/// * `verbose` - Verbosity level
+/// * `filter_fn` - Function to filter the output
+///
+/// # Returns
+///
+/// Result of the operation
+///
+fn run_bazel_filtered<F>(subcommand: &str, args: &[String], verbose: u8, filter_fn: F) -> Result<()>
+where
+    F: Fn(&str) -> Result<String>,
+{
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = resolved_command("bazel");
+    cmd.arg(subcommand);
+    cmd.args(BAZEL_EXTRA_FLAGS);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: bazel build {}", args.join(" "));
+    }
+
+    let output = cmd
+        .output()
+        .context("Failed to run bazel build. Is Bazel installed?")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+
+    let exit_code = output
+        .status
+        .code()
+        .unwrap_or(if output.status.success() { 0 } else { 1 });
+
+    match filter_fn(&raw) {
+        Ok(filtered) => {
+            // Print filtered output
+            match crate::tee::tee_and_hint(&raw, "bazel_build", exit_code) {
+                Some(hint) => println!("{}\n{}", filtered, hint),
+                None => println!("{}", filtered),
+            };
+
+            // Track filtering
+            timer.track(
+                &format!("bazel {} {}", subcommand, args.join(" ")),
+                &format!("rtk bazel {} {}", subcommand, args.join(" ")),
+                &raw,
+                &filtered,
+            );
+        }
+        Err(e) => {
+            // Print raw output
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "rtk: filtering bazel {} failed, showing raw output: {}",
+                subcommand, e
+            );
+
+            println!("{}", raw);
+        }
+    }
+
+    if !output.status.success() {
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
+}
+
 /**********************************************************************/
 /*                            bazel build                             */
 /**********************************************************************/
@@ -220,14 +297,45 @@ impl BazelBuildState {
         let trimmed = line.trim();
 
         // Bazel action count
-        if let Some(ac) = ACTION_COUNT.captures(trimmed) {
-            assert!(self.action_count.is_none(), "action count already set");
-            let ac = ac[1].parse::<usize>().expect("expected a number");
-            self.action_count = Some(ac);
-        }
+        if let Some(captures) = ACTION_COUNT.captures(trimmed) {
+            // Incremental builds may emit "total actions" multiple times.
+            // For simplicity, only remember the first action count seen.
+            if self.action_count.is_some() {
+                #[cfg(debug_assertions)]
+                eprintln!("rtk: Duplicate action count in line '{}'", trimmed);
+                return;
+            }
 
+            match captures.get(1).map(|capture| capture.as_str().parse()) {
+                // Successfully parsed action count
+                // (`.parse()` returned `Ok`)
+                Some(Ok(action_count)) => {
+                    self.action_count = Some(action_count);
+                }
+                // Failed to parse action count
+                // (`.parse()` returned `Err`)
+                Some(Err(e)) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "rtk: Failed to parse action count from capture '{}' in line '{}': {}",
+                        &captures.get(1).unwrap().as_str(),
+                        trimmed,
+                        e
+                    );
+                }
+                // Not enough capture groups
+                // (`.get(1)` returned `None`)
+                None => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "rtk: Not enough captures for action count in line '{}'",
+                        trimmed
+                    );
+                }
+            }
+        }
         // Bazel error
-        if trimmed.starts_with("ERROR:") {
+        else if trimmed.starts_with("ERROR:") {
             // Flush any in-progress compiler diagnostic block.
             if self.in_diagnostic_block() {
                 self.consume_diagnostic();
@@ -236,16 +344,14 @@ impl BazelBuildState {
             // Skip the summary "Build did NOT complete successfully" — we show our own header
             if trimmed.contains("Build did NOT complete successfully") {
                 return;
-                // error_count = error_count.max(1); // Ensure we show error header
             }
 
             // Add the Bazel error
             self.errors.push(trimmed.to_string());
             return;
         }
-
         // Bazel warning
-        if trimmed.starts_with("WARNING:") {
+        else if trimmed.starts_with("WARNING:") {
             // Flush any in-progress compiler diagnostic block.
             if self.in_diagnostic_block() {
                 self.consume_diagnostic();
@@ -255,9 +361,8 @@ impl BazelBuildState {
             self.warnings.push(trimmed.to_string());
             return;
         }
-
         // Start of diagnostic block
-        if trimmed.starts_with("warning:")
+        else if trimmed.starts_with("warning:")
             || trimmed.starts_with("error:")
             || trimmed.contains(": warning:")
             || trimmed.contains(": error:")
@@ -272,9 +377,8 @@ impl BazelBuildState {
             self.diagnostic.is_error = trimmed.contains(": error:");
             return;
         }
-
         // Currently inside diagnostic block
-        if self.in_diagnostic_block() {
+        else if self.in_diagnostic_block() {
             if trimmed.is_empty() {
                 // End of diagnostic block
                 self.consume_diagnostic();
@@ -319,7 +423,7 @@ impl BazelBuildState {
 /// * Status lines (e.g. `Loading ...`)
 /// * Timestamps
 ///
-pub fn filter_bazel_build(output: &str) -> String {
+pub fn filter_bazel_build(output: &str) -> Result<String> {
     let mut state = BazelBuildState::default();
     for line in output.lines() {
         state.digest_line(line);
@@ -373,7 +477,7 @@ pub fn filter_bazel_build(output: &str) -> String {
 
     // If succesful, return only the summary line.
     if state.success() {
-        return build_summary;
+        return Ok(build_summary);
     }
 
     // Otherwise, include a summary of the warnings and errors.
@@ -401,7 +505,7 @@ pub fn filter_bazel_build(output: &str) -> String {
         ));
     }
 
-    result.trim().to_string()
+    Ok(result.trim().to_string())
 }
 
 /// Run `bazel build` while filtering the output.
@@ -416,52 +520,7 @@ pub fn filter_bazel_build(output: &str) -> String {
 /// Result of the operation
 ///
 pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("bazel");
-    cmd.arg("build");
-    cmd.args(BAZEL_EXTRA_FLAGS);
-
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: bazel build {}", args.join(" "));
-    }
-
-    let output = cmd
-        .output()
-        .context("Failed to run bazel build. Is Bazel installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_bazel_build(&raw);
-
-    if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_build", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("bazel build {}", args.join(" ")),
-        &format!("rtk bazel build {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    run_bazel_filtered("build", args, verbose, filter_bazel_build)
 }
 
 /**********************************************************************/
@@ -615,11 +674,11 @@ impl BazelTestState {
 ///
 /// # Arguments
 ///
-/// * `output` - output from `bazel test`
+/// * `output` - Output from `bazel test`
 ///
 /// # Returns
 ///
-/// The filtered `bazel test` output
+/// The filtered output
 ///
 /// # Notes
 ///
@@ -628,7 +687,7 @@ impl BazelTestState {
 /// On all-pass, returns a one-liner. On failure, shows FAIL blocks and
 /// inline test output while stripping surrounding noise.
 ///
-pub fn filter_bazel_test(output: &str) -> String {
+pub fn filter_bazel_test(output: &str) -> Result<String> {
     let mut state = BazelTestState::default();
     for line in output.lines() {
         state.digest_line(line);
@@ -641,7 +700,7 @@ pub fn filter_bazel_test(output: &str) -> String {
     if state.passed == 0 && state.failed == 0 && !state.error_lines.is_empty() {
         let mut result = String::from("bazel test: build failed\n");
         result.push_str("═══════════════════════════════════════\n");
-        for err in state.error_lines.iter().take(15) {
+        for err in state.error_lines.iter().take(MAX_BUILD_ISSUES) {
             result.push_str(err);
             result.push('\n');
         }
@@ -651,15 +710,15 @@ pub fn filter_bazel_test(output: &str) -> String {
                 state.error_lines.len() - 15
             ));
         }
-        return result.trim().to_string();
+        return Ok(result.trim().to_string());
     }
 
     // All pass: one-liner.
     if state.failed == 0 {
-        return format!(
+        return Ok(format!(
             "\u{2713} bazel test: {} passed, 0 failed ({}s)",
             state.passed, elapsed_str
-        );
+        ));
     }
 
     // Has failures: show details.
@@ -721,11 +780,14 @@ pub fn filter_bazel_test(output: &str) -> String {
         + state.inline_output_blocks.len()
         + state.failed_result_lines.len()
         + state.error_lines.len();
-    if total_blocks > 15 {
-        result.push_str(&format!("\n... +{} more blocks\n", total_blocks - 15));
+    if total_blocks > MAX_BUILD_ISSUES {
+        result.push_str(&format!(
+            "\n... +{} more blocks\n",
+            total_blocks - MAX_BUILD_ISSUES
+        ));
     }
 
-    result.trim().to_string()
+    Ok(result.trim().to_string())
 }
 
 /// Run `bazel test` while filtering the output.
@@ -740,51 +802,7 @@ pub fn filter_bazel_test(output: &str) -> String {
 /// Result of the operation
 ///
 pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("bazel");
-    cmd.arg("test");
-
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: bazel test {}", args.join(" "));
-    }
-
-    let output = cmd
-        .output()
-        .context("Failed to run bazel test. Is Bazel installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_bazel_test(&raw);
-
-    if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_test", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("bazel test {}", args.join(" ")),
-        &format!("rtk bazel test {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    run_bazel_filtered("test", args, verbose, filter_bazel_test)
 }
 
 /**********************************************************************/
@@ -802,7 +820,7 @@ enum BazelRunStage {
 ///
 /// # Arguments
 ///
-/// * `output` - output from `bazel run`
+/// * `output` - Output from `bazel run`
 ///
 /// # Returns
 ///
@@ -819,7 +837,7 @@ enum BazelRunStage {
 /// This filter splits stderr at the sentinel, applies `filter_bazel_build`
 /// to the build phase, then appends the binary's output verbatim.
 ///
-pub fn filter_bazel_run(output: &str) -> String {
+pub fn filter_bazel_run(output: &str) -> Result<String> {
     let mut current_stage = BazelRunStage::Build;
     let mut build_state = BazelBuildState::default();
     let mut run_lines: Vec<String> = Vec::new();
@@ -852,7 +870,7 @@ pub fn filter_bazel_run(output: &str) -> String {
     if !build_state.has_errors() {
         // `split_inclusive('\n')` preserves newline delimiters in each segment,
         // so concatenate directly to avoid injecting extra blank lines.
-        return run_lines.concat();
+        return Ok(run_lines.concat());
     }
 
     // Build the summary line.
@@ -921,10 +939,10 @@ pub fn filter_bazel_run(output: &str) -> String {
         ));
     }
 
-    result.trim().to_string()
+    Ok(result.trim().to_string())
 }
 
-/// Run `bazel run` while filtering the build output.
+/// Run `bazel run` while filtering the output.
 ///
 /// # Arguments
 ///
@@ -936,52 +954,7 @@ pub fn filter_bazel_run(output: &str) -> String {
 /// Result of the operation
 ///
 pub fn run_run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("bazel");
-    cmd.arg("run");
-    cmd.args(BAZEL_EXTRA_FLAGS);
-
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: bazel run {}", args.join(" "));
-    }
-
-    let output = cmd
-        .output()
-        .context("Failed to run bazel run. Is Bazel installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_bazel_run(&raw);
-
-    if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_run", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("bazel run {}", args.join(" ")),
-        &format!("rtk bazel run {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    run_bazel_filtered("run", args, verbose, filter_bazel_run)
 }
 
 /**********************************************************************/
@@ -1380,22 +1353,21 @@ fn collect_section_nodes(
     }
 }
 
-pub fn filter_bazel_query(stdout: &str, stderr: &str, depth: usize, width: usize) -> String {
+/// Filter `bazel query` output.
+///
+/// # Arguments
+///
+/// * `output` - Output from `bazel query`
+/// * `depth` - Maximum depth of the package tree to show
+/// * `width` - Maximum number of items to show per package
+///
+/// # Returns
+///
+/// The filtered output
+///
+pub fn filter_bazel_query(output: &str, depth: usize, width: usize) -> Result<String> {
     let mut result = String::new();
     let mut has_error_lines = false;
-
-    // Collect ERROR lines from stderr
-    for line in stderr.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with("ERROR:") {
-            has_error_lines = true;
-            result.push_str(trimmed);
-            result.push('\n');
-        }
-    }
 
     // Group targets by output-derived roots:
     // - local roots: "//" and "//level0"
@@ -1404,15 +1376,21 @@ pub fn filter_bazel_query(stdout: &str, stderr: &str, depth: usize, width: usize
     let mut external_sections: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
     let mut section_order: Vec<QuerySectionRoot> = Vec::new();
     let mut seen_sections: HashSet<QuerySectionRoot> = HashSet::new();
-    let mut non_target_lines: Vec<String> = Vec::new();
 
-    for line in stdout.lines() {
+    for line in output.lines() {
         let trimmed = line.trim();
+
         if trimmed.is_empty() {
             continue;
         }
-
-        if let Some(caps) = TARGET_LINE.captures(trimmed) {
+        // Bazel error
+        else if trimmed.starts_with("ERROR:") {
+            has_error_lines = true;
+            result.push_str(trimmed);
+            result.push('\n');
+        }
+        // Bazel target
+        else if let Some(caps) = TARGET_LINE.captures(trimmed) {
             let package = caps[1].to_string();
             let target = caps[2].to_string();
 
@@ -1462,8 +1440,6 @@ pub fn filter_bazel_query(stdout: &str, stderr: &str, depth: usize, width: usize
                     section_order.push(section);
                 }
             }
-        } else {
-            non_target_lines.push(trimmed.to_string());
         }
     }
 
@@ -1546,13 +1522,7 @@ pub fn filter_bazel_query(stdout: &str, stderr: &str, depth: usize, width: usize
         }
     }
 
-    // Output non-target lines
-    for line in &non_target_lines {
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    result.trim_end().to_string()
+    Ok(result.trim_end().to_string())
 }
 
 /// Run `bazel query` while filtering the output.
@@ -1569,62 +1539,16 @@ pub fn filter_bazel_query(stdout: &str, stderr: &str, depth: usize, width: usize
 /// Result of the operation
 ///
 pub fn run_query(args: &[String], depth: Limit, width: Limit, verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("bazel");
-    cmd.arg("query");
-
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: bazel query {}", args.join(" "));
-    }
-
-    let output = cmd
-        .output()
-        .context("Failed to run bazel query. Is Bazel installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_bazel_query(&stdout, &stderr, depth.value(), width.value());
-
-    if output.status.success() {
-        if let Some(hint) = crate::tee::tee_and_hint(&raw, "bazel_query", exit_code) {
-            println!("{}\n{}", filtered, hint);
-        } else {
-            println!("{}", filtered);
-        }
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("bazel query {}", args.join(" ")),
-        &format!("rtk bazel query {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    run_bazel_filtered("query", args, verbose, |output| {
+        filter_bazel_query(output, depth.value(), width.value())
+    })
 }
 
 /**********************************************************************/
 /*                      Other bazel subcommands                       */
 /**********************************************************************/
 
-/// Run other `bazel` subcommands not handled by rtk.
+/// Run a unsupported `bazel` subcommand by passing it through directly.
 ///
 /// # Arguments
 ///
@@ -1635,45 +1559,30 @@ pub fn run_query(args: &[String], depth: Limit, width: Limit, verbose: u8) -> Re
 ///
 /// Result of the operation
 ///
-pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     if args.is_empty() {
         anyhow::bail!("bazel: no subcommand specified");
     }
 
+    if verbose > 0 {
+        eprintln!("bazel passthrough: {:?}", args);
+    }
+
     let timer = tracking::TimedExecution::start();
 
-    let subcommand = args[0].to_string_lossy();
-    let mut cmd = Command::new("bazel");
-    cmd.arg(&*subcommand);
+    let status = resolved_command("bazel")
+        .args(args)
+        .status()
+        .context("Failed to run bazel")?;
 
-    for arg in &args[1..] {
-        cmd.arg(arg);
-    }
-
-    if verbose > 0 {
-        eprintln!("Running: bazel {} ...", subcommand);
-    }
-
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to run bazel {}", subcommand))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    print!("{}", stdout);
-    eprint!("{}", stderr);
-
-    timer.track(
-        &format!("bazel {}", subcommand),
-        &format!("rtk bazel {}", subcommand),
-        &raw,
-        &raw, // No filtering for unsupported commands
+    let args_str = tracking::args_display(args);
+    timer.track_passthrough(
+        &format!("bazel {}", args_str),
+        &format!("rtk bazel {} (passthrough)", args_str),
     );
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     Ok(())
@@ -1709,7 +1618,7 @@ INFO: Elapsed time: 0.453s, Critical Path: 0.00s
 INFO: 1 process: 1 internal.
 INFO: Build completed successfully, 1 total action
     ";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
             assert_eq!(result, "✓ bazel build (1 action)");
         }
 
@@ -1724,7 +1633,7 @@ bazel-bin/src/bazel-dev
 INFO: Elapsed time: 54.859s, Critical Path: 49.98s
 INFO: 2391 processes: 3 internal, 1537 processwrapper-sandbox, 881 worker.
 INFO: Build completed successfully, 2391 total actions";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
             assert_eq!(result, "✓ bazel build (2391 actions)");
         }
 
@@ -1738,7 +1647,7 @@ Target //src:bazel-dev up-to-date:
 bazel-bin/src/bazel-dev
 INFO: Elapsed time: 54.859s, Critical Path: 49.98s
     ";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
             assert_eq!(result, "✓ bazel build");
         }
 
@@ -1759,7 +1668,7 @@ Target //src:bazel-dev up-to-date:
 bazel-bin/src/bazel-dev
 INFO: Elapsed time: 54.859s, Critical Path: 49.98s
 INFO: Build completed successfully, 4978 total actions";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
 
             eprintln!("[DEBUG] Result is:\n{}", result);
 
@@ -1785,7 +1694,7 @@ ERROR: no such target '//src:bazel-dev-NONEXISTENT': target 'bazel-dev-NONEXISTE
 INFO: Elapsed time: 0.142s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
 
             // Build summary
             assert!(result.contains("bazel build: 2 errors"));
@@ -1815,7 +1724,7 @@ ERROR: no such target '//src:bazel-dev-NONEXISTENT': target 'bazel-dev-NONEXISTE
 INFO: Elapsed time: 0.142s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
 
             // Build summary
             assert!(result.contains("bazel build: 2 errors, 1 warning"));
@@ -1849,7 +1758,7 @@ bazel-out/k8-fastbuild/bin/src/main/protobuf/failure_details.pb.h:1690:3: note: 
      |   ^~~~~~~~~
 
 INFO: Build completed successfully, 200 total actions";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
 
             // Should keep the compiler warning block
             assert!(result.contains("warning:"));
@@ -1874,7 +1783,7 @@ warning: field `value` is never read
 = note: `#[warn(dead_code)]` on by default
 
 INFO: Build completed successfully, 42 total actions";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
 
             assert!(result.contains("warning: field `value` is never read"));
             assert!(result.contains("src/lib.rs:12:5"));
@@ -1891,7 +1800,7 @@ src/main.c:14:9: warning: unused variable 'tmp' [-Wunused-variable]
    |         ^~~
 
 INFO: Build completed successfully, 7 total actions";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
 
             assert!(result.contains("warning: unused variable 'tmp'"));
             assert!(result.contains("src/main.c:14:9"));
@@ -1909,7 +1818,7 @@ src/main.cc:21:7: warning: unused variable 'counter' [-Wunused-variable]
 1 warning generated.
 
 INFO: Build completed successfully, 11 total actions";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
 
             assert!(result.contains("warning: unused variable 'counter'"));
             assert!(result.contains("src/main.cc:21:7"));
@@ -1934,7 +1843,7 @@ Note: Recompile with -Xlint:removal for details.
 Target //src:bazel-dev up-to-date:
 bazel-bin/src/bazel-dev
 DEBUG: some debug info";
-            let result = filter_bazel_build(stderr);
+            let result = filter_bazel_build(stderr).unwrap();
 
             assert!(!result.contains("Computing main repo"));
             assert!(!result.contains("Loading:"));
@@ -1949,7 +1858,7 @@ DEBUG: some debug info";
 
         #[test]
         fn test_filter_empty() {
-            let result = filter_bazel_build("");
+            let result = filter_bazel_build("").unwrap();
             assert_eq!(result, "✓ bazel build");
         }
 
@@ -1981,7 +1890,7 @@ INFO: 2391 processes: 3 internal, 1537 processwrapper-sandbox, 881 worker.
 INFO: Build completed successfully, 2391 total actions";
 
             let input_tokens = count_tokens(output);
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
             let output_tokens = count_tokens(&result);
 
             let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -2001,7 +1910,7 @@ INFO: Build completed successfully, 2391 total actions";
             for i in 0..20 {
                 stderr.push_str(&format!("ERROR: //pkg:target_{}: build failed\n\n", i));
             }
-            let result = filter_bazel_build(&stderr);
+            let result = filter_bazel_build(&stderr).unwrap();
 
             assert!(result.contains("... +5 more issues"));
         }
@@ -2018,7 +1927,7 @@ src/app.cc:42:10: error: use of undeclared identifier 'foo'
 ERROR: //src:app failed to build
 INFO: Build completed, 0 total actions
 ERROR: Build did NOT complete successfully";
-            let result = filter_bazel_build(output);
+            let result = filter_bazel_build(output).unwrap();
 
             // Should have 2 errors (compiler + bazel ERROR) and 1 warning
             assert!(result.contains("2 errors"));
@@ -2062,16 +1971,16 @@ ERROR: Build did NOT complete successfully";
 
         #[test]
         fn test_strips_info_warning_noise() {
-            let stderr = "\
+            let output = "\
 INFO: Invocation ID: abc-123
 INFO: Build options changed
 WARNING: some warning
 DEBUG: debug info
 INFO: plain info line
 WARNING: plain warning
-DEBUG: plain debug";
-            let stdout = "//pkg:target";
-            let result = filter_bazel_query(stdout, stderr, usize::MAX, usize::MAX);
+DEBUG: plain debug
+//pkg:target";
+            let result = filter_bazel_query(output, usize::MAX, usize::MAX).unwrap();
 
             assert!(!result.contains("Invocation ID"));
             assert!(!result.contains("Build options changed"));
@@ -2085,12 +1994,12 @@ DEBUG: plain debug";
 
         #[test]
         fn test_keeps_error_lines() {
-            let stderr = "\
+            let output = "\
 INFO: Build options changed
 ERROR: something went wrong
-ERROR: another error";
-            let stdout = "//pkg:target";
-            let result = filter_bazel_query(stdout, stderr, usize::MAX, usize::MAX);
+ERROR: another error
+//pkg:target";
+            let result = filter_bazel_query(output, usize::MAX, usize::MAX).unwrap();
 
             assert!(result.contains("ERROR: something went wrong"));
             assert!(result.contains("ERROR: another error"));
@@ -2099,28 +2008,15 @@ ERROR: another error";
 
         #[test]
         fn test_empty_output() {
-            let result = filter_bazel_query("", "", usize::MAX, usize::MAX);
+            let result = filter_bazel_query("", usize::MAX, usize::MAX).unwrap();
             // With default root, header is still produced
             assert!(result.contains("// (0 targets)"));
         }
 
         #[test]
-        fn test_non_target_lines_pass_through() {
-            let stdout = "\
-//pkg:target_a
-some non-target output line
-//:root_target";
-            let result = filter_bazel_query(stdout, "", usize::MAX, usize::MAX);
-
-            assert!(result.contains("some non-target output line"));
-            assert!(result.contains("🎯 :target_a"));
-            assert!(result.contains("🎯 :root_target"));
-        }
-
-        #[test]
         fn test_single_target_uses_singular() {
             let stdout = "//my/package:only_target";
-            let result = filter_bazel_query(stdout, "", usize::MAX, usize::MAX);
+            let result = filter_bazel_query(stdout, usize::MAX, usize::MAX).unwrap();
             assert!(result.contains("(1 target)"));
         }
 
@@ -2130,7 +2026,7 @@ some non-target output line
 //src/lib:a
 //src/lib:b
 //tools:c";
-            let result = filter_bazel_query(stdout, "", usize::MAX, usize::MAX);
+            let result = filter_bazel_query(stdout, usize::MAX, usize::MAX).unwrap();
 
             assert!(result.contains("//src/lib (2 targets)"));
             assert!(result.contains("//tools (1 target)"));
@@ -2146,7 +2042,7 @@ some non-target output line
 //tools/gen:e
 //tools/gen:f
 //:root_target";
-            let result = filter_bazel_query(stdout, "", 1, usize::MAX);
+            let result = filter_bazel_query(stdout, 1, usize::MAX).unwrap();
 
             assert!(result.contains("//src (3 targets, 2 packages)"));
             assert!(result.contains("//tools/gen (3 targets)"));
@@ -2162,7 +2058,7 @@ some non-target output line
 //src/lib/io:c
 //src/app:d
 //tools:e";
-            let result = filter_bazel_query(stdout, "", 2, usize::MAX);
+            let result = filter_bazel_query(stdout, 2, usize::MAX).unwrap();
 
             assert!(result.contains("//src/app (1 target)"));
             assert!(result.contains("//src/lib (3 targets, 2 packages)"));
@@ -2175,7 +2071,7 @@ some non-target output line
 //src/lib/math:a
 //src/lib/io:b
 //src/app:c";
-            let result = filter_bazel_query(stdout, "", usize::MAX, usize::MAX);
+            let result = filter_bazel_query(stdout, usize::MAX, usize::MAX).unwrap();
 
             assert!(result.contains("//src/app (1 target)"));
             assert!(result.contains("//src/lib/io (1 target)"));
@@ -2193,7 +2089,7 @@ some non-target output line
 //examples/cpp:b
 //examples/go:c
 //examples/java/sub:d";
-            let result = filter_bazel_query(stdout, "", 2, usize::MAX);
+            let result = filter_bazel_query(stdout, 2, usize::MAX).unwrap();
 
             assert!(result.contains("//examples/cpp (2 targets)"));
             assert!(result.contains("//examples/go (1 target)"));
@@ -2210,7 +2106,7 @@ some non-target output line
 //root:root_a
 //root:root_b
 //root:root_c";
-            let result = filter_bazel_query(stdout, "", 1, 5);
+            let result = filter_bazel_query(stdout, 1, 5).unwrap();
 
             assert!(result.contains("//root (7 targets, 4 packages)"));
             assert!(result.contains("📦 a (1 target)"));
@@ -2230,7 +2126,7 @@ some non-target output line
 //root/c:t3
 //root/d:t4
 //root/e:t5";
-            let result = filter_bazel_query(stdout, "", 1, 3);
+            let result = filter_bazel_query(stdout, 1, 3).unwrap();
 
             assert!(result.contains("//root (5 targets, 5 packages)"));
             assert!(result.contains("📦 a"));
@@ -2251,7 +2147,7 @@ some non-target output line
 //root:x
 //root:y
 //root:z";
-            let result = filter_bazel_query(stdout, "", 1, 3);
+            let result = filter_bazel_query(stdout, 1, 3).unwrap();
 
             assert!(result.contains("(+1 more sub-package, 3 more targets)"));
         }
@@ -2263,7 +2159,7 @@ some non-target output line
 //root/b:t
 //root/c:t
 //root/d:t";
-            let result = filter_bazel_query(stdout, "", 1, 3);
+            let result = filter_bazel_query(stdout, 1, 3).unwrap();
 
             assert!(result.contains("(+1 more sub-package)"));
             assert!(!result.contains("more target"));
@@ -2275,7 +2171,7 @@ some non-target output line
 //:bazel-distfile
 //:bazel-srcs
 //src:lib";
-            let result = filter_bazel_query(stdout, "", 1, usize::MAX);
+            let result = filter_bazel_query(stdout, 1, usize::MAX).unwrap();
 
             assert!(result.contains("//src (1 target)"));
             assert!(result.contains("// (2 targets)"));
@@ -2288,7 +2184,7 @@ some non-target output line
             let stdout = "\
 //examples/cpp:a
 //examples/go:b";
-            let result = filter_bazel_query(stdout, "", 2, usize::MAX);
+            let result = filter_bazel_query(stdout, 2, usize::MAX).unwrap();
 
             assert!(result.contains("//examples/cpp (1 target)"));
             assert!(result.contains("//examples/go (1 target)"));
@@ -2302,7 +2198,7 @@ some non-target output line
 //src/lib/math/compute:target_c
 //tools/codegen:foo
 //tools/codegen:bar";
-            let result = filter_bazel_query(stdout, "", usize::MAX, usize::MAX);
+            let result = filter_bazel_query(stdout, usize::MAX, usize::MAX).unwrap();
 
             // With full depth, targets are at leaf nodes
             assert!(result.contains("🎯 :target_a"));
@@ -2314,14 +2210,13 @@ some non-target output line
 
         #[test]
         fn test_real_bazel_output() {
-            let stderr = "\
+            let output = "\
 INFO: Invocation ID: 8e2f4a91-abc1-4def-9012-345678abcdef
 INFO: Current date is 2026-03-01
 WARNING: Build option --config=remote has changed
 INFO: Repository rule @bazel_tools//tools/jdk:jdk configured
 INFO: Found 16 targets...
-INFO: Elapsed time: 1.234s";
-            let stdout = "\
+INFO: Elapsed time: 1.234s
 //src/app/foo/bar:bar
 //src/app/foo/bar:bar_test
 //src/app/foo/bar:bar_lib
@@ -2339,7 +2234,7 @@ INFO: Elapsed time: 1.234s";
 //src/app/foo/bar:runner
 //src/app/foo/bar:runner_test";
 
-            let result = filter_bazel_query(stdout, stderr, usize::MAX, usize::MAX);
+            let result = filter_bazel_query(output, usize::MAX, usize::MAX).unwrap();
 
             // Should strip all INFO/WARNING noise
             assert!(!result.contains("Invocation ID"));
@@ -2353,11 +2248,11 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_multi_root_no_target_loss() {
-            let stdout = "\
+            let output = "\
 //src/app:bin
 //tools/gen:tool
 //third_party/lib:pkg";
-            let result = filter_bazel_query(stdout, "", usize::MAX, usize::MAX);
+            let result = filter_bazel_query(output, usize::MAX, usize::MAX).unwrap();
 
             assert!(result.contains("//src/app (1 target)"));
             assert!(result.contains("//tools/gen (1 target)"));
@@ -2369,12 +2264,12 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_multi_root_respects_width() {
-            let stdout = "\
+            let output = "\
 //src/s1:a
 //src/s2:b
 //tools/t1:c
 //tools/t2:d";
-            let result = filter_bazel_query(stdout, "", 1, 1);
+            let result = filter_bazel_query(output, 1, 1).unwrap();
 
             assert!(
                 result.contains("//src (2 targets"),
@@ -2394,12 +2289,12 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_groups_external_repos() {
-            let stdout = "\
+            let output = "\
 //src/app:bin
 @abseil-cpp//absl/base:core_headers
 @abseil-cpp//absl/strings:str_format
 @zlib//:zlib";
-            let result = filter_bazel_query(stdout, "", 1, 10);
+            let result = filter_bazel_query(output, 1, 10).unwrap();
 
             assert!(result.contains("//src/app (1 target)"));
             assert!(result.contains("@abseil-cpp//absl (2 targets"));
@@ -2411,11 +2306,11 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_consolidates_deep_common_prefix() {
-            let stdout = "\
+            let output = "\
 //src/java_tools/buildjar:a
 //src/java_tools/import_deps_checker:b
 //src/java_tools/junitrunner:c";
-            let result = filter_bazel_query(stdout, "", 1, 10);
+            let result = filter_bazel_query(output, 1, 10).unwrap();
 
             assert!(result.starts_with("//src/java_tools (3 targets"));
             assert!(result.contains("📦 buildjar (1 target)"));
@@ -2425,12 +2320,12 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_splits_external_repos_by_repo_root() {
-            let stdout = "\
+            let output = "\
 @abseil-cpp//absl/base:core
 @abseil-cpp//absl/strings:format
 @bazel_skylib//lib:paths
 @bazel_skylib//rules:copy";
-            let result = filter_bazel_query(stdout, "", 1, 10);
+            let result = filter_bazel_query(output, 1, 10).unwrap();
 
             assert!(result.contains("@abseil-cpp//absl (2 targets"));
             assert!(result.contains("@bazel_skylib// (2 targets, 2 packages)"));
@@ -2442,10 +2337,10 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_external_root_targets_keep_repo_root_header() {
-            let stdout = "\
+            let output = "\
 @abseil-cpp//:root_target
 @abseil-cpp//absl/base:core";
-            let result = filter_bazel_query(stdout, "", 1, 10);
+            let result = filter_bazel_query(output, 1, 10).unwrap();
 
             assert!(result.starts_with("@abseil-cpp// (2 targets, 2 packages)"));
             assert!(result.contains("📦 absl (1 target, 1 package)"));
@@ -2454,11 +2349,11 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_depth_1_runtime_mode_stays_single_section() {
-            let stdout = "\
+            let output = "\
 //src:root
 //src/conditions:a
 //src/java_tools:b";
-            let result = filter_bazel_query(stdout, "", 1, 10);
+            let result = filter_bazel_query(output, 1, 10).unwrap();
 
             assert!(result.starts_with("//src (3 targets, 2 packages)"));
             assert!(result.contains("📦 conditions (1 target)"));
@@ -2469,13 +2364,13 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_depth_2_runtime_mode_expands_to_sections() {
-            let stdout = "\
+            let output = "\
 //src:root_a
 //src:root_b
 //src/conditions:c1
 //src/java_tools:j1
 //src/java_tools/sub:s1";
-            let result = filter_bazel_query(stdout, "", 2, 10);
+            let result = filter_bazel_query(output, 2, 10).unwrap();
 
             assert!(result.contains("//src (2 targets)"));
             assert!(result.contains("🎯 :root_a"));
@@ -2488,12 +2383,12 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_depth_2_skips_empty_intermediate_section() {
-            let stdout = "\
+            let output = "\
 @xds+//xds/data/orca:alpha
 @xds+//xds/data/orca:beta
 @xds+//xds/service/orca:gamma
 @xds+//xds/service/orca:delta";
-            let result = filter_bazel_query(stdout, "", 2, 10);
+            let result = filter_bazel_query(output, 2, 10).unwrap();
 
             assert!(!result.contains("@xds+//xds (0 targets)"));
             assert!(result.contains("@xds+//xds/data"));
@@ -2502,9 +2397,9 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_error_only_no_empty_header() {
-            let stderr =
+            let output =
                 "ERROR: Evaluation of query \"deps(//...)\" failed: preloading transitive closure failed";
-            let result = filter_bazel_query("", stderr, usize::MAX, 10);
+            let result = filter_bazel_query(output, usize::MAX, 10).unwrap();
 
             assert_eq!(
                 result,
@@ -2515,10 +2410,10 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_single_root_uses_subsections() {
-            let stdout = "\
+            let output = "\
 //src/lib:a
 //src/app:b";
-            let result = filter_bazel_query(stdout, "", 2, usize::MAX);
+            let result = filter_bazel_query(output, 2, usize::MAX).unwrap();
 
             assert!(result.contains("//src/app (1 target)"));
             assert!(result.contains("//src/lib (1 target)"));
@@ -2535,7 +2430,7 @@ INFO: Elapsed time: 1.234s";
 
         #[test]
         fn test_filter_all_pass() {
-            let original = "\
+            let output = "\
 INFO: Analyzed 3 targets (0 packages loaded, 0 targets configured).
 INFO: Found 1 target and 2 test targets...
 INFO: Elapsed time: 0.508s, Critical Path: 0.00s
@@ -2543,13 +2438,13 @@ INFO: 1 process: 2 action cache hit, 1 internal.
 INFO: Build completed successfully, 1 total action
 //src/test/java/com/google/devtools/build/lib/runtime/commands/info:RemoteRequestedInfoItemHandlerTest PASSED in 2.4s
 //src/test/java/com/google/devtools/build/lib/runtime/commands/info:StdoutInfoItemHandlerTest PASSED in 1.5s.";
-            let result = filter_bazel_test(original);
+            let result = filter_bazel_test(output).unwrap();
             assert_eq!(result, "\u{2713} bazel test: 2 passed, 0 failed (0.508s)");
         }
 
         #[test]
         fn test_filter_with_cached() {
-            let stderr = "\
+            let output = "\
 Loading:
 INFO: Analyzed 2 targets (0 packages loaded, 0 targets configured).
 INFO: Found 2 test targets...
@@ -2559,13 +2454,13 @@ INFO: Elapsed time: 0.412s, Critical Path: 0.10s
 INFO: 2 processes: 1 internal, 1 worker.
 INFO: Build completed successfully, 2 total actions
 Executed 1 out of 2 tests: 2 tests pass.";
-            let result = filter_bazel_test(stderr);
+            let result = filter_bazel_test(output).unwrap();
             assert_eq!(result, "\u{2713} bazel test: 2 passed, 0 failed (0.412s)");
         }
 
         #[test]
         fn test_filter_failure() {
-            let stderr = "\
+            let output = "\
 Loading:
 INFO: Analyzed 1 target (0 packages loaded, 0 targets configured).
 INFO: Found 1 test target...
@@ -2576,7 +2471,7 @@ INFO: Elapsed time: 0.340s, Critical Path: 0.30s
 INFO: 2 processes: 1 internal, 1 worker.
 INFO: Build completed, 1 test FAILED, 2 total actions
 Executed 1 out of 1 test: 1 fails locally.";
-            let result = filter_bazel_test(stderr);
+            let result = filter_bazel_test(output).unwrap();
 
             assert!(result.contains("bazel test: 1 failed, 0 passed (0.340s)"));
             assert!(result.contains("═══════════════════════════════════════"));
@@ -2590,7 +2485,7 @@ Executed 1 out of 1 test: 1 fails locally.";
 
         #[test]
         fn test_filter_failure_with_test_output() {
-            let stderr = "\
+            let output = "\
 Loading:
 INFO: Analyzed 1 target (0 packages loaded, 0 targets configured).
 INFO: Found 1 test target...
@@ -2609,7 +2504,7 @@ java.lang.Exception: No tests found matching RegEx[NONEXISTENT_TEST]
 INFO: Elapsed time: 0.340s, Critical Path: 0.30s
 INFO: Build completed, 1 test FAILED, 2 total actions
 Executed 1 out of 1 test: 1 fails locally.";
-            let result = filter_bazel_test(stderr);
+            let result = filter_bazel_test(output).unwrap();
 
             assert!(result.contains("bazel test: 1 failed, 0 passed"));
             // Inline test output preserved
@@ -2627,7 +2522,7 @@ Executed 1 out of 1 test: 1 fails locally.";
 
         #[test]
         fn test_filter_strips_build_noise() {
-            let stderr = "\
+            let output = "\
 Computing main repo mapping:
 Loading:
 Loading: 0 packages loaded
@@ -2645,7 +2540,7 @@ bazel-bin/src/target
 INFO: Elapsed time: 1.00s, Critical Path: 0.50s
 INFO: Build completed successfully, 4 total actions
 Executed 1 out of 1 test: 1 tests pass.";
-            let result = filter_bazel_test(stderr);
+            let result = filter_bazel_test(output).unwrap();
 
             assert!(!result.contains("Computing main repo"));
             assert!(!result.contains("Loading:"));
@@ -2664,7 +2559,7 @@ Executed 1 out of 1 test: 1 tests pass.";
 
         #[test]
         fn test_filter_build_error() {
-            let stderr = "\
+            let output = "\
 Loading:
 WARNING: Target pattern parsing failed.
 ERROR: Skipping '//src:nonexistent': no such target '//src:nonexistent'
@@ -2672,7 +2567,7 @@ ERROR: no such target '//src:nonexistent': target 'nonexistent' not declared
 INFO: Elapsed time: 0.142s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully";
-            let result = filter_bazel_test(stderr);
+            let result = filter_bazel_test(output).unwrap();
 
             assert!(result.contains("bazel test: build failed"));
             assert!(result.contains("═══════════════════════════════════════"));
@@ -2684,13 +2579,13 @@ ERROR: Build did NOT complete successfully";
 
         #[test]
         fn test_filter_empty() {
-            let result = filter_bazel_test("");
+            let result = filter_bazel_test("").unwrap();
             assert_eq!(result, "\u{2713} bazel test: 0 passed, 0 failed (0s)");
         }
 
         #[test]
         fn test_filter_token_savings() {
-            let stderr = "\
+            let output = "\
 Computing main repo mapping:
 Loading:
 Loading: 0 packages loaded
@@ -2713,8 +2608,8 @@ INFO: 6 processes: 3 internal, 3 worker.
 INFO: Build completed successfully, 6 total actions
 Executed 3 out of 3 tests: 3 tests pass.";
 
-            let input_tokens = count_tokens(stderr);
-            let result = filter_bazel_test(stderr);
+            let input_tokens = count_tokens(output);
+            let result = filter_bazel_test(output).unwrap();
             let output_tokens = count_tokens(&result);
 
             let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -2729,7 +2624,7 @@ Executed 3 out of 3 tests: 3 tests pass.";
 
         #[test]
         fn test_filter_strips_timeout_warnings() {
-            let stderr = "\
+            let output = "\
 INFO: Analyzed 1 target (0 packages loaded).
 INFO: Found 1 test target...
 //pkg:test    PASSED in 0.5s
@@ -2737,7 +2632,7 @@ There were tests whose specified size is too big. Use the --test_verbose_timeout
 INFO: Elapsed time: 1.00s, Critical Path: 0.50s
 INFO: Build completed successfully, 2 total actions
 Executed 1 out of 1 test: 1 tests pass.";
-            let result = filter_bazel_test(stderr);
+            let result = filter_bazel_test(output).unwrap();
 
             assert!(!result.contains("There were tests whose specified size"));
             assert!(!result.contains("--test_verbose_timeout_warnings"));
@@ -2766,7 +2661,7 @@ INFO: Running command line: bazel-bin/src/my_binary
 Hello from binary!
 Result: 42
 ";
-            let result = filter_bazel_run(output);
+            let result = filter_bazel_run(output).unwrap();
 
             // Clean output — no build summary, just binary output
             assert_eq!(result, "Hello from binary!\nResult: 42\n");
@@ -2785,7 +2680,7 @@ bazel-bin/src/app
 INFO: Build completed successfully, 100 total actions
 INFO: Running command line: bazel-bin/src/app
 app output here";
-            let result = filter_bazel_run(output);
+            let result = filter_bazel_run(output).unwrap();
 
             // Clean output - no warnings shown
             assert_eq!(result, "app output here");
@@ -2799,7 +2694,7 @@ ERROR: Skipping '//src:nonexistent': no such target '//src:nonexistent'
 INFO: Elapsed time: 0.142s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully";
-            let result = filter_bazel_run(output);
+            let result = filter_bazel_run(output).unwrap();
 
             assert!(result.contains("bazel run: 1 error"));
             assert!(result.contains("ERROR: Skipping"));
@@ -2816,7 +2711,7 @@ ERROR: no such target '//src:nonexistent': target 'nonexistent' not declared
 INFO: Elapsed time: 0.142s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully";
-            let result = filter_bazel_run(output);
+            let result = filter_bazel_run(output).unwrap();
 
             assert!(result.contains("bazel run: 2 errors"));
         }
@@ -2832,7 +2727,7 @@ WARNING: File not found: /home/user/foo/bar.txt
 INFO: Elapsed time: 0.142s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully";
-            let result = filter_bazel_run(output);
+            let result = filter_bazel_run(output).unwrap();
 
             assert!(
                 result.contains("bazel run:")
@@ -2858,13 +2753,13 @@ INFO: Found 1 target...
 Target //src:app up-to-date:
 bazel-bin/src/app
 INFO: Build completed successfully, 100 total actions";
-            let result = filter_bazel_run(output);
+            let result = filter_bazel_run(output).unwrap();
             assert!(result.is_empty());
         }
 
         #[test]
         fn test_filter_empty() {
-            let result = filter_bazel_run("");
+            let result = filter_bazel_run("").unwrap();
             assert!(result.is_empty());
         }
 
@@ -2911,7 +2806,7 @@ INFO: Running command line: bazel-bin/src/my_binary
 Hello World";
 
             let input_tokens = count_tokens(original);
-            let result = filter_bazel_run(prefiltered);
+            let result = filter_bazel_run(prefiltered).unwrap();
             let output_tokens = count_tokens(&result);
 
             let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
@@ -2937,7 +2832,7 @@ WARNING: App warning
 DEBUG: App debug
 ERROR: App error
 ";
-            let result = filter_bazel_run(output);
+            let result = filter_bazel_run(output).unwrap();
 
             assert!(result.contains("INFO: Some trailing info line"));
             assert!(result.contains("WARNING: App warning"));
@@ -2956,7 +2851,7 @@ line1
 line2
 
 ";
-            let result = filter_bazel_run(output);
+            let result = filter_bazel_run(output).unwrap();
             assert_eq!(result, "line1\n\nline2\n\n");
         }
 
@@ -2969,7 +2864,7 @@ line2
                 "\tTabbed\n",
             );
             let expected = concat!("  indented\n", "\tTabbed\n",);
-            let actual = filter_bazel_run(output);
+            let actual = filter_bazel_run(output).unwrap();
 
             assert_eq!(expected, actual);
         }
@@ -2982,7 +2877,7 @@ line2
                 "  hello! oops I left some trailing whitespace   \n",
             );
             let expected = "  hello! oops I left some trailing whitespace   \n";
-            let actual = filter_bazel_run(output);
+            let actual = filter_bazel_run(output).unwrap();
 
             assert_eq!(expected, actual);
         }
