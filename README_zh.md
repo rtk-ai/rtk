@@ -19,7 +19,7 @@
   <a href="#安装">安装</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">故障排除</a> &bull;
   <a href="ARCHITECTURE.md">架构</a> &bull;
-  <a href="https://discord.gg/pvHdzAec">Discord</a>
+  <a href="https://discord.gg/gFwRPEKq4p">Discord</a>
 </p>
 
 <p align="center">
