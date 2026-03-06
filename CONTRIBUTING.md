@@ -35,7 +35,7 @@ Every branch **must** follow one of these prefixes to identify the level of chan
 |--------|---------------|-------------|
 | `fix(scope): ...` | Patch | Bug fixes, corrections, minor adjustments |
 | `feat(scope): ...` | Minor | New features, new filters, new command support |
-| `break(scope): ...` | Major | Breaking changes, API changes, removed functionality |
+| `chore(scope): ...` | Major | Breaking changes, API changes, removed functionality |
 
 The **scope** in parentheses indicates which part of the project is concerned (e.g. `git`, `kubectl`, `filter`, `tracking`, `config`).
 
@@ -45,7 +45,7 @@ Examples:
 ```
 fix(git): log-filter-drops-merge-commits
 feat(kubectl): add-pod-list-filter
-break(proxy): remove-deprecated-flags
+chore(proxy): remove-deprecated-flags
 ```
 
 ---
