@@ -38,10 +38,31 @@ if [ -z "$CMD" ]; then
   exit 0
 fi
 
+# Normalize path-prefixed commands for matching only.
+# Claude Code often invokes tools via venv or full path, e.g.
+# ".venv/bin/pytest -v" or "/usr/local/bin/ruff check .".
+# Strip the directory prefix from the first word so rtk rewrite
+# can match the bare command name.
+FIRST_WORD="${CMD%% *}"
+BASE_CMD="$(basename "$FIRST_WORD")"
+if [ "$FIRST_WORD" != "$BASE_CMD" ]; then
+  NORM_CMD="${BASE_CMD}${CMD#"$FIRST_WORD"}"
+else
+  NORM_CMD="$CMD"
+fi
+
 # Delegate all rewrite logic to the Rust binary.
 # rtk rewrite exits 1 when there's no rewrite — hook passes through silently.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null) || { echo '{}'; exit 0; }
-
+REWRITTEN=$(rtk rewrite "$NORM_CMD" 2>/dev/null) || { echo '{}'; exit 0; }
+                                                                               
+# If the original command had a path prefix and the rewrite simply           
+# prepended "rtk ", rebuild using the original path so the correct
+# binary (e.g. .venv/bin/pytest) is invoked at runtime.                      
+if [ "$FIRST_WORD" != "$BASE_CMD" ] && [ "$REWRITTEN" = "rtk $NORM_CMD" ];
+then                                                                         
+  REWRITTEN="rtk $CMD"
+fi                                                                           
+             
 # No change — nothing to do.
 if [ "$CMD" = "$REWRITTEN" ]; then
   echo '{}'
