@@ -1,6 +1,6 @@
 [package]
 name = "rtk"
-version = "0.25.0"
+version = "0.27.2"
 edition = "2021"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
@@ -28,6 +28,8 @@ chrono = "0.4"
 thiserror = "1.0"
 tempfile = "3"
 sha2 = "0.10"
+ureq = "2"
+hostname = "0.4"
 
 [dev-dependencies]
 

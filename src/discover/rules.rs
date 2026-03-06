@@ -30,7 +30,7 @@ pub const PATTERNS: &[&str] = &[
     r"^(pnpm\s+|npx\s+)?(vitest|jest|test)(\s|$)",
     r"^(npx\s+|pnpm\s+)?playwright",
     r"^(npx\s+|pnpm\s+)?prisma",
-    r"^docker\s+(ps|images|logs|run|exec|build)",
+    r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
     r"^kubectl\s+(get|logs|describe|apply)",
     r"^tree(\s|$)",
     r"^diff\s+",
