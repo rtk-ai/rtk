@@ -4,7 +4,6 @@
 //! Focuses on extracting essential information from JSON outputs.
 
 use crate::git;
-use crate::json_cmd;
 use crate::tracking;
 use crate::utils::{ok_confirmation, truncate};
 use anyhow::{Context, Result};
@@ -276,6 +275,12 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     Ok(())
 }
 
+fn should_passthrough_pr_view(extra_args: &[String]) -> bool {
+    extra_args
+        .iter()
+        .any(|a| a == "--json" || a == "--jq" || a == "--web")
+}
+
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
@@ -283,6 +288,12 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
         Some(result) => result,
         None => return Err(anyhow::anyhow!("PR number required")),
     };
+
+    // If the user provides --jq or --web, pass through directly.
+    // Note: --json is already handled globally by run() via has_json_flag.
+    if should_passthrough_pr_view(&extra_args) {
+        return run_passthrough_with_extra("gh", &["pr", "view", &pr_number], &extra_args);
+    }
 
     let mut cmd = Command::new("gh");
     cmd.args([
@@ -1092,11 +1103,23 @@ fn pr_merge(args: &[String], _verbose: u8) -> Result<()> {
 }
 
 fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
+    // --no-compact: pass full diff through (gh CLI doesn't know this flag, strip it)
+    let no_compact = args.iter().any(|a| a == "--no-compact");
+    let gh_args: Vec<String> = args
+        .iter()
+        .filter(|a| *a != "--no-compact")
+        .cloned()
+        .collect();
+
+    if no_compact {
+        return run_passthrough_with_extra("gh", &["pr", "diff"], &gh_args);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
     cmd.args(["pr", "diff"]);
-    for arg in args {
+    for arg in gh_args.iter() {
         cmd.arg(arg);
     }
 
@@ -1115,7 +1138,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
         print!("{}", msg);
         msg.to_string()
     } else {
-        let compacted = git::compact_diff(&raw, 100);
+        let compacted = git::compact_diff(&raw, 500);
         println!("{}", compacted);
         compacted
     };
@@ -1179,47 +1202,10 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
 }
 
 fn run_api(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("gh");
-    cmd.arg("api");
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    let output = cmd.output().context("Failed to run gh api")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        timer.track("gh api", "rtk gh api", &stderr, &stderr);
-        eprintln!("{}", stderr.trim());
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    // Try to parse as JSON and filter
-    let filtered = match json_cmd::filter_json_string(&raw, 5) {
-        Ok(schema) => {
-            println!("{}", schema);
-            schema
-        }
-        Err(_) => {
-            // Not JSON, print truncated raw output
-            let mut result = String::new();
-            let lines: Vec<&str> = raw.lines().take(20).collect();
-            let joined = lines.join("\n");
-            result.push_str(&joined);
-            print!("{}", joined);
-            if raw.lines().count() > 20 {
-                result.push_str("\n... (truncated)");
-                println!("\n... (truncated)");
-            }
-            result
-        }
-    };
-
-    timer.track("gh api", "rtk gh api", &raw, &filtered);
-    Ok(())
+    // gh api is an explicit/advanced command — the user knows what they asked for.
+    // Converting JSON to a schema destroys all values and forces Claude to re-fetch.
+    // Passthrough preserves the full response and tracks metrics at 0% savings.
+    run_passthrough("gh", "api", args)
 }
 
 /// Pass through a command with base args + extra args, tracking as passthrough.
@@ -1430,6 +1416,36 @@ mod tests {
     #[test]
     fn test_run_view_no_passthrough_other_flags() {
         assert!(!should_passthrough_run_view(&["--web".into()]));
+    }
+
+    // --- should_passthrough_pr_view tests ---
+
+    #[test]
+    fn test_should_passthrough_pr_view_json() {
+        assert!(should_passthrough_pr_view(&[
+            "--json".into(),
+            "body,comments".into()
+        ]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_view_jq() {
+        assert!(should_passthrough_pr_view(&["--jq".into(), ".body".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_view_web() {
+        assert!(should_passthrough_pr_view(&["--web".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_view_default() {
+        assert!(!should_passthrough_pr_view(&[]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_view_other_flags() {
+        assert!(!should_passthrough_pr_view(&["--comments".into()]));
     }
 
     // --- filter_markdown_body tests ---
