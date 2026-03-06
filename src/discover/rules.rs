@@ -44,6 +44,8 @@ pub const PATTERNS: &[&str] = &[
     // Go tooling
     r"^go\s+(test|build|vet)",
     r"^golangci-lint(\s|$)",
+    // Gradle / Gradlew
+    r"^(\.?/?gradlew?)\s+",
     // Ruby tooling
     r"^bundle\s+(install|update)\b",
     r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
@@ -335,6 +337,15 @@ pub const RULES: &[RtkRule] = &[
         category: "Go",
         savings_pct: 85.0,
         subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Gradle / Gradlew
+    RtkRule {
+        rtk_cmd: "rtk gradle",
+        rewrite_prefixes: &["gradle", "./gradlew", "gradlew"],
+        category: "JVM",
+        savings_pct: 85.0,
+        subcmd_savings: &[("build", 80.0), ("test", 85.0), ("dependencies", 60.0)],
         subcmd_status: &[],
     },
     // Ruby tooling

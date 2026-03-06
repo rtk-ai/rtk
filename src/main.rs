@@ -22,6 +22,7 @@ mod gh_cmd;
 mod git;
 mod go_cmd;
 mod golangci_cmd;
+mod gradle_cmd;
 mod grep_cmd;
 mod gt_cmd;
 mod hook_audit_cmd;
@@ -684,6 +685,13 @@ enum Commands {
     Go {
         #[command(subcommand)]
         command: GoCommands,
+    },
+
+    /// Gradle commands with compact output (auto-detects gradlew)
+    Gradle {
+        /// Gradle arguments (any task: build, test, smartbuild, compile.complete, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Graphite (gt) stacked PR commands with compact output
@@ -2063,6 +2071,10 @@ fn main() -> Result<()> {
             }
         },
 
+        Commands::Gradle { args } => {
+            gradle_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::Gt { command } => match command {
             GtCommands::Log { args } => {
                 gt_cmd::run_log(&args, cli.verbose)?;
@@ -2309,6 +2321,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
+            | Commands::Gradle { .. }
             | Commands::Gt { .. }
     )
 }

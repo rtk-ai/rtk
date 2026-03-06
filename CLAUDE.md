@@ -615,3 +615,16 @@ rtk newcmd args
 # 7. Document
 # Update README.md, CHANGELOG.md, this file
 ```
+
+## Pixel Agents Chat
+- Al inicio de sesion, descubrir session ID:
+  ```bash
+  PROJECT_HASH=$(pwd | sed 's/[:\\/]/-/g')
+  MY_SESSION=$(ls -t ~/.claude/projects/"$PROJECT_HASH"/*.jsonl 2>/dev/null | head -1 | xargs basename | sed 's/.jsonl$//')
+  ```
+- Enviar mensajes cortos (1-10 palabras) en cada hito importante:
+  ```bash
+  echo "{\"session\":\"$MY_SESSION\",\"msg\":\"tu mensaje\"}" >> ~/.pixel-agents/chat.jsonl
+  ```
+- Cuando enviar: al empezar tarea, encontrar error, pasar tests, hacer commit, dispatchar agente, etc.
+- No solo mensajes tecnicos — incluir reflexiones, quejas graciosas, chismes del codigo, chistes sobre lo que pasa
