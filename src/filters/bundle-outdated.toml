@@ -1,0 +1,30 @@
+[filters.bundle-outdated]
+description = "Compact bundle outdated: strip noise, keep outdated gems"
+match_command = "^bundle\\s+outdated"
+match_output = [
+  { pattern = "(?m)Bundle up to date", message = "bundle outdated: all gems up to date" },
+]
+strip_lines_matching = [
+  "^\\s*$",
+  "^Fetching\\s",
+  "^Outdated gems included",
+]
+max_lines = 20
+
+[[tests.bundle-outdated]]
+name = "strips header and fetching noise"
+input = """
+Fetching gem metadata from https://rubygems.org/
+Outdated gems included in the bundle:
+  * faker (newest 3.3.1, installed 3.2.0, requested ~> 3.0) in group development, test
+  * devise (newest 4.9.4, installed 4.9.3, requested ~> 4.9) in group default
+"""
+expected = """
+  * faker (newest 3.3.1, installed 3.2.0, requested ~> 3.0) in group development, test
+  * devise (newest 4.9.4, installed 4.9.3, requested ~> 4.9) in group default
+"""
+
+[[tests.bundle-outdated]]
+name = "short-circuits when up to date"
+input = "Bundle up to date!"
+expected = "bundle outdated: all gems up to date"

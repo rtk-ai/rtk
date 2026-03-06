@@ -1,0 +1,48 @@
+[filters.rails-generate]
+description = "Compact rails generate/destroy: strip invoke lines, keep create/remove/skip/conflict"
+match_command = "^(rails|bin/rails|bundle\\s+exec\\s+rails)\\s+(generate|g|destroy|d)\\b"
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*invoke\\s",
+  "^\\s*route\\s",
+]
+max_lines = 30
+on_empty = "rails generate: ok (no output)"
+
+[[tests.rails-generate]]
+name = "strips invoke lines, keeps create/remove"
+input = """
+      invoke  active_record
+      create    db/migrate/20260228120000_create_short_term_price_lists.rb
+      create    app/models/short_term_price_list.rb
+      invoke    rspec
+      create      spec/models/short_term_price_list_spec.rb
+      invoke      factory_bot
+      create        spec/factories/short_term_price_lists.rb
+"""
+expected = """
+      create    db/migrate/20260228120000_create_short_term_price_lists.rb
+      create    app/models/short_term_price_list.rb
+      create      spec/models/short_term_price_list_spec.rb
+      create        spec/factories/short_term_price_lists.rb
+"""
+
+[[tests.rails-generate]]
+name = "destroy output keeps remove lines"
+input = """
+      invoke  active_record
+      remove    db/migrate/20260228120000_create_short_term_price_lists.rb
+      remove    app/models/short_term_price_list.rb
+      invoke    rspec
+      remove      spec/models/short_term_price_list_spec.rb
+"""
+expected = """
+      remove    db/migrate/20260228120000_create_short_term_price_lists.rb
+      remove    app/models/short_term_price_list.rb
+      remove      spec/models/short_term_price_list_spec.rb
+"""
+
+[[tests.rails-generate]]
+name = "empty output returns ok"
+input = ""
+expected = "rails generate: ok (no output)"

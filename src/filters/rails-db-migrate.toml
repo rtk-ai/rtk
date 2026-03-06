@@ -1,0 +1,45 @@
+[filters.rails-db-migrate]
+description = "Compact rails db:migrate: strip SQL details, keep migration names and timing"
+match_command = "^(rails|bin/rails|bundle\\s+exec\\s+rails)\\s+db:migrate(\\s|$)"
+match_output = [
+  { pattern = "(?m)Schema is up to date", message = "rails db:migrate: schema is up to date" },
+  { pattern = "(?m)already up", message = "rails db:migrate: already up to date" },
+]
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*--\\s",
+  "^\\s*->\\s",
+]
+truncate_lines_at = 120
+max_lines = 20
+on_empty = "rails db:migrate: no pending migrations"
+
+[[tests.rails-db-migrate]]
+name = "strips SQL detail lines, keeps migration markers"
+input = """
+== 20240201120000 CreateUsersTable: migrating =================================
+-- create_table(:users)
+   -> 0.0042s
+== 20240201120000 CreateUsersTable: migrated (0.0043s) ========================
+
+== 20240202110000 AddEmailIndexToUsers: migrating ============================
+-- add_index(:users, :email, {:unique=>true})
+   -> 0.0021s
+== 20240202110000 AddEmailIndexToUsers: migrated (0.0022s) ====================
+"""
+expected = """
+== 20240201120000 CreateUsersTable: migrating =================================
+== 20240201120000 CreateUsersTable: migrated (0.0043s) ========================
+== 20240202110000 AddEmailIndexToUsers: migrating ============================
+== 20240202110000 AddEmailIndexToUsers: migrated (0.0022s) ====================
+"""
+
+[[tests.rails-db-migrate]]
+name = "schema up to date short-circuits"
+input = "Schema is up to date."
+expected = "rails db:migrate: schema is up to date"
+
+[[tests.rails-db-migrate]]
+name = "empty output returns no pending"
+input = ""
+expected = "rails db:migrate: no pending migrations"

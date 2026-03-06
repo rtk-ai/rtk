@@ -1,0 +1,94 @@
+[filters.bundle-list]
+description = "Compact bundle list: strip header, truncate long lists"
+match_command = "^bundle\\s+list"
+strip_lines_matching = [
+  "^\\s*$",
+  "^Gems included by the bundle:",
+]
+truncate_lines_at = 120
+head_lines = 30
+
+[[tests.bundle-list]]
+name = "strips header and blank lines, keeps gems"
+input = """
+Gems included by the bundle:
+  * actioncable (7.1.3)
+  * actionmailbox (7.1.3)
+  * rails (7.1.3)
+"""
+expected = """
+  * actioncable (7.1.3)
+  * actionmailbox (7.1.3)
+  * rails (7.1.3)
+"""
+
+[[tests.bundle-list]]
+name = "truncates long lists at 30 lines"
+input = """
+Gems included by the bundle:
+  * gem01 (1.0)
+  * gem02 (1.0)
+  * gem03 (1.0)
+  * gem04 (1.0)
+  * gem05 (1.0)
+  * gem06 (1.0)
+  * gem07 (1.0)
+  * gem08 (1.0)
+  * gem09 (1.0)
+  * gem10 (1.0)
+  * gem11 (1.0)
+  * gem12 (1.0)
+  * gem13 (1.0)
+  * gem14 (1.0)
+  * gem15 (1.0)
+  * gem16 (1.0)
+  * gem17 (1.0)
+  * gem18 (1.0)
+  * gem19 (1.0)
+  * gem20 (1.0)
+  * gem21 (1.0)
+  * gem22 (1.0)
+  * gem23 (1.0)
+  * gem24 (1.0)
+  * gem25 (1.0)
+  * gem26 (1.0)
+  * gem27 (1.0)
+  * gem28 (1.0)
+  * gem29 (1.0)
+  * gem30 (1.0)
+  * gem31 (1.0)
+  * gem32 (1.0)
+"""
+expected = """
+  * gem01 (1.0)
+  * gem02 (1.0)
+  * gem03 (1.0)
+  * gem04 (1.0)
+  * gem05 (1.0)
+  * gem06 (1.0)
+  * gem07 (1.0)
+  * gem08 (1.0)
+  * gem09 (1.0)
+  * gem10 (1.0)
+  * gem11 (1.0)
+  * gem12 (1.0)
+  * gem13 (1.0)
+  * gem14 (1.0)
+  * gem15 (1.0)
+  * gem16 (1.0)
+  * gem17 (1.0)
+  * gem18 (1.0)
+  * gem19 (1.0)
+  * gem20 (1.0)
+  * gem21 (1.0)
+  * gem22 (1.0)
+  * gem23 (1.0)
+  * gem24 (1.0)
+  * gem25 (1.0)
+  * gem26 (1.0)
+  * gem27 (1.0)
+  * gem28 (1.0)
+  * gem29 (1.0)
+  * gem30 (1.0)
+... (2 lines omitted)
+"""

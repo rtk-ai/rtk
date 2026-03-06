@@ -1,0 +1,47 @@
+[filters.bundle-install]
+description = "Compact bundle install/update: strip Using/Fetching noise, keep changes"
+match_command = "^bundle\\s+(install|update)"
+match_output = [
+  { pattern = "(?m)^Bundle complete!.*\\n?$", message = "bundle: ok" },
+]
+strip_lines_matching = [
+  "^\\s*$",
+  "^Using\\s",
+  "^Fetching\\s",
+  "^Resolving\\s",
+  "^Downloading\\s",
+]
+on_empty = "bundle: ok"
+
+[[tests.bundle-install]]
+name = "strips Using/Fetching noise, keeps installs"
+input = """
+Fetching gem metadata from https://rubygems.org/.........
+Resolving dependencies...
+Using rake 13.2.1
+Using concurrent-ruby 1.3.5
+Installing sidekiq 8.1.1 (was 8.0.0)
+Installing stripe 18.4.0
+Bundle complete! 142 gems, 387 total gems installed.
+"""
+expected = """
+Installing sidekiq 8.1.1 (was 8.0.0)
+Installing stripe 18.4.0
+Bundle complete! 142 gems, 387 total gems installed.
+"""
+
+[[tests.bundle-install]]
+name = "all cached returns ok"
+input = """
+Using rake 13.1.0
+Using concurrent-ruby 1.2.3
+Using rails 7.1.3
+"""
+expected = "bundle: ok"
+
+[[tests.bundle-install]]
+name = "short-circuits on Bundle complete only"
+input = """
+Bundle complete! 50 gems, 3 git sources
+"""
+expected = "bundle: ok"

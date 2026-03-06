@@ -272,6 +272,10 @@ PYTHON            ruff_cmd.rs       ruff check/format      80%+       ✓
 GO                go_cmd.rs         go test/build/vet      75-90%     ✓
                   golangci_cmd.rs   golangci-lint          85%        ✓
 
+RUBY (hybrid)     TOML filters      bundle list/outdated/install/update  10-30%  ✓
+                  rails_cmd.rs      rails test/routes (Rust)  40-50%+    ✓
+                  TOML filters      rails db:migrate/rollback/generate  20-40%  ✓
+
 NETWORK           wget_cmd.rs       wget                   85-95%     ✓
                   curl_cmd.rs       curl                   70%        ✓
 
@@ -293,16 +297,17 @@ SHARED            utils.rs          Helpers                N/A        ✓
                   tee.rs            Full output recovery   N/A        ✓
 ```
 
-**Total: 59 modules** (38 command modules + 21 infrastructure modules)
+**Total: 61 modules** (40 command modules + 21 infrastructure modules)
 
 ### Module Count Breakdown
 
-- **Command Modules**: 34 (directly exposed to users)
-- **Infrastructure Modules**: 20 (utils, filter, tracking, tee, config, init, gain, toml_filter, verify_cmd, etc.)
+- **Command Modules**: 40 (directly exposed to users, includes TOML DSL filters)
+- **Infrastructure Modules**: 21 (utils, filter, tracking, tee, config, init, gain, toml_filter, verify_cmd, etc.)
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
 - **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
+- **Ruby Tooling**: 1 Rust module (rails test/routes) + 7 TOML filters (bundle, rails db/generate)
 
 ---
 
@@ -469,6 +474,20 @@ Commands::Pip { args }                 Build { args },
                                      └─ golangci_cmd.rs
 
 Mirrors: lint, prettier              Mirrors: git, cargo
+
+"rtk bundle *" (no Clap)             Commands::Rails { command }
+│                                    │
+└─ run_fallback() → TOML filters     ├─ rails_cmd.rs (sub-enum router)
+   bundle-list.toml                  │   ├─ Test { args }    → Rust (minitest state machine)
+   bundle-outdated.toml              │   ├─ Routes { args }  → Rust (HashMap grouping)
+   bundle-install.toml               │   └─ Other(Vec<OsString>)
+                                     │       └─ run_other() → TOML filter → passthrough
+                                     │           rails-db-migrate.toml
+                                     │           rails-db-migrate-status.toml
+                                     │           rails-db-rollback.toml
+                                     │           rails-generate.toml
+
+TOML: simple line filtering          Rust: state machines, HashMaps
 ```
 
 ### Python Stack Architecture

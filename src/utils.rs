@@ -259,6 +259,88 @@ pub fn package_manager_exec(tool: &str) -> Command {
     }
 }
 
+pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 {
+    match output.status.code() {
+        Some(code) => code,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = output.status.signal() {
+                    eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
+                    return 128 + sig;
+                }
+            }
+            eprintln!("[rtk] {}: process terminated by signal", label);
+            1
+        }
+    }
+}
+
+/// Return the last `n` lines of output with a label, for use as a fallback
+/// when filter parsing fails. Logs a diagnostic to stderr.
+pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
+    eprintln!(
+        "[rtk] {}: output format not recognized, showing last {} lines",
+        label, n
+    );
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+pub fn ruby_exec(tool: &str) -> Command {
+    if std::path::Path::new("Gemfile").exists() {
+        match std::fs::read_to_string("Gemfile") {
+            Ok(gemfile) => {
+                if gemfile_mentions_gem(&gemfile, tool) {
+                    let mut c = Command::new("bundle");
+                    c.arg("exec").arg(tool);
+                    return c;
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[rtk] Warning: Gemfile exists but could not be read ({}). \
+                     Running '{}' directly (not via bundle exec). \
+                     Check file permissions if this causes version mismatches.",
+                    e, tool
+                );
+            }
+        }
+    }
+    Command::new(tool)
+}
+
+/// Check if a Gemfile declares a gem matching the tool name.
+/// Matches `gem 'tool'`, `gem "tool"`, `gem 'tool-rails'`, etc.
+/// Avoids false positives from comments or unrelated substrings.
+fn gemfile_mentions_gem(gemfile: &str, tool: &str) -> bool {
+    for line in gemfile.lines() {
+        let trimmed = line.trim();
+        // Skip comments
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        // Match gem declarations: gem 'tool' or gem "tool" or gem 'tool-*'
+        if let Some(rest) = trimmed.strip_prefix("gem") {
+            let rest = rest.trim_start();
+            if rest.starts_with(&format!("'{}'", tool))
+                || rest.starts_with(&format!("\"{}\"", tool))
+                || rest.starts_with(&format!("'{}-", tool))
+                || rest.starts_with(&format!("\"{}-", tool))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn count_tokens(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

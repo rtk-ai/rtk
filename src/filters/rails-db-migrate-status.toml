@@ -1,0 +1,40 @@
+[filters.rails-db-migrate-status]
+description = "Compact rails db:migrate:status: show pending (down) migrations and database line"
+match_command = "^(rails|bin/rails|bundle\\s+exec\\s+rails)\\s+db:migrate:status"
+keep_lines_matching = [
+  "^\\s*down\\s",
+  "^\\s*database:",
+  "^database:",
+]
+on_empty = "rails db:migrate:status: all migrations up"
+
+[[tests.rails-db-migrate-status]]
+name = "keeps only down migrations and database line"
+input = """
+database: myapp_development
+
+ Status   Migration ID    Migration Name
+--------------------------------------------------
+   up     20200101120000  Create users
+   up     20200102120000  Create parkings
+  down    20260228120000  Add status to bookings
+  down    20260228130000  Create short term price lists
+"""
+expected = """
+database: myapp_development
+  down    20260228120000  Add status to bookings
+  down    20260228130000  Create short term price lists
+"""
+
+[[tests.rails-db-migrate-status]]
+name = "all up returns summary"
+input = """
+database: myapp_development
+
+ Status   Migration ID    Migration Name
+--------------------------------------------------
+   up     20200101120000  Create users
+   up     20200102120000  Create parkings
+   up     20200103120000  Add status to parkings
+"""
+expected = "rails db:migrate:status: all migrations up"

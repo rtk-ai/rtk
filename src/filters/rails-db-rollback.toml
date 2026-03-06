@@ -1,0 +1,29 @@
+[filters.rails-db-rollback]
+description = "Compact rails db:rollback: strip SQL details, keep revert markers"
+match_command = "^(rails|bin/rails|bundle\\s+exec\\s+rails)\\s+db:rollback"
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*--\\s",
+  "^\\s*->\\s",
+]
+truncate_lines_at = 120
+max_lines = 20
+on_empty = "rails db:rollback: nothing to rollback"
+
+[[tests.rails-db-rollback]]
+name = "strips SQL details, keeps revert markers"
+input = """
+== 20260228130000 CreateShortTermPriceLists: reverting =========================
+-- drop_table(:short_term_price_lists)
+   -> 0.0034s
+== 20260228130000 CreateShortTermPriceLists: reverted (0.0035s) ================
+"""
+expected = """
+== 20260228130000 CreateShortTermPriceLists: reverting =========================
+== 20260228130000 CreateShortTermPriceLists: reverted (0.0035s) ================
+"""
+
+[[tests.rails-db-rollback]]
+name = "empty output returns nothing to rollback"
+input = ""
+expected = "rails db:rollback: nothing to rollback"
