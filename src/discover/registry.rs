@@ -1199,6 +1199,38 @@ mod tests {
         );
     }
 
+    // --- MySQL ---
+
+    #[test]
+    fn test_classify_mysql() {
+        assert!(matches!(
+            classify_command("mysql -u root -p mydb"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mysql",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mysql_host() {
+        assert!(matches!(
+            classify_command("mysql -h 192.168.1.1 -u admin mydb"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mysql",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_mysql() {
+        assert_eq!(
+            rewrite_command("mysql -u root -p mydb"),
+            Some("rtk mysql -u root -p mydb".into())
+        );
+    }
+
     // --- Python tooling ---
 
     #[test]

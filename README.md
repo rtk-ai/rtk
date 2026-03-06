@@ -175,6 +175,7 @@ rtk pytest                       # Python tests (failures only, 90% reduction)
 rtk pip list                     # Python packages (auto-detect uv, 70% reduction)
 rtk go test                      # Go tests (NDJSON, 90% reduction)
 rtk golangci-lint run            # Go linting (JSON, 85% reduction)
+rtk mysql -h host -u user -p -e "SELECT ..."  # MySQL client (56-58% reduction)
 ```
 
 ### Data & Analytics
@@ -282,6 +283,13 @@ rtk go test                      # NDJSON streaming parser (90% reduction)
 rtk go build                     # Build errors only (80% reduction)
 rtk go vet                       # Vet issues (75% reduction)
 rtk golangci-lint run            # JSON grouped by rule (85% reduction)
+```
+
+### Database Clients
+```bash
+rtk mysql -h host -u root -p -e "SELECT ..." --table  # Strip box borders, tab-separated (56% reduction)
+rtk mysql -h host -u root -p --vertical -e "SELECT ..."  # Collapse vertical to key=val (58% reduction)
+rtk psql -U postgres -d mydb -c "SELECT ..."  # Strip separators, tab-separated (40-60% reduction)
 ```
 
 ## Examples
@@ -625,6 +633,7 @@ The hook is included in this repository at `.claude/hooks/rtk-rewrite.sh`. To us
 | `pip list/install/outdated` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint run` | `rtk golangci-lint run` |
+| `mysql -h/-u/-e` | `rtk mysql ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |

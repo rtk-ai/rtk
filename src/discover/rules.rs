@@ -48,6 +48,8 @@ pub const PATTERNS: &[&str] = &[
     r"^aws\s+",
     // PostgreSQL
     r"^psql(\s|$)",
+    // MySQL
+    r"^mysql(\s|$)",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -314,6 +316,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["psql"],
         category: "Infra",
         savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // MySQL
+    RtkRule {
+        rtk_cmd: "rtk mysql",
+        rewrite_prefixes: &["mysql"],
+        category: "Infra",
+        savings_pct: 57.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

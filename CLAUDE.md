@@ -230,6 +230,7 @@ rtk gain --history | grep proxy
 | pip_cmd.rs | pip/uv package manager | JSON parsing, auto-detect uv (70-85% reduction) |
 | go_cmd.rs | Go commands | NDJSON for test, text for build/vet (80-90% reduction) |
 | golangci_cmd.rs | golangci-lint | JSON parsing, group by rule (85% reduction) |
+| mysql_cmd.rs | MySQL client | Strip box borders, compact tables (56-58% reduction) |
 | tee.rs | Full output recovery | Save raw output to file on failure, print hint for LLM re-read |
 | utils.rs | Shared utilities | Package manager detection, common formatting |
 | discover/ | Claude Code history analysis | Scan JSONL sessions, classify commands, report missed savings |

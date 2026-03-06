@@ -29,6 +29,7 @@ mod local_llm;
 mod log_cmd;
 mod ls;
 mod mypy_cmd;
+mod mysql_cmd;
 mod next_cmd;
 mod npm_cmd;
 mod parser;
@@ -180,6 +181,14 @@ enum Commands {
         subcommand: String,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// MySQL client with compact output (strip borders, compress tables)
+    #[command(disable_help_flag = true)]
+    Mysql {
+        /// mysql arguments (pass -h, -u, -p, -e etc. directly)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<String>,
     },
 
@@ -1192,6 +1201,10 @@ fn main() -> Result<()> {
 
         Commands::Aws { subcommand, args } => {
             aws_cmd::run(&subcommand, &args, cli.verbose)?;
+        }
+
+        Commands::Mysql { args } => {
+            mysql_cmd::run(&args, cli.verbose)?;
         }
 
         Commands::Psql { args } => {
