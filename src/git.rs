@@ -10,7 +10,7 @@ pub enum GitCommand {
     Status,
     Show,
     Add,
-    Commit { messages: Vec<String> },
+    Commit,
     Push,
     Pull,
     Branch,
@@ -42,7 +42,7 @@ pub fn run(
         GitCommand::Status => run_status(args, verbose, global_args),
         GitCommand::Show => run_show(args, max_lines, verbose, global_args),
         GitCommand::Add => run_add(args, verbose, global_args),
-        GitCommand::Commit { messages } => run_commit(&messages, verbose, global_args),
+        GitCommand::Commit => run_commit(args, verbose, global_args),
         GitCommand::Push => run_push(args, verbose, global_args),
         GitCommand::Pull => run_pull(args, verbose, global_args),
         GitCommand::Branch => run_branch(args, verbose, global_args),
@@ -703,30 +703,25 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn build_commit_command(messages: &[String], global_args: &[String]) -> Command {
+fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("commit");
-    for msg in messages {
-        cmd.args(["-m", msg]);
+    for arg in args {
+        cmd.arg(arg);
     }
     cmd
 }
 
-fn run_commit(messages: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
+fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let original_cmd = messages
-        .iter()
-        .map(|m| format!("-m \"{}\"", m))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let original_cmd = format!("git commit {}", original_cmd);
+    let original_cmd = format!("git commit {}", args.join(" "));
 
     if verbose > 0 {
         eprintln!("{}", original_cmd);
     }
 
-    let output = build_commit_command(messages, global_args)
+    let output = build_commit_command(args, global_args)
         .output()
         .context("Failed to run git commit")?;
 
@@ -1721,28 +1716,30 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
     #[test]
     fn test_commit_single_message() {
-        let messages = vec!["fix: typo".to_string()];
-        let cmd = build_commit_command(&messages, &[]);
-        let args: Vec<_> = cmd
+        let args = vec!["-m".to_string(), "fix: typo".to_string()];
+        let cmd = build_commit_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert_eq!(args, vec!["commit", "-m", "fix: typo"]);
+        assert_eq!(cmd_args, vec!["commit", "-m", "fix: typo"]);
     }
 
     #[test]
     fn test_commit_multiple_messages() {
-        let messages = vec![
+        let args = vec![
+            "-m".to_string(),
             "feat: add multi-paragraph support".to_string(),
+            "-m".to_string(),
             "This allows git commit -m \"title\" -m \"body\".".to_string(),
         ];
-        let cmd = build_commit_command(&messages, &[]);
-        let args: Vec<_> = cmd
+        let cmd = build_commit_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         assert_eq!(
-            args,
+            cmd_args,
             vec![
                 "commit",
                 "-m",
@@ -1753,29 +1750,30 @@ no changes added to commit (use "git add" and/or "git commit -a")
         );
     }
 
+    // #327: git commit -am "msg" must pass -am through to git
     #[test]
-    fn test_commit_three_messages() {
-        let messages = vec![
-            "title".to_string(),
-            "body".to_string(),
-            "footer: refs #202".to_string(),
-        ];
-        let cmd = build_commit_command(&messages, &[]);
-        let args: Vec<_> = cmd
+    fn test_commit_am_flag() {
+        let args = vec!["-am".to_string(), "quick fix".to_string()];
+        let cmd = build_commit_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert_eq!(
-            args,
-            vec![
-                "commit",
-                "-m",
-                "title",
-                "-m",
-                "body",
-                "-m",
-                "footer: refs #202"
-            ]
-        );
+        assert_eq!(cmd_args, vec!["commit", "-am", "quick fix"]);
+    }
+
+    #[test]
+    fn test_commit_amend() {
+        let args = vec![
+            "--amend".to_string(),
+            "-m".to_string(),
+            "new msg".to_string(),
+        ];
+        let cmd = build_commit_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(cmd_args, vec!["commit", "--amend", "-m", "new msg"]);
     }
 }
