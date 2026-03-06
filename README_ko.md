@@ -19,7 +19,7 @@
   <a href="#설치">설치</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">문제 해결</a> &bull;
   <a href="ARCHITECTURE.md">아키텍처</a> &bull;
-  <a href="https://discord.gg/pvHdzAec">Discord</a>
+  <a href="https://discord.gg/gFwRPEKq4p">Discord</a>
 </p>
 
 <p align="center">
