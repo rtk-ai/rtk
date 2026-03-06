@@ -151,7 +151,19 @@ pub fn is_hook_disabled() -> bool {
 /// - Already routed through rtk (`rtk ...` or `/path/to/rtk ...`)
 /// - Contains heredoc (`<<`) which needs raw shell processing
 pub fn should_passthrough(cmd: &str) -> bool {
-    cmd.starts_with("rtk ") || cmd.contains("/rtk ") || cmd.contains("<<")
+    // Already rtk or heredoc → no-op
+    if cmd.starts_with("rtk ") || cmd.contains("/rtk ") || cmd.contains("<<") {
+        return true;
+    }
+    // #196: gh --json/--jq/--template produces structured output that rtk gh
+    // would corrupt. Pass through unchanged so callers get raw JSON.
+    // Mirrors the guard in registry::rewrite_segment.
+    if (cmd.starts_with("gh ") || cmd.contains(" gh "))
+        && (cmd.contains("--json") || cmd.contains("--jq") || cmd.contains("--template"))
+    {
+        return true;
+    }
+    false
 }
 
 /// Replace the command field in a tool_input object, preserving other fields.
@@ -1714,5 +1726,24 @@ mod tests {
             "cat (single-file) must rewrite to rtk read on this branch; got: {:?}",
             result
         );
+    }
+    // --- #196: gh --json/--jq/--template passthrough ---
+
+    #[test]
+    fn test_gh_json_flag_passes_through() {
+        // gh --json produces structured JSON that rtk gh would corrupt
+        assert!(should_passthrough("gh pr list --json number,title"));
+        assert!(should_passthrough(
+            "gh pr list --json number --jq '.[].number'"
+        ));
+        assert!(should_passthrough("gh pr view 42 --template '{{.title}}'"));
+        assert!(should_passthrough("gh api repos/owner/repo --jq '.name'"));
+    }
+
+    #[test]
+    fn test_gh_without_json_not_passthrough() {
+        // gh without structured output flags → still eligible for rewriting
+        assert!(!should_passthrough("gh pr list"));
+        assert!(!should_passthrough("gh issue list"));
     }
 }
