@@ -23,7 +23,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = if stderr.is_empty() {
+        stdout.to_string()
+    } else {
+        format!("{}\n{}", stdout, stderr)
+    };
 
     let exit_code = output
         .status
@@ -355,7 +359,10 @@ pub fn filter_gradle_output(output: &str) -> String {
         // Everything else is noise — skip
     }
 
-    // Clean up trailing blank lines
+    // Clean up leading and trailing blank lines
+    while result.first().map_or(false, |l| l.is_empty()) {
+        result.remove(0);
+    }
     while result.last().map_or(false, |l| l.is_empty()) {
         result.pop();
     }
