@@ -426,20 +426,31 @@ else
     skip_test "rtk golangci-lint" "golangci-lint not installed"
 fi
 
-# ── 29. Global flags ────────────────────────────────
+# ── 29. Graphite (conditional) ─────────────────────
+
+section "Graphite (conditional)"
+
+if command -v gt &>/dev/null; then
+    assert_help   "rtk gt"                          rtk gt --help
+    assert_ok     "rtk gt log short"                rtk gt log short
+else
+    skip "gt not installed"
+fi
+
+# ── 30. Global flags ────────────────────────────────
 
 section "Global flags"
 
 assert_ok      "rtk -u ls ."                  rtk -u ls .
 assert_ok      "rtk --skip-env npm --help"    rtk --skip-env npm --help
 
-# ── 30. CcEconomics ─────────────────────────────────
+# ── 31. CcEconomics ─────────────────────────────────
 
 section "CcEconomics"
 
 assert_ok      "rtk cc-economics"             rtk cc-economics
 
-# ── 31. Learn ───────────────────────────────────────
+# ── 32. Learn ───────────────────────────────────────
 
 section "Learn"
 

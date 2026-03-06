@@ -9,11 +9,11 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::Command;
 
-/// Tronque une chaîne à `max_len` caractères avec "..." si nécessaire.
+/// Truncates a string to `max_len` characters, appending "..." if needed.
 ///
 /// # Arguments
-/// * `s` - La chaîne à tronquer
-/// * `max_len` - Longueur maximale avant troncature (minimum 3 pour inclure "...")
+/// * `s` - The string to truncate
+/// * `max_len` - Maximum length before truncation (minimum 3 to include "...")
 ///
 /// # Examples
 /// ```
@@ -33,10 +33,10 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
-/// Supprime les codes ANSI d'une chaîne (couleurs, styles).
+/// Strips ANSI escape codes (colors, styles) from a string.
 ///
 /// # Arguments
-/// * `text` - Texte contenant potentiellement des codes ANSI
+/// * `text` - Text potentially containing ANSI codes
 ///
 /// # Examples
 /// ```
@@ -51,11 +51,11 @@ pub fn strip_ansi(text: &str) -> String {
     ANSI_RE.replace_all(text, "").to_string()
 }
 
-/// Exécute une commande et retourne stdout/stderr nettoyés.
+/// Execute a command and return cleaned stdout/stderr.
 ///
 /// # Arguments
-/// * `cmd` - Commande à exécuter (ex: "eslint")
-/// * `args` - Arguments de la commande
+/// * `cmd` - Command to execute (e.g. "eslint")
+/// * `args` - Command arguments
 ///
 /// # Returns
 /// `(stdout: String, stderr: String, exit_code: i32)`
@@ -80,13 +80,13 @@ pub fn execute_command(cmd: &str, args: &[&str]) -> Result<(String, String, i32)
     Ok((stdout, stderr, exit_code))
 }
 
-/// Formate un nombre de tokens avec suffixes K/M pour lisibilité.
+/// Format a token count with K/M suffixes for readability.
 ///
 /// # Arguments
-/// * `n` - Nombre de tokens
+/// * `n` - Token count
 ///
 /// # Returns
-/// String formaté (ex: "1.2M", "59.2K", "694")
+/// Formatted string (e.g. "1.2M", "59.2K", "694")
 ///
 /// # Examples
 /// ```
@@ -105,13 +105,13 @@ pub fn format_tokens(n: usize) -> String {
     }
 }
 
-/// Formate un montant USD avec précision adaptée.
+/// Format a USD amount with adaptive precision.
 ///
 /// # Arguments
-/// * `amount` - Montant en dollars
+/// * `amount` - Amount in dollars
 ///
 /// # Returns
-/// String formaté avec $ prefix
+/// Formatted string with $ prefix
 ///
 /// # Examples
 /// ```
