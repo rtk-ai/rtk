@@ -136,8 +136,8 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
-        "comment" => pr_action("commented", &args[1..], verbose),
-        "edit" => pr_action("edited", &args[1..], verbose),
+        "comment" => pr_action("commented", &args, verbose),
+        "edit" => pr_action("edited", &args, verbose),
         _ => run_passthrough("gh", "pr", args),
     }
 }
@@ -1070,23 +1070,24 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
 /// Generic PR action handler for comment/edit
 fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
+    let subcmd = &args[0];
 
     let mut cmd = Command::new("gh");
-    cmd.args(["pr", action]);
+    cmd.arg("pr");
     for arg in args {
         cmd.arg(arg);
     }
 
     let output = cmd
         .output()
-        .context(format!("Failed to run gh pr {}", action))?;
+        .context(format!("Failed to run gh pr {}", subcmd))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         timer.track(
-            &format!("gh pr {}", action),
-            &format!("rtk gh pr {}", action),
+            &format!("gh pr {}", subcmd),
+            &format!("rtk gh pr {}", subcmd),
             &stderr,
             &stderr,
         );
@@ -1094,8 +1095,8 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
         std::process::exit(output.status.code().unwrap_or(1));
     }
 
-    // Extract PR number from args
-    let pr_num = args
+    // Extract PR number from args (skip args[0] which is the subcommand)
+    let pr_num = args[1..]
         .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| format!("#{}", s))
@@ -1112,8 +1113,8 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
     };
 
     timer.track(
-        &format!("gh pr {}", action),
-        &format!("rtk gh pr {}", action),
+        &format!("gh pr {}", subcmd),
+        &format!("rtk gh pr {}", subcmd),
         &raw,
         &filtered,
     );
