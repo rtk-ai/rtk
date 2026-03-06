@@ -11,6 +11,7 @@ use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
+use cmds::java::mvn_cmd;
 use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
@@ -712,7 +713,13 @@ enum Commands {
         command: GtCommands,
     },
 
-    /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
+    /// Maven commands with compact output
+    Mvn {
+        #[command(subcommand)]
+        command: MvnCommands,
+    },
+
+    /// golangci-lint with compact output
     #[command(name = "golangci-lint")]
     GolangciLint {
         /// Additional golangci-lint arguments
@@ -1090,6 +1097,57 @@ enum GoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported go subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum MvnCommands {
+    /// Compile sources with compact output (errors + warnings only)
+    Compile {
+        /// Additional mvn compile arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run tests with compact output (failures only)
+    Test {
+        /// Additional mvn test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Package with compact output (artifact + test summary)
+    Package {
+        /// Additional mvn package arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Clean with compact output (single confirmation line)
+    Clean {
+        /// Additional mvn clean arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Integration tests with compact output (failures only)
+    #[command(name = "integration-test")]
+    IntegrationTest {
+        /// Additional mvn integration-test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Install with compact output (artifact + test summary + install path)
+    Install {
+        /// Additional mvn install arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Dependency tree with compact output (strip [INFO] prefixes, compact coordinates)
+    #[command(name = "dependency:tree")]
+    DependencyTree {
+        /// Additional mvn dependency:tree arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported mvn subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -2095,6 +2153,21 @@ fn run_cli() -> Result<i32> {
             GtCommands::Other(args) => gt_cmd::run_other(&args, cli.verbose)?,
         },
 
+        Commands::Mvn { command } => match command {
+            MvnCommands::Compile { args } => mvn_cmd::run_compile(&args, cli.verbose)?,
+            MvnCommands::Test { args } => mvn_cmd::run_test(&args, cli.verbose)?,
+            MvnCommands::Package { args } => mvn_cmd::run_package(&args, cli.verbose)?,
+            MvnCommands::Clean { args } => mvn_cmd::run_clean(&args, cli.verbose)?,
+            MvnCommands::IntegrationTest { args } => {
+                mvn_cmd::run_integration_test(&args, cli.verbose)?
+            }
+            MvnCommands::Install { args } => mvn_cmd::run_install(&args, cli.verbose)?,
+            MvnCommands::DependencyTree { args } => {
+                mvn_cmd::run_dependency_tree(&args, cli.verbose)?
+            }
+            MvnCommands::Other(args) => mvn_cmd::run_other(&args, cli.verbose)?,
+        },
+
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
 
         Commands::HookAudit { since } => {
@@ -2428,6 +2501,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
             | Commands::Go { .. }
+            | Commands::Mvn { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
     )
