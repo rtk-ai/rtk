@@ -274,8 +274,6 @@ GO                go_cmd.rs         go test/build/vet      75-90%     ✓
 
 RUBY              rspec_cmd.rs      rspec                  60%+       ✓
                   rubocop_cmd.rs    rubocop                60%+       ✓
-                  bundle_cmd.rs     bundle list/outdated/install/update  10-30%  ✓
-                  rails_cmd.rs      rails test/routes/db   40-50%+    ✓
 
 NETWORK           wget_cmd.rs       wget                   85-95%     ✓
                   curl_cmd.rs       curl                   70%        ✓
@@ -298,17 +296,17 @@ SHARED            utils.rs          Helpers                N/A        ✓
                   tee.rs            Full output recovery   N/A        ✓
 ```
 
-**Total: 61 modules** (42 command modules + 19 infrastructure modules)
+**Total: 59 modules** (40 command modules + 19 infrastructure modules)
 
 ### Module Count Breakdown
 
-- **Command Modules**: 42 (directly exposed to users)
+- **Command Modules**: 40 (directly exposed to users)
 - **Infrastructure Modules**: 18 (utils, filter, tracking, tee, config, init, gain, etc.)
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
 - **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
-- **Ruby Tooling**: 4 modules (rspec, rubocop, bundle, rails)
+- **Ruby Tooling**: 2 modules (rspec, rubocop)
 
 ---
 
@@ -474,16 +472,11 @@ Commands::Pip { args }                 Build { args },
 └─ pip_cmd.rs                        ├─ go_cmd.rs (sub-enum router)
                                      └─ golangci_cmd.rs
 
-Commands::Rspec { args }             Commands::Rails { command }
-Commands::Rubocop { args }           │
-Commands::Bundle { args }            ├─ rails_cmd.rs (sub-enum router)
-│                                    │   ├─ Test { args }
-├─ rspec_cmd.rs                      │   ├─ Routes { args }
-├─ rubocop_cmd.rs                    │   ├─ DbMigrate { args }
-└─ bundle_cmd.rs (subcommand router) │   ├─ DbMigrateStatus { args }
-                                     │   ├─ DbRollback { args }
-                                     │   ├─ Generate { args }
-                                     │   └─ Other(Vec<OsString>)
+Commands::Rspec { args }
+Commands::Rubocop { args }
+│
+├─ rspec_cmd.rs
+└─ rubocop_cmd.rs
 
 Mirrors: lint, prettier              Mirrors: git, cargo
 ```
