@@ -119,12 +119,6 @@ pub fn remove_hash(hook_path: &Path) -> Result<bool> {
 ///
 /// Returns `IntegrityStatus` indicating the result. Callers decide
 /// how to handle each status (warn, block, ignore).
-pub fn verify_hook() -> Result<IntegrityStatus> {
-    let hook_path = resolve_hook_path()?;
-    verify_hook_at(&hook_path)
-}
-
-/// Verify hook integrity for a specific hook path (testable)
 pub fn verify_hook_at(hook_path: &Path) -> Result<IntegrityStatus> {
     let hash_file = hash_path(hook_path);
 
@@ -178,11 +172,11 @@ fn read_stored_hash(path: &Path) -> Result<String> {
     Ok(hash.to_string())
 }
 
-/// Resolve the default hook path (~/.claude/hooks/rtk-rewrite.sh)
+/// Resolve the default hook path (<claude-config-dir>/hooks/rtk-rewrite.sh)
 pub fn resolve_hook_path() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".claude").join("hooks").join("rtk-rewrite.sh"))
-        .context("Cannot determine home directory. Is $HOME set?")
+    Ok(crate::config::claude_config_dir()?
+        .join("hooks")
+        .join("rtk-rewrite.sh"))
 }
 
 /// Run integrity check and print results (for `rtk verify` subcommand)
@@ -243,7 +237,8 @@ pub fn run_verify(verbose: u8) -> Result<()> {
 /// No env-var bypass is provided — if the hook is legitimately modified,
 /// re-run `rtk init -g --auto-patch` to re-establish the baseline.
 pub fn runtime_check() -> Result<()> {
-    match verify_hook()? {
+    let hook_path = resolve_hook_path()?;
+    match verify_hook_at(&hook_path)? {
         IntegrityStatus::Verified | IntegrityStatus::NotInstalled => {
             // All good, proceed
         }
@@ -262,7 +257,8 @@ pub fn runtime_check() -> Result<()> {
                 actual.get(..16).unwrap_or(&actual)
             );
             eprintln!();
-            eprintln!("  The hook at ~/.claude/hooks/rtk-rewrite.sh has been modified.");
+
+            eprintln!("  The hook at {} has been modified.", hook_path.display());
             eprintln!("  This may indicate tampering. RTK will not execute.");
             eprintln!();
             eprintln!("  To restore:  rtk init -g --auto-patch");

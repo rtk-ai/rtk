@@ -1,6 +1,20 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Resolve the Claude Code config directory.
+///
+/// Mirrors Claude Code's own logic:
+///   1. `CLAUDE_CONFIG_DIR` env var (if set)
+///   2. Fallback: `~/.claude`
+pub fn claude_config_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".claude"))
+        .context("Cannot determine home directory. Is $HOME set?")
+}
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -183,5 +197,21 @@ history_days = 90
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert!(config.hooks.exclude_commands.is_empty());
+    }
+
+    #[test]
+    fn test_claude_config_dir_env_override() {
+        std::env::set_var("CLAUDE_CONFIG_DIR", "/tmp/custom-claude");
+        let dir = claude_config_dir().unwrap();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        assert_eq!(dir, PathBuf::from("/tmp/custom-claude"));
+    }
+
+    #[test]
+    fn test_claude_config_dir_default() {
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let dir = claude_config_dir().unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(dir, home.join(".claude"));
     }
 }

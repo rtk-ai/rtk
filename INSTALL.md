@@ -89,6 +89,8 @@ rtk gain  # MUST show token savings, not "command not found"
 
 ### Recommended: Global Hook-First Setup
 
+> **Custom config directory**: If you've set `CLAUDE_CONFIG_DIR`, RTK respects it — all paths below use that directory instead of `~/.claude`.
+
 **Best for: All projects, automatic RTK usage**
 
 ```bash

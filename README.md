@@ -544,6 +544,8 @@ The hook runs as a Claude Code [PreToolUse hook](https://docs.anthropic.com/en/d
 
 ### Quick Install (Automated)
 
+> **Custom config directory**: If you've set `CLAUDE_CONFIG_DIR`, RTK respects it — all paths below use that directory instead of `~/.claude`.
+
 ```bash
 rtk init -g
 # → Installs hook to ~/.claude/hooks/rtk-rewrite.sh (with executable permissions)

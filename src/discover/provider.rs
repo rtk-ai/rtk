@@ -36,8 +36,7 @@ pub struct ClaudeProvider;
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("could not determine home directory")?;
-        let dir = home.join(".claude").join("projects");
+        let dir = crate::config::claude_config_dir()?.join("projects");
         if !dir.exists() {
             anyhow::bail!(
                 "Claude Code projects directory not found: {}\nMake sure Claude Code has been used at least once.",

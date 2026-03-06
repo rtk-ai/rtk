@@ -306,7 +306,7 @@ enum Commands {
 
     /// Initialize rtk instructions in CLAUDE.md
     Init {
-        /// Add to global ~/.claude/CLAUDE.md instead of local
+        /// Add to global CLAUDE.md (default: ~/.claude, override: CLAUDE_CONFIG_DIR)
         #[arg(short, long)]
         global: bool,
 
