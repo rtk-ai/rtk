@@ -5,6 +5,16 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.2](https://github.com/rtk-ai/rtk/compare/v0.27.1...v0.27.2) (2026-03-06)
+
+
+### Bug Fixes
+
+* gh pr edit/comment pass correct subcommand to gh ([#332](https://github.com/rtk-ai/rtk/issues/332)) ([799f085](https://github.com/rtk-ai/rtk/commit/799f0856e4547318230fe150a43f50ab82e1cf03))
+* pass through -R/--repo flag in gh view commands ([#328](https://github.com/rtk-ai/rtk/issues/328)) ([0a1bcb0](https://github.com/rtk-ai/rtk/commit/0a1bcb05e5737311211369dcb92b3f756a6230c6)), closes [#223](https://github.com/rtk-ai/rtk/issues/223)
+* reduce gh diff / git diff / gh api truncation ([#354](https://github.com/rtk-ai/rtk/issues/354)) ([#370](https://github.com/rtk-ai/rtk/issues/370)) ([e356c12](https://github.com/rtk-ai/rtk/commit/e356c1280da9896195d0dff91e152c5f20347a65))
+* strip npx/bunx/pnpm prefixes in lint linter detection ([#186](https://github.com/rtk-ai/rtk/issues/186)) ([#366](https://github.com/rtk-ai/rtk/issues/366)) ([27b35d8](https://github.com/rtk-ai/rtk/commit/27b35d84a341622aa4bf686c2ce8867f8feeb742))
+
 ## [0.27.1](https://github.com/rtk-ai/rtk/compare/v0.27.0...v0.27.1) (2026-03-06)
 
 
