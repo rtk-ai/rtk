@@ -68,6 +68,19 @@ assert_exit_ok() {
     fi
 }
 
+assert_fails() {
+    local name="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        FAIL=$((FAIL + 1))
+        FAILURES+=("$name (expected failure, got success)")
+        printf "  ${RED}FAIL${NC}  %s (expected failure)\n" "$name"
+    else
+        PASS=$((PASS + 1))
+        printf "  ${GREEN}PASS${NC}  %s\n" "$name"
+    fi
+}
+
 assert_help() {
     local name="$1"
     shift
@@ -413,25 +426,121 @@ else
     skip_test "rtk golangci-lint" "golangci-lint not installed"
 fi
 
-# ── 29. Global flags ────────────────────────────────
+# ── 29. Graphite (conditional) ─────────────────────
+
+section "Graphite (conditional)"
+
+if command -v gt &>/dev/null; then
+    assert_help   "rtk gt"                          rtk gt --help
+    assert_ok     "rtk gt log short"                rtk gt log short
+else
+    skip "gt not installed"
+fi
+
+# ── 30. Global flags ────────────────────────────────
 
 section "Global flags"
 
 assert_ok      "rtk -u ls ."                  rtk -u ls .
 assert_ok      "rtk --skip-env npm --help"    rtk --skip-env npm --help
 
-# ── 30. CcEconomics ─────────────────────────────────
+# ── 31. CcEconomics ─────────────────────────────────
 
 section "CcEconomics"
 
 assert_ok      "rtk cc-economics"             rtk cc-economics
 
-# ── 31. Learn ───────────────────────────────────────
+# ── 32. Learn ───────────────────────────────────────
 
 section "Learn"
 
 assert_ok      "rtk learn --help"             rtk learn --help
 assert_ok      "rtk learn (no sessions)"      rtk learn --since 0 2>&1 || true
+
+# ── 32. Rewrite ───────────────────────────────────────
+
+section "Rewrite"
+
+assert_contains "rewrite git status"          "rtk git status"         rtk rewrite "git status"
+assert_contains "rewrite cargo test"          "rtk cargo test"         rtk rewrite "cargo test"
+assert_contains "rewrite compound &&"         "rtk git status"         rtk rewrite "git status && cargo test"
+assert_contains "rewrite pipe preserves"      "| head"                 rtk rewrite "git log | head"
+
+section "Rewrite (#345: RTK_DISABLED skip)"
+
+assert_fails   "rewrite RTK_DISABLED=1 skip"                          rtk rewrite "RTK_DISABLED=1 git status"
+assert_fails   "rewrite env RTK_DISABLED skip"                        rtk rewrite "FOO=1 RTK_DISABLED=1 cargo test"
+
+section "Rewrite (#346: 2>&1 preserved)"
+
+assert_contains "rewrite 2>&1 preserved"      "2>&1"                  rtk rewrite "cargo test 2>&1 | head"
+
+section "Rewrite (#196: gh --json skip)"
+
+assert_fails   "rewrite gh --json skip"                               rtk rewrite "gh pr list --json number"
+assert_fails   "rewrite gh --jq skip"                                 rtk rewrite "gh api /repos --jq .name"
+assert_fails   "rewrite gh --template skip"                           rtk rewrite "gh pr view 1 --template '{{.title}}'"
+assert_contains "rewrite gh normal works"     "rtk gh pr list"        rtk rewrite "gh pr list"
+
+# ── 33. Verify ────────────────────────────────────────
+
+section "Verify"
+
+assert_ok      "rtk verify"                   rtk verify
+
+# ── 34. Proxy ─────────────────────────────────────────
+
+section "Proxy"
+
+assert_ok      "rtk proxy echo hello"         rtk proxy echo hello
+assert_contains "rtk proxy passthrough"       "hello" rtk proxy echo hello
+
+# ── 35. Discover ──────────────────────────────────────
+
+section "Discover"
+
+assert_ok      "rtk discover"                 rtk discover
+
+# ── 36. Diff ──────────────────────────────────────────
+
+section "Diff"
+
+assert_ok      "rtk diff two files"           rtk diff Cargo.toml LICENSE
+
+# ── 37. Wc ────────────────────────────────────────────
+
+section "Wc"
+
+assert_ok      "rtk wc Cargo.toml"            rtk wc Cargo.toml
+
+# ── 38. Smart ─────────────────────────────────────────
+
+section "Smart"
+
+assert_ok      "rtk smart src/main.rs"        rtk smart src/main.rs
+
+# ── 39. Json edge cases ──────────────────────────────
+
+section "Json (edge cases)"
+
+assert_fails   "rtk json on TOML (#347)"                              rtk json Cargo.toml
+
+# ── 40. Docker (conditional) ─────────────────────────
+
+section "Docker (conditional)"
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    assert_ok  "rtk docker ps"               rtk docker ps
+    assert_ok  "rtk docker images"           rtk docker images
+else
+    skip_test "rtk docker" "docker not running"
+fi
+
+# ── 41. Hook check ───────────────────────────────────
+
+section "Hook check (#344)"
+
+assert_contains "rtk init --show hook version" "version" rtk init --show
 
 # ══════════════════════════════════════════════════════
 # Report

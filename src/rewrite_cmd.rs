@@ -11,7 +11,11 @@ use crate::discover::registry;
 /// [ "$CMD" = "$REWRITTEN" ] && exit 0  # already RTK, skip
 /// ```
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    match registry::rewrite_command(cmd) {
+    let excluded = crate::config::Config::load()
+        .map(|c| c.hooks.exclude_commands)
+        .unwrap_or_default();
+
+    match registry::rewrite_command(cmd, &excluded) {
         Some(rewritten) => {
             print!("{}", rewritten);
             Ok(())
@@ -28,19 +32,18 @@ mod tests {
 
     #[test]
     fn test_run_supported_command_succeeds() {
-        // We can't easily test exit code here, but we can test the registry directly
-        assert!(registry::rewrite_command("git status").is_some());
+        assert!(registry::rewrite_command("git status", &[]).is_some());
     }
 
     #[test]
     fn test_run_unsupported_returns_none() {
-        assert!(registry::rewrite_command("terraform plan").is_none());
+        assert!(registry::rewrite_command("terraform plan", &[]).is_none());
     }
 
     #[test]
     fn test_run_already_rtk_returns_some() {
         assert_eq!(
-            registry::rewrite_command("rtk git status"),
+            registry::rewrite_command("rtk git status", &[]),
             Some("rtk git status".into())
         );
     }
