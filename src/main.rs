@@ -1770,6 +1770,8 @@ fn main() -> Result<()> {
             use std::process::{Command, Stdio};
             use std::thread;
 
+            let args = normalize_proxy_args(&args)?;
+
             if args.is_empty() {
                 anyhow::bail!(
                     "proxy requires a command to execute\nUsage: rtk proxy <command> [args...]"
@@ -1930,6 +1932,29 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
     )
+}
+
+fn normalize_proxy_args(args: &[OsString]) -> Result<Vec<OsString>> {
+    if args.len() != 1 {
+        return Ok(args.to_vec());
+    }
+
+    let raw = args[0].to_string_lossy();
+    if !raw.chars().any(char::is_whitespace) {
+        return Ok(args.to_vec());
+    }
+
+    let split = shlex::split(raw.as_ref())
+        .context("failed to parse quoted proxy command")?
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+
+    if split.is_empty() {
+        Ok(args.to_vec())
+    } else {
+        Ok(split)
+    }
 }
 
 #[cfg(test)]
@@ -2176,5 +2201,27 @@ mod tests {
                 args
             );
         }
+    }
+
+    #[test]
+    fn test_normalize_proxy_args_splits_single_shell_string() {
+        let normalized = normalize_proxy_args(&[OsString::from("head -50 app/Models/Domaine.php")])
+            .expect("proxy args should normalize");
+
+        assert_eq!(
+            normalized,
+            vec!["head", "-50", "app/Models/Domaine.php"]
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_normalize_proxy_args_keeps_pre_split_args() {
+        let original = vec![OsString::from("head"), OsString::from("-50")];
+        let normalized = normalize_proxy_args(&original).expect("proxy args should normalize");
+
+        assert_eq!(normalized, original);
     }
 }

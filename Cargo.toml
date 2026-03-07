@@ -30,6 +30,7 @@ tempfile = "3"
 sha2 = "0.10"
 ureq = "2"
 hostname = "0.4"
+shlex = "1"
 
 [dev-dependencies]
 
