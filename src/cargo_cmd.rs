@@ -862,23 +862,49 @@ fn filter_cargo_test(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Extract help text from clippy diagnostic lines (inline `| ^^^^ help:` or standalone `= help:`).
+fn extract_clippy_help(trimmed: &str) -> Option<&str> {
+    if let Some(rest) = trimmed.strip_prefix("= help: ") {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return Some(rest);
+        }
+        return None;
+    }
+    // Inline: "| ^^^^ help: suggestion" — require pipe prefix for caret/tilde lines
+    let after_pipe = trimmed.strip_prefix('|')?.trim_start();
+    if after_pipe.starts_with('^') || after_pipe.starts_with('~') {
+        if let Some(help_pos) = after_pipe.find("help: ") {
+            let help = after_pipe[help_pos + 6..].trim();
+            if !help.is_empty() {
+                return Some(help);
+            }
+        }
+    }
+    None
+}
+
 /// Filter cargo clippy output - group warnings by lint rule
 fn filter_cargo_clippy(output: &str) -> String {
-    let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
+    let mut by_rule: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
     let mut error_count = 0;
     let mut warning_count = 0;
 
     // Parse clippy output lines
     // Format: "warning: description\n  --> file:line:col\n  |\n  | code\n"
     let mut current_rule = String::new();
+    let mut current_location = String::new();
+    let mut current_help: Option<String> = None;
 
     for line in output.lines() {
+        let trimmed = line.trim_start();
+
         // Skip compilation lines
-        if line.trim_start().starts_with("Compiling")
-            || line.trim_start().starts_with("Checking")
-            || line.trim_start().starts_with("Downloading")
-            || line.trim_start().starts_with("Downloaded")
-            || line.trim_start().starts_with("Finished")
+        if trimmed.starts_with("Compiling")
+            || trimmed.starts_with("Checking")
+            || trimmed.starts_with("Downloading")
+            || trimmed.starts_with("Downloaded")
+            || trimmed.starts_with("Finished")
         {
             continue;
         }
@@ -887,12 +913,24 @@ fn filter_cargo_clippy(output: &str) -> String {
         if (line.starts_with("warning:") || line.starts_with("warning["))
             || (line.starts_with("error:") || line.starts_with("error["))
         {
+            // Flush previous location+help before starting new diagnostic
+            if !current_rule.is_empty() && !current_location.is_empty() {
+                by_rule
+                    .entry(current_rule.clone())
+                    .or_default()
+                    .push((current_location.clone(), current_help.take()));
+                current_location.clear();
+            }
+            current_help = None;
+
             // Skip summary lines: "warning: `rtk` (bin) generated 5 warnings"
             if line.contains("generated") && line.contains("warning") {
+                current_rule.clear();
                 continue;
             }
             // Skip "error: aborting" / "error: could not compile"
             if line.contains("aborting due to") || line.contains("could not compile") {
+                current_rule.clear();
                 continue;
             }
 
@@ -915,15 +953,26 @@ fn filter_cargo_clippy(output: &str) -> String {
                 let prefix = if is_error { "error: " } else { "warning: " };
                 line.strip_prefix(prefix).unwrap_or(line).to_string()
             };
-        } else if line.trim_start().starts_with("--> ") {
-            let location = line.trim_start().trim_start_matches("--> ").to_string();
-            if !current_rule.is_empty() {
-                by_rule
-                    .entry(current_rule.clone())
-                    .or_default()
-                    .push(location);
+        } else if trimmed.starts_with("--> ") {
+            current_location = trimmed.trim_start_matches("--> ").to_string();
+        } else if let Some(help_text) = extract_clippy_help(trimmed) {
+            // Skip "for further information visit" links (noise, not actionable)
+            if !help_text.starts_with("for further information") {
+                // Only set if we don't already have a help — first help (inline) wins
+                // over later standalone helps which are typically less specific
+                if current_help.is_none() {
+                    current_help = Some(help_text.to_string());
+                }
             }
         }
+    }
+
+    // Flush last diagnostic
+    if !current_rule.is_empty() && !current_location.is_empty() {
+        by_rule
+            .entry(current_rule)
+            .or_default()
+            .push((current_location, current_help));
     }
 
     if error_count == 0 && warning_count == 0 {
@@ -941,13 +990,16 @@ fn filter_cargo_clippy(output: &str) -> String {
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
     rule_counts.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
-    for (rule, locations) in rule_counts.iter().take(15) {
-        result.push_str(&format!("  {} ({}x)\n", rule, locations.len()));
-        for loc in locations.iter().take(3) {
-            result.push_str(&format!("    {}\n", loc));
+    for (rule, entries) in rule_counts.iter().take(15) {
+        result.push_str(&format!("  {} ({}x)\n", rule, entries.len()));
+        for (loc, help) in entries.iter().take(3) {
+            match help {
+                Some(suggestion) => result.push_str(&format!("    {}  {}\n", loc, suggestion)),
+                None => result.push_str(&format!("    {}\n", loc)),
+            }
         }
-        if locations.len() > 3 {
-            result.push_str(&format!("    ... +{} more\n", locations.len() - 3));
+        if entries.len() > 3 {
+            result.push_str(&format!("    ... +{} more\n", entries.len() - 3));
         }
     }
 
@@ -1308,6 +1360,123 @@ warning: `rtk` (bin) generated 2 warnings
         assert!(result.contains("0 errors, 2 warnings"));
         assert!(result.contains("unused_variables"));
         assert!(result.contains("clippy::too_many_arguments"));
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_includes_help_suggestions() {
+        let output = r#"error: length comparison to zero
+ --> src/main.rs:8:8
+  |
+8 |     if v.len() == 0 {
+  |        ^^^^^^^^^^^^ help: using `is_empty` is clearer and more explicit: `v.is_empty()`
+
+error: manual `RangeInclusive::contains` implementation
+ --> src/main.rs:3:8
+  |
+3 |     if x >= 5 && x <= 15 {
+  |        ^^^^^^^^^^^^^^^^^ help: use: `(5..=15).contains(&x)`
+
+error: aborting due to 2 previous errors
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(result.contains("2 errors, 0 warnings"), "got: {}", result);
+        // help suggestions should be included (without "help:" prefix)
+        assert!(
+            result.contains("`v.is_empty()`"),
+            "should include is_empty suggestion, got: {}",
+            result
+        );
+        assert!(
+            result.contains("`(5..=15).contains(&x)`"),
+            "should include contains suggestion, got: {}",
+            result
+        );
+        // "help:" prefix should be stripped
+        assert!(
+            !result.contains("help:"),
+            "should strip help: prefix, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_standalone_help() {
+        let output = r#"warning: unused variable: `x` [unused_variables]
+ --> src/main.rs:10:9
+  |
+10|     let x = 5;
+  |         ^
+  |
+  = help: if this is intentional, prefix it with an underscore: `_x`
+  = note: `#[warn(unused_variables)]` on by default
+
+warning: `rtk` (bin) generated 1 warning
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(result.contains("0 errors, 1 warnings"), "got: {}", result);
+        // standalone = help: should also be captured
+        assert!(
+            result.contains("prefix it with an underscore: `_x`"),
+            "should include standalone help suggestion, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_help_not_overwritten_by_link() {
+        let output = r#"warning: unneeded `return` statement [clippy::needless_return]
+ --> src/main.rs:9:5
+  |
+9 |     return false;
+  |     ^^^^^^^^^^^^^ help: remove `return`: `false`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_return
+
+warning: `rtk` (bin) generated 1 warning
+"#;
+        let result = filter_cargo_clippy(output);
+        // The actual fix suggestion should be kept, not overwritten by the link
+        assert!(
+            result.contains("remove `return`: `false`"),
+            "inline help should be preserved, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("for further information"),
+            "documentation link should be excluded, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_clippy_help_inline() {
+        assert_eq!(
+            extract_clippy_help("| ^^^^^^^^^^^^ help: using `is_empty`: `v.is_empty()`"),
+            Some("using `is_empty`: `v.is_empty()`")
+        );
+    }
+
+    #[test]
+    fn test_extract_clippy_help_standalone() {
+        assert_eq!(
+            extract_clippy_help("= help: prefix it with an underscore: `_x`"),
+            Some("prefix it with an underscore: `_x`")
+        );
+    }
+
+    #[test]
+    fn test_extract_clippy_help_source_code_line() {
+        // Must NOT match source code lines
+        assert_eq!(extract_clippy_help("let help: &str = \"docs\";"), None);
+        assert_eq!(extract_clippy_help("| fn process(help: &str) {"), None);
+    }
+
+    #[test]
+    fn test_extract_clippy_help_with_pipe_prefix() {
+        assert_eq!(
+            extract_clippy_help("| ^^^^ help: remove `return`: `false`"),
+            Some("remove `return`: `false`")
+        );
     }
 
     #[test]
