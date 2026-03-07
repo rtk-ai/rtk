@@ -1,4 +1,5 @@
 use crate::tracking;
+use crate::utils::{has_program, script_cmd};
 use anyhow::{Context, Result};
 use std::process::Command;
 
@@ -26,16 +27,10 @@ pub fn run(cmd: PrismaCommand, args: &[String], verbose: u8) -> Result<()> {
 
 /// Create a Command that will run prisma (tries global first, then npx)
 fn create_prisma_command() -> Command {
-    let prisma_exists = Command::new("which")
-        .arg("prisma")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if prisma_exists {
-        Command::new("prisma")
+    if has_program("prisma") {
+        script_cmd("prisma")
     } else {
-        let mut c = Command::new("npx");
+        let mut c = script_cmd("npx");
         c.arg("prisma");
         c
     }

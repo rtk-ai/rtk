@@ -1,24 +1,19 @@
 use crate::tracking;
-use crate::utils::truncate;
+use crate::utils::{has_program, script_cmd, truncate};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
-use std::process::Command;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Try tsc directly first, fallback to npx if not found
-    let tsc_exists = Command::new("which")
-        .arg("tsc")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let tsc_exists = has_program("tsc");
 
     let mut cmd = if tsc_exists {
-        Command::new("tsc")
+        script_cmd("tsc")
     } else {
-        let mut c = Command::new("npx");
+        let mut c = script_cmd("npx");
         c.arg("tsc");
         c
     };

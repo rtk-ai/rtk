@@ -7,6 +7,7 @@
 //! unless -a flag is present (respecting user intent).
 
 use crate::tracking;
+use crate::utils::has_program;
 use anyhow::{Context, Result};
 use std::process::Command;
 
@@ -44,8 +45,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Check if tree is installed
-    let tree_check = Command::new("which").arg("tree").output();
-    if tree_check.is_err() || !tree_check.unwrap().status.success() {
+    if !has_program("tree") {
         anyhow::bail!(
             "tree command not found. Install it first:\n\
              - macOS: brew install tree\n\
@@ -126,7 +126,7 @@ fn filter_tree_output(raw: &str) -> String {
     }
 
     // Remove trailing empty lines
-    while filtered_lines.last().map_or(false, |l| l.trim().is_empty()) {
+    while filtered_lines.last().is_some_and(|l| l.trim().is_empty()) {
         filtered_lines.pop();
     }
 

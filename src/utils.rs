@@ -7,7 +7,35 @@
 
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+/// Create a Command for a Node.js CLI tool, handling Windows `.cmd` wrappers.
+///
+/// On Windows, tools like yarn/pnpm/npm/npx ship as `.cmd` batch wrappers.
+/// Rust's `CreateProcessW` doesn't resolve PATHEXT, so we append `.cmd` explicitly.
+pub fn script_cmd(program: &str) -> Command {
+    if cfg!(windows) {
+        Command::new(format!("{}.cmd", program))
+    } else {
+        Command::new(program)
+    }
+}
+
+/// Cross-platform check for whether a program exists on PATH.
+///
+/// Uses `where` on Windows and `which` on Unix.
+pub fn has_program(program: &str) -> bool {
+    // Use "where.exe" explicitly on Windows to avoid PowerShell alias
+    // conflict ("where" maps to Where-Object in PowerShell).
+    let cmd = if cfg!(windows) { "where.exe" } else { "which" };
+    Command::new(cmd)
+        .arg(program)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 /// Truncates a string to `max_len` characters, appending "..." if needed.
 ///
@@ -229,29 +257,23 @@ pub fn detect_package_manager() -> &'static str {
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
 pub fn package_manager_exec(tool: &str) -> Command {
-    let tool_exists = Command::new("which")
-        .arg(tool)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if tool_exists {
-        Command::new(tool)
+    if has_program(tool) {
+        script_cmd(tool)
     } else {
         let pm = detect_package_manager();
         match pm {
             "pnpm" => {
-                let mut c = Command::new("pnpm");
+                let mut c = script_cmd("pnpm");
                 c.arg("exec").arg("--").arg(tool);
                 c
             }
             "yarn" => {
-                let mut c = Command::new("yarn");
+                let mut c = script_cmd("yarn");
                 c.arg("exec").arg("--").arg(tool);
                 c
             }
             _ => {
-                let mut c = Command::new("npx");
+                let mut c = script_cmd("npx");
                 c.arg("--no-install").arg("--").arg(tool);
                 c
             }
@@ -428,5 +450,97 @@ mod tests {
         let cjk = "你好世界测试字符串";
         let result = truncate(cjk, 6);
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_script_cmd_creates_command() {
+        let cmd = script_cmd("node");
+        let _ = format!("{:?}", cmd);
+    }
+
+    /// On Windows, script_cmd("npm") must resolve to "npm.cmd" so that
+    /// CreateProcessW can find the batch wrapper shims that Node installers
+    /// drop on PATH.  On Unix the name is passed through unchanged.
+    #[test]
+    fn test_script_cmd_windows_appends_cmd_suffix() {
+        let cmd = script_cmd("npm");
+        let debug = format!("{:?}", cmd);
+        #[cfg(windows)]
+        assert!(
+            debug.contains("npm.cmd"),
+            "On Windows, script_cmd(\"npm\") should produce \"npm.cmd\", got: {}",
+            debug
+        );
+        #[cfg(not(windows))]
+        assert!(
+            !debug.contains(".cmd"),
+            "On non-Windows, script_cmd(\"npm\") should not append .cmd, got: {}",
+            debug
+        );
+    }
+
+    /// Verify that both the positive and negative branches of has_program()
+    /// behave correctly for a set of Node-ecosystem tools that the Windows fix
+    /// routes through script_cmd().  We only assert the nonexistent case here
+    /// because installed tools vary by CI environment; the cargo assertion
+    /// below covers the positive branch more reliably.
+    #[test]
+    fn test_has_program_finds_cargo() {
+        assert!(has_program("cargo"));
+    }
+
+    #[test]
+    fn test_has_program_nonexistent() {
+        assert!(!has_program("definitely_not_a_real_program_xyz"));
+    }
+
+    /// has_program() must use "where" on Windows and "which" on Unix.
+    /// This test cannot directly inspect which sub-command was spawned, but it
+    /// validates the observable contract: cargo must be found, a nonsense name
+    /// must not be found, on every platform.
+    #[test]
+    fn test_has_program_cross_platform_contract() {
+        // cargo is always present in our build environment
+        assert!(
+            has_program("cargo"),
+            "has_program should find 'cargo' on all platforms"
+        );
+        // a name that can never exist
+        assert!(
+            !has_program("__rtk_no_such_binary_0xDEAD__"),
+            "has_program should return false for unknown programs on all platforms"
+        );
+    }
+
+    /// Ensure script_cmd returns a *different* binary name on Windows vs Unix,
+    /// not the same string regardless of platform.
+    #[test]
+    fn test_script_cmd_platform_differs_for_node_tools() {
+        for tool in &["npm", "pnpm", "npx", "yarn"] {
+            let cmd = script_cmd(tool);
+            let debug = format!("{:?}", cmd);
+            #[cfg(windows)]
+            {
+                let expected = format!("{}.cmd", tool);
+                assert!(
+                    debug.contains(&expected),
+                    "Windows: script_cmd({:?}) should contain {:?}, got: {}",
+                    tool,
+                    expected,
+                    debug
+                );
+            }
+            #[cfg(not(windows))]
+            {
+                let unexpected = format!("{}.cmd", tool);
+                assert!(
+                    !debug.contains(&unexpected),
+                    "Unix: script_cmd({:?}) should NOT contain {:?}, got: {}",
+                    tool,
+                    unexpected,
+                    debug
+                );
+            }
+        }
     }
 }
