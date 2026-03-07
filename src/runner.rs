@@ -58,9 +58,13 @@ pub fn run_err(command: &str, verbose: u8) -> Result<()> {
     } else {
         println!("{}", rtk);
     }
-    let label = format!("rtk err {}", command);
+    let label = err_label(command);
     timer.track(command, &label, &raw, &rtk);
     Ok(())
+}
+
+fn err_label(command: &str) -> String {
+    format!("rtk err {}", command)
 }
 
 /// Run tests and show only failures
@@ -100,9 +104,13 @@ pub fn run_test(command: &str, verbose: u8) -> Result<()> {
     } else {
         println!("{}", summary);
     }
-    let label = format!("rtk test {}", command);
+    let label = test_label(command);
     timer.track(command, &label, &raw, &summary);
     Ok(())
+}
+
+fn test_label(command: &str) -> String {
+    format!("rtk test {}", command)
 }
 
 fn filter_errors(output: &str) -> String {
@@ -269,5 +277,20 @@ mod tests {
         let filtered = filter_errors(output);
         assert!(filtered.contains("error"));
         assert!(!filtered.contains("info"));
+    }
+
+    #[test]
+    fn test_err_label_includes_command() {
+        assert_eq!(
+            err_label("pre-commit run --verbose"),
+            "rtk err pre-commit run --verbose"
+        );
+        assert_eq!(err_label("mycommand"), "rtk err mycommand");
+    }
+
+    #[test]
+    fn test_test_label_includes_command() {
+        assert_eq!(test_label("cargo test --lib"), "rtk test cargo test --lib");
+        assert_eq!(test_label("pytest -x"), "rtk test pytest -x");
     }
 }
