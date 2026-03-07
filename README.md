@@ -299,7 +299,6 @@ After install, **restart Claude Code**.
 | `pytest` | `rtk pytest` |
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
-| `golangci-lint run` | `rtk golangci-lint run` |
 | `xcodebuild ...` | `rtk xcodebuild ...` |
 | `golangci-lint` | `rtk golangci-lint` |
 | `docker ps/images/logs` | `rtk docker ...` |
