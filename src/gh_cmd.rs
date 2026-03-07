@@ -4,7 +4,6 @@
 //! Focuses on extracting essential information from JSON outputs.
 
 use crate::git;
-use crate::json_cmd;
 use crate::tracking;
 use crate::utils::{ok_confirmation, truncate};
 use anyhow::{Context, Result};
@@ -108,8 +107,58 @@ fn filter_markdown_segment(text: &str) -> String {
     s
 }
 
+/// Check if args contain --json flag (user wants specific JSON fields, not RTK filtering)
+fn has_json_flag(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--json")
+}
+
+/// Extract a positional identifier (PR/issue number) from args, returning it
+/// separately from the remaining extra flags (like -R, --repo, etc.).
+/// Handles both `view 123 -R owner/repo` and `view -R owner/repo 123`.
+fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<String>)> {
+    if args.is_empty() {
+        return None;
+    }
+
+    // Known gh flags that take a value — skip these and their values
+    let flags_with_value = ["-R", "--repo", "-q", "--jq", "-t", "--template"];
+    let mut identifier = None;
+    let mut extra = Vec::new();
+    let mut skip_next = false;
+
+    for arg in args {
+        if skip_next {
+            extra.push(arg.clone());
+            skip_next = false;
+            continue;
+        }
+        if flags_with_value.contains(&arg.as_str()) {
+            extra.push(arg.clone());
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with('-') {
+            extra.push(arg.clone());
+            continue;
+        }
+        // First non-flag arg is the identifier (number/URL)
+        if identifier.is_none() {
+            identifier = Some(arg.clone());
+        } else {
+            extra.push(arg.clone());
+        }
+    }
+
+    identifier.map(|id| (id, extra))
+}
+
 /// Run a gh command with token-optimized output
 pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
+    // When user explicitly passes --json, they want raw gh JSON output, not RTK filtering
+    if has_json_flag(args) {
+        return run_passthrough("gh", subcommand, args);
+    }
+
     match subcommand {
         "pr" => run_pr(args, verbose, ultra_compact),
         "issue" => run_issue(args, verbose, ultra_compact),
@@ -136,8 +185,8 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
-        "comment" => pr_action("commented", &args[1..], verbose),
-        "edit" => pr_action("edited", &args[1..], verbose),
+        "comment" => pr_action("commented", &args, verbose),
+        "edit" => pr_action("edited", &args, verbose),
         _ => run_passthrough("gh", "pr", args),
     }
 }
@@ -226,23 +275,37 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     Ok(())
 }
 
+fn should_passthrough_pr_view(extra_args: &[String]) -> bool {
+    extra_args
+        .iter()
+        .any(|a| a == "--json" || a == "--jq" || a == "--web")
+}
+
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("PR number required"));
-    }
+    let (pr_number, extra_args) = match extract_identifier_and_extra_args(args) {
+        Some(result) => result,
+        None => return Err(anyhow::anyhow!("PR number required")),
+    };
 
-    let pr_number = &args[0];
+    // If the user provides --jq or --web, pass through directly.
+    // Note: --json is already handled globally by run() via has_json_flag.
+    if should_passthrough_pr_view(&extra_args) {
+        return run_passthrough_with_extra("gh", &["pr", "view", &pr_number], &extra_args);
+    }
 
     let mut cmd = Command::new("gh");
     cmd.args([
         "pr",
         "view",
-        pr_number,
+        &pr_number,
         "--json",
         "number,title,state,author,body,url,mergeable,reviews,statusCheckRollup",
     ]);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh pr view")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -398,14 +461,16 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
 fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("PR number required"));
-    }
-
-    let pr_number = &args[0];
+    let (pr_number, extra_args) = match extract_identifier_and_extra_args(args) {
+        Some(result) => result,
+        None => return Err(anyhow::anyhow!("PR number required")),
+    };
 
     let mut cmd = Command::new("gh");
-    cmd.args(["pr", "checks", pr_number]);
+    cmd.args(["pr", "checks", &pr_number]);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh pr checks")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -607,20 +672,22 @@ fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()>
 fn view_issue(args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("Issue number required"));
-    }
-
-    let issue_number = &args[0];
+    let (issue_number, extra_args) = match extract_identifier_and_extra_args(args) {
+        Some(result) => result,
+        None => return Err(anyhow::anyhow!("Issue number required")),
+    };
 
     let mut cmd = Command::new("gh");
     cmd.args([
         "issue",
         "view",
-        issue_number,
+        &issue_number,
         "--json",
         "number,title,state,author,body,url",
     ]);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh issue view")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -796,22 +863,23 @@ fn should_passthrough_run_view(extra_args: &[String]) -> bool {
 }
 
 fn view_run(args: &[String], _verbose: u8) -> Result<()> {
-    if args.is_empty() {
-        return Err(anyhow::anyhow!("Run ID required"));
-    }
-
-    let run_id = &args[0];
-    let extra_args = &args[1..];
+    let (run_id, extra_args) = match extract_identifier_and_extra_args(args) {
+        Some(result) => result,
+        None => return Err(anyhow::anyhow!("Run ID required")),
+    };
 
     // Pass through when user requests logs or JSON — the filter would strip them
-    if should_passthrough_run_view(extra_args) {
-        return run_passthrough_with_extra("gh", &["run", "view", run_id], extra_args);
+    if should_passthrough_run_view(&extra_args) {
+        return run_passthrough_with_extra("gh", &["run", "view", &run_id], &extra_args);
     }
 
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
-    cmd.args(["run", "view", run_id]);
+    cmd.args(["run", "view", &run_id]);
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
 
     let output = cmd.output().context("Failed to run gh run view")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -1035,11 +1103,23 @@ fn pr_merge(args: &[String], _verbose: u8) -> Result<()> {
 }
 
 fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
+    // --no-compact: pass full diff through (gh CLI doesn't know this flag, strip it)
+    let no_compact = args.iter().any(|a| a == "--no-compact");
+    let gh_args: Vec<String> = args
+        .iter()
+        .filter(|a| *a != "--no-compact")
+        .cloned()
+        .collect();
+
+    if no_compact {
+        return run_passthrough_with_extra("gh", &["pr", "diff"], &gh_args);
+    }
+
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("gh");
     cmd.args(["pr", "diff"]);
-    for arg in args {
+    for arg in gh_args.iter() {
         cmd.arg(arg);
     }
 
@@ -1058,7 +1138,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
         print!("{}", msg);
         msg.to_string()
     } else {
-        let compacted = git::compact_diff(&raw, 100);
+        let compacted = git::compact_diff(&raw, 500);
         println!("{}", compacted);
         compacted
     };
@@ -1070,23 +1150,24 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
 /// Generic PR action handler for comment/edit
 fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
+    let subcmd = &args[0];
 
     let mut cmd = Command::new("gh");
-    cmd.args(["pr", action]);
+    cmd.arg("pr");
     for arg in args {
         cmd.arg(arg);
     }
 
     let output = cmd
         .output()
-        .context(format!("Failed to run gh pr {}", action))?;
+        .context(format!("Failed to run gh pr {}", subcmd))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         timer.track(
-            &format!("gh pr {}", action),
-            &format!("rtk gh pr {}", action),
+            &format!("gh pr {}", subcmd),
+            &format!("rtk gh pr {}", subcmd),
             &stderr,
             &stderr,
         );
@@ -1094,8 +1175,8 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
         std::process::exit(output.status.code().unwrap_or(1));
     }
 
-    // Extract PR number from args
-    let pr_num = args
+    // Extract PR number from args (skip args[0] which is the subcommand)
+    let pr_num = args[1..]
         .iter()
         .find(|a| !a.starts_with('-'))
         .map(|s| format!("#{}", s))
@@ -1112,8 +1193,8 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
     };
 
     timer.track(
-        &format!("gh pr {}", action),
-        &format!("rtk gh pr {}", action),
+        &format!("gh pr {}", subcmd),
+        &format!("rtk gh pr {}", subcmd),
         &raw,
         &filtered,
     );
@@ -1121,47 +1202,10 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
 }
 
 fn run_api(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut cmd = Command::new("gh");
-    cmd.arg("api");
-    for arg in args {
-        cmd.arg(arg);
-    }
-
-    let output = cmd.output().context("Failed to run gh api")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        timer.track("gh api", "rtk gh api", &stderr, &stderr);
-        eprintln!("{}", stderr.trim());
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    // Try to parse as JSON and filter
-    let filtered = match json_cmd::filter_json_string(&raw, 5) {
-        Ok(schema) => {
-            println!("{}", schema);
-            schema
-        }
-        Err(_) => {
-            // Not JSON, print truncated raw output
-            let mut result = String::new();
-            let lines: Vec<&str> = raw.lines().take(20).collect();
-            let joined = lines.join("\n");
-            result.push_str(&joined);
-            print!("{}", joined);
-            if raw.lines().count() > 20 {
-                result.push_str("\n... (truncated)");
-                println!("\n... (truncated)");
-            }
-            result
-        }
-    };
-
-    timer.track("gh api", "rtk gh api", &raw, &filtered);
-    Ok(())
+    // gh api is an explicit/advanced command — the user knows what they asked for.
+    // Converting JSON to a schema destroys all values and forces Claude to re-fetch.
+    // Passthrough preserves the full response and tracks metrics at 0% savings.
+    run_passthrough("gh", "api", args)
 }
 
 /// Pass through a command with base args + extra args, tracking as passthrough.
@@ -1278,6 +1322,75 @@ mod tests {
     }
 
     #[test]
+    fn test_has_json_flag_present() {
+        assert!(has_json_flag(&[
+            "view".into(),
+            "--json".into(),
+            "number,url".into()
+        ]));
+    }
+
+    #[test]
+    fn test_has_json_flag_absent() {
+        assert!(!has_json_flag(&["view".into(), "42".into()]));
+    }
+
+    #[test]
+    fn test_extract_identifier_simple() {
+        let args: Vec<String> = vec!["123".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "123");
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn test_extract_identifier_with_repo_flag_after() {
+        // gh issue view 185 -R rtk-ai/rtk
+        let args: Vec<String> = vec!["185".into(), "-R".into(), "rtk-ai/rtk".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "185");
+        assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_repo_flag_before() {
+        // gh issue view -R rtk-ai/rtk 185
+        let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into(), "185".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "185");
+        assert_eq!(extra, vec!["-R", "rtk-ai/rtk"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_long_repo_flag() {
+        let args: Vec<String> = vec!["42".into(), "--repo".into(), "owner/repo".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "42");
+        assert_eq!(extra, vec!["--repo", "owner/repo"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_empty() {
+        let args: Vec<String> = vec![];
+        assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    #[test]
+    fn test_extract_identifier_only_flags() {
+        // No positional identifier, only flags
+        let args: Vec<String> = vec!["-R".into(), "rtk-ai/rtk".into()];
+        assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    #[test]
+    fn test_extract_identifier_with_web_flag() {
+        let args: Vec<String> = vec!["123".into(), "--web".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "123");
+        assert_eq!(extra, vec!["--web"]);
+    }
+
+    #[test]
     fn test_run_view_passthrough_log_failed() {
         assert!(should_passthrough_run_view(&["--log-failed".into()]));
     }
@@ -1303,6 +1416,36 @@ mod tests {
     #[test]
     fn test_run_view_no_passthrough_other_flags() {
         assert!(!should_passthrough_run_view(&["--web".into()]));
+    }
+
+    // --- should_passthrough_pr_view tests ---
+
+    #[test]
+    fn test_should_passthrough_pr_view_json() {
+        assert!(should_passthrough_pr_view(&[
+            "--json".into(),
+            "body,comments".into()
+        ]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_view_jq() {
+        assert!(should_passthrough_pr_view(&["--jq".into(), ".body".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_view_web() {
+        assert!(should_passthrough_pr_view(&["--web".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_view_default() {
+        assert!(!should_passthrough_pr_view(&[]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_view_other_flags() {
+        assert!(!should_passthrough_pr_view(&["--comments".into()]));
     }
 
     // --- filter_markdown_body tests ---

@@ -1070,6 +1070,7 @@ pub fn show_config() -> Result<()> {
             let has_guards =
                 hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
             let is_thin_delegator = hook_content.contains("rtk rewrite");
+            let hook_version = crate::hook_check::parse_hook_version(&hook_content);
 
             if !is_executable {
                 println!(
@@ -1086,8 +1087,9 @@ pub fn show_config() -> Result<()> {
                 );
             } else if is_executable && has_guards {
                 println!(
-                    "✅ Hook: {} (thin delegator, up to date)",
-                    hook_path.display()
+                    "✅ Hook: {} (thin delegator, version {})",
+                    hook_path.display(),
+                    hook_version
                 );
             } else {
                 println!("⚠️  Hook: {} (no guards - outdated)", hook_path.display());

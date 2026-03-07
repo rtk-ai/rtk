@@ -201,6 +201,39 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  notify-discord:
+    name: Notify Discord
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Send Discord notification
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.RTK_DISCORD_RELEASE }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          RELEASE_URL="https://github.com/rtk-ai/rtk/releases/tag/${TAG}"
+
+          # Fetch release notes from GitHub API
+          NOTES=$(gh api "repos/rtk-ai/rtk/releases/tags/${TAG}" --jq '.body' 2>/dev/null | head -c 1800 || echo "")
+          DESC=$(echo "${NOTES:-No release notes}" | jq -Rs .)
+
+          jq -n \
+            --arg title "RTK ${TAG} released" \
+            --arg url "$RELEASE_URL" \
+            --argjson desc "$DESC" \
+            '{embeds: [{title: $title, url: $url, description: $desc, color: 5814783, footer: {text: "Rust Token Killer"}}]}' \
+          | curl -sf -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK"
+
   homebrew:
     name: Update Homebrew formula
     needs: [release]
