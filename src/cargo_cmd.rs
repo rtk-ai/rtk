@@ -28,6 +28,45 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
     }
 }
 
+/// Split Clap-parsed args into (before_dd, after_dd) based on raw process args.
+///
+/// Clap with `trailing_var_arg=true` consumes the `--` separator — it does not
+/// appear in the captured args Vec. This function detects `--` in `raw_args` and
+/// returns the split point so callers can re-insert it when building a Command.
+///
+/// Returns `(args_before, Some(args_after))` if `--` was present, or
+/// `(all_args, None)` if not.
+fn split_at_double_dash<'a>(
+    raw_args: &[String],
+    subcommand: &str,
+    clap_args: &'a [String],
+) -> (&'a [String], Option<&'a [String]>) {
+    let sub_pos = raw_args.iter().position(|a| a == subcommand);
+    let dd_offset = sub_pos.and_then(|pos| raw_args[pos + 1..].iter().position(|a| a == "--"));
+    match dd_offset {
+        Some(offset) => {
+            let split = offset.min(clap_args.len());
+            (&clap_args[..split], Some(&clap_args[split..]))
+        }
+        None => (clap_args, None),
+    }
+}
+
+/// Add args to a Command, re-inserting `--` if the user's original invocation had it.
+fn build_cargo_args(cmd: &mut Command, subcommand: &str, args: &[String]) {
+    let raw: Vec<String> = std::env::args().collect();
+    let (before, after) = split_at_double_dash(&raw, subcommand, args);
+    for arg in before {
+        cmd.arg(arg);
+    }
+    if let Some(after_args) = after {
+        cmd.arg("--");
+        for arg in after_args {
+            cmd.arg(arg);
+        }
+    }
+}
+
 /// Generic cargo command runner with filtering
 fn run_cargo_filtered<F>(subcommand: &str, args: &[String], verbose: u8, filter_fn: F) -> Result<()>
 where
@@ -37,9 +76,7 @@ where
 
     let mut cmd = Command::new("cargo");
     cmd.arg(subcommand);
-    for arg in args {
-        cmd.arg(arg);
-    }
+    build_cargo_args(&mut cmd, subcommand, args);
 
     if verbose > 0 {
         eprintln!("Running: cargo {} {}", subcommand, args.join(" "));
@@ -232,9 +269,7 @@ fn run_test(args: &[String], verbose: u8) -> Result<()> {
 
     let mut cmd = Command::new("cargo");
     cmd.arg("test");
-    for arg in args {
-        cmd.arg(arg);
-    }
+    build_cargo_args(&mut cmd, "test", args);
 
     if verbose > 0 {
         eprintln!("Running: cargo test {}", args.join(" "));
@@ -1884,5 +1919,74 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         let mut f1 = CargoTestStreamFilter::new();
         let mut f2 = CargoTestStreamFilter::default();
         assert_eq!(f1.flush(), f2.flush());
+    }
+
+    // ── split_at_double_dash tests ───────────────────────────────────────────
+
+    fn s(vals: &[&str]) -> Vec<String> {
+        vals.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn test_split_at_double_dash_present() {
+        // rtk cargo test --lib -- --test-threads=1
+        let raw = s(&["rtk", "cargo", "test", "--lib", "--", "--test-threads=1"]);
+        let clap_args = s(&["--lib", "--test-threads=1"]);
+        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
+        assert_eq!(before, &[String::from("--lib")]);
+        assert_eq!(after.unwrap(), &[String::from("--test-threads=1")]);
+    }
+
+    #[test]
+    fn test_split_at_double_dash_absent() {
+        // rtk cargo test --lib
+        let raw = s(&["rtk", "cargo", "test", "--lib"]);
+        let clap_args = s(&["--lib"]);
+        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
+        assert_eq!(before, &[String::from("--lib")]);
+        assert!(after.is_none());
+    }
+
+    #[test]
+    fn test_split_at_double_dash_no_args_before() {
+        // rtk cargo test -- --ignored
+        let raw = s(&["rtk", "cargo", "test", "--", "--ignored"]);
+        let clap_args = s(&["--ignored"]);
+        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
+        assert!(before.is_empty());
+        assert_eq!(after.unwrap(), &[String::from("--ignored")]);
+    }
+
+    #[test]
+    fn test_split_at_double_dash_no_args_after() {
+        // rtk cargo test --lib --  (bare -- with nothing after)
+        let raw = s(&["rtk", "cargo", "test", "--lib", "--"]);
+        let clap_args = s(&["--lib"]);
+        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
+        assert_eq!(before, &[String::from("--lib")]);
+        assert_eq!(after.unwrap(), &[] as &[String]);
+    }
+
+    #[test]
+    fn test_split_at_double_dash_clippy() {
+        // rtk cargo clippy -- -W clippy::pedantic
+        let raw = s(&["rtk", "cargo", "clippy", "--", "-W", "clippy::pedantic"]);
+        let clap_args = s(&["-W", "clippy::pedantic"]);
+        let (before, after) = split_at_double_dash(&raw, "clippy", &clap_args);
+        assert!(before.is_empty());
+        assert_eq!(
+            after.unwrap(),
+            &[String::from("-W"), String::from("clippy::pedantic")]
+        );
+    }
+
+    #[test]
+    fn test_split_at_double_dash_subcommand_not_found() {
+        // Edge: subcommand name doesn't match anything in raw args
+        let raw = s(&["rtk", "cargo", "build"]);
+        let clap_args = s(&["--release"]);
+        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
+        assert_eq!(before, &[String::from("--release")]);
+        assert!(after.is_none());
     }
 }
