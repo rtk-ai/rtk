@@ -1,0 +1,25 @@
+ 60K	ARCHITECTURE.md
+ 36K	CHANGELOG.md
+ 24K	CLAUDE.md
+8.0K	CONTRIBUTING.md
+ 44K	Cargo.lock
+4.0K	Cargo.toml
+4.0K	Formula
+ 12K	INSTALL.md
+4.0K	LICENSE
+ 16K	README.md
+8.0K	README_es.md
+8.0K	README_fr.md
+8.0K	README_ja.md
+8.0K	README_ko.md
+8.0K	README_zh.md
+4.0K	ROADMAP.md
+8.0K	SECURITY.md
+4.0K	TEST_EXEC_TIME.md
+316K	docs
+ 20K	hooks
+4.0K	install.sh
+4.0K	release-please-config.json
+ 84K	scripts
+1.2M	src
+4.0K	tests

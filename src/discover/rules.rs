@@ -48,6 +48,8 @@ pub const PATTERNS: &[&str] = &[
     r"^aws\s+",
     // PostgreSQL
     r"^psql(\s|$)",
+    // Disk usage
+    r"^du(\s|$)",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -314,6 +316,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["psql"],
         category: "Infra",
         savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Disk usage
+    RtkRule {
+        rtk_cmd: "rtk du",
+        rewrite_prefixes: &["du"],
+        category: "System",
+        savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

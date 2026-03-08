@@ -1,0 +1,58 @@
+ 32K	src/aws_cmd.rs
+ 60K	src/cargo_cmd.rs
+ 40K	src/cc_economics.rs
+ 12K	src/ccusage.rs
+8.0K	src/config.rs
+ 28K	src/container.rs
+8.0K	src/curl_cmd.rs
+ 12K	src/deps.rs
+ 12K	src/diff_cmd.rs
+104K	src/discover
+ 12K	src/display_helpers.rs
+8.0K	src/env_cmd.rs
+ 12K	src/filter.rs
+ 20K	src/find_cmd.rs
+ 16K	src/format_cmd.rs
+ 24K	src/gain.rs
+ 52K	src/gh_cmd.rs
+ 60K	src/git.rs
+ 20K	src/go_cmd.rs
+8.0K	src/golangci_cmd.rs
+ 12K	src/grep_cmd.rs
+ 24K	src/gt_cmd.rs
+ 12K	src/hook_audit_cmd.rs
+4.0K	src/hook_check.rs
+ 56K	src/init.rs
+ 20K	src/integrity.rs
+8.0K	src/json_cmd.rs
+ 36K	src/learn
+ 24K	src/lint_cmd.rs
+ 12K	src/local_llm.rs
+8.0K	src/log_cmd.rs
+ 12K	src/ls.rs
+ 68K	src/main.rs
+ 16K	src/mypy_cmd.rs
+8.0K	src/next_cmd.rs
+4.0K	src/npm_cmd.rs
+ 44K	src/parser
+ 12K	src/pip_cmd.rs
+ 16K	src/playwright_cmd.rs
+ 20K	src/pnpm_cmd.rs
+8.0K	src/prettier_cmd.rs
+ 16K	src/prisma_cmd.rs
+ 16K	src/psql_cmd.rs
+ 12K	src/pytest_cmd.rs
+8.0K	src/read.rs
+4.0K	src/rewrite_cmd.rs
+ 16K	src/ruff_cmd.rs
+ 12K	src/runner.rs
+ 12K	src/summary.rs
+ 12K	src/tee.rs
+8.0K	src/telemetry.rs
+ 48K	src/tracking.rs
+8.0K	src/tree.rs
+ 12K	src/tsc_cmd.rs
+ 16K	src/utils.rs
+ 12K	src/vitest_cmd.rs
+ 12K	src/wc_cmd.rs
+8.0K	src/wget_cmd.rs

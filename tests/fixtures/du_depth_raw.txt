@@ -1,0 +1,10 @@
+8.0K	./tests
+220K	./.claude
+316K	./docs
+ 20K	./hooks
+4.0K	./Formula
+ 84K	./scripts
+ 36K	./.github
+1.8M	./.git
+1.2M	./src
+3.9M	.

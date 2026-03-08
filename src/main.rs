@@ -9,6 +9,7 @@ mod deps;
 mod diff_cmd;
 mod discover;
 mod display_helpers;
+mod du_cmd;
 mod env_cmd;
 mod filter;
 mod find_cmd;
@@ -219,6 +220,18 @@ enum Commands {
         /// Max depth
         #[arg(short, long, default_value = "5")]
         depth: usize,
+    },
+
+    /// Disk usage with compact output (sorts by size, strips paths and padding)
+    #[command(disable_help_flag = true)]
+    Du {
+        /// Print help
+        #[arg(long = "help", action = clap::ArgAction::Help)]
+        help: Option<bool>,
+
+        /// Arguments passed to du (directories, flags like -sh, -h, -d)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Summarize project dependencies
@@ -1287,6 +1300,10 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Du { args, .. } => {
+            du_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::Deps { path } => {
             deps::run(&path, cli.verbose)?;
         }
@@ -1902,6 +1919,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Err { .. }
             | Commands::Test { .. }
             | Commands::Json { .. }
+            | Commands::Du { .. }
             | Commands::Deps { .. }
             | Commands::Env { .. }
             | Commands::Find { .. }
