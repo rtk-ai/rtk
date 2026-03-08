@@ -396,7 +396,7 @@ enum Commands {
     /// Show token savings summary and history
     #[command(next_display_order = None)]
     Gain {
-        /// Filter statistics to current project (current working directory) // added
+        /// Filter statistics to current project (current working directory)
         #[arg(short, long)]
         project: bool,
         /// Show ASCII graph of daily savings
