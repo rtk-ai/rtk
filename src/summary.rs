@@ -290,8 +290,37 @@ fn summarize_generic(output: &str, result: &mut Vec<String>) {
 }
 
 fn extract_number(text: &str, after: &str) -> Option<usize> {
-    let re = Regex::new(&format!(r"(\d+)\s*{}", after)).ok()?;
+    let escaped = regex::escape(after);
+    let re = Regex::new(&format!(r"(\d+)\s*{}", escaped)).ok()?;
     re.captures(text)
         .and_then(|c| c.get(1))
         .and_then(|m| m.as_str().parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_number_basic() {
+        assert_eq!(extract_number("5 passed", "passed"), Some(5));
+        assert_eq!(extract_number("12 failed", "failed"), Some(12));
+        assert_eq!(extract_number("no numbers here", "passed"), None);
+    }
+
+    #[test]
+    fn test_extract_number_regex_metacharacters_escaped() {
+        // Ensure regex metacharacters in `after` don't cause panic or ReDoS
+        assert_eq!(extract_number("5 test()", "test()"), Some(5));
+        assert_eq!(extract_number("3 a.*b", "a.*b"), Some(3));
+        // Without escaping, ".*" would match anything and give wrong results
+        assert_eq!(extract_number("3 xyz", "a.*b"), None);
+    }
+
+    #[test]
+    fn test_summarize_output_success() {
+        let output = summarize_output("line1\nline2\n", "echo hello", true);
+        assert!(output.contains("Command:"));
+        assert!(output.contains("2 lines"));
+    }
 }
