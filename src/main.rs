@@ -490,11 +490,10 @@ enum Commands {
         command: CargoCommands,
     },
 
-    /// npm run with filtered output (strip boilerplate)
+    /// npm commands with smart filter routing
     Npm {
-        /// npm run arguments (script name + options)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: NpmCommands,
     },
 
     /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
@@ -810,6 +809,23 @@ enum PnpmCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported pnpm subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum NpmCommands {
+    /// Run a package.json script with smart filter routing.
+    /// Well-known scripts (build, test, lint, typecheck) are routed to
+    /// specialised filters; all others fall back to boilerplate stripping.
+    Run {
+        /// Script name (e.g. build, test, lint)
+        script: String,
+        /// Additional arguments forwarded to the script
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any other npm subcommand (install, ci, audit, …) directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1858,9 +1874,15 @@ fn main() -> Result<()> {
             }
         },
 
-        Commands::Npm { args } => {
-            npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
-        }
+        Commands::Npm { command } => match command {
+            NpmCommands::Run { script, args } => match script.as_str() {
+                "build" => next_cmd::run(&args, cli.verbose)?,
+                "typecheck" | "tsc" => tsc_cmd::run(&args, cli.verbose)?,
+                "lint" => lint_cmd::run(&args, cli.verbose)?,
+                _ => npm_cmd::run_script(&script, &args, cli.verbose, cli.skip_env)?,
+            },
+            NpmCommands::Other(args) => npm_cmd::run_passthrough(&args, cli.verbose)?,
+        },
 
         Commands::Curl { args } => {
             curl_cmd::run(&args, cli.verbose)?;
@@ -1973,7 +1995,8 @@ fn main() -> Result<()> {
                 }
                 _ => {
                     // Generic passthrough with npm boilerplate filter
-                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
+                    let script = &args[0];
+                    npm_cmd::run_script(script, &args[1..], cli.verbose, cli.skip_env)?;
                 }
             }
         }
@@ -2596,6 +2619,63 @@ mod tests {
                 }
                 _ => panic!("expected Rewrite command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_npm_run_build_parses() {
+        let cli = Cli::try_parse_from(["rtk", "npm", "run", "build"]).unwrap();
+        match cli.command {
+            Commands::Npm {
+                command: NpmCommands::Run { script, args },
+            } => {
+                assert_eq!(script, "build");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected NpmCommands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_npm_run_with_extra_args_parses() {
+        let cli = Cli::try_parse_from(["rtk", "npm", "run", "test", "--", "--reporter", "verbose"])
+            .unwrap();
+        match cli.command {
+            Commands::Npm {
+                command: NpmCommands::Run { script, args },
+            } => {
+                assert_eq!(script, "test");
+                // Clap consumes `--` itself; the trailing args arrive without it
+                assert_eq!(args, vec!["--reporter", "verbose"]);
+            }
+            _ => panic!("Expected NpmCommands::Run"),
+        }
+    }
+
+    #[test]
+    fn test_npm_install_falls_to_passthrough() {
+        let cli = Cli::try_parse_from(["rtk", "npm", "install", "lodash"]).unwrap();
+        match cli.command {
+            Commands::Npm {
+                command: NpmCommands::Other(args),
+            } => {
+                assert_eq!(args[0].to_string_lossy(), "install");
+                assert_eq!(args[1].to_string_lossy(), "lodash");
+            }
+            _ => panic!("Expected NpmCommands::Other"),
+        }
+    }
+
+    #[test]
+    fn test_npm_ci_falls_to_passthrough() {
+        let cli = Cli::try_parse_from(["rtk", "npm", "ci"]).unwrap();
+        match cli.command {
+            Commands::Npm {
+                command: NpmCommands::Other(args),
+            } => {
+                assert_eq!(args[0].to_string_lossy(), "ci");
+            }
+            _ => panic!("Expected NpmCommands::Other"),
         }
     }
 }

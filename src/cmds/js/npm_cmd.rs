@@ -3,103 +3,20 @@
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
+use std::ffi::OsString;
+use std::process::Command;
 
-/// Known npm subcommands that should NOT get "run" injected.
-/// Shared between production code and tests to avoid drift.
-const NPM_SUBCOMMANDS: &[&str] = &[
-    "install",
-    "i",
-    "ci",
-    "uninstall",
-    "remove",
-    "rm",
-    "update",
-    "up",
-    "list",
-    "ls",
-    "outdated",
-    "init",
-    "create",
-    "publish",
-    "pack",
-    "link",
-    "audit",
-    "fund",
-    "exec",
-    "explain",
-    "why",
-    "search",
-    "view",
-    "info",
-    "show",
-    "config",
-    "set",
-    "get",
-    "cache",
-    "prune",
-    "dedupe",
-    "doctor",
-    "help",
-    "version",
-    "prefix",
-    "root",
-    "bin",
-    "bugs",
-    "docs",
-    "home",
-    "repo",
-    "ping",
-    "whoami",
-    "token",
-    "profile",
-    "team",
-    "access",
-    "owner",
-    "deprecate",
-    "dist-tag",
-    "star",
-    "stars",
-    "login",
-    "logout",
-    "adduser",
-    "unpublish",
-    "pkg",
-    "diff",
-    "rebuild",
-    "test",
-    "t",
-    "start",
-    "stop",
-    "restart",
-];
-
-pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
+/// Execute `npm run <script>` with boilerplate filtering.
+/// Called for unrecognised scripts — well-known ones (build, test, lint,
+/// typecheck) are routed to their specialised filters in main.rs before
+/// reaching this function.
+pub fn run_script(script: &str, args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = resolved_command("npm");
+    cmd.arg("run").arg(script);
 
-    // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
-    // Only inject "run" when args look like a script name, not a known npm subcommand.
-    let first_arg = args.first().map(|s| s.as_str());
-    let is_run_explicit = first_arg == Some("run");
-    let is_npm_subcommand = first_arg
-        .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
-        .unwrap_or(false);
-
-    let effective_args = if is_run_explicit {
-        // "rtk npm run build" → "npm run build"
-        cmd.arg("run");
-        &args[1..]
-    } else if is_npm_subcommand {
-        // "rtk npm install express" → "npm install express"
-        args
-    } else {
-        // "rtk npm build" → "npm run build" (assume script name)
-        cmd.arg("run");
-        args
-    };
-
-    for arg in effective_args {
+    for arg in args {
         cmd.arg(arg);
     }
 
@@ -108,7 +25,7 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: npm {}", args.join(" "));
+        eprintln!("Running: npm run {} {}", script, args.join(" "));
     }
 
     let output = cmd.output().context("Failed to run npm")?;
@@ -120,8 +37,8 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     println!("{}", filtered);
 
     timer.track(
-        &format!("npm {}", args.join(" ")),
-        &format!("rtk npm {}", args.join(" ")),
+        &format!("npm run {}", script),
+        &format!("rtk npm run {}", script),
         &raw,
         &filtered,
     );
@@ -133,8 +50,34 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     Ok(())
 }
 
+/// Passthrough for non-`run` npm subcommands (install, ci, audit, init, …).
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("npm passthrough: {:?}", args);
+    }
+
+    let status = Command::new("npm")
+        .args(args)
+        .status()
+        .context("Failed to run npm")?;
+
+    let args_str = tracking::args_display(args);
+    timer.track_passthrough(
+        &format!("npm {}", args_str),
+        &format!("rtk npm {} (passthrough)", args_str),
+    );
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    Ok(())
+}
+
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
-fn filter_npm_output(output: &str) -> String {
+pub fn filter_npm_output(output: &str) -> String {
     let mut result = Vec::new();
 
     for line in output.lines() {
@@ -189,44 +132,6 @@ npm notice
         assert!(!result.contains("npm notice"));
         assert!(!result.contains("> project@"));
         assert!(result.contains("Build completed"));
-    }
-
-    #[test]
-    fn test_npm_subcommand_routing() {
-        // Uses the shared NPM_SUBCOMMANDS constant — no drift between prod and test
-        fn needs_run_injection(args: &[&str]) -> bool {
-            let first = args.first().copied();
-            let is_run_explicit = first == Some("run");
-            let is_subcommand = first
-                .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
-                .unwrap_or(false);
-            !is_run_explicit && !is_subcommand
-        }
-
-        // Known subcommands should NOT get "run" injected
-        for subcmd in NPM_SUBCOMMANDS {
-            assert!(
-                !needs_run_injection(&[subcmd]),
-                "'npm {}' should NOT inject 'run'",
-                subcmd
-            );
-        }
-
-        // Script names SHOULD get "run" injected
-        for script in &["build", "dev", "lint", "typecheck", "deploy"] {
-            assert!(
-                needs_run_injection(&[script]),
-                "'npm {}' SHOULD inject 'run'",
-                script
-            );
-        }
-
-        // Flags should NOT get "run" injected
-        assert!(!needs_run_injection(&["--version"]));
-        assert!(!needs_run_injection(&["-h"]));
-
-        // Explicit "run" should NOT inject another "run"
-        assert!(!needs_run_injection(&["run", "build"]));
     }
 
     #[test]
