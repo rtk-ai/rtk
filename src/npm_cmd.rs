@@ -5,10 +5,19 @@ use std::process::Command;
 pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
+    // Strip a leading "run" if present — `rtk npm run build` and `rtk npm build`
+    // should both invoke `npm run build`. Without this, the former would produce
+    // `npm run run build` because this function always injects "run".
+    let effective_args = if args.first().map(|s| s == "run").unwrap_or(false) {
+        &args[1..]
+    } else {
+        args
+    };
+
     let mut cmd = Command::new("npm");
     cmd.arg("run");
 
-    for arg in args {
+    for arg in effective_args {
         cmd.arg(arg);
     }
 
@@ -17,7 +26,7 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: npm run {}", args.join(" "));
+        eprintln!("Running: npm run {}", effective_args.join(" "));
     }
 
     let output = cmd.output().context("Failed to run npm run")?;
@@ -29,8 +38,8 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     println!("{}", filtered);
 
     timer.track(
-        &format!("npm run {}", args.join(" ")),
-        &format!("rtk npm run {}", args.join(" ")),
+        &format!("npm run {}", effective_args.join(" ")),
+        &format!("rtk npm run {}", effective_args.join(" ")),
         &raw,
         &filtered,
     );
@@ -105,5 +114,31 @@ npm notice
         let output = "\n\n\n";
         let result = filter_npm_output(output);
         assert_eq!(result, "ok ✓");
+    }
+
+    #[test]
+    fn test_run_prefix_stripped() {
+        // "rtk npm run build" should pass ["run", "build"] as args.
+        // Verify that the leading "run" is recognised and stripped so we don't
+        // invoke `npm run run build`.
+        let args: Vec<String> = vec!["run".to_string(), "build".to_string()];
+        let effective: &[String] = if args.first().map(|s| s == "run").unwrap_or(false) {
+            &args[1..]
+        } else {
+            &args
+        };
+        assert_eq!(effective, &["build".to_string()]);
+    }
+
+    #[test]
+    fn test_no_run_prefix_unchanged() {
+        // "rtk npm build" should pass ["build"] and remain unchanged.
+        let args: Vec<String> = vec!["build".to_string()];
+        let effective: &[String] = if args.first().map(|s| s == "run").unwrap_or(false) {
+            &args[1..]
+        } else {
+            &args
+        };
+        assert_eq!(effective, &["build".to_string()]);
     }
 }
