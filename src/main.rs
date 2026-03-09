@@ -996,7 +996,7 @@ fn run_fallback(parse_error: clap::Error, parse_argv: &[OsString]) -> Result<()>
     // Start timer before execution to capture actual command runtime
     let timer = tracking::TimedExecution::start();
 
-    let mut fallback_cmd = match utils::native_command(&args[0]) {
+    let mut fallback_cmd = match shim::native_command(&args[0]) {
         Ok(cmd) => cmd,
         Err(e) => {
             tracking::record_parse_failure_silent(&raw_command, &error_message, false);
@@ -1541,12 +1541,12 @@ fn main() -> Result<()> {
             } => {
                 let allowed = metadata::shim_eligible_top_level_commands();
                 let operational_commands =
-                    utils::resolve_shim_operational_commands(&operational_commands, &allowed)?;
+                    shim::resolve_shim_operational_commands(&operational_commands, &allowed)?;
                 if operational_commands.is_empty() {
                     anyhow::bail!("no operational_commands to shim");
                 }
 
-                utils::install_operational_command_shims(
+                shim::install_operational_command_shims(
                     bin_dir,
                     rtk_bin,
                     force,
@@ -2177,7 +2177,7 @@ mod tests {
     fn test_resolve_shim_operational_commands_rejects_non_eligible() {
         let allowed = metadata::shim_eligible_top_level_commands();
         let err =
-            utils::resolve_shim_operational_commands(&["gain".to_string()], &allowed).unwrap_err();
+            shim::resolve_shim_operational_commands(&["gain".to_string()], &allowed).unwrap_err();
         assert!(
             err.to_string().contains("not Shim-eligible"),
             "unexpected error: {}",

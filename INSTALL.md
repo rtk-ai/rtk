@@ -238,6 +238,52 @@ rtk pnpm list
 rtk vitest run
 ```
 
+## Optional: Shim Mode for Codex (Unix/macOS)
+
+If you want Codex to run common tool names (`git`, `curl`, `docker`, `kubectl`, etc.) through RTK automatically, install Shim entrypoints:
+
+```bash
+# Install all Shim-eligible commands to ~/.local/rtk-shims/bin
+rtk shim install
+
+# Or install a focused subset while testing:
+rtk shim install git gh curl
+```
+
+Notes:
+- `rtk shim install` currently fails fast on Windows.
+- Default shim location: `~/.local/rtk-shims/bin`
+
+### PATH strategies for Codex
+
+Use one of these depending on how aggressively you want to route commands:
+
+```bash
+# 1) One-shot (recommended for experiments):
+#    Only this Codex process gets shim-first PATH.
+PATH="$HOME/.local/rtk-shims/bin:$PATH" codex
+
+# 2) Current shell session:
+#    Useful when launching Codex multiple times in one terminal.
+export PATH="$HOME/.local/rtk-shims/bin:$PATH"
+codex
+
+# 3) Persistent (every new shell):
+#    Add shim path in your shell rc, then reopen terminal.
+echo 'export PATH="$HOME/.local/rtk-shims/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+codex
+```
+
+Quick sanity check before launching Codex:
+
+```bash
+command -v git
+# Expected (shim-first): ~/.local/rtk-shims/bin/git
+```
+
+To disable shim-first behavior, remove the shim path from `PATH` (or start Codex without that PATH override).
+
 ## Uninstalling
 
 ### Complete Removal (Global Installations Only)
