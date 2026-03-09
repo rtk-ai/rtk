@@ -2307,19 +2307,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_pnpx() {
-        let commands = vec!["pnpm dlx", "pnpx"];
-        for command in commands {
-            assert_eq!(
-                rewrite_command(format!("{command} svgo").as_str(), &[]),
-                Some(format!("rtk pnpx svgo")),
-                "Failed for command: {}",
-                command
-            );
-        }
-    }
-
-    #[test]
     fn test_rewrite_npx() {
         assert_eq!(
             rewrite_command(format!("npx svgo").as_str(), &[]),

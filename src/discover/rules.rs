@@ -53,15 +53,6 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^(pnpm\s+dlx|pnpx)\s+",
-        rtk_cmd: "rtk pnpx",
-        rewrite_prefixes: &["pnpm dlx", "pnpx"],
-        category: "PackageManager",
-        savings_pct: 80.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
-    },
-    RtkRule {
         pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)\s+",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
