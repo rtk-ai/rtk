@@ -967,6 +967,60 @@ mod tests {
         assert_rewrite("nocorrect git log -10", "nocorrect rtk git log");
     }
 
+    #[test]
+    fn test_noglob_gh_release_create_exact_bug_report() {
+        // Exact command from the bug report that triggered `rtk: noglob: command not found`
+        let input = "noglob gh release create v0.3.0-rc1 --title v0.3.0-rc1 --notes test --prerelease --draft";
+        match check_for_hook(input, "claude") {
+            HookResult::Rewrite(cmd) => {
+                // gh release is not in hook_lookup whitelist (only pr/issue/run),
+                // so inner routes to rtk run -c. noglob must stay outside.
+                assert!(
+                    !cmd.contains("rtk run -c 'noglob"),
+                    "noglob must not be inside rtk run -c, got '{}'",
+                    cmd
+                );
+                assert!(
+                    cmd.starts_with("noglob "),
+                    "noglob must be the outermost prefix, got '{}'",
+                    cmd
+                );
+            }
+            HookResult::Blocked(_) => panic!("should not be blocked"),
+        }
+    }
+
+    #[test]
+    fn test_nested_shell_prefixes() {
+        // noglob + command: both should be stripped, inner command routed
+        assert_rewrite("noglob command git status", "noglob command rtk git status");
+    }
+
+    #[test]
+    fn test_shell_prefix_plus_env_prefix() {
+        // noglob + GIT_PAGER=cat + git log: all three layers stripped correctly
+        assert_rewrite(
+            "noglob GIT_PAGER=cat git log -10",
+            "noglob GIT_PAGER=cat rtk git log",
+        );
+    }
+
+    #[test]
+    fn test_exec_prefix_routes_inner_command() {
+        assert_rewrite("exec git status", "exec rtk git status");
+    }
+
+    #[test]
+    fn test_bare_shell_prefix_passthrough() {
+        // Bare "noglob" with no following command — pass through unchanged
+        match check_for_hook("noglob", "claude") {
+            HookResult::Rewrite(cmd) => {
+                assert_eq!(cmd, "noglob", "bare prefix should pass through unchanged");
+            }
+            HookResult::Blocked(_) => panic!("should not be blocked"),
+        }
+    }
+
     // === COMPOUND COMMANDS (chained with &&, ||, ;) ===
     // Shell script only matched FIRST command in a chain.
     // Rust hook parses each command independently (#112).
