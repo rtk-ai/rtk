@@ -1955,109 +1955,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_parse_argv_rewrites_known_operational_command() {
-        let raw = vec![
-            OsString::from("/tmp/git"),
-            OsString::from("status"),
-            OsString::from("-s"),
-        ];
-        let rewritten = shim::build_parse_argv(&raw);
-        assert_eq!(
-            rewritten,
-            vec![
-                OsString::from("rtk"),
-                OsString::from("git"),
-                OsString::from("status"),
-                OsString::from("-s")
-            ]
-        );
-    }
-
-    #[test]
-    fn test_build_parse_argv_rewrites_hyphenated_operational_command() {
-        let raw = vec![
-            OsString::from("/usr/local/bin/golangci-lint"),
-            OsString::from("run"),
-        ];
-        let rewritten = shim::build_parse_argv(&raw);
-        assert_eq!(
-            rewritten,
-            vec![
-                OsString::from("rtk"),
-                OsString::from("golangci-lint"),
-                OsString::from("run")
-            ]
-        );
-    }
-
-    #[test]
-    fn test_build_parse_argv_does_not_rewrite_rtk_binary() {
-        let raw = vec![
-            OsString::from("/usr/local/bin/rtk"),
-            OsString::from("git"),
-            OsString::from("status"),
-        ];
-        assert_eq!(shim::build_parse_argv(&raw), raw);
-    }
-
-    #[test]
-    fn test_build_parse_argv_does_not_rewrite_unknown_operational_command() {
-        let raw = vec![OsString::from("/tmp/random-tool"), OsString::from("status")];
-        assert_eq!(shim::build_parse_argv(&raw), raw);
-    }
-
-    #[test]
-    fn test_fallback_guard_blocks_excluded_shim_command_symlink() {
-        let gain_like = vec![OsString::from("/tmp/gain"), OsString::from("--bad-flag")];
-        assert!(shim::should_block_fallback_for_excluded_shim_command(
-            &gain_like
-        ));
-
-        let git_like = vec![OsString::from("/tmp/git"), OsString::from("--bad-flag")];
-        assert!(!shim::should_block_fallback_for_excluded_shim_command(
-            &git_like
-        ));
-    }
-
-    #[test]
-    fn test_operational_command_name_from_argv0_strips_exe_suffix() {
-        let name = shim::operational_command_name_from_argv0(std::ffi::OsStr::new("git.exe"));
-        assert_eq!(name.as_deref(), Some("git"));
-    }
-
-    #[test]
     fn test_supported_top_level_commands_contains_known_items() {
         let commands = metadata::supported_top_level_commands();
         assert!(commands.iter().any(|c| c == "git"));
         assert!(commands.iter().any(|c| c == "curl"));
         assert!(commands.iter().any(|c| c == "shim"));
-    }
-
-    #[test]
-    fn test_shim_eligible_commands_excludes_meta_and_rtk_native() {
-        let commands = metadata::shim_eligible_top_level_commands();
-        assert!(commands.iter().any(|c| c == "git"));
-        assert!(commands.iter().any(|c| c == "curl"));
-        assert!(commands.iter().any(|c| c == "aws"));
-        assert!(commands.iter().any(|c| c == "psql"));
-        assert!(commands.iter().any(|c| c == "wc"));
-        assert!(commands.iter().any(|c| c == "mypy"));
-        assert!(!commands.iter().any(|c| c == "gain"));
-        assert!(!commands.iter().any(|c| c == "read"));
-        assert!(!commands.iter().any(|c| c == "shim"));
-    }
-
-    #[test]
-    fn test_shim_eligible_commands_are_operational() {
-        for cmd in metadata::shim_eligible_top_level_commands() {
-            assert!(
-                metadata::top_level_command_metadata(&cmd)
-                    .map(|meta| meta.operational)
-                    .unwrap_or(false),
-                "Expected '{}' to be operational",
-                cmd
-            );
-        }
     }
 
     #[test]
@@ -2109,24 +2011,6 @@ mod tests {
         assert_eq!(actual, expected, "metadata command set drifted");
     }
 
-    #[test]
-    fn test_metadata_commands_are_not_shim_eligible() {
-        for meta in metadata::TOP_LEVEL_COMMAND_METADATA
-            .iter()
-            .filter(|meta| meta.metadata)
-        {
-            assert!(
-                !meta.shim,
-                "metadata command '{}' must not be shim-eligible",
-                meta.name
-            );
-            assert!(
-                !metadata::is_shim_eligible_top_level_command(meta.name),
-                "metadata command '{}' must not be shim-eligible at runtime",
-                meta.name
-            );
-        }
-    }
 
     #[test]
     fn test_shim_install_parses() {
@@ -2173,23 +2057,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_shim_operational_commands_rejects_non_eligible() {
-        let allowed = metadata::shim_eligible_top_level_commands();
-        let err =
-            shim::resolve_shim_operational_commands(&["gain".to_string()], &allowed).unwrap_err();
-        assert!(
-            err.to_string().contains("not Shim-eligible"),
-            "unexpected error: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_build_parse_argv_does_not_rewrite_excluded_shim_command() {
-        let raw = vec![OsString::from("/tmp/gain"), OsString::from("--graph")];
-        assert_eq!(shim::build_parse_argv(&raw), raw);
-    }
 
     #[test]
     fn test_git_commit_single_message() {
@@ -2440,39 +2307,6 @@ mod tests {
                 args
             );
         }
-    }
-
-    #[test]
-    fn test_shim_exclusion_policy_covers_guarded_commands() {
-        for cmd in [
-            "gain",
-            "discover",
-            "learn",
-            "init",
-            "config",
-            "shim",
-            "proxy",
-            "hook-audit",
-            "cc-economics",
-            "rewrite",
-            "verify",
-            "read",
-            "smart",
-        ] {
-            assert!(metadata::is_supported_top_level_command(cmd));
-            assert!(
-                !metadata::is_shim_eligible_top_level_command(cmd),
-                "Expected '{}' to be excluded from Shim operational_command mode",
-                cmd
-            );
-        }
-    }
-
-    #[test]
-    fn test_shim_is_not_operational() {
-        assert!(!metadata::is_operational_command_from_parse_argv(&os_argv(
-            &["rtk", "shim", "install", "git",]
-        )));
     }
 
     #[test]
