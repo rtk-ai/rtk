@@ -249,7 +249,7 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
 /// For pipes (`|`), only rewrites the first command (the filter stays raw).
-pub fn rewrite_command(cmd: &str) -> Option<String> {
+pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return None;
@@ -272,11 +272,11 @@ pub fn rewrite_command(cmd: &str) -> Option<String> {
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed)
+    rewrite_compound(trimmed, excluded)
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
-fn rewrite_compound(cmd: &str) -> Option<String> {
+fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
     let bytes = cmd.as_bytes();
     let len = bytes.len();
     let mut result = String::with_capacity(len + 32);
@@ -301,7 +301,8 @@ fn rewrite_compound(cmd: &str) -> Option<String> {
                 if i + 1 < len && bytes[i + 1] == b'|' {
                     // `||` operator — rewrite left, continue
                     let seg = cmd[seg_start..i].trim();
-                    let rewritten = rewrite_segment(seg).unwrap_or_else(|| seg.to_string());
+                    let rewritten =
+                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
                     if rewritten != seg {
                         any_changed = true;
                     }
@@ -315,7 +316,8 @@ fn rewrite_compound(cmd: &str) -> Option<String> {
                 } else {
                     // `|` pipe — rewrite first segment only, pass through the rest unchanged
                     let seg = cmd[seg_start..i].trim();
-                    let rewritten = rewrite_segment(seg).unwrap_or_else(|| seg.to_string());
+                    let rewritten =
+                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
                     if rewritten != seg {
                         any_changed = true;
                     }
@@ -329,7 +331,7 @@ fn rewrite_compound(cmd: &str) -> Option<String> {
             b'&' if !in_single && !in_double && i + 1 < len && bytes[i + 1] == b'&' => {
                 // `&&` operator — rewrite left, continue
                 let seg = cmd[seg_start..i].trim();
-                let rewritten = rewrite_segment(seg).unwrap_or_else(|| seg.to_string());
+                let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -342,24 +344,32 @@ fn rewrite_compound(cmd: &str) -> Option<String> {
                 seg_start = i;
             }
             b'&' if !in_single && !in_double => {
-                // single `&` background execution operator
-                let seg = cmd[seg_start..i].trim();
-                let rewritten = rewrite_segment(seg).unwrap_or_else(|| seg.to_string());
-                if rewritten != seg {
-                    any_changed = true;
-                }
-                result.push_str(&rewritten);
-                result.push_str(" & ");
-                i += 1;
-                while i < len && bytes[i] == b' ' {
+                // #346: redirect detection — 2>&1 / >&2 (> before &) or &>file / &>>file (> after &)
+                let is_redirect =
+                    (i > 0 && bytes[i - 1] == b'>') || (i + 1 < len && bytes[i + 1] == b'>');
+                if is_redirect {
                     i += 1;
+                } else {
+                    // single `&` background execution operator
+                    let seg = cmd[seg_start..i].trim();
+                    let rewritten =
+                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+                    if rewritten != seg {
+                        any_changed = true;
+                    }
+                    result.push_str(&rewritten);
+                    result.push_str(" & ");
+                    i += 1;
+                    while i < len && bytes[i] == b' ' {
+                        i += 1;
+                    }
+                    seg_start = i;
                 }
-                seg_start = i;
             }
             b';' if !in_single && !in_double => {
                 // `;` separator
                 let seg = cmd[seg_start..i].trim();
-                let rewritten = rewrite_segment(seg).unwrap_or_else(|| seg.to_string());
+                let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -382,7 +392,7 @@ fn rewrite_compound(cmd: &str) -> Option<String> {
 
     // Last (or only) segment
     let seg = cmd[seg_start..len].trim();
-    let rewritten = rewrite_segment(seg).unwrap_or_else(|| seg.to_string());
+    let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
     if rewritten != seg {
         any_changed = true;
     }
@@ -424,7 +434,7 @@ fn rewrite_head_numeric(cmd: &str) -> Option<String> {
 /// Rewrite a single (non-compound) command segment.
 /// Returns `Some(rewritten)` if matched (including already-RTK pass-through).
 /// Returns `None` if no match (caller uses original segment).
-fn rewrite_segment(seg: &str) -> Option<String> {
+fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
         return None;
@@ -445,7 +455,14 @@ fn rewrite_segment(seg: &str) -> Option<String> {
 
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(trimmed) {
-        Classification::Supported { rtk_equivalent, .. } => rtk_equivalent,
+        Classification::Supported { rtk_equivalent, .. } => {
+            // Check if the base command is excluded from rewriting (#243)
+            let base = trimmed.split_whitespace().next().unwrap_or("");
+            if excluded.iter().any(|e| e == base) {
+                return None;
+            }
+            rtk_equivalent
+        }
         _ => return None,
     };
 
@@ -457,6 +474,23 @@ fn rewrite_segment(seg: &str) -> Option<String> {
     let env_prefix_len = trimmed.len() - stripped_cow.len();
     let env_prefix = &trimmed[..env_prefix_len];
     let cmd_clean = stripped_cow.trim();
+
+    // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
+    if env_prefix.contains("RTK_DISABLED=") {
+        return None;
+    }
+
+    // #196: gh with --json/--jq/--template produces structured output that
+    // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
+    if rule.rtk_cmd == "rtk gh" {
+        let args_lower = cmd_clean.to_lowercase();
+        if args_lower.contains("--json")
+            || args_lower.contains("--jq")
+            || args_lower.contains("--template")
+        {
+            return None;
+        }
+    }
 
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
@@ -792,26 +826,32 @@ mod tests {
 
     #[test]
     fn test_rewrite_git_status() {
-        assert_eq!(rewrite_command("git status"), Some("rtk git status".into()));
+        assert_eq!(
+            rewrite_command("git status", &[]),
+            Some("rtk git status".into())
+        );
     }
 
     #[test]
     fn test_rewrite_git_log() {
         assert_eq!(
-            rewrite_command("git log -10"),
+            rewrite_command("git log -10", &[]),
             Some("rtk git log -10".into())
         );
     }
 
     #[test]
     fn test_rewrite_cargo_test() {
-        assert_eq!(rewrite_command("cargo test"), Some("rtk cargo test".into()));
+        assert_eq!(
+            rewrite_command("cargo test", &[]),
+            Some("rtk cargo test".into())
+        );
     }
 
     #[test]
     fn test_rewrite_compound_and() {
         assert_eq!(
-            rewrite_command("git add . && cargo test"),
+            rewrite_command("git add . && cargo test", &[]),
             Some("rtk git add . && rtk cargo test".into())
         );
     }
@@ -819,7 +859,10 @@ mod tests {
     #[test]
     fn test_rewrite_compound_three_segments() {
         assert_eq!(
-            rewrite_command("cargo fmt --all && cargo clippy --all-targets && cargo test"),
+            rewrite_command(
+                "cargo fmt --all && cargo clippy --all-targets && cargo test",
+                &[]
+            ),
             Some("rtk cargo fmt --all && rtk cargo clippy --all-targets && rtk cargo test".into())
         );
     }
@@ -827,7 +870,7 @@ mod tests {
     #[test]
     fn test_rewrite_already_rtk() {
         assert_eq!(
-            rewrite_command("rtk git status"),
+            rewrite_command("rtk git status", &[]),
             Some("rtk git status".into())
         );
     }
@@ -835,7 +878,7 @@ mod tests {
     #[test]
     fn test_rewrite_background_single_amp() {
         assert_eq!(
-            rewrite_command("cargo test & git status"),
+            rewrite_command("cargo test & git status", &[]),
             Some("rtk cargo test & rtk git status".into())
         );
     }
@@ -843,7 +886,7 @@ mod tests {
     #[test]
     fn test_rewrite_background_unsupported_right() {
         assert_eq!(
-            rewrite_command("cargo test & terraform plan"),
+            rewrite_command("cargo test & terraform plan", &[]),
             Some("rtk cargo test & terraform plan".into())
         );
     }
@@ -852,25 +895,25 @@ mod tests {
     fn test_rewrite_background_does_not_affect_double_amp() {
         // `&&` must still work after adding `&` support
         assert_eq!(
-            rewrite_command("cargo test && git status"),
+            rewrite_command("cargo test && git status", &[]),
             Some("rtk cargo test && rtk git status".into())
         );
     }
 
     #[test]
     fn test_rewrite_unsupported_returns_none() {
-        assert_eq!(rewrite_command("terraform plan"), None);
+        assert_eq!(rewrite_command("terraform plan", &[]), None);
     }
 
     #[test]
     fn test_rewrite_ignored_cd() {
-        assert_eq!(rewrite_command("cd /tmp"), None);
+        assert_eq!(rewrite_command("cd /tmp", &[]), None);
     }
 
     #[test]
     fn test_rewrite_with_env_prefix() {
         assert_eq!(
-            rewrite_command("GIT_SSH_COMMAND=ssh git push"),
+            rewrite_command("GIT_SSH_COMMAND=ssh git push", &[]),
             Some("GIT_SSH_COMMAND=ssh rtk git push".into())
         );
     }
@@ -878,7 +921,7 @@ mod tests {
     #[test]
     fn test_rewrite_npx_tsc() {
         assert_eq!(
-            rewrite_command("npx tsc --noEmit"),
+            rewrite_command("npx tsc --noEmit", &[]),
             Some("rtk tsc --noEmit".into())
         );
     }
@@ -886,7 +929,7 @@ mod tests {
     #[test]
     fn test_rewrite_pnpm_tsc() {
         assert_eq!(
-            rewrite_command("pnpm tsc --noEmit"),
+            rewrite_command("pnpm tsc --noEmit", &[]),
             Some("rtk tsc --noEmit".into())
         );
     }
@@ -894,7 +937,7 @@ mod tests {
     #[test]
     fn test_rewrite_cat_file() {
         assert_eq!(
-            rewrite_command("cat src/main.rs"),
+            rewrite_command("cat src/main.rs", &[]),
             Some("rtk read src/main.rs".into())
         );
     }
@@ -902,7 +945,7 @@ mod tests {
     #[test]
     fn test_rewrite_rg_pattern() {
         assert_eq!(
-            rewrite_command("rg \"fn main\""),
+            rewrite_command("rg \"fn main\"", &[]),
             Some("rtk grep \"fn main\"".into())
         );
     }
@@ -910,7 +953,7 @@ mod tests {
     #[test]
     fn test_rewrite_npx_playwright() {
         assert_eq!(
-            rewrite_command("npx playwright test"),
+            rewrite_command("npx playwright test", &[]),
             Some("rtk playwright test".into())
         );
     }
@@ -918,7 +961,7 @@ mod tests {
     #[test]
     fn test_rewrite_next_build() {
         assert_eq!(
-            rewrite_command("next build --turbo"),
+            rewrite_command("next build --turbo", &[]),
             Some("rtk next --turbo".into())
         );
     }
@@ -927,28 +970,111 @@ mod tests {
     fn test_rewrite_pipe_first_only() {
         // After a pipe, the filter command stays raw
         assert_eq!(
-            rewrite_command("git log -10 | grep feat"),
+            rewrite_command("git log -10 | grep feat", &[]),
             Some("rtk git log -10 | grep feat".into())
         );
     }
 
     #[test]
     fn test_rewrite_heredoc_returns_none() {
-        assert_eq!(rewrite_command("cat <<'EOF'\nfoo\nEOF"), None);
+        assert_eq!(rewrite_command("cat <<'EOF'\nfoo\nEOF", &[]), None);
     }
 
     #[test]
     fn test_rewrite_empty_returns_none() {
-        assert_eq!(rewrite_command(""), None);
-        assert_eq!(rewrite_command("   "), None);
+        assert_eq!(rewrite_command("", &[]), None);
+        assert_eq!(rewrite_command("   ", &[]), None);
     }
 
     #[test]
     fn test_rewrite_mixed_compound_partial() {
         // First segment already RTK, second gets rewritten
         assert_eq!(
-            rewrite_command("rtk git add . && cargo test"),
+            rewrite_command("rtk git add . && cargo test", &[]),
             Some("rtk git add . && rtk cargo test".into())
+        );
+    }
+
+    // --- #345: RTK_DISABLED ---
+
+    #[test]
+    fn test_rewrite_rtk_disabled_curl() {
+        assert_eq!(
+            rewrite_command("RTK_DISABLED=1 curl https://example.com", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_git_status() {
+        assert_eq!(rewrite_command("RTK_DISABLED=1 git status", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_multi_env() {
+        assert_eq!(
+            rewrite_command("FOO=1 RTK_DISABLED=1 git status", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_non_rtk_disabled_env_still_rewrites() {
+        assert_eq!(
+            rewrite_command("SOME_VAR=1 git status", &[]),
+            Some("SOME_VAR=1 rtk git status".into())
+        );
+    }
+
+    // --- #346: 2>&1 and &> redirect detection ---
+
+    #[test]
+    fn test_rewrite_redirect_2_gt_amp_1_with_pipe() {
+        assert_eq!(
+            rewrite_command("cargo test 2>&1 | head", &[]),
+            Some("rtk cargo test 2>&1 | head".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_2_gt_amp_1_trailing() {
+        assert_eq!(
+            rewrite_command("cargo test 2>&1", &[]),
+            Some("rtk cargo test 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_plain_2_devnull() {
+        // 2>/dev/null has no `&`, never broken — non-regression
+        assert_eq!(
+            rewrite_command("git status 2>/dev/null", &[]),
+            Some("rtk git status 2>/dev/null".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_2_gt_amp_1_with_and() {
+        assert_eq!(
+            rewrite_command("cargo test 2>&1 && echo done", &[]),
+            Some("rtk cargo test 2>&1 && echo done".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_amp_gt_devnull() {
+        assert_eq!(
+            rewrite_command("cargo test &>/dev/null", &[]),
+            Some("rtk cargo test &>/dev/null".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_background_amp_non_regression() {
+        // background `&` must still work after redirect fix
+        assert_eq!(
+            rewrite_command("cargo test & git status", &[]),
+            Some("rtk cargo test & rtk git status".into())
         );
     }
 
@@ -958,7 +1084,7 @@ mod tests {
     fn test_rewrite_head_numeric_flag() {
         // head -20 file → rtk read file --max-lines 20 (not rtk read -20 file)
         assert_eq!(
-            rewrite_command("head -20 src/main.rs"),
+            rewrite_command("head -20 src/main.rs", &[]),
             Some("rtk read src/main.rs --max-lines 20".into())
         );
     }
@@ -966,7 +1092,7 @@ mod tests {
     #[test]
     fn test_rewrite_head_lines_long_flag() {
         assert_eq!(
-            rewrite_command("head --lines=50 src/lib.rs"),
+            rewrite_command("head --lines=50 src/lib.rs", &[]),
             Some("rtk read src/lib.rs --max-lines 50".into())
         );
     }
@@ -975,7 +1101,7 @@ mod tests {
     fn test_rewrite_head_no_flag_still_rewrites() {
         // plain `head file` → `rtk read file` (no numeric flag)
         assert_eq!(
-            rewrite_command("head src/main.rs"),
+            rewrite_command("head src/main.rs", &[]),
             Some("rtk read src/main.rs".into())
         );
     }
@@ -983,7 +1109,7 @@ mod tests {
     #[test]
     fn test_rewrite_head_other_flag_skipped() {
         // head -c 100 file: unsupported flag, skip rewriting
-        assert_eq!(rewrite_command("head -c 100 src/main.rs"), None);
+        assert_eq!(rewrite_command("head -c 100 src/main.rs", &[]), None);
     }
 
     // --- New registry entries ---
@@ -1089,13 +1215,16 @@ mod tests {
 
     #[test]
     fn test_rewrite_tree() {
-        assert_eq!(rewrite_command("tree src/"), Some("rtk tree src/".into()));
+        assert_eq!(
+            rewrite_command("tree src/", &[]),
+            Some("rtk tree src/".into())
+        );
     }
 
     #[test]
     fn test_rewrite_diff() {
         assert_eq!(
-            rewrite_command("diff file1.txt file2.txt"),
+            rewrite_command("diff file1.txt file2.txt", &[]),
             Some("rtk diff file1.txt file2.txt".into())
         );
     }
@@ -1103,7 +1232,7 @@ mod tests {
     #[test]
     fn test_rewrite_gh_release() {
         assert_eq!(
-            rewrite_command("gh release list"),
+            rewrite_command("gh release list", &[]),
             Some("rtk gh release list".into())
         );
     }
@@ -1111,7 +1240,7 @@ mod tests {
     #[test]
     fn test_rewrite_cargo_install() {
         assert_eq!(
-            rewrite_command("cargo install rtk"),
+            rewrite_command("cargo install rtk", &[]),
             Some("rtk cargo install rtk".into())
         );
     }
@@ -1119,7 +1248,7 @@ mod tests {
     #[test]
     fn test_rewrite_kubectl_describe() {
         assert_eq!(
-            rewrite_command("kubectl describe pod mypod"),
+            rewrite_command("kubectl describe pod mypod", &[]),
             Some("rtk kubectl describe pod mypod".into())
         );
     }
@@ -1127,8 +1256,52 @@ mod tests {
     #[test]
     fn test_rewrite_docker_run() {
         assert_eq!(
-            rewrite_command("docker run --rm ubuntu bash"),
+            rewrite_command("docker run --rm ubuntu bash", &[]),
             Some("rtk docker run --rm ubuntu bash".into())
+        );
+    }
+
+    // --- #336: docker compose supported subcommands rewritten, unsupported skipped ---
+
+    #[test]
+    fn test_rewrite_docker_compose_ps() {
+        assert_eq!(
+            rewrite_command("docker compose ps", &[]),
+            Some("rtk docker compose ps".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_logs() {
+        assert_eq!(
+            rewrite_command("docker compose logs web", &[]),
+            Some("rtk docker compose logs web".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_build() {
+        assert_eq!(
+            rewrite_command("docker compose build", &[]),
+            Some("rtk docker compose build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_up_skipped() {
+        assert_eq!(rewrite_command("docker compose up -d", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_down_skipped() {
+        assert_eq!(rewrite_command("docker compose down", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_config_skipped() {
+        assert_eq!(
+            rewrite_command("docker compose -f foo.yaml config --services", &[]),
+            None
         );
     }
 
@@ -1180,13 +1353,16 @@ mod tests {
 
     #[test]
     fn test_rewrite_aws() {
-        assert_eq!(rewrite_command("aws s3 ls"), Some("rtk aws s3 ls".into()));
+        assert_eq!(
+            rewrite_command("aws s3 ls", &[]),
+            Some("rtk aws s3 ls".into())
+        );
     }
 
     #[test]
     fn test_rewrite_aws_ec2() {
         assert_eq!(
-            rewrite_command("aws ec2 describe-instances --region us-east-1"),
+            rewrite_command("aws ec2 describe-instances --region us-east-1", &[]),
             Some("rtk aws ec2 describe-instances --region us-east-1".into())
         );
     }
@@ -1194,7 +1370,7 @@ mod tests {
     #[test]
     fn test_rewrite_psql() {
         assert_eq!(
-            rewrite_command("psql -U postgres -d mydb"),
+            rewrite_command("psql -U postgres -d mydb", &[]),
             Some("rtk psql -U postgres -d mydb".into())
         );
     }
@@ -1270,7 +1446,7 @@ mod tests {
     #[test]
     fn test_rewrite_ruff_check() {
         assert_eq!(
-            rewrite_command("ruff check ."),
+            rewrite_command("ruff check .", &[]),
             Some("rtk ruff check .".into())
         );
     }
@@ -1278,7 +1454,7 @@ mod tests {
     #[test]
     fn test_rewrite_ruff_format() {
         assert_eq!(
-            rewrite_command("ruff format src/"),
+            rewrite_command("ruff format src/", &[]),
             Some("rtk ruff format src/".into())
         );
     }
@@ -1286,7 +1462,7 @@ mod tests {
     #[test]
     fn test_rewrite_pytest() {
         assert_eq!(
-            rewrite_command("pytest tests/"),
+            rewrite_command("pytest tests/", &[]),
             Some("rtk pytest tests/".into())
         );
     }
@@ -1294,27 +1470,33 @@ mod tests {
     #[test]
     fn test_rewrite_python_m_pytest() {
         assert_eq!(
-            rewrite_command("python -m pytest -x tests/"),
+            rewrite_command("python -m pytest -x tests/", &[]),
             Some("rtk pytest -x tests/".into())
         );
     }
 
     #[test]
     fn test_rewrite_pip_list() {
-        assert_eq!(rewrite_command("pip list"), Some("rtk pip list".into()));
+        assert_eq!(
+            rewrite_command("pip list", &[]),
+            Some("rtk pip list".into())
+        );
     }
 
     #[test]
     fn test_rewrite_pip_outdated() {
         assert_eq!(
-            rewrite_command("pip outdated"),
+            rewrite_command("pip outdated", &[]),
             Some("rtk pip outdated".into())
         );
     }
 
     #[test]
     fn test_rewrite_uv_pip_list() {
-        assert_eq!(rewrite_command("uv pip list"), Some("rtk pip list".into()));
+        assert_eq!(
+            rewrite_command("uv pip list", &[]),
+            Some("rtk pip list".into())
+        );
     }
 
     // --- Go tooling ---
@@ -1366,7 +1548,7 @@ mod tests {
     #[test]
     fn test_rewrite_go_test() {
         assert_eq!(
-            rewrite_command("go test ./..."),
+            rewrite_command("go test ./...", &[]),
             Some("rtk go test ./...".into())
         );
     }
@@ -1374,7 +1556,7 @@ mod tests {
     #[test]
     fn test_rewrite_go_build() {
         assert_eq!(
-            rewrite_command("go build ./..."),
+            rewrite_command("go build ./...", &[]),
             Some("rtk go build ./...".into())
         );
     }
@@ -1382,7 +1564,7 @@ mod tests {
     #[test]
     fn test_rewrite_go_vet() {
         assert_eq!(
-            rewrite_command("go vet ./..."),
+            rewrite_command("go vet ./...", &[]),
             Some("rtk go vet ./...".into())
         );
     }
@@ -1390,7 +1572,7 @@ mod tests {
     #[test]
     fn test_rewrite_golangci_lint() {
         assert_eq!(
-            rewrite_command("golangci-lint run ./..."),
+            rewrite_command("golangci-lint run ./...", &[]),
             Some("rtk golangci-lint run ./...".into())
         );
     }
@@ -1410,13 +1592,16 @@ mod tests {
 
     #[test]
     fn test_rewrite_vitest() {
-        assert_eq!(rewrite_command("vitest run"), Some("rtk vitest run".into()));
+        assert_eq!(
+            rewrite_command("vitest run", &[]),
+            Some("rtk vitest run".into())
+        );
     }
 
     #[test]
     fn test_rewrite_pnpm_vitest() {
         assert_eq!(
-            rewrite_command("pnpm vitest run"),
+            rewrite_command("pnpm vitest run", &[]),
             Some("rtk vitest run".into())
         );
     }
@@ -1435,7 +1620,7 @@ mod tests {
     #[test]
     fn test_rewrite_prisma() {
         assert_eq!(
-            rewrite_command("npx prisma migrate dev"),
+            rewrite_command("npx prisma migrate dev", &[]),
             Some("rtk prisma migrate dev".into())
         );
     }
@@ -1443,14 +1628,17 @@ mod tests {
     #[test]
     fn test_rewrite_prettier() {
         assert_eq!(
-            rewrite_command("npx prettier --check src/"),
+            rewrite_command("npx prettier --check src/", &[]),
             Some("rtk prettier --check src/".into())
         );
     }
 
     #[test]
     fn test_rewrite_pnpm_list() {
-        assert_eq!(rewrite_command("pnpm list"), Some("rtk pnpm list".into()));
+        assert_eq!(
+            rewrite_command("pnpm list", &[]),
+            Some("rtk pnpm list".into())
+        );
     }
 
     // --- Compound operator edge cases ---
@@ -1459,7 +1647,7 @@ mod tests {
     fn test_rewrite_compound_or() {
         // `||` fallback: left rewritten, right rewritten
         assert_eq!(
-            rewrite_command("cargo test || cargo build"),
+            rewrite_command("cargo test || cargo build", &[]),
             Some("rtk cargo test || rtk cargo build".into())
         );
     }
@@ -1467,7 +1655,7 @@ mod tests {
     #[test]
     fn test_rewrite_compound_semicolon() {
         assert_eq!(
-            rewrite_command("git status; cargo test"),
+            rewrite_command("git status; cargo test", &[]),
             Some("rtk git status; rtk cargo test".into())
         );
     }
@@ -1476,7 +1664,7 @@ mod tests {
     fn test_rewrite_compound_pipe_raw_filter() {
         // Pipe: rewrite first segment only, pass through rest unchanged
         assert_eq!(
-            rewrite_command("cargo test | grep FAILED"),
+            rewrite_command("cargo test | grep FAILED", &[]),
             Some("rtk cargo test | grep FAILED".into())
         );
     }
@@ -1484,7 +1672,7 @@ mod tests {
     #[test]
     fn test_rewrite_compound_pipe_git_grep() {
         assert_eq!(
-            rewrite_command("git log -10 | grep feat"),
+            rewrite_command("git log -10 | grep feat", &[]),
             Some("rtk git log -10 | grep feat".into())
         );
     }
@@ -1492,7 +1680,10 @@ mod tests {
     #[test]
     fn test_rewrite_compound_four_segments() {
         assert_eq!(
-            rewrite_command("cargo fmt --all && cargo clippy && cargo test && git status"),
+            rewrite_command(
+                "cargo fmt --all && cargo clippy && cargo test && git status",
+                &[]
+            ),
             Some(
                 "rtk cargo fmt --all && rtk cargo clippy && rtk cargo test && rtk git status"
                     .into()
@@ -1504,7 +1695,7 @@ mod tests {
     fn test_rewrite_compound_mixed_supported_unsupported() {
         // unsupported segments stay raw
         assert_eq!(
-            rewrite_command("cargo test && terraform plan"),
+            rewrite_command("cargo test && terraform plan", &[]),
             Some("rtk cargo test && terraform plan".into())
         );
     }
@@ -1512,7 +1703,10 @@ mod tests {
     #[test]
     fn test_rewrite_compound_all_unsupported_returns_none() {
         // No rewrite at all: returns None
-        assert_eq!(rewrite_command("terraform plan && terraform apply"), None);
+        assert_eq!(
+            rewrite_command("terraform plan && terraform apply", &[]),
+            None
+        );
     }
 
     // --- sudo / env prefix + rewrite ---
@@ -1520,7 +1714,7 @@ mod tests {
     #[test]
     fn test_rewrite_sudo_docker() {
         assert_eq!(
-            rewrite_command("sudo docker ps"),
+            rewrite_command("sudo docker ps", &[]),
             Some("sudo rtk docker ps".into())
         );
     }
@@ -1528,7 +1722,7 @@ mod tests {
     #[test]
     fn test_rewrite_env_var_prefix() {
         assert_eq!(
-            rewrite_command("GIT_SSH_COMMAND=ssh git push origin main"),
+            rewrite_command("GIT_SSH_COMMAND=ssh git push origin main", &[]),
             Some("GIT_SSH_COMMAND=ssh rtk git push origin main".into())
         );
     }
@@ -1538,7 +1732,7 @@ mod tests {
     #[test]
     fn test_rewrite_find_with_flags() {
         assert_eq!(
-            rewrite_command("find . -name '*.rs' -type f"),
+            rewrite_command("find . -name '*.rs' -type f", &[]),
             Some("rtk find . -name '*.rs' -type f".into())
         );
     }
@@ -1576,6 +1770,42 @@ mod tests {
         }
     }
 
+    // --- exclude_commands (#243) ---
+
+    #[test]
+    fn test_rewrite_excludes_curl() {
+        let excluded = vec!["curl".to_string()];
+        assert_eq!(
+            rewrite_command("curl https://api.example.com/health", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_exclude_does_not_affect_other_commands() {
+        let excluded = vec!["curl".to_string()];
+        assert_eq!(
+            rewrite_command("git status", &excluded),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_empty_excludes_rewrites_curl() {
+        let excluded: Vec<String> = vec![];
+        assert!(rewrite_command("curl https://api.example.com", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_rewrite_compound_partial_exclude() {
+        // curl excluded but git still rewrites
+        let excluded = vec!["curl".to_string()];
+        assert_eq!(
+            rewrite_command("git status && curl https://api.example.com", &excluded),
+            Some("rtk git status && curl https://api.example.com".into())
+        );
+    }
+
     // --- Every PATTERN compiles to a valid Regex ---
 
     #[test]
@@ -1587,5 +1817,44 @@ mod tests {
                 "PATTERNS[{i}] = '{pattern}' is not a valid regex"
             );
         }
+    }
+
+    // --- #196: gh --json/--jq/--template passthrough ---
+
+    #[test]
+    fn test_rewrite_gh_json_skipped() {
+        assert_eq!(rewrite_command("gh pr list --json number,title", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_gh_jq_skipped() {
+        assert_eq!(
+            rewrite_command("gh pr list --json number --jq '.[].number'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_template_skipped() {
+        assert_eq!(
+            rewrite_command("gh pr view 42 --template '{{.title}}'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_api_json_skipped() {
+        assert_eq!(
+            rewrite_command("gh api repos/owner/repo --jq '.name'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gh_without_json_still_works() {
+        assert_eq!(
+            rewrite_command("gh pr list", &[]),
+            Some("rtk gh pr list".into())
+        );
     }
 }

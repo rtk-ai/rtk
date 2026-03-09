@@ -52,16 +52,43 @@ fn is_python_linter(linter: &str) -> bool {
     matches!(linter, "ruff" | "pylint" | "mypy" | "flake8")
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
+/// Strip package manager prefixes (npx, bunx, pnpm, pnpm exec, yarn) from args.
+/// Returns the number of args to skip.
+fn strip_pm_prefix(args: &[String]) -> usize {
+    let pm_names = ["npx", "bunx", "pnpm", "yarn"];
+    let mut skip = 0;
+    for arg in args {
+        if pm_names.contains(&arg.as_str()) || arg == "exec" {
+            skip += 1;
+        } else {
+            break;
+        }
+    }
+    skip
+}
 
-    // Detect linter name (first arg if not a path/flag, else default to eslint)
+/// Detect the linter name from args (after stripping PM prefixes).
+/// Returns the linter name and whether it was explicitly specified.
+fn detect_linter(args: &[String]) -> (&str, bool) {
     let is_path_or_flag = args.is_empty()
         || args[0].starts_with('-')
         || args[0].contains('/')
         || args[0].contains('.');
 
-    let linter = if is_path_or_flag { "eslint" } else { &args[0] };
+    if is_path_or_flag {
+        ("eslint", false)
+    } else {
+        (&args[0], true)
+    }
+}
+
+pub fn run(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let skip = strip_pm_prefix(args);
+    let effective_args = &args[skip..];
+
+    let (linter, explicit) = detect_linter(effective_args);
 
     // Python linters use Command::new() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
@@ -78,13 +105,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         }
         "ruff" => {
             // Force JSON output for ruff check
-            if !args.contains(&"--output-format".to_string()) {
+            if !effective_args.contains(&"--output-format".to_string()) {
                 cmd.arg("check").arg("--output-format=json");
             }
         }
         "pylint" => {
             // Force JSON2 output for pylint
-            if !args.contains(&"--output-format".to_string()) {
+            if !effective_args.contains(&"--output-format".to_string()) {
                 cmd.arg("--output-format=json2");
             }
         }
@@ -97,11 +124,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     // Add user arguments (skip first if it was the linter name, and skip "check" for ruff if we added it)
-    let start_idx = if is_path_or_flag {
+    let start_idx = if !explicit {
         0
-    } else if linter == "ruff" && !args.is_empty() && args[0] == "ruff" {
+    } else if linter == "ruff" && !effective_args.is_empty() && effective_args[0] == "ruff" {
         // Skip "ruff" and "check" if we already added "check"
-        if args.len() > 1 && args[1] == "check" {
+        if effective_args.len() > 1 && effective_args[1] == "check" {
             2
         } else {
             1
@@ -110,7 +137,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         1
     };
 
-    for arg in &args[start_idx..] {
+    for arg in &effective_args[start_idx..] {
         // Skip --output-format if we already added it
         if linter == "ruff" && arg.starts_with("--output-format") {
             continue;
@@ -123,7 +150,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     // Default to current directory if no path specified (for ruff/pylint/mypy/eslint)
     if matches!(linter, "ruff" | "pylint" | "mypy" | "eslint") {
-        let has_path = args
+        let has_path = effective_args
             .iter()
             .skip(start_idx)
             .any(|a| !a.starts_with('-') && !a.contains('='));
@@ -578,6 +605,80 @@ mod tests {
         assert!(result.contains("undefined-variable (E0602)"));
         assert!(result.contains("main.py"));
         assert!(result.contains("utils.py"));
+    }
+
+    #[test]
+    fn test_strip_pm_prefix_npx() {
+        let args: Vec<String> = vec!["npx".into(), "eslint".into(), "src/".into()];
+        assert_eq!(strip_pm_prefix(&args), 1);
+    }
+
+    #[test]
+    fn test_strip_pm_prefix_bunx() {
+        let args: Vec<String> = vec!["bunx".into(), "eslint".into(), ".".into()];
+        assert_eq!(strip_pm_prefix(&args), 1);
+    }
+
+    #[test]
+    fn test_strip_pm_prefix_pnpm_exec() {
+        let args: Vec<String> = vec!["pnpm".into(), "exec".into(), "eslint".into()];
+        assert_eq!(strip_pm_prefix(&args), 2);
+    }
+
+    #[test]
+    fn test_strip_pm_prefix_none() {
+        let args: Vec<String> = vec!["eslint".into(), "src/".into()];
+        assert_eq!(strip_pm_prefix(&args), 0);
+    }
+
+    #[test]
+    fn test_strip_pm_prefix_empty() {
+        let args: Vec<String> = vec![];
+        assert_eq!(strip_pm_prefix(&args), 0);
+    }
+
+    #[test]
+    fn test_detect_linter_eslint() {
+        let args: Vec<String> = vec!["eslint".into(), "src/".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert_eq!(linter, "eslint");
+        assert!(explicit);
+    }
+
+    #[test]
+    fn test_detect_linter_default_on_path() {
+        let args: Vec<String> = vec!["src/".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert_eq!(linter, "eslint");
+        assert!(!explicit);
+    }
+
+    #[test]
+    fn test_detect_linter_default_on_flag() {
+        let args: Vec<String> = vec!["--max-warnings=0".into()];
+        let (linter, explicit) = detect_linter(&args);
+        assert_eq!(linter, "eslint");
+        assert!(!explicit);
+    }
+
+    #[test]
+    fn test_detect_linter_after_npx_strip() {
+        // Simulates: rtk lint npx eslint src/ → after strip_pm_prefix, args = ["eslint", "src/"]
+        let full_args: Vec<String> = vec!["npx".into(), "eslint".into(), "src/".into()];
+        let skip = strip_pm_prefix(&full_args);
+        let effective = &full_args[skip..];
+        let (linter, _) = detect_linter(effective);
+        assert_eq!(linter, "eslint");
+    }
+
+    #[test]
+    fn test_detect_linter_after_pnpm_exec_strip() {
+        let full_args: Vec<String> =
+            vec!["pnpm".into(), "exec".into(), "biome".into(), "check".into()];
+        let skip = strip_pm_prefix(&full_args);
+        let effective = &full_args[skip..];
+        let (linter, _) = detect_linter(effective);
+        assert_eq!(linter, "biome");
     }
 
     #[test]

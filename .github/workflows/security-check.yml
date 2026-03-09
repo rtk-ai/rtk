@@ -2,7 +2,7 @@ name: Security Check
 
 on:
   pull_request:
-    branches: [ master ]
+    branches: [ master, develop ]
 
 permissions:
   contents: read
