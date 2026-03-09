@@ -694,6 +694,120 @@ Current Version ID: test789
         );
     }
 
+    // ── Token savings assertions ──────────────────────────────
+
+    /// Helper: estimate token count as chars / 4 (standard approximation)
+    fn estimate_tokens(s: &str) -> usize {
+        s.len() / 4
+    }
+
+    /// Helper: assert minimum savings percentage
+    fn assert_savings(raw: &str, filtered: &str, min_pct: f64, label: &str) {
+        let raw_tokens = estimate_tokens(raw);
+        let filtered_tokens = estimate_tokens(filtered);
+        assert!(
+            raw_tokens > 0,
+            "{}: raw output should not be empty",
+            label
+        );
+        let savings_pct =
+            (raw_tokens as f64 - filtered_tokens as f64) / raw_tokens as f64 * 100.0;
+        assert!(
+            savings_pct >= min_pct,
+            "{}: expected >= {:.0}% savings, got {:.1}% (raw {} tokens, filtered {} tokens)",
+            label,
+            min_pct,
+            savings_pct,
+            raw_tokens,
+            filtered_tokens
+        );
+    }
+
+    #[test]
+    fn test_deploy_token_savings() {
+        let raw = r#"
+ ⛅️ wrangler 4.14.4 (update available 4.15.0)
+-------------------------------------------------------
+
+▲ [WARNING] Your worker has access to the following bindings
+
+  - KV Namespaces:
+    - MY_KV (3a4b5c6d)
+  - D1 Databases:
+    - MY_DB (7e8f9a0b)
+  - R2 Buckets:
+    - STORAGE (1c2d3e4f)
+
+Total Upload: 123.45 KiB / gzip: 34.56 KiB
+Worker Startup Time: 5 ms
+Uploaded api-worker (2.34 sec)
+Deployed api-worker triggers (0.67 sec)
+  https://api-worker.username.workers.dev
+  https://api.example.com
+Current Version ID: xyz789abc012
+Current Deployment ID: deploy-abc-123-def-456
+"#;
+        let filtered = filter_deploy_output(raw);
+        assert_savings(raw, &filtered, 50.0, "deploy with bindings");
+    }
+
+    #[test]
+    fn test_pages_deploy_token_savings() {
+        let raw = r#"
+🌀 Building list of files...
+🌍 Uploading... (1/24)
+🌍 Uploading... (2/24)
+🌍 Uploading... (3/24)
+🌍 Uploading... (4/24)
+🌍 Uploading... (5/24)
+🌍 Uploading... (6/24)
+🌍 Uploading... (7/24)
+🌍 Uploading... (8/24)
+🌍 Uploading... (9/24)
+🌍 Uploading... (10/24)
+🌍 Uploading... (11/24)
+🌍 Uploading... (12/24)
+🌍 Uploading... (13/24)
+🌍 Uploading... (14/24)
+🌍 Uploading... (15/24)
+🌍 Uploading... (16/24)
+🌍 Uploading... (17/24)
+🌍 Uploading... (18/24)
+🌍 Uploading... (19/24)
+🌍 Uploading... (20/24)
+🌍 Uploading... (21/24)
+🌍 Uploading... (22/24)
+🌍 Uploading... (23/24)
+🌍 Uploading... (24/24)
+
+✨ Success! Uploaded 24 files (2.34 sec)
+
+✨ Deployment complete! Take a peek over at https://abc123.my-pages.pages.dev
+"#;
+        let filtered = filter_pages_output(raw);
+        assert_savings(raw, &filtered, 70.0, "pages deploy with progress");
+    }
+
+    #[test]
+    fn test_deploy_error_token_savings() {
+        let raw = r#"
+ ⛅️ wrangler 4.14.4 (update available 4.15.0)
+-------------------------------------------------------
+
+Running custom build: node build.js
+Build completed successfully.
+
+✘ [ERROR] Could not find wrangler.toml
+
+  No configuration file found. Create a wrangler.toml in your project root.
+  You can use `wrangler init` to create a new project.
+
+For more information, see https://developers.cloudflare.com/workers/wrangler/configuration/
+"#;
+        let filtered = filter_deploy_output(raw);
+        assert_savings(raw, &filtered, 30.0, "deploy error");
+    }
+
     #[test]
     fn test_parse_pages_output_fields() {
         let output = r#"

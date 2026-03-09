@@ -297,6 +297,42 @@ test_rewrite "pnpm vitest --coverage" \
 
 echo ""
 
+# ---- SECTION 4b: Wrangler rewrite ----
+echo "--- Wrangler rewrite ---"
+test_rewrite "wrangler deploy" \
+  "wrangler deploy" \
+  "rtk wrangler deploy"
+
+test_rewrite "wrangler deploy with args" \
+  "wrangler deploy --env production" \
+  "rtk wrangler deploy --env production"
+
+test_rewrite "wrangler pages deploy" \
+  "wrangler pages deploy ./dist" \
+  "rtk wrangler pages deploy ./dist"
+
+test_rewrite "wrangler dev" \
+  "wrangler dev --local" \
+  "rtk wrangler dev --local"
+
+test_rewrite "npx wrangler deploy" \
+  "npx wrangler deploy" \
+  "rtk wrangler deploy"
+
+test_rewrite "bunx wrangler deploy" \
+  "bunx wrangler deploy --env staging" \
+  "rtk wrangler deploy --env staging"
+
+test_rewrite "pnpm wrangler pages" \
+  "pnpm wrangler pages deploy ./dist" \
+  "rtk wrangler pages deploy ./dist"
+
+test_rewrite "wrangler unsupported (no rewrite)" \
+  "wrangler secret list" \
+  ""
+
+echo ""
+
 # ---- SECTION 5: Should NOT rewrite ----
 echo "--- Should NOT rewrite ---"
 test_rewrite "heredoc" \
