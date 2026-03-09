@@ -428,7 +428,47 @@ fn hook_lookup<'a>(binary: &'a str, sub: &str) -> Option<(&'static str, &'a str)
     }
 }
 
+/// Returns true if the token is a shell prefix builtin that modifies the
+/// execution of the following command (e.g. `noglob`, `command`, `nocorrect`).
+/// These builtins are NOT standalone executables — they must stay in shell context.
+fn is_shell_prefix_builtin(token: &str) -> bool {
+    matches!(
+        token,
+        "noglob" | "command" | "builtin" | "exec" | "nocorrect"
+    )
+}
+
 pub(crate) fn route_native_command(cmd: &analysis::NativeCommand, raw: &str) -> String {
+    // === SHELL PREFIX BUILTIN STRIPPING ===
+    // When the "binary" is a shell prefix builtin (noglob, command, etc.),
+    // strip it, route the real command, and re-prepend the prefix.
+    // These builtins modify execution context — they are NOT executables
+    // and cannot be wrapped in `rtk run -c`.
+    //
+    // Example: "noglob gh release create v0.3.0-rc1 --title ..."
+    //   → prefix="noglob", real_binary="gh", args=["release","create",...]
+    //   → route "gh release create ..." → "rtk gh release create ..."
+    //   → result: "noglob rtk gh release create v0.3.0-rc1 --title ..."
+    if is_shell_prefix_builtin(&cmd.binary) {
+        if let Some(real_binary) = cmd.args.first() {
+            let prefix = &cmd.binary;
+            let real_args = cmd.args[1..].to_vec();
+            let real_cmd = analysis::NativeCommand {
+                binary: real_binary.clone(),
+                args: real_args,
+                operator: cmd.operator.clone(),
+            };
+            let core_raw = raw
+                .strip_prefix(prefix)
+                .map(|s| s.trim_start())
+                .unwrap_or(raw);
+            let routed = route_native_command(&real_cmd, core_raw);
+            return format!("{} {}", prefix, routed);
+        }
+        // Bare prefix with no following command — pass through unchanged
+        return raw.to_string();
+    }
+
     // === ENV PREFIX STRIPPING ===
     // When the "binary" is actually a VAR=val env assignment (e.g. "GIT_PAGER=cat"),
     // collect all leading env assigns, find the real binary in args, route it, and
@@ -869,6 +909,62 @@ mod tests {
         for input in cases {
             assert_rewrite(input, "rtk run");
         }
+    }
+
+    // === SHELL PREFIX BUILTINS (noglob, command, builtin, exec, nocorrect) ===
+    // These zsh/bash builtins modify the execution of the NEXT command.
+    // The hook should strip the prefix, route the real command, and
+    // re-prepend the prefix so the shell applies it correctly.
+    //
+    // Bug: `noglob gh release create v0.3.0-rc1 ...` was being wrapped in
+    // `rtk run -c 'noglob gh ...'` which fails because noglob is a shell
+    // builtin, not an executable that rtk can invoke.
+
+    #[test]
+    fn test_noglob_prefix_routes_inner_command() {
+        // noglob + known command: should route the inner command through RTK
+        assert_rewrite("noglob gh pr view 123", "noglob rtk gh pr view 123");
+    }
+
+    #[test]
+    fn test_noglob_prefix_with_unknown_command() {
+        // noglob + unknown command: should preserve noglob prefix, wrap inner in rtk run -c
+        match check_for_hook("noglob some-unknown-tool --arg", "claude") {
+            HookResult::Rewrite(cmd) => {
+                // noglob should be OUTSIDE the rtk run -c, not inside it
+                assert!(
+                    !cmd.contains("rtk run -c 'noglob"),
+                    "noglob should not be inside rtk run -c, got '{}'",
+                    cmd
+                );
+            }
+            HookResult::Blocked(_) => panic!("should not be blocked"),
+        }
+    }
+
+    #[test]
+    fn test_command_prefix_routes_inner_command() {
+        assert_rewrite("command git status", "command rtk git status");
+    }
+
+    #[test]
+    fn test_builtin_prefix_passthrough() {
+        // builtin cd should just pass through with noglob-style prefix handling
+        match check_for_hook("builtin cd /tmp", "claude") {
+            HookResult::Rewrite(cmd) => {
+                assert!(
+                    !cmd.contains("rtk run -c 'builtin"),
+                    "builtin should not be inside rtk run -c, got '{}'",
+                    cmd
+                );
+            }
+            HookResult::Blocked(_) => panic!("should not be blocked"),
+        }
+    }
+
+    #[test]
+    fn test_nocorrect_prefix_routes_inner_command() {
+        assert_rewrite("nocorrect git log -10", "nocorrect rtk git log");
     }
 
     // === COMPOUND COMMANDS (chained with &&, ||, ;) ===
