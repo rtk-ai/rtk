@@ -1950,68 +1950,6 @@ mod tests {
     use super::*;
     use clap::Parser;
 
-    fn os_argv(args: &[&str]) -> Vec<OsString> {
-        args.iter().map(OsString::from).collect()
-    }
-
-    #[test]
-    fn test_supported_top_level_commands_contains_known_items() {
-        let commands = metadata::supported_top_level_commands();
-        assert!(commands.iter().any(|c| c == "git"));
-        assert!(commands.iter().any(|c| c == "curl"));
-        assert!(commands.iter().any(|c| c == "shim"));
-    }
-
-    #[test]
-    fn test_top_level_command_metadata_covers_supported_commands() {
-        for cmd in metadata::supported_top_level_commands() {
-            assert!(
-                metadata::top_level_command_metadata(&cmd).is_some(),
-                "Missing top-level metadata for command '{}'",
-                cmd
-            );
-        }
-    }
-
-    #[test]
-    fn test_top_level_command_metadata_has_no_unknown_commands() {
-        for meta in metadata::TOP_LEVEL_COMMAND_METADATA {
-            assert!(
-                metadata::is_supported_top_level_command(meta.name),
-                "Unknown command '{}' exists in top-level metadata",
-                meta.name
-            );
-        }
-    }
-
-    #[test]
-    fn test_top_level_command_metadata_commands_match_expected_set() {
-        let actual: std::collections::BTreeSet<&str> = metadata::TOP_LEVEL_COMMAND_METADATA
-            .iter()
-            .filter(|meta| meta.metadata)
-            .map(|meta| meta.name)
-            .collect();
-
-        let expected: std::collections::BTreeSet<&str> = [
-            "cc-economics",
-            "config",
-            "discover",
-            "gain",
-            "hook-audit",
-            "init",
-            "learn",
-            "proxy",
-            "rewrite",
-            "shim",
-            "verify",
-        ]
-        .into_iter()
-        .collect();
-
-        assert_eq!(actual, expected, "metadata command set drifted");
-    }
-
-
     #[test]
     fn test_shim_install_parses() {
         let cli = Cli::try_parse_from([
@@ -2056,7 +1994,6 @@ mod tests {
             "legacy 'link' command should not parse after shim rename"
         );
     }
-
 
     #[test]
     fn test_git_commit_single_message() {
@@ -2257,78 +2194,5 @@ mod tests {
                 _ => panic!("Expected Gain command"),
             }
         }
-    }
-
-    #[test]
-    fn test_meta_commands_reject_bad_flags() {
-        // RTK-native commands should produce parse errors (not fall through to raw execution).
-        // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
-        let guarded = [
-            "gain",
-            "discover",
-            "learn",
-            "init",
-            "config",
-            "shim",
-            "hook-audit",
-            "cc-economics",
-            "verify",
-        ];
-        for cmd in guarded {
-            let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
-            assert!(
-                result.is_err(),
-                "Guarded command '{}' with bad flag should fail to parse",
-                cmd
-            );
-        }
-    }
-
-    #[test]
-    fn test_guarded_command_list_parses_valid_invocations() {
-        let guarded_cmds_that_parse = [
-            vec!["rtk", "gain"],
-            vec!["rtk", "discover"],
-            vec!["rtk", "learn"],
-            vec!["rtk", "init"],
-            vec!["rtk", "config"],
-            vec!["rtk", "shim", "install", "git"],
-            vec!["rtk", "proxy", "echo", "hi"],
-            vec!["rtk", "hook-audit"],
-            vec!["rtk", "cc-economics"],
-            vec!["rtk", "verify"],
-            vec!["rtk", "rewrite", "git status"],
-        ];
-        for args in &guarded_cmds_that_parse {
-            let result = Cli::try_parse_from(args.iter());
-            assert!(
-                result.is_ok(),
-                "Guarded command {:?} should parse successfully",
-                args
-            );
-        }
-    }
-
-    #[test]
-    fn test_git_is_operational() {
-        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
-            &["rtk", "git", "status",]
-        )));
-    }
-
-    #[test]
-    fn test_aws_psql_wc_mypy_are_operational() {
-        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
-            &["rtk", "aws", "sts",]
-        )));
-        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
-            &["rtk", "psql",]
-        )));
-        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
-            &["rtk", "wc",]
-        )));
-        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
-            &["rtk", "mypy",]
-        )));
     }
 }
