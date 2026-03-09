@@ -30,6 +30,7 @@ mod lint_cmd;
 mod local_llm;
 mod log_cmd;
 mod ls;
+mod metadata;
 mod mypy_cmd;
 mod next_cmd;
 mod npm_cmd;
@@ -45,6 +46,7 @@ mod read;
 mod rewrite_cmd;
 mod ruff_cmd;
 mod runner;
+mod shim;
 mod summary;
 mod tee;
 mod telemetry;
@@ -416,6 +418,12 @@ enum Commands {
         /// Create default config file
         #[arg(long)]
         create: bool,
+    },
+
+    /// Install operational_command shims
+    Shim {
+        #[command(subcommand)]
+        command: ShimCommands,
     },
 
     /// Vitest commands with compact output
@@ -812,6 +820,27 @@ enum KubectlCommands {
 }
 
 #[derive(Subcommand)]
+enum ShimCommands {
+    /// Install operational_command shims that point to the rtk binary
+    Install {
+        /// Target directory for operational_command shims
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+        /// Path to rtk binary (default: current executable)
+        #[arg(long)]
+        rtk_bin: Option<PathBuf>,
+        /// Replace existing entries
+        #[arg(long)]
+        force: bool,
+        /// Replace arbitrary existing files (not just existing shim symlinks)
+        #[arg(long)]
+        force_all: bool,
+        /// Explicit operational_commands to install (default: all Shim-eligible operational_commands)
+        operational_commands: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum VitestCommands {
     /// Run tests with filtered output (90% token reduction)
     Run {
@@ -937,19 +966,18 @@ enum GoCommands {
 
 /// RTK-only subcommands that should never fall back to raw execution.
 /// If Clap fails to parse these, show the Clap error directly.
-const RTK_META_COMMANDS: &[&str] = &[
-    "gain",
-    "discover",
-    "learn",
-    "init",
-    "config",
-    "proxy",
-    "hook-audit",
-    "cc-economics",
-];
+fn run_fallback(parse_error: clap::Error, parse_argv: &[OsString]) -> Result<()> {
+    // If argv[0] is a known-but-excluded operational_command (e.g. manually symlinked `gain -> rtk`),
+    // do not treat positional args as fallback executable names.
+    if shim::should_block_fallback_for_excluded_shim_command(parse_argv) {
+        parse_error.exit();
+    }
 
-fn run_fallback(parse_error: clap::Error) -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = parse_argv
+        .iter()
+        .skip(1)
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
 
     // No args → show Clap's error (user ran just "rtk" with bad syntax)
     if args.is_empty() {
@@ -958,7 +986,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<()> {
 
     // RTK meta-commands should never fall back to raw execution.
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
-    if RTK_META_COMMANDS.contains(&args[0].as_str()) {
+    if metadata::is_rtk_meta_command(&args[0]) {
         parse_error.exit();
     }
 
@@ -968,7 +996,16 @@ fn run_fallback(parse_error: clap::Error) -> Result<()> {
     // Start timer before execution to capture actual command runtime
     let timer = tracking::TimedExecution::start();
 
-    let status = std::process::Command::new(&args[0])
+    let mut fallback_cmd = match utils::native_command(&args[0]) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+            eprintln!("[rtk: fallback failed: {}]", e);
+            parse_error.exit();
+        }
+    };
+
+    let status = fallback_cmd
         .args(&args[1..])
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
@@ -1040,20 +1077,24 @@ fn main() -> Result<()> {
     // Warn if installed hook is outdated (1/day, non-blocking)
     hook_check::maybe_warn();
 
-    let cli = match Cli::try_parse() {
+    let Some(parse_argv) = shim::prepare_runtime_parse_argv()? else {
+        return Ok(());
+    };
+
+    let cli = match Cli::try_parse_from(parse_argv.clone()) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
                 e.exit();
             }
-            return run_fallback(e);
+            return run_fallback(e, &parse_argv);
         }
     };
 
     // Runtime integrity check for operational commands.
     // Meta commands (init, gain, verify, config, etc.) skip the check
     // because they don't go through the hook pipeline.
-    if is_operational_command(&cli.command) {
+    if metadata::is_operational_command_from_parse_argv(&parse_argv) {
         integrity::runtime_check()?;
     }
 
@@ -1490,6 +1531,31 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Shim { command } => match command {
+            ShimCommands::Install {
+                bin_dir,
+                rtk_bin,
+                force,
+                force_all,
+                operational_commands,
+            } => {
+                let allowed = metadata::shim_eligible_top_level_commands();
+                let operational_commands =
+                    utils::resolve_shim_operational_commands(&operational_commands, &allowed)?;
+                if operational_commands.is_empty() {
+                    anyhow::bail!("no operational_commands to shim");
+                }
+
+                utils::install_operational_command_shims(
+                    bin_dir,
+                    rtk_bin,
+                    force,
+                    force_all,
+                    &operational_commands,
+                )?;
+            }
+        },
+
         Commands::Vitest { command } => match command {
             VitestCommands::Run { args } => {
                 vitest_cmd::run(vitest_cmd::VitestCommand::Run, &args, cli.verbose)?;
@@ -1879,63 +1945,251 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Returns true for commands that are invoked via the hook pipeline
-/// (i.e., commands that process rewritten shell commands).
-/// Meta commands (init, gain, verify, etc.) are excluded because
-/// they are run directly by the user, not through the hook.
-/// Returns true for commands that go through the hook pipeline
-/// and therefore require integrity verification.
-///
-/// SECURITY: whitelist pattern — new commands are NOT integrity-checked
-/// until explicitly added here. A forgotten command fails open (no check)
-/// rather than creating false confidence about what's protected.
-fn is_operational_command(cmd: &Commands) -> bool {
-    matches!(
-        cmd,
-        Commands::Ls { .. }
-            | Commands::Tree { .. }
-            | Commands::Read { .. }
-            | Commands::Smart { .. }
-            | Commands::Git { .. }
-            | Commands::Gh { .. }
-            | Commands::Pnpm { .. }
-            | Commands::Err { .. }
-            | Commands::Test { .. }
-            | Commands::Json { .. }
-            | Commands::Deps { .. }
-            | Commands::Env { .. }
-            | Commands::Find { .. }
-            | Commands::Diff { .. }
-            | Commands::Log { .. }
-            | Commands::Docker { .. }
-            | Commands::Kubectl { .. }
-            | Commands::Summary { .. }
-            | Commands::Grep { .. }
-            | Commands::Wget { .. }
-            | Commands::Vitest { .. }
-            | Commands::Prisma { .. }
-            | Commands::Tsc { .. }
-            | Commands::Next { .. }
-            | Commands::Lint { .. }
-            | Commands::Prettier { .. }
-            | Commands::Playwright { .. }
-            | Commands::Cargo { .. }
-            | Commands::Npm { .. }
-            | Commands::Npx { .. }
-            | Commands::Curl { .. }
-            | Commands::Ruff { .. }
-            | Commands::Pytest { .. }
-            | Commands::Pip { .. }
-            | Commands::Go { .. }
-            | Commands::GolangciLint { .. }
-            | Commands::Gt { .. }
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    fn os_argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn test_build_parse_argv_rewrites_known_operational_command() {
+        let raw = vec![
+            OsString::from("/tmp/git"),
+            OsString::from("status"),
+            OsString::from("-s"),
+        ];
+        let rewritten = shim::build_parse_argv(&raw);
+        assert_eq!(
+            rewritten,
+            vec![
+                OsString::from("rtk"),
+                OsString::from("git"),
+                OsString::from("status"),
+                OsString::from("-s")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_parse_argv_rewrites_hyphenated_operational_command() {
+        let raw = vec![
+            OsString::from("/usr/local/bin/golangci-lint"),
+            OsString::from("run"),
+        ];
+        let rewritten = shim::build_parse_argv(&raw);
+        assert_eq!(
+            rewritten,
+            vec![
+                OsString::from("rtk"),
+                OsString::from("golangci-lint"),
+                OsString::from("run")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_parse_argv_does_not_rewrite_rtk_binary() {
+        let raw = vec![
+            OsString::from("/usr/local/bin/rtk"),
+            OsString::from("git"),
+            OsString::from("status"),
+        ];
+        assert_eq!(shim::build_parse_argv(&raw), raw);
+    }
+
+    #[test]
+    fn test_build_parse_argv_does_not_rewrite_unknown_operational_command() {
+        let raw = vec![OsString::from("/tmp/random-tool"), OsString::from("status")];
+        assert_eq!(shim::build_parse_argv(&raw), raw);
+    }
+
+    #[test]
+    fn test_fallback_guard_blocks_excluded_shim_command_symlink() {
+        let gain_like = vec![OsString::from("/tmp/gain"), OsString::from("--bad-flag")];
+        assert!(shim::should_block_fallback_for_excluded_shim_command(
+            &gain_like
+        ));
+
+        let git_like = vec![OsString::from("/tmp/git"), OsString::from("--bad-flag")];
+        assert!(!shim::should_block_fallback_for_excluded_shim_command(
+            &git_like
+        ));
+    }
+
+    #[test]
+    fn test_operational_command_name_from_argv0_strips_exe_suffix() {
+        let name = shim::operational_command_name_from_argv0(std::ffi::OsStr::new("git.exe"));
+        assert_eq!(name.as_deref(), Some("git"));
+    }
+
+    #[test]
+    fn test_supported_top_level_commands_contains_known_items() {
+        let commands = metadata::supported_top_level_commands();
+        assert!(commands.iter().any(|c| c == "git"));
+        assert!(commands.iter().any(|c| c == "curl"));
+        assert!(commands.iter().any(|c| c == "shim"));
+    }
+
+    #[test]
+    fn test_shim_eligible_commands_excludes_meta_and_rtk_native() {
+        let commands = metadata::shim_eligible_top_level_commands();
+        assert!(commands.iter().any(|c| c == "git"));
+        assert!(commands.iter().any(|c| c == "curl"));
+        assert!(commands.iter().any(|c| c == "aws"));
+        assert!(commands.iter().any(|c| c == "psql"));
+        assert!(commands.iter().any(|c| c == "wc"));
+        assert!(commands.iter().any(|c| c == "mypy"));
+        assert!(!commands.iter().any(|c| c == "gain"));
+        assert!(!commands.iter().any(|c| c == "read"));
+        assert!(!commands.iter().any(|c| c == "shim"));
+    }
+
+    #[test]
+    fn test_shim_eligible_commands_are_operational() {
+        for cmd in metadata::shim_eligible_top_level_commands() {
+            assert!(
+                metadata::top_level_command_metadata(&cmd)
+                    .map(|meta| meta.operational)
+                    .unwrap_or(false),
+                "Expected '{}' to be operational",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_top_level_command_metadata_covers_supported_commands() {
+        for cmd in metadata::supported_top_level_commands() {
+            assert!(
+                metadata::top_level_command_metadata(&cmd).is_some(),
+                "Missing top-level metadata for command '{}'",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_top_level_command_metadata_has_no_unknown_commands() {
+        for meta in metadata::TOP_LEVEL_COMMAND_METADATA {
+            assert!(
+                metadata::is_supported_top_level_command(meta.name),
+                "Unknown command '{}' exists in top-level metadata",
+                meta.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_top_level_command_metadata_commands_match_expected_set() {
+        let actual: std::collections::BTreeSet<&str> = metadata::TOP_LEVEL_COMMAND_METADATA
+            .iter()
+            .filter(|meta| meta.metadata)
+            .map(|meta| meta.name)
+            .collect();
+
+        let expected: std::collections::BTreeSet<&str> = [
+            "cc-economics",
+            "config",
+            "discover",
+            "gain",
+            "hook-audit",
+            "init",
+            "learn",
+            "proxy",
+            "rewrite",
+            "shim",
+            "verify",
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(actual, expected, "metadata command set drifted");
+    }
+
+    #[test]
+    fn test_metadata_commands_are_not_shim_eligible() {
+        for meta in metadata::TOP_LEVEL_COMMAND_METADATA
+            .iter()
+            .filter(|meta| meta.metadata)
+        {
+            assert!(
+                !meta.shim,
+                "metadata command '{}' must not be shim-eligible",
+                meta.name
+            );
+            assert!(
+                !metadata::is_shim_eligible_top_level_command(meta.name),
+                "metadata command '{}' must not be shim-eligible at runtime",
+                meta.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_shim_install_parses() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "shim",
+            "install",
+            "--force",
+            "--force-all",
+            "--bin-dir",
+            "/tmp/rtk-shims",
+            "--rtk-bin",
+            "/usr/local/bin/rtk",
+            "git",
+            "curl",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Shim { command } => match command {
+                ShimCommands::Install {
+                    bin_dir,
+                    rtk_bin,
+                    force,
+                    force_all,
+                    operational_commands,
+                } => {
+                    assert!(force);
+                    assert!(force_all);
+                    assert_eq!(bin_dir.as_deref(), Some(Path::new("/tmp/rtk-shims")));
+                    assert_eq!(rtk_bin.as_deref(), Some(Path::new("/usr/local/bin/rtk")));
+                    assert_eq!(operational_commands, vec!["git", "curl"]);
+                }
+            },
+            _ => panic!("Expected Shim command"),
+        }
+    }
+
+    #[test]
+    fn test_link_command_removed() {
+        let result = Cli::try_parse_from(["rtk", "link", "install", "git"]);
+        assert!(
+            result.is_err(),
+            "legacy 'link' command should not parse after shim rename"
+        );
+    }
+
+    #[test]
+    fn test_resolve_shim_operational_commands_rejects_non_eligible() {
+        let allowed = metadata::shim_eligible_top_level_commands();
+        let err =
+            utils::resolve_shim_operational_commands(&["gain".to_string()], &allowed).unwrap_err();
+        assert!(
+            err.to_string().contains("not Shim-eligible"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_build_parse_argv_does_not_rewrite_excluded_shim_command() {
+        let raw = vec![OsString::from("/tmp/gain"), OsString::from("--graph")];
+        assert_eq!(shim::build_parse_argv(&raw), raw);
+    }
 
     #[test]
     fn test_git_commit_single_message() {
@@ -2140,41 +2394,107 @@ mod tests {
 
     #[test]
     fn test_meta_commands_reject_bad_flags() {
-        // RTK meta-commands should produce parse errors (not fall through to raw execution).
+        // RTK-native commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
-        for cmd in RTK_META_COMMANDS {
-            if *cmd == "proxy" {
-                continue;
-            }
+        let guarded = [
+            "gain",
+            "discover",
+            "learn",
+            "init",
+            "config",
+            "shim",
+            "hook-audit",
+            "cc-economics",
+            "verify",
+        ];
+        for cmd in guarded {
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
             assert!(
                 result.is_err(),
-                "Meta-command '{}' with bad flag should fail to parse",
+                "Guarded command '{}' with bad flag should fail to parse",
                 cmd
             );
         }
     }
 
     #[test]
-    fn test_meta_command_list_is_complete() {
-        // Verify all meta-commands are in the guard list by checking they parse with valid syntax
-        let meta_cmds_that_parse = [
+    fn test_guarded_command_list_parses_valid_invocations() {
+        let guarded_cmds_that_parse = [
             vec!["rtk", "gain"],
             vec!["rtk", "discover"],
             vec!["rtk", "learn"],
             vec!["rtk", "init"],
             vec!["rtk", "config"],
+            vec!["rtk", "shim", "install", "git"],
             vec!["rtk", "proxy", "echo", "hi"],
             vec!["rtk", "hook-audit"],
             vec!["rtk", "cc-economics"],
+            vec!["rtk", "verify"],
+            vec!["rtk", "rewrite", "git status"],
         ];
-        for args in &meta_cmds_that_parse {
+        for args in &guarded_cmds_that_parse {
             let result = Cli::try_parse_from(args.iter());
             assert!(
                 result.is_ok(),
-                "Meta-command {:?} should parse successfully",
+                "Guarded command {:?} should parse successfully",
                 args
             );
         }
+    }
+
+    #[test]
+    fn test_shim_exclusion_policy_covers_guarded_commands() {
+        for cmd in [
+            "gain",
+            "discover",
+            "learn",
+            "init",
+            "config",
+            "shim",
+            "proxy",
+            "hook-audit",
+            "cc-economics",
+            "rewrite",
+            "verify",
+            "read",
+            "smart",
+        ] {
+            assert!(metadata::is_supported_top_level_command(cmd));
+            assert!(
+                !metadata::is_shim_eligible_top_level_command(cmd),
+                "Expected '{}' to be excluded from Shim operational_command mode",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_shim_is_not_operational() {
+        assert!(!metadata::is_operational_command_from_parse_argv(&os_argv(
+            &["rtk", "shim", "install", "git",]
+        )));
+    }
+
+    #[test]
+    fn test_git_is_operational() {
+        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
+            &["rtk", "git", "status",]
+        )));
+    }
+
+    #[test]
+    fn test_aws_psql_wc_mypy_are_operational() {
+        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
+            &["rtk", "aws", "sts",]
+        )));
+        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
+            &["rtk", "psql",]
+        )));
+        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
+            &["rtk", "wc",]
+        )));
+        assert!(metadata::is_operational_command_from_parse_argv(&os_argv(
+            &["rtk", "mypy",]
+        )));
     }
 }
