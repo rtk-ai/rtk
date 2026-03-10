@@ -147,7 +147,7 @@ pub(crate) struct FinalSetupSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ShowConfigOpencodeStatus {
     global_root: PathBuf,
-    plugin: Option<(SetupTargetStatus, PathBuf)>,
+    plugins: Vec<(SetupTargetStatus, PathBuf)>,
     agents: Option<(SetupTargetStatus, PathBuf)>,
 }
 
@@ -1097,13 +1097,21 @@ fn detect_opencode_agents_status(path: &Path) -> Result<Option<(SetupTargetStatu
 fn collect_show_config_opencode_status_at(config_dir: &Path) -> Result<ShowConfigOpencodeStatus> {
     let global_root = resolve_opencode_global_root_at(config_dir);
     let global_plugin = resolve_opencode_plugin_path_from_config_dir(config_dir, true);
+    let local_plugin = resolve_opencode_plugin_path_from_config_dir(config_dir, false);
     let agents_path = resolve_opencode_agents_path_from_config_dir(config_dir);
+    let mut plugins = Vec::new();
+
+    if global_plugin.exists() {
+        plugins.push((SetupTargetStatus::AlreadyConfigured, global_plugin));
+    }
+
+    if local_plugin.exists() {
+        plugins.push((SetupTargetStatus::AlreadyConfigured, local_plugin));
+    }
 
     Ok(ShowConfigOpencodeStatus {
         global_root,
-        plugin: global_plugin
-            .exists()
-            .then_some((SetupTargetStatus::AlreadyConfigured, global_plugin)),
+        plugins,
         agents: detect_opencode_agents_status(&agents_path)?,
     })
 }
@@ -1242,13 +1250,21 @@ fn format_show_config_opencode_status(status: &ShowConfigOpencodeStatus) -> Stri
         status.global_root.display()
     )];
 
-    match &status.plugin {
-        Some((entry_status, path)) => lines.push(format!(
-            "  plugin: {} ({})",
-            format_target_status(*entry_status),
-            path.display()
-        )),
-        None => lines.push("  plugin: not configured".to_string()),
+    if status.plugins.is_empty() {
+        lines.push("  plugin: not configured".to_string());
+    } else {
+        for (entry_status, path) in &status.plugins {
+            let scope = if path.starts_with(&status.global_root) {
+                "global"
+            } else {
+                "local"
+            };
+            lines.push(format!(
+                "  plugin[{scope}]: {} ({})",
+                format_target_status(*entry_status),
+                path.display()
+            ));
+        }
     }
 
     match &status.agents {
@@ -1364,6 +1380,71 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     Ok(removed)
 }
 
+#[cfg(unix)]
+fn uninstall_opencode_artifacts(verbose: u8, removed: &mut Vec<String>) -> Result<()> {
+    let config_dir = resolve_official_opencode_config_dir()?;
+    uninstall_opencode_artifacts_at(&config_dir, removed, verbose)
+}
+
+#[cfg(unix)]
+fn uninstall_opencode_artifacts_at(
+    config_dir: &Path,
+    removed: &mut Vec<String>,
+    verbose: u8,
+) -> Result<()> {
+    for (scope, path) in [
+        (
+            OpencodeInstallScope::Global,
+            resolve_opencode_plugin_path_from_config_dir(config_dir, true),
+        ),
+        (
+            OpencodeInstallScope::Local,
+            resolve_opencode_plugin_path_from_config_dir(config_dir, false),
+        ),
+    ] {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove opencode plugin: {}", path.display()))?;
+            removed.push(format!(
+                "opencode plugin ({}): {}",
+                scope.label(),
+                path.display()
+            ));
+        }
+    }
+
+    let agents_path = resolve_opencode_agents_path_from_config_dir(config_dir);
+    if !agents_path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&agents_path)
+        .with_context(|| format!("Failed to read {}", agents_path.display()))?;
+    let (new_content, action) = remove_opencode_agents_section(&content);
+
+    match action {
+        OpencodeAgentsSectionRemove::Removed => {
+            fs::write(&agents_path, new_content)
+                .with_context(|| format!("Failed to write {}", agents_path.display()))?;
+            removed.push(format!(
+                "AGENTS.md: removed RTK section ({})",
+                agents_path.display()
+            ));
+        }
+        OpencodeAgentsSectionRemove::Malformed => {
+            if verbose > 0 {
+                eprintln!(
+                    "Skipped opencode AGENTS.md uninstall due to malformed RTK markers: {}",
+                    agents_path.display()
+                );
+            }
+        }
+        OpencodeAgentsSectionRemove::Unchanged => {}
+    }
+
+    Ok(())
+}
+
 /// Full uninstall: remove hook, RTK.md, @RTK.md reference, settings.json entry
 pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     if !global {
@@ -1421,6 +1502,9 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     if remove_hook_from_settings(verbose)? {
         removed.push("settings.json: removed RTK hook entry".to_string());
     }
+
+    #[cfg(unix)]
+    uninstall_opencode_artifacts(verbose, &mut removed)?;
 
     // Report results
     if removed.is_empty() {
@@ -2547,7 +2631,7 @@ mod tests {
 
         let rendered = format_show_config_opencode_status(&ShowConfigOpencodeStatus {
             global_root: root.clone(),
-            plugin: Some((SetupTargetStatus::AlreadyConfigured, plugin_path.clone())),
+            plugins: vec![(SetupTargetStatus::AlreadyConfigured, plugin_path.clone())],
             agents: Some((SetupTargetStatus::Processed, agents_path.clone())),
         });
 
@@ -2555,7 +2639,7 @@ mod tests {
         assert!(rendered.contains(plugin_path.to_string_lossy().as_ref()));
         assert!(rendered.contains(agents_path.to_string_lossy().as_ref()));
         assert!(rendered.contains("opencode (global)"));
-        assert!(rendered.contains("plugin: already configured"));
+        assert!(rendered.contains("plugin[global]: already configured"));
         assert!(rendered.contains("AGENTS.md: configured"));
     }
 
@@ -3052,8 +3136,8 @@ More notes
     #[cfg(unix)]
     fn test_uninstall_opencode_removes_plugin_files_for_all_scopes() {
         let temp = TempDir::new().unwrap();
-        let global_plugin = resolve_opencode_plugin_path_at(temp.path(), true);
-        let local_plugin = resolve_opencode_plugin_path_at(temp.path(), false);
+        let global_plugin = resolve_opencode_plugin_path_from_config_dir(temp.path(), true);
+        let local_plugin = resolve_opencode_plugin_path_from_config_dir(temp.path(), false);
         let mut removed: Vec<String> = Vec::new();
 
         fs::create_dir_all(global_plugin.parent().unwrap()).unwrap();
@@ -3123,8 +3207,8 @@ More notes
     #[cfg(unix)]
     fn test_show_config_opencode_reports_actual_plugin_locations_for_global_and_local_scopes() {
         let temp = TempDir::new().unwrap();
-        let global_plugin = resolve_opencode_plugin_path_at(temp.path(), true);
-        let local_plugin = resolve_opencode_plugin_path_at(temp.path(), false);
+        let global_plugin = resolve_opencode_plugin_path_from_config_dir(temp.path(), true);
+        let local_plugin = resolve_opencode_plugin_path_from_config_dir(temp.path(), false);
 
         fs::create_dir_all(global_plugin.parent().unwrap()).unwrap();
         fs::create_dir_all(local_plugin.parent().unwrap()).unwrap();
