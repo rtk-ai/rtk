@@ -1,0 +1,44 @@
+[filters.mvn-build]
+description = "Compact Maven build output"
+match_command = "^mvn\\s+(compile|package|clean|install)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\[INFO\\] ---",
+  "^\\[INFO\\] Building\\s",
+  "^\\[INFO\\] Downloading\\s",
+  "^\\[INFO\\] Downloaded\\s",
+  "^\\[INFO\\]\\s*$",
+  "^\\s*$",
+  "^Downloading:",
+  "^Downloaded:",
+  "^Progress",
+]
+max_lines = 50
+on_empty = "mvn: ok"
+
+[[tests.mvn-build]]
+name = "strips INFO noise, preserves errors and summary"
+input = """
+[INFO] ---
+[INFO] Building myapp 1.0-SNAPSHOT
+[INFO] Downloading org.apache.maven.plugins:maven-compiler-plugin:3.11.0
+[INFO] Downloaded org.apache.maven.plugins:maven-compiler-plugin:3.11.0
+[INFO]
+[ERROR] /src/main/java/Main.java:[10,5] cannot find symbol
+  symbol: method foo()
+[INFO] BUILD FAILURE
+[INFO] Total time: 2.543 s
+"""
+expected = "[ERROR] /src/main/java/Main.java:[10,5] cannot find symbol\n  symbol: method foo()\n[INFO] BUILD FAILURE\n[INFO] Total time: 2.543 s"
+
+[[tests.mvn-build]]
+name = "successful build keeps BUILD SUCCESS line"
+input = """
+[INFO] ---
+[INFO] Building myapp 1.0-SNAPSHOT
+[INFO]
+[INFO] BUILD SUCCESS
+[INFO] Total time: 4.123 s
+[INFO] Finished at: 2024-01-15T10:30:00Z
+"""
+expected = "[INFO] BUILD SUCCESS\n[INFO] Total time: 4.123 s\n[INFO] Finished at: 2024-01-15T10:30:00Z"
