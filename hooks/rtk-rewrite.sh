@@ -33,15 +33,17 @@ fi
 
 INPUT=$(cat)
 # Detect Cursor vs Claude Code from payload shape.
-# Cursor payloads include "hook_event_name" or "cursor_version" as top-level strings.
-# Claude Code payloads have none of these; they nest event info inside hookSpecificOutput.
-# If both agents add overlapping fields in the future, set RTK_HOOK_MODE=cursor|claude to override.
+# Claude Code uses tool_name "Bash"; Cursor uses "Shell".
+# Default: Claude Code format (safe fallback for unknown payloads).
+# Only switch to Cursor when tool_name is present and NOT "Bash",
+# so adding fields to Claude's payload won't cause a false Cursor match.
+# Override with RTK_HOOK_MODE=cursor|claude if needed.
 CURSOR_MODE=
 if [ "${RTK_HOOK_MODE:-}" = "cursor" ]; then
   CURSOR_MODE=1
 elif [ "${RTK_HOOK_MODE:-}" = "claude" ]; then
   CURSOR_MODE=
-elif echo "$INPUT" | jq -e '.hook_event_name // .cursor_version | type == "string"' &>/dev/null; then
+elif echo "$INPUT" | jq -e 'has("tool_name") and .tool_name != "Bash"' &>/dev/null; then
   CURSOR_MODE=1
 fi
 

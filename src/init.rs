@@ -646,7 +646,7 @@ fn patch_json_registry<F1, F2, F3>(
 ) -> Result<PatchResult>
 where
     F1: Fn(&serde_json::Value, &str) -> bool,
-    F2: Fn(&mut serde_json::Value, &str),
+    F2: Fn(&mut serde_json::Value, &str) -> Result<()>,
     F3: Fn(),
 {
     let mut root = if path.exists() {
@@ -683,7 +683,7 @@ where
         PatchMode::Auto => {}
     }
 
-    insert(&mut root, hook_command);
+    insert(&mut root, hook_command)?;
     if path.exists() {
         let backup = path.with_extension("json.bak");
         fs::copy(path, &backup).with_context(|| format!("Failed to backup {}", path.display()))?;
@@ -763,38 +763,33 @@ fn clean_double_blanks(content: &str) -> String {
 
 /// Deep-merge RTK hook entry into settings.json
 /// Creates hooks.PreToolUse structure if missing, preserves existing hooks
-fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
-    // Ensure root is an object
-    let root_obj = match root.as_object_mut() {
-        Some(obj) => obj,
-        None => {
-            *root = serde_json::json!({});
-            root.as_object_mut()
-                .expect("Just created object, must succeed")
-        }
-    };
+fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
+    let root_obj = root
+        .as_object_mut()
+        .context("settings.json root is not a JSON object")?;
 
-    // Use entry() API for idiomatic insertion
     let hooks = root_obj
         .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_obj = hooks
         .as_object_mut()
-        .expect("hooks must be an object");
+        .context("settings.json \"hooks\" field is not an object")?;
 
-    let pre_tool_use = hooks
+    let pre_tool_use = hooks_obj
         .entry("PreToolUse")
-        .or_insert_with(|| serde_json::json!([]))
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = pre_tool_use
         .as_array_mut()
-        .expect("PreToolUse must be an array");
+        .context("settings.json \"PreToolUse\" field is not an array")?;
 
-    // Append RTK hook entry
-    pre_tool_use.push(serde_json::json!({
+    arr.push(serde_json::json!({
         "matcher": "Bash",
         "hooks": [{
             "type": "command",
             "command": hook_command
         }]
     }));
+    Ok(())
 }
 
 /// Check if RTK hook is already present in settings.json
@@ -1337,15 +1332,10 @@ fn patch_cursor_hooks_json(global: bool, mode: PatchMode, verbose: u8) -> Result
     )
 }
 
-fn insert_cursor_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
-    let root_obj = match root.as_object_mut() {
-        Some(obj) => obj,
-        None => {
-            *root = serde_json::json!({});
-            root.as_object_mut()
-                .expect("Just created object, must succeed")
-        }
-    };
+fn insert_cursor_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
+    let root_obj = root
+        .as_object_mut()
+        .context("hooks.json root is not a JSON object")?;
 
     root_obj
         .entry("version")
@@ -1354,25 +1344,22 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
     let hooks = root_obj
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}));
-    if !hooks.is_object() {
-        *hooks = serde_json::json!({});
-    }
-    let hooks_obj = hooks.as_object_mut().expect("Just ensured hooks is object");
+    let hooks_obj = hooks
+        .as_object_mut()
+        .context("hooks.json \"hooks\" field is not an object")?;
 
     let pre_tool_use = hooks_obj
         .entry("preToolUse")
         .or_insert_with(|| serde_json::json!([]));
-    if !pre_tool_use.is_array() {
-        *pre_tool_use = serde_json::json!([]);
-    }
     let arr = pre_tool_use
         .as_array_mut()
-        .expect("Just ensured preToolUse is array");
+        .context("hooks.json \"preToolUse\" field is not an array")?;
 
     arr.push(serde_json::json!({
         "command": hook_command,
         "matcher": "Shell"
     }));
+    Ok(())
 }
 
 fn cursor_hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
