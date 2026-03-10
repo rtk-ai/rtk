@@ -1099,6 +1099,41 @@ Write template:
 Success: "✓ Initialized rtk for LLM integration"
 ```
 
+### Multi-Target Init Lifecycle (`src/init.rs`)
+
+The init subsystem in `src/init.rs` now manages two integration surfaces from one entry point:
+
+- Claude Code artifacts live under `~/.claude/` and still use the hook + `settings.json` patch flow.
+- opencode artifacts are split by responsibility: plugin scope is selectable (`~/.config/opencode/plugins/rtk-rewrite.ts` or `.opencode/plugins/rtk-rewrite.ts`), while RTK guidance always lives in the global `~/.config/opencode/AGENTS.md` file.
+
+Core lifecycle entry points:
+
+```rust
+fn run_opencode_target(global: bool, verbose: u8) -> Result<SetupTargetOutcome>;
+pub fn uninstall(global: bool, verbose: u8) -> Result<()>;
+pub fn show_config() -> Result<()>;
+fn resolve_opencode_agents_path() -> Result<PathBuf>;
+fn resolve_opencode_plugin_path(global: bool) -> Result<PathBuf>;
+```
+
+#### opencode setup flow
+
+`run_opencode_target()` installs the selected plugin file and then updates `~/.config/opencode/AGENTS.md` with a fixed RTK marker block. The two operations are reported back as one `SetupTargetOutcome`, which keeps the final setup summary aligned with the actual filesystem lifecycle.
+
+#### Plugin scope vs AGENTS scope
+
+- Plugin scope is user-selectable because opencode can load RTK from either the global plugin directory or the project-local `.opencode/plugins/` directory.
+- AGENTS scope is always global because opencode loads `~/.config/opencode/AGENTS.md` as the shared instruction surface for every session.
+
+This separation is intentional in `src/init.rs`: local plugin installs never create a local `AGENTS.md`, and global AGENTS guidance is preserved even when the plugin itself is project-scoped.
+
+#### Show and uninstall lifecycle
+
+- `show_config()` inspects both supported opencode plugin paths and prints each installed location instead of assuming a single global plugin slot.
+- `show_config()` treats `AGENTS.md` as configured only when the RTK marker block is present, not when the file merely exists.
+- `uninstall()` removes RTK-managed opencode plugins from every supported plugin scope, then rewrites `~/.config/opencode/AGENTS.md` to remove only the RTK block.
+- If the RTK block was the only AGENTS content, uninstall writes back an empty `AGENTS.md` file rather than deleting the file outright.
+
 ---
 
 ## Module Development Pattern

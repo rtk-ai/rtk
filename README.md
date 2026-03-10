@@ -271,13 +271,29 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 ### Setup
 
 ```bash
-rtk init -g                 # Install hook + RTK.md (recommended)
+rtk init -g                 # Install Claude hook + RTK.md, and opencode support when selected
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
 ```
 
-After install, **restart Claude Code**.
+`rtk init` now starts by asking which setup target to configure: `Claude`, `opencode`, or `both`.
+
+- `Claude` keeps the existing Claude Code lifecycle: `~/.claude/hooks/rtk-rewrite.sh`, `~/.claude/RTK.md`, and the `settings.json` hook entry.
+- `opencode` installs the rewrite plugin at `~/.config/opencode/plugins/rtk-rewrite.ts` for global setup, or `.opencode/plugins/rtk-rewrite.ts` when you choose a local plugin during project init.
+- opencode setup also appends an RTK-managed guidance block to the global `~/.config/opencode/AGENTS.md`, so opencode sessions keep the RTK behavior guidance even when the plugin lives in a project-local `.opencode/plugins/` directory.
+
+After install, restart Claude Code or opencode before testing rewritten commands.
+
+### Inspect and Remove Installed Files
+
+```bash
+rtk init --show             # Print Claude hook status, opencode plugin path(s), and AGENTS.md status
+rtk init -g --uninstall     # Remove Claude artifacts, opencode plugin copies, and the RTK AGENTS.md block
+```
+
+- `rtk init --show` reports the active opencode lifecycle exactly as installed: global plugin, local plugin, and whether the RTK marker block is present in `~/.config/opencode/AGENTS.md`.
+- `rtk init -g --uninstall` removes RTK-managed opencode plugin files from both supported plugin scopes and strips only the RTK section from `~/.config/opencode/AGENTS.md`; it does not delete unrelated user content from that file.
 
 ### Commands Rewritten
 
@@ -338,7 +354,7 @@ FAILED: 2/15 tests
 ### Uninstall
 
 ```bash
-rtk init -g --uninstall     # Remove hook, RTK.md, settings.json entry
+rtk init -g --uninstall     # Remove Claude hook artifacts, opencode plugin files, and the RTK AGENTS.md block
 cargo uninstall rtk          # Remove binary
 brew uninstall rtk           # If installed via Homebrew
 ```
