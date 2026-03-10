@@ -3049,6 +3049,131 @@ More notes
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_uninstall_opencode_removes_plugin_files_for_all_scopes() {
+        let temp = TempDir::new().unwrap();
+        let global_plugin = resolve_opencode_plugin_path_at(temp.path(), true);
+        let local_plugin = resolve_opencode_plugin_path_at(temp.path(), false);
+        let mut removed: Vec<String> = Vec::new();
+
+        fs::create_dir_all(global_plugin.parent().unwrap()).unwrap();
+        fs::create_dir_all(local_plugin.parent().unwrap()).unwrap();
+        fs::write(&global_plugin, OPENCODE_PLUGIN).unwrap();
+        fs::write(&local_plugin, OPENCODE_PLUGIN).unwrap();
+
+        uninstall_opencode_artifacts_at(temp.path(), &mut removed, 0).unwrap();
+
+        assert!(!global_plugin.exists());
+        assert!(!local_plugin.exists());
+        assert!(removed
+            .iter()
+            .any(|item| item.contains(&global_plugin.display().to_string())));
+        assert!(removed
+            .iter()
+            .any(|item| item.contains(&local_plugin.display().to_string())));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_uninstall_opencode_removes_only_rtk_agents_section() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = resolve_opencode_agents_path_from_config_dir(temp.path());
+        let mut removed: Vec<String> = Vec::new();
+        let existing = format!(
+            "# User instructions\n\n{}\n\n## Keep\nThis stays.\n",
+            RTK_OPENCODE_SECTION
+        );
+
+        fs::create_dir_all(agents_path.parent().unwrap()).unwrap();
+        fs::write(&agents_path, existing).unwrap();
+
+        uninstall_opencode_artifacts_at(temp.path(), &mut removed, 0).unwrap();
+
+        let content = fs::read_to_string(&agents_path).unwrap();
+        assert!(!content.contains("rtk-opencode-start"));
+        assert!(content.contains("# User instructions"));
+        assert!(content.contains("## Keep"));
+        assert!(content.contains("This stays."));
+        assert!(agents_path.exists());
+        assert!(removed
+            .iter()
+            .any(|item| item.contains("AGENTS.md: removed RTK section")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_uninstall_opencode_preserves_empty_agents_file() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = resolve_opencode_agents_path_from_config_dir(temp.path());
+        let mut removed: Vec<String> = Vec::new();
+
+        fs::create_dir_all(agents_path.parent().unwrap()).unwrap();
+        fs::write(&agents_path, RTK_OPENCODE_SECTION).unwrap();
+
+        uninstall_opencode_artifacts_at(temp.path(), &mut removed, 0).unwrap();
+
+        assert!(agents_path.exists());
+        assert_eq!(fs::read_to_string(&agents_path).unwrap(), "");
+        assert!(removed
+            .iter()
+            .any(|item| item.contains("AGENTS.md: removed RTK section")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_show_config_opencode_reports_actual_plugin_locations_for_global_and_local_scopes() {
+        let temp = TempDir::new().unwrap();
+        let global_plugin = resolve_opencode_plugin_path_at(temp.path(), true);
+        let local_plugin = resolve_opencode_plugin_path_at(temp.path(), false);
+
+        fs::create_dir_all(global_plugin.parent().unwrap()).unwrap();
+        fs::create_dir_all(local_plugin.parent().unwrap()).unwrap();
+        fs::write(&global_plugin, OPENCODE_PLUGIN).unwrap();
+        fs::write(&local_plugin, OPENCODE_PLUGIN).unwrap();
+
+        let status = collect_show_config_opencode_status_at(temp.path()).unwrap();
+        let rendered = format_show_config_opencode_status(&status);
+
+        assert_eq!(
+            status.plugins,
+            vec![
+                (SetupTargetStatus::AlreadyConfigured, global_plugin.clone()),
+                (SetupTargetStatus::AlreadyConfigured, local_plugin.clone()),
+            ]
+        );
+        assert!(rendered.contains(&global_plugin.display().to_string()));
+        assert!(rendered.contains(&local_plugin.display().to_string()));
+        assert!(rendered.contains("plugin[global]: already configured"));
+        assert!(rendered.contains("plugin[local]: already configured"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_show_config_opencode_reports_agents_marker_status_without_plugin_false_positive() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = resolve_opencode_agents_path_from_config_dir(temp.path());
+
+        fs::create_dir_all(agents_path.parent().unwrap()).unwrap();
+        fs::write(
+            &agents_path,
+            format!("# User instructions\n\n{}\n", RTK_OPENCODE_SECTION),
+        )
+        .unwrap();
+
+        let status = collect_show_config_opencode_status_at(temp.path()).unwrap();
+        let rendered = format_show_config_opencode_status(&status);
+
+        assert!(status.plugins.is_empty());
+        assert_eq!(
+            status.agents,
+            Some((SetupTargetStatus::AlreadyConfigured, agents_path.clone()))
+        );
+        assert!(rendered.contains("plugin: not configured"));
+        assert!(rendered.contains(&agents_path.display().to_string()));
+        assert!(rendered.contains("AGENTS.md: already configured"));
+    }
+
+    #[test]
     fn test_init_is_idempotent() {
         let temp = TempDir::new().unwrap();
         let claude_md = temp.path().join("CLAUDE.md");
