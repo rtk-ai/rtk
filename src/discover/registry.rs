@@ -76,6 +76,23 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
+    if cmd_clean.starts_with("cat ")
+        || cmd_clean.starts_with("head ")
+        || cmd_clean.starts_with("tail ")
+    {
+        let after_cmd = cmd_clean.split_whitespace().nth(1).unwrap_or("");
+        if after_cmd.starts_with('>') || after_cmd.starts_with('<') || after_cmd.starts_with('|') {
+            return Classification::Unsupported {
+                base_command: cmd_clean
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("cat")
+                    .to_string(),
+            };
+        }
+    }
+
     // Fast check with RegexSet — take the last (most specific) match
     let matches: Vec<usize> = REGEX_SET.matches(cmd_clean).into_iter().collect();
     if let Some(&idx) = matches.last() {
@@ -590,6 +607,23 @@ mod tests {
                 status: RtkStatus::Existing,
             }
         );
+    }
+
+    #[test]
+    fn test_classify_cat_redirect_not_supported() {
+        // cat > file and cat >> file are writes, not reads — should not be classified as supported
+        match classify_command("cat > /tmp/output.txt") {
+            Classification::Supported { .. } => {
+                panic!("cat > should NOT be classified as Supported")
+            }
+            _ => {} // Unsupported or Ignored is fine
+        }
+        match classify_command("cat >> /tmp/output.txt") {
+            Classification::Supported { .. } => {
+                panic!("cat >> should NOT be classified as Supported")
+            }
+            _ => {}
+        }
     }
 
     #[test]

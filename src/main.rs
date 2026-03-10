@@ -1857,17 +1857,34 @@ fn main() -> Result<()> {
 
             let timer = tracking::TimedExecution::start();
 
-            let cmd_name = args[0].to_string_lossy();
-            let cmd_args: Vec<String> = args[1..]
-                .iter()
-                .map(|s| s.to_string_lossy().into_owned())
-                .collect();
+            // If a single quoted arg contains spaces, split it (#388).
+            // e.g. rtk proxy 'head -50 file.php' → cmd=head, args=["-50", "file.php"]
+            let (cmd_name, cmd_args): (String, Vec<String>) = if args.len() == 1 {
+                let full = args[0].to_string_lossy();
+                let parts: Vec<&str> = full.split_whitespace().collect();
+                if parts.len() > 1 {
+                    (
+                        parts[0].to_string(),
+                        parts[1..].iter().map(|s| s.to_string()).collect(),
+                    )
+                } else {
+                    (full.into_owned(), vec![])
+                }
+            } else {
+                (
+                    args[0].to_string_lossy().into_owned(),
+                    args[1..]
+                        .iter()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .collect(),
+                )
+            };
 
             if cli.verbose > 0 {
                 eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
             }
 
-            let mut child = Command::new(cmd_name.as_ref())
+            let mut child = Command::new(&cmd_name)
                 .args(&cmd_args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

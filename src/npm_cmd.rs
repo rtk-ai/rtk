@@ -6,12 +6,92 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("npm");
-    cmd.arg("run");
 
-    // Strip leading "run" to avoid doubling (rtk npm run build → npm run build, not npm run run build)
-    let effective_args = if args.first().map(|s| s.as_str()) == Some("run") {
+    // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
+    // Only inject "run" when args look like a script name, not a known npm subcommand.
+    let npm_subcommands = [
+        "install",
+        "i",
+        "ci",
+        "uninstall",
+        "remove",
+        "rm",
+        "update",
+        "up",
+        "list",
+        "ls",
+        "outdated",
+        "init",
+        "create",
+        "publish",
+        "pack",
+        "link",
+        "audit",
+        "fund",
+        "exec",
+        "explain",
+        "why",
+        "search",
+        "view",
+        "info",
+        "show",
+        "config",
+        "set",
+        "get",
+        "cache",
+        "prune",
+        "dedupe",
+        "doctor",
+        "help",
+        "version",
+        "prefix",
+        "root",
+        "bin",
+        "bugs",
+        "docs",
+        "home",
+        "repo",
+        "ping",
+        "whoami",
+        "token",
+        "profile",
+        "team",
+        "access",
+        "owner",
+        "deprecate",
+        "dist-tag",
+        "star",
+        "stars",
+        "login",
+        "logout",
+        "adduser",
+        "unpublish",
+        "pkg",
+        "diff",
+        "rebuild",
+        "test",
+        "t",
+        "start",
+        "stop",
+        "restart",
+    ];
+
+    let first_arg = args.first().map(|s| s.as_str());
+    let is_run_explicit = first_arg == Some("run");
+    let is_npm_subcommand = first_arg
+        .map(|a| npm_subcommands.contains(&a) || a.starts_with('-'))
+        .unwrap_or(false);
+
+    let effective_args = if is_run_explicit {
+        // "rtk npm run build" → "npm run build"
+        cmd.arg("run");
         &args[1..]
+    } else if is_npm_subcommand {
+        // "rtk npm install express" → "npm install express"
+        args
     } else {
+        // "rtk npm build" → "npm run build" (assume script name)
+        cmd.arg("run");
         args
     };
 
@@ -24,10 +104,10 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: npm run {}", effective_args.join(" "));
+        eprintln!("Running: npm {}", args.join(" "));
     }
 
-    let output = cmd.output().context("Failed to run npm run")?;
+    let output = cmd.output().context("Failed to run npm")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
@@ -36,8 +116,8 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     println!("{}", filtered);
 
     timer.track(
-        &format!("npm run {}", effective_args.join(" ")),
-        &format!("rtk npm run {}", effective_args.join(" ")),
+        &format!("npm {}", args.join(" ")),
+        &format!("rtk npm {}", args.join(" ")),
         &raw,
         &filtered,
     );
@@ -108,36 +188,111 @@ npm notice
     }
 
     #[test]
-    fn test_strip_leading_run_from_args() {
-        // When user runs `rtk npm run build`, args = ["run", "build"]
-        // The "run" should be stripped since cmd.arg("run") already adds it
-        let args: Vec<String> = vec!["run".into(), "build".into()];
-        let effective_args = if args.first().map(|s| s.as_str()) == Some("run") {
-            &args[1..]
-        } else {
-            &args[..]
-        };
-        assert_eq!(effective_args, &["build"]);
+    fn test_npm_subcommand_detection() {
+        // Known npm subcommands should NOT get "run" injected
+        let npm_subcommands = [
+            "install",
+            "i",
+            "ci",
+            "uninstall",
+            "list",
+            "ls",
+            "outdated",
+            "test",
+            "t",
+            "start",
+            "audit",
+            "init",
+        ];
+        for subcmd in &npm_subcommands {
+            assert!(
+                [
+                    "install",
+                    "i",
+                    "ci",
+                    "uninstall",
+                    "remove",
+                    "rm",
+                    "update",
+                    "up",
+                    "list",
+                    "ls",
+                    "outdated",
+                    "init",
+                    "create",
+                    "publish",
+                    "pack",
+                    "link",
+                    "audit",
+                    "fund",
+                    "exec",
+                    "explain",
+                    "why",
+                    "search",
+                    "view",
+                    "info",
+                    "show",
+                    "config",
+                    "set",
+                    "get",
+                    "cache",
+                    "prune",
+                    "dedupe",
+                    "doctor",
+                    "help",
+                    "version",
+                    "prefix",
+                    "root",
+                    "bin",
+                    "bugs",
+                    "docs",
+                    "home",
+                    "repo",
+                    "ping",
+                    "whoami",
+                    "token",
+                    "profile",
+                    "team",
+                    "access",
+                    "owner",
+                    "deprecate",
+                    "dist-tag",
+                    "star",
+                    "stars",
+                    "login",
+                    "logout",
+                    "adduser",
+                    "unpublish",
+                    "pkg",
+                    "diff",
+                    "rebuild",
+                    "test",
+                    "t",
+                    "start",
+                    "stop",
+                    "restart"
+                ]
+                .contains(subcmd),
+                "{} should be a known npm subcommand",
+                subcmd
+            );
+        }
 
-        // When user runs `rtk npm build`, args = ["build"]
-        // No stripping needed
-        let args2: Vec<String> = vec!["build".into()];
-        let effective_args2 = if args2.first().map(|s| s.as_str()) == Some("run") {
-            &args2[1..]
-        } else {
-            &args2[..]
-        };
-        assert_eq!(effective_args2, &["build"]);
+        // "run" is explicit → strip it
+        let args_run: Vec<String> = vec!["run".into(), "build".into()];
+        assert_eq!(args_run.first().map(|s| s.as_str()), Some("run"));
 
-        // When user runs `rtk npm run`, args = ["run"]
-        // Strip "run" → empty args (npm run with no script)
-        let args3: Vec<String> = vec!["run".into()];
-        let effective_args3 = if args3.first().map(|s| s.as_str()) == Some("run") {
-            &args3[1..]
-        } else {
-            &args3[..]
-        };
-        assert!(effective_args3.is_empty());
+        // "build" is NOT a known subcommand → inject "run"
+        assert!(
+            !["install", "i", "ci", "list", "ls", "test", "t"].contains(&"build"),
+            "build should not be a known npm subcommand"
+        );
+
+        // "install" IS a known subcommand → no "run" injection
+        assert!(
+            ["install", "i", "ci", "list", "ls", "test", "t"].contains(&"install"),
+            "install should be a known npm subcommand"
+        );
     }
 
     #[test]
