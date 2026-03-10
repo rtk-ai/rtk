@@ -40,6 +40,103 @@ enum OpencodeInstallScope {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupTarget {
+    Claude,
+    Opencode,
+    Both,
+}
+
+#[cfg(unix)]
+impl SetupTarget {
+    fn includes_claude(self) -> bool {
+        matches!(self, Self::Claude | Self::Both)
+    }
+
+    fn includes_opencode(self) -> bool {
+        matches!(self, Self::Opencode | Self::Both)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupTargetSelection {
+    Selected(SetupTarget),
+    SkippedChoiceRequired,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SetupTargetStatus {
+    Processed,
+    AlreadyConfigured,
+    Skipped,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetupTargetOutcome {
+    status: SetupTargetStatus,
+}
+
+#[cfg(unix)]
+impl SetupTargetOutcome {
+    fn processed() -> Self {
+        Self {
+            status: SetupTargetStatus::Processed,
+        }
+    }
+
+    fn already_configured() -> Self {
+        Self {
+            status: SetupTargetStatus::AlreadyConfigured,
+        }
+    }
+
+    fn skipped() -> Self {
+        Self {
+            status: SetupTargetStatus::Skipped,
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetupExecutionSummary {
+    sections: Vec<&'static str>,
+    claude: SetupTargetOutcome,
+    opencode: SetupTargetOutcome,
+}
+
+#[cfg(unix)]
+impl Default for SetupExecutionSummary {
+    fn default() -> Self {
+        Self {
+            sections: Vec::new(),
+            claude: SetupTargetOutcome::skipped(),
+            opencode: SetupTargetOutcome::skipped(),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitMode {
+    Default,
+    ClaudeMd,
+    HookOnly,
+}
+
+#[cfg(unix)]
+pub(crate) fn resolve_init_mode(claude_md: bool, hook_only: bool) -> InitMode {
+    match (claude_md, hook_only) {
+        (true, _) => InitMode::ClaudeMd,
+        (false, true) => InitMode::HookOnly,
+        (false, false) => InitMode::Default,
+    }
+}
+
+#[cfg(unix)]
 impl OpencodeInstallScope {
     fn is_global(self) -> bool {
         matches!(self, Self::Global)
@@ -234,12 +331,11 @@ pub fn run(
     patch_mode: PatchMode,
     verbose: u8,
 ) -> Result<()> {
-    // Mode selection
     match (claude_md, hook_only) {
-        (true, _) => run_claude_md_mode(global, verbose),
-        (false, true) => run_hook_only_mode(global, patch_mode, verbose),
-        (false, false) => run_default_mode(global, patch_mode, verbose),
-    }?;
+        (true, _) => run_claude_md_mode(global, verbose)?,
+        (false, true) => run_hook_only_mode(global, patch_mode, verbose)?,
+        (false, false) => run_default_mode(global, patch_mode, verbose)?,
+    }
 
     #[cfg(unix)]
     if !hook_only {
@@ -390,17 +486,6 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
 }
 
 #[cfg(unix)]
-fn detect_opencode() -> bool {
-    detect_opencode_with(dirs::config_dir().as_deref(), || {
-        std::process::Command::new("which")
-            .arg("opencode")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    })
-}
-
-#[cfg(unix)]
 fn detect_opencode_with<F>(config_dir: Option<&Path>, has_binary: F) -> bool
 where
     F: FnOnce() -> bool,
@@ -414,6 +499,17 @@ where
     }
 
     has_binary()
+}
+
+#[cfg(unix)]
+fn detect_opencode() -> bool {
+    detect_opencode_with(dirs::config_dir().as_deref(), || {
+        std::process::Command::new("which")
+            .arg("opencode")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(unix)]
@@ -436,6 +532,50 @@ fn prompt_opencode_support() -> Result<bool> {
 
     let response = line.trim().to_lowercase();
     Ok(response == "y" || response == "yes")
+}
+
+#[cfg(unix)]
+pub(crate) fn resolve_setup_target(
+    response: Option<&str>,
+    interactive: bool,
+) -> SetupTargetSelection {
+    if !interactive {
+        return SetupTargetSelection::SkippedChoiceRequired;
+    }
+
+    match response.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(choice) if choice == "claude" => SetupTargetSelection::Selected(SetupTarget::Claude),
+        Some(choice) if choice == "opencode" => {
+            SetupTargetSelection::Selected(SetupTarget::Opencode)
+        }
+        Some(choice) if choice == "both" => SetupTargetSelection::Selected(SetupTarget::Both),
+        _ => SetupTargetSelection::SkippedChoiceRequired,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn run_setup_target_with<F, G, E>(
+    target: SetupTarget,
+    mut run_claude: F,
+    mut run_opencode: G,
+) -> std::result::Result<SetupExecutionSummary, E>
+where
+    F: FnMut() -> std::result::Result<SetupTargetOutcome, E>,
+    G: FnMut() -> std::result::Result<SetupTargetOutcome, E>,
+{
+    let mut summary = SetupExecutionSummary::default();
+
+    if target.includes_claude() {
+        summary.sections.push("Claude setup");
+        summary.claude = run_claude()?;
+    }
+
+    if target.includes_opencode() {
+        summary.sections.push("opencode setup");
+        summary.opencode = run_opencode()?;
+    }
+
+    Ok(summary)
 }
 
 #[cfg(unix)]
@@ -981,7 +1121,6 @@ fn clean_double_blanks(content: &str) -> String {
         if line.trim().is_empty() {
             // Count consecutive blank lines
             let mut blank_count = 0;
-            let start = i;
             while i < lines.len() && lines[i].trim().is_empty() {
                 blank_count += 1;
                 i += 1;
@@ -1664,6 +1803,122 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_resolve_setup_target_exact_prompt_choices() {
+        assert_eq!(
+            resolve_setup_target(Some("Claude"), true),
+            SetupTargetSelection::Selected(SetupTarget::Claude)
+        );
+        assert_eq!(
+            resolve_setup_target(Some("opencode"), true),
+            SetupTargetSelection::Selected(SetupTarget::Opencode)
+        );
+        assert_eq!(
+            resolve_setup_target(Some("both"), true),
+            SetupTargetSelection::Selected(SetupTarget::Both)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_setup_target_non_interactive_skips_without_processing() {
+        assert_eq!(
+            resolve_setup_target(None, false),
+            SetupTargetSelection::SkippedChoiceRequired
+        );
+        assert_eq!(
+            resolve_setup_target(Some("claude"), false),
+            SetupTargetSelection::SkippedChoiceRequired
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_target_claude_only_runs_only_claude_work() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let summary = run_setup_target_with(
+            SetupTarget::Claude,
+            || {
+                calls.borrow_mut().push("claude");
+                Ok::<_, ()>(SetupTargetOutcome::processed())
+            },
+            || {
+                calls.borrow_mut().push("opencode");
+                Ok::<_, ()>(SetupTargetOutcome::processed())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), vec!["claude"]);
+        assert_eq!(summary.sections, vec!["Claude setup"]);
+        assert_eq!(summary.claude.status, SetupTargetStatus::Processed);
+        assert_eq!(summary.opencode.status, SetupTargetStatus::Skipped);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_target_opencode_only_runs_only_opencode_work() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let summary = run_setup_target_with(
+            SetupTarget::Opencode,
+            || {
+                calls.borrow_mut().push("claude");
+                Ok::<_, ()>(SetupTargetOutcome::processed())
+            },
+            || {
+                calls.borrow_mut().push("opencode");
+                Ok::<_, ()>(SetupTargetOutcome::already_configured())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), vec!["opencode"]);
+        assert_eq!(summary.sections, vec!["opencode setup"]);
+        assert_eq!(summary.claude.status, SetupTargetStatus::Skipped);
+        assert_eq!(
+            summary.opencode.status,
+            SetupTargetStatus::AlreadyConfigured
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_target_both_orders_claude_then_opencode() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let summary = run_setup_target_with(
+            SetupTarget::Both,
+            || {
+                calls.borrow_mut().push("claude");
+                Ok::<_, ()>(SetupTargetOutcome::processed())
+            },
+            || {
+                calls.borrow_mut().push("opencode");
+                Ok::<_, ()>(SetupTargetOutcome::already_configured())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), vec!["claude", "opencode"]);
+        assert_eq!(summary.sections, vec!["Claude setup", "opencode setup"]);
+        assert_eq!(summary.claude.status, SetupTargetStatus::Processed);
+        assert_eq!(
+            summary.opencode.status,
+            SetupTargetStatus::AlreadyConfigured
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_preserves_legacy_init_modes() {
+        assert_eq!(resolve_init_mode(true, false), InitMode::ClaudeMd);
+        assert_eq!(resolve_init_mode(false, true), InitMode::HookOnly);
+        assert_eq!(resolve_init_mode(false, false), InitMode::Default);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_resolve_opencode_install_target_global_init_uses_global_without_prompt() {
         assert_eq!(
             resolve_opencode_install_target(true, None, false),
@@ -2175,11 +2430,6 @@ More notes
         let original = r#"{"env": {"PATH": "/usr/bin"}, "permissions": {"allowAll": true}, "model": "claude-sonnet-4"}"#;
         let parsed: serde_json::Value = serde_json::from_str(original).unwrap();
         let serialized = serde_json::to_string(&parsed).unwrap();
-
-        // Keys should appear in same order
-        let original_keys: Vec<&str> = original.split("\"").filter(|s| s.contains(":")).collect();
-        let serialized_keys: Vec<&str> =
-            serialized.split("\"").filter(|s| s.contains(":")).collect();
 
         // Just check that keys exist (preserve_order doesn't guarantee exact order in nested objects)
         assert!(serialized.contains("\"env\""));
