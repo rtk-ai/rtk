@@ -1,12 +1,13 @@
 /// TOML-based filter DSL for RTK.
 ///
 /// Provides a declarative pipeline of 8 stages that can be configured
-/// via `.rtk/filters.toml` (project-local) or built-in TOML embedded in the binary.
+/// via TOML files. Lookup priority (first match wins):
+///   1. `.rtk/filters.toml`              — project-local, committable with the repo
+///   2. `~/.config/rtk/filters.toml`     — user-global, applies to all projects
+///   3. Built-in TOML                     — `src/filters/*.toml`, concatenated by build.rs and embedded at compile time
+///   4. Passthrough                       — no match, handled by caller
 ///
-/// Lookup priority (first match wins):
-///   1. `.rtk/filters.toml` (PWD — project-local, committable)
-///   2. Built-in TOML (`src/builtin_filters.toml`, embedded at compile time)
-///   3. Passthrough (no match — handled by caller)
+/// `rtk init` generates a commented template for both levels (project or global).
 ///
 /// Environment variables:
 ///   - `RTK_NO_TOML=1`     — bypass TOML engine entirely
@@ -25,6 +26,9 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
 use std::collections::BTreeMap;
+
+// Built-in filters: concatenated from src/filters/*.toml by build.rs at compile time.
+const BUILTIN_TOML: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin_filters.toml"));
 
 // ---------------------------------------------------------------------------
 // Deserialization types (TOML schema)
@@ -179,8 +183,19 @@ impl TomlFilterRegistry {
             }
         }
 
-        // Priority 2: built-in (embedded at compile time)
-        let builtin = include_str!("builtin_filters.toml");
+        // Priority 2: user-global ~/.config/rtk/filters.toml
+        if let Some(config_dir) = dirs::config_dir() {
+            let global_path = config_dir.join("rtk").join("filters.toml");
+            if let Ok(content) = std::fs::read_to_string(&global_path) {
+                match Self::parse_and_compile(&content, "user-global") {
+                    Ok(f) => filters.extend(f),
+                    Err(e) => eprintln!("[rtk] warning: {}: {}", global_path.display(), e),
+                }
+            }
+        }
+
+        // Priority 3: built-in (embedded at compile time)
+        let builtin = BUILTIN_TOML;
         match Self::parse_and_compile(builtin, "builtin") {
             Ok(f) => filters.extend(f),
             Err(e) => eprintln!("[rtk] warning: builtin filters: {}", e),
@@ -211,6 +226,61 @@ impl TomlFilterRegistry {
     }
 }
 
+/// Commands already handled by dedicated Rust modules (routed by Clap before TOML).
+/// A TOML filter whose match_command matches one of these will never activate —
+/// Clap routes the command before `run_fallback()` is reached.
+const RUST_HANDLED_COMMANDS: &[&str] = &[
+    "ls",
+    "tree",
+    "read",
+    "smart",
+    "git",
+    "gh",
+    "aws",
+    "psql",
+    "pnpm",
+    "err",
+    "test",
+    "json",
+    "deps",
+    "env",
+    "find",
+    "diff",
+    "log",
+    "docker",
+    "kubectl",
+    "summary",
+    "grep",
+    "init",
+    "wget",
+    "wc",
+    "gain",
+    "config",
+    "vitest",
+    "prisma",
+    "tsc",
+    "next",
+    "lint",
+    "prettier",
+    "format",
+    "playwright",
+    "cargo",
+    "npm",
+    "npx",
+    "curl",
+    "discover",
+    "ruff",
+    "pytest",
+    "mypy",
+    "pip",
+    "go",
+    "golangci-lint",
+    "rewrite",
+    "proxy",
+    "verify",
+    "learn",
+];
+
 fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, String> {
     // Mutual exclusion: strip and keep cannot both be set
     if !def.strip_lines_matching.is_empty() && !def.keep_lines_matching.is_empty() {
@@ -219,6 +289,19 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
 
     let match_regex = Regex::new(&def.match_command)
         .map_err(|e| format!("invalid match_command regex: {}", e))?;
+
+    // Shadow warning: if match_command matches a Rust-handled command, this filter
+    // will never activate (Clap routes before run_fallback). Warn the author.
+    for cmd in RUST_HANDLED_COMMANDS {
+        if match_regex.is_match(cmd) {
+            eprintln!(
+                "[rtk] warning: filter '{}' match_command matches '{}' which is already \
+                 handled by a Rust module — this filter will never activate for that command",
+                name, cmd
+            );
+            break;
+        }
+    }
 
     let replace = def
         .replace
@@ -416,7 +499,7 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
     let mut tested_filter_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
-    let builtin = include_str!("builtin_filters.toml");
+    let builtin = BUILTIN_TOML;
     collect_test_outcomes(
         builtin,
         filter_name_opt,
@@ -819,12 +902,12 @@ match_command = "^cmd"
 
     #[test]
     fn test_builtin_filters_compile() {
-        // Compile-time safety: panics if builtin_filters.toml is broken
-        let builtin = include_str!("builtin_filters.toml");
+        // Compile-time safety: panics if any src/filters/*.toml is broken
+        let builtin = BUILTIN_TOML;
         let result = TomlFilterRegistry::parse_and_compile(builtin, "builtin");
         assert!(
             result.is_ok(),
-            "builtin_filters.toml failed to compile: {:?}",
+            "builtin filters failed to compile: {:?}",
             result
         );
         assert!(!result.unwrap().is_empty());
@@ -869,7 +952,7 @@ match_command = "^make\\b"
 max_lines = 999
 "#,
         );
-        let builtin = make_filters(include_str!("builtin_filters.toml"));
+        let builtin = make_filters(BUILTIN_TOML);
 
         // Simulate the registry: project first
         let mut all = project;
@@ -885,7 +968,7 @@ max_lines = 999
 
     #[test]
     fn test_terraform_savings_above_60pct() {
-        let filters = make_filters(include_str!("builtin_filters.toml"));
+        let filters = make_filters(BUILTIN_TOML);
         let filter = find_filter_in("terraform plan", &filters).expect("terraform-plan built-in");
 
         // Inline fixture: realistic terraform plan with many Refreshing state lines (noise).
@@ -949,7 +1032,7 @@ max_lines = 999
 
     #[test]
     fn test_make_savings_above_60pct() {
-        let filters = make_filters(include_str!("builtin_filters.toml"));
+        let filters = make_filters(BUILTIN_TOML);
         let filter = find_filter_in("make all", &filters).expect("make built-in");
 
         let input = r#"make[1]: Entering directory '/home/user/project'
@@ -1301,5 +1384,139 @@ match_command = "^make\\b"
         assert_eq!(outcomes.len(), 0);
         assert!(all_names.contains(&"make".to_string()));
         assert!(!tested.contains("make"));
+    }
+
+    // --- Multi-file architecture tests (build.rs) ---
+
+    /// Verify BUILTIN_TOML was generated with the correct schema_version header.
+    /// build.rs injects it — if the const is somehow stale this fails immediately.
+    #[test]
+    fn test_builtin_toml_has_schema_version() {
+        assert!(
+            BUILTIN_TOML.contains("schema_version = 1"),
+            "BUILTIN_TOML must start with 'schema_version = 1' (injected by build.rs)"
+        );
+    }
+
+    /// Verify every expected filter name is present in BUILTIN_TOML.
+    /// This is the safeguard against accidentally deleting a filter file.
+    #[test]
+    fn test_builtin_all_expected_filters_present() {
+        let filters = make_filters(BUILTIN_TOML);
+        let names: std::collections::HashSet<&str> =
+            filters.iter().map(|f| f.name.as_str()).collect();
+
+        let expected = [
+            "ansible-playbook",
+            "du",
+            "fail2ban-client",
+            "gcloud",
+            "helm",
+            "iptables",
+            "make",
+            "mix-compile",
+            "mix-format",
+            "mvn-build",
+            "pio-run",
+            "pre-commit",
+            "quarto-render",
+            "shopify-theme",
+            "sops",
+            "terraform-plan",
+            "tofu-fmt",
+            "tofu-init",
+            "tofu-plan",
+            "tofu-validate",
+            "trunk-build",
+        ];
+
+        for name in &expected {
+            assert!(
+                names.contains(name),
+                "Built-in filter '{}' is missing — was its .toml file deleted from src/filters/?",
+                name
+            );
+        }
+    }
+
+    /// Verify the exact count of built-in filters.
+    /// Fails if a file is added/removed without updating this test.
+    #[test]
+    fn test_builtin_filter_count() {
+        let filters = make_filters(BUILTIN_TOML);
+        assert_eq!(
+            filters.len(),
+            21,
+            "Expected exactly 21 built-in filters, got {}. \
+             Update this count when adding/removing filters in src/filters/.",
+            filters.len()
+        );
+    }
+
+    /// Verify that every built-in filter has at least one inline test.
+    /// Prevents shipping filters with zero test coverage.
+    #[test]
+    fn test_builtin_all_filters_have_inline_tests() {
+        let mut all_names: Vec<String> = Vec::new();
+        let mut tested: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut outcomes = Vec::new();
+        collect_test_outcomes(
+            BUILTIN_TOML,
+            None,
+            &mut outcomes,
+            &mut all_names,
+            &mut tested,
+        );
+
+        let untested: Vec<&str> = all_names
+            .iter()
+            .filter(|name| !tested.contains(name.as_str()))
+            .map(|s| s.as_str())
+            .collect();
+
+        assert!(
+            untested.is_empty(),
+            "The following built-in filters have no inline tests: {:?}\n\
+             Add [[tests.<name>]] entries to the corresponding src/filters/<name>.toml file.",
+            untested
+        );
+    }
+
+    /// Verify that adding a new filter entry to any TOML content makes it
+    /// immediately discoverable via find_filter_in — simulating how a new
+    /// src/filters/my-tool.toml would work after cargo build.
+    #[test]
+    fn test_new_filter_discoverable_after_concat() {
+        // Simulate build.rs: concat BUILTIN_TOML with a brand-new filter block
+        let new_filter = r#"
+[filters.my-new-tool]
+description = "Compact my-new-tool output"
+match_command = "^my-new-tool\\b"
+strip_lines_matching = ["^\\s*$"]
+max_lines = 30
+on_empty = "my-new-tool: ok"
+
+[[tests.my-new-tool]]
+name = "strips blank lines"
+input = "output line 1\n\noutput line 2"
+expected = "output line 1\noutput line 2"
+"#;
+        let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
+        let filters = make_filters(&combined);
+
+        // All 21 existing filters still present + 1 new = 22
+        assert_eq!(
+            filters.len(),
+            22,
+            "Expected 22 filters after concat (21 built-in + 1 new)"
+        );
+
+        // New filter is discoverable
+        let found = find_filter_in("my-new-tool --verbose", &filters);
+        assert!(
+            found.is_some(),
+            "Newly added filter must be discoverable via find_filter_in"
+        );
+        assert_eq!(found.unwrap().name, "my-new-tool");
     }
 }

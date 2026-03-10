@@ -31,6 +31,9 @@ sha2 = "0.10"
 ureq = "2"
 hostname = "0.4"
 
+[build-dependencies]
+toml = "0.8"
+
 [dev-dependencies]
 
 [profile.release]

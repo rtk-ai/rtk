@@ -1,0 +1,16 @@
+[filters.sops]
+description = "Compact sops output"
+match_command = "^sops\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$"]
+max_lines = 40
+
+[[tests.sops]]
+name = "strips blank lines"
+input = "mac: xyz123\n\nversion: 3.8.1"
+expected = "mac: xyz123\nversion: 3.8.1"
+
+[[tests.sops]]
+name = "preserves non-blank output unchanged"
+input = "mac: abc123\nversion: 3.8.1"
+expected = "mac: abc123\nversion: 3.8.1"

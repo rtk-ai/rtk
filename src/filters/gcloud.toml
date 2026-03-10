@@ -1,0 +1,22 @@
+[filters.gcloud]
+description = "Compact gcloud output"
+match_command = "^gcloud\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$"]
+truncate_lines_at = 120
+max_lines = 30
+
+[[tests.gcloud]]
+name = "strips blank lines, preserves output"
+input = """
+Updated property [core/project].
+
+NAME        REGION        STATUS
+my-cluster  us-central1   RUNNING
+"""
+expected = "Updated property [core/project].\nNAME        REGION        STATUS\nmy-cluster  us-central1   RUNNING"
+
+[[tests.gcloud]]
+name = "single line passthrough"
+input = "Listed 0 items."
+expected = "Listed 0 items."

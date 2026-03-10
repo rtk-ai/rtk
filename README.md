@@ -10,7 +10,7 @@
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://discord.gg/gFwRPEKq4p"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
+  <a href="https://discord.gg/pvHdzAec"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
 
@@ -19,7 +19,7 @@
   <a href="#installation">Install</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> &bull;
   <a href="ARCHITECTURE.md">Architecture</a> &bull;
-  <a href="https://discord.gg/gFwRPEKq4p">Discord</a>
+  <a href="https://discord.gg/pvHdzAec">Discord</a>
 </p>
 
 <p align="center">
@@ -351,19 +351,12 @@ brew uninstall rtk           # If installed via Homebrew
 - **[SECURITY.md](SECURITY.md)** - Security policy and PR review process
 - **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
 
-
 ## Contributing
 
-Contributions welcome! See the **[Contributing Guide](CONTRIBUTING.md)** for branch naming, PR process, testing requirements, and coding practices.
+Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/rtk-ai/rtk).
 
 Join the community on [Discord](https://discord.gg/pvHdzAec).
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-
-## Contact
-
-- Website: https://www.rtk-ai.app
-- Email: contact@rtk-ai.app
-- Issues: https://github.com/rtk-ai/rtk/issues
