@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 * **hooks:** `exclude_commands` config — exclude specific commands from auto-rewrite ([#243](https://github.com/rtk-ai/rtk/issues/243))
+* **init:** extend the opencode lifecycle so `rtk init` can install and report the full reviewer-facing integration surface
+  - installs the rewrite plugin in the selected opencode plugin scope and adds the RTK guidance block to `~/.config/opencode/AGENTS.md`
+  - `rtk init --show` reports marker-aware `AGENTS.md` status plus any configured global/local opencode plugin paths
+  - `rtk init -g --uninstall` removes RTK-managed opencode plugin copies and strips only the RTK block from `AGENTS.md`
 
 ### Bug Fixes
 
