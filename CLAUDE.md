@@ -230,6 +230,7 @@ rtk gain --history | grep proxy
 | pip_cmd.rs | pip/uv package manager | JSON parsing, auto-detect uv (70-85% reduction) |
 | go_cmd.rs | Go commands | NDJSON for test, text for build/vet (80-90% reduction) |
 | golangci_cmd.rs | golangci-lint | JSON parsing, group by rule (85% reduction) |
+| xcodebuild_cmd.rs | Xcode build/test wrapper | Conservative text filtering for build, test, archive, and info modes (60-85% reduction) |
 | tee.rs | Full output recovery | Save raw output to file on failure, print hint for LLM re-read |
 | utils.rs | Shared utilities | Package manager detection, common formatting |
 | discover/ | Claude Code history analysis | Scan JSONL sessions, classify commands, report missed savings |
@@ -390,7 +391,8 @@ pub fn execute_with_filter(cmd: &str, args: &[&str]) -> Result<()> {
   - `rtk go vet`: Text filter for issues (75% reduction)
   - `rtk golangci-lint`: JSON parsing grouped by rule (85% reduction)
 - **Architecture**: Standalone Python commands (mirror lint/prettier), Go sub-enum (mirror git/cargo)
-- **Patterns**: JSON for structured output (ruff check, golangci-lint, pip), NDJSON streaming (go test), text state machine (pytest), text filters (go build/vet, ruff format)
+- **Apple Commands**: `rtk xcodebuild` for `build`, `test`, `archive`, `build-for-testing`, `test-without-building`, `-list`, and `-showBuildSettings`
+- **Patterns**: JSON for structured output (ruff check, golangci-lint, pip), NDJSON streaming (go test), text state machine (pytest), conservative text filters (go build/vet, ruff format, xcodebuild)
 
 ## Testing Strategy
 

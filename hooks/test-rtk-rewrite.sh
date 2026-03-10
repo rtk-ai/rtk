@@ -237,6 +237,14 @@ test_rewrite "kubectl apply -f deploy.yaml" \
   "kubectl apply -f deploy.yaml" \
   "rtk kubectl apply -f deploy.yaml"
 
+test_rewrite "xcodebuild test -scheme DemoApp" \
+  "xcodebuild test -scheme DemoApp" \
+  "rtk xcodebuild test -scheme DemoApp"
+
+test_rewrite "env + xcodebuild -list" \
+  "DEVELOPER_DIR=/Applications/Xcode.app xcodebuild -list" \
+  "DEVELOPER_DIR=/Applications/Xcode.app rtk xcodebuild -list"
+
 echo ""
 
 # ---- SECTION 3b: RTK_DISABLED and redirect fixes (#345, #346) ----

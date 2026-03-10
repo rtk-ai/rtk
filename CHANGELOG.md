@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+* add `rtk xcodebuild` with conservative filtering, rewrite support, and fixture coverage ([#376](https://github.com/rtk-ai/rtk/issues/376))
 * **hooks:** `exclude_commands` config — exclude specific commands from auto-rewrite ([#243](https://github.com/rtk-ai/rtk/issues/243))
 
 ### Bug Fixes

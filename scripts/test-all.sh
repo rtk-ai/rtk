@@ -426,6 +426,8 @@ else
     skip_test "rtk golangci-lint" "golangci-lint not installed"
 fi
 
+assert_help        "rtk xcodebuild"                rtk xcodebuild
+
 # ── 29. Graphite (conditional) ─────────────────────
 
 section "Graphite (conditional)"
