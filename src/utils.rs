@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::process::Command;
 
-/// Truncates a string to `max_len` characters, appending "..." if needed.
+/// Truncates a string to `max_len` characters, appending `...` if needed.
 ///
 /// # Arguments
 /// * `s` - The string to truncate
@@ -36,7 +36,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 /// Strips ANSI escape codes (colors, styles) from a string.
 ///
 /// # Arguments
-/// * `text` - Text potentially containing ANSI codes
+/// * `text` - Text potentially containing ANSI escape codes
 ///
 /// # Examples
 /// ```
@@ -51,7 +51,7 @@ pub fn strip_ansi(text: &str) -> String {
     ANSI_RE.replace_all(text, "").to_string()
 }
 
-/// Execute a command and return cleaned stdout/stderr.
+/// Executes a command and returns cleaned stdout/stderr.
 ///
 /// # Arguments
 /// * `cmd` - Command to execute (e.g. "eslint")
@@ -80,7 +80,7 @@ pub fn execute_command(cmd: &str, args: &[&str]) -> Result<(String, String, i32)
     Ok((stdout, stderr, exit_code))
 }
 
-/// Format a token count with K/M suffixes for readability.
+/// Formats a token count with K/M suffixes for readability.
 ///
 /// # Arguments
 /// * `n` - Token count
@@ -105,7 +105,7 @@ pub fn format_tokens(n: usize) -> String {
     }
 }
 
-/// Format a USD amount with adaptive precision.
+/// Formats a USD amount with adaptive precision.
 ///
 /// # Arguments
 /// * `amount` - Amount in dollars

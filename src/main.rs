@@ -48,10 +48,12 @@ mod runner;
 mod summary;
 mod tee;
 mod telemetry;
+mod toml_filter;
 mod tracking;
 mod tree;
 mod tsc_cmd;
 mod utils;
+mod verify_cmd;
 mod vitest_cmd;
 mod wc_cmd;
 mod wget_cmd;
@@ -550,8 +552,15 @@ enum Commands {
         args: Vec<OsString>,
     },
 
-    /// Verify hook integrity (SHA-256 check)
-    Verify,
+    /// Verify hook integrity and run TOML filter inline tests
+    Verify {
+        /// Run tests only for this filter name
+        #[arg(long)]
+        filter: Option<String>,
+        /// Fail if any filter has no inline tests (CI mode)
+        #[arg(long)]
+        require_all: bool,
+    },
 
     /// Ruff linter/formatter with compact output
     Ruff {
@@ -946,6 +955,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "proxy",
     "hook-audit",
     "cc-economics",
+    "verify",
 ];
 
 fn run_fallback(parse_error: clap::Error) -> Result<()> {
@@ -968,28 +978,94 @@ fn run_fallback(parse_error: clap::Error) -> Result<()> {
     // Start timer before execution to capture actual command runtime
     let timer = tracking::TimedExecution::start();
 
-    let status = std::process::Command::new(&args[0])
-        .args(&args[1..])
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status();
+    // TOML filter lookup — bypass with RTK_NO_TOML=1
+    // Use basename of args[0] so absolute paths (/usr/bin/make) still match "^make\b".
+    let lookup_cmd = {
+        let base = std::path::Path::new(&args[0])
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| args[0].clone());
+        std::iter::once(base.as_str())
+            .chain(args[1..].iter().map(|s| s.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let toml_match = if std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1") {
+        None
+    } else {
+        toml_filter::find_matching_filter(&lookup_cmd)
+    };
 
-    match status {
-        Ok(s) => {
-            timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+    if let Some(filter) = toml_match {
+        // TOML match: capture stdout for filtering
+        let result = std::process::Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::piped()) // capture
+            .stderr(std::process::Stdio::inherit()) // stderr always direct
+            .output();
 
-            tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+        match result {
+            Ok(output) => {
+                let stdout_raw = String::from_utf8_lossy(&output.stdout);
 
-            if !s.success() {
-                std::process::exit(s.code().unwrap_or(1));
+                // Tee raw output BEFORE filtering on failure — lets LLM re-read if needed
+                let tee_hint = if !output.status.success() {
+                    tee::tee_and_hint(&stdout_raw, &raw_command, output.status.code().unwrap_or(1))
+                } else {
+                    None
+                };
+
+                let filtered = toml_filter::apply_filter(filter, &stdout_raw);
+                println!("{}", filtered);
+                if let Some(hint) = tee_hint {
+                    println!("{}", hint);
+                }
+
+                timer.track(
+                    &raw_command,
+                    &format!("rtk:toml {}", raw_command),
+                    &stdout_raw,
+                    &filtered,
+                );
+                tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+
+                if !output.status.success() {
+                    std::process::exit(output.status.code().unwrap_or(1));
+                }
+            }
+            Err(e) => {
+                // Command not found — same behaviour as no-TOML path
+                tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                eprintln!("[rtk: {}]", e);
+                std::process::exit(127);
             }
         }
-        Err(e) => {
-            tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-            // Command not found or other OS error — show Clap's original error
-            eprintln!("[rtk: fallback failed: {}]", e);
-            parse_error.exit();
+    } else {
+        // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
+        let status = std::process::Command::new(&args[0])
+            .args(&args[1..])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+
+        match status {
+            Ok(s) => {
+                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+
+                tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+
+                if !s.success() {
+                    std::process::exit(s.code().unwrap_or(1));
+                }
+            }
+            Err(e) => {
+                tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                // Command not found or other OS error — single message, no duplicate Clap error
+                eprintln!("[rtk: {}]", e);
+                std::process::exit(127);
+            }
         }
     }
 
@@ -1871,8 +1947,18 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Verify => {
-            integrity::run_verify(cli.verbose)?;
+        Commands::Verify {
+            filter,
+            require_all,
+        } => {
+            if filter.is_some() {
+                // Filter-specific mode: run only that filter's tests
+                verify_cmd::run(filter, require_all)?;
+            } else {
+                // Default or --require-all: always run integrity check first
+                integrity::run_verify(cli.verbose)?;
+                verify_cmd::run(None, require_all)?;
+            }
         }
     }
 
