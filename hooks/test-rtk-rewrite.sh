@@ -239,6 +239,44 @@ test_rewrite "kubectl apply -f deploy.yaml" \
 
 echo ""
 
+# ---- SECTION 3b: RTK_DISABLED and redirect fixes (#345, #346) ----
+echo "--- RTK_DISABLED (#345) ---"
+test_rewrite "RTK_DISABLED=1 git status (no rewrite)" \
+  "RTK_DISABLED=1 git status" \
+  ""
+
+test_rewrite "RTK_DISABLED=1 cargo test (no rewrite)" \
+  "RTK_DISABLED=1 cargo test" \
+  ""
+
+test_rewrite "FOO=1 RTK_DISABLED=1 git status (no rewrite)" \
+  "FOO=1 RTK_DISABLED=1 git status" \
+  ""
+
+echo ""
+echo "--- Redirect operators (#346) ---"
+test_rewrite "cargo test 2>&1 | head" \
+  "cargo test 2>&1 | head" \
+  "rtk cargo test 2>&1 | head"
+
+test_rewrite "cargo test 2>&1" \
+  "cargo test 2>&1" \
+  "rtk cargo test 2>&1"
+
+test_rewrite "cargo test &>/dev/null" \
+  "cargo test &>/dev/null" \
+  "rtk cargo test &>/dev/null"
+
+# Note: the bash hook rewrites only the first command segment (sed-based);
+# full compound rewriting (both sides of &) is handled by `rtk rewrite` (Rust).
+# The critical behavior tested here: `&` after `cargo test` is NOT mistaken for
+# a redirect — the hook still rewrites cargo test, no crash.
+test_rewrite "cargo test & git status (bash hook rewrites first segment only)" \
+  "cargo test & git status" \
+  "rtk cargo test & git status"
+
+echo ""
+
 # ---- SECTION 4: Vitest edge case (fixed double "run" bug) ----
 echo "--- Vitest run dedup ---"
 test_rewrite "vitest (no args)" \

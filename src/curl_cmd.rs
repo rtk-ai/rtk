@@ -55,7 +55,10 @@ fn filter_curl_output(output: &str) -> String {
         && (trimmed.ends_with('}') || trimmed.ends_with(']'))
     {
         if let Ok(schema) = json_cmd::filter_json_string(trimmed, 5) {
-            return schema;
+            // Only use schema if it's actually shorter than the original (#297)
+            if schema.len() <= trimmed.len() {
+                return schema;
+            }
         }
     }
 
@@ -86,7 +89,8 @@ mod tests {
 
     #[test]
     fn test_filter_curl_json() {
-        let output = r#"{"name": "test", "count": 42, "items": [1, 2, 3]}"#;
+        // Large JSON where schema is shorter than original — schema should be returned
+        let output = r#"{"name": "a very long user name here", "count": 42, "items": [1, 2, 3], "description": "a very long description that takes up many characters in the original JSON payload", "status": "active", "url": "https://example.com/api/v1/users/123"}"#;
         let result = filter_curl_output(output);
         assert!(result.contains("name"));
         assert!(result.contains("string"));
@@ -106,6 +110,16 @@ mod tests {
         let result = filter_curl_output(output);
         assert!(result.contains("Hello, World!"));
         assert!(result.contains("plain text"));
+    }
+
+    #[test]
+    fn test_filter_curl_json_small_returns_original() {
+        // Small JSON where schema would be larger than original (issue #297)
+        let output = r#"{"r2Ready":true,"status":"ok"}"#;
+        let result = filter_curl_output(output);
+        // Schema would be "{\n  r2Ready: bool,\n  status: string\n}" which is longer
+        // Should return the original JSON unchanged
+        assert_eq!(result.trim(), output.trim());
     }
 
     #[test]

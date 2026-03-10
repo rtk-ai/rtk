@@ -1,0 +1,63 @@
+[filters.ping]
+description = "Compact ping output — strip per-packet lines, keep summary"
+match_command = "^ping\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^PING ",
+  "^Pinging ",
+  "^\\d+ bytes from ",
+  "^Reply from .+: bytes=",
+  "^\\s*$",
+]
+tail_lines = 4
+
+[[tests.ping]]
+name = "success keeps summary only"
+input = """
+PING example.com (93.184.216.34): 56 data bytes
+64 bytes from 93.184.216.34: icmp_seq=0 ttl=56 time=14.2 ms
+64 bytes from 93.184.216.34: icmp_seq=1 ttl=56 time=13.8 ms
+64 bytes from 93.184.216.34: icmp_seq=2 ttl=56 time=14.1 ms
+64 bytes from 93.184.216.34: icmp_seq=3 ttl=56 time=13.9 ms
+
+--- example.com ping statistics ---
+4 packets transmitted, 4 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 13.8/14.0/14.2/0.2 ms
+"""
+expected = """--- example.com ping statistics ---
+4 packets transmitted, 4 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 13.8/14.0/14.2/0.2 ms"""
+
+[[tests.ping]]
+name = "windows format keeps stats block only"
+input = """
+Pinging 192.0.2.1 with 32 bytes of data:
+Reply from 192.0.2.1: bytes=32 time=14ms TTL=56
+Reply from 192.0.2.1: bytes=32 time=13ms TTL=56
+Reply from 192.0.2.1: bytes=32 time=14ms TTL=56
+Reply from 192.0.2.1: bytes=32 time=13ms TTL=56
+
+Ping statistics for 192.0.2.1:
+    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 13ms, Maximum = 14ms, Average = 13ms
+"""
+expected = """Ping statistics for 192.0.2.1:
+    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),
+Approximate round trip times in milli-seconds:
+    Minimum = 13ms, Maximum = 14ms, Average = 13ms"""
+
+[[tests.ping]]
+name = "unreachable host passes error through"
+input = """
+PING unreachable.example.com (192.0.2.1): 56 data bytes
+Request timeout for icmp_seq 0
+Request timeout for icmp_seq 1
+
+--- unreachable.example.com ping statistics ---
+2 packets transmitted, 0 packets received, 100.0% packet loss
+"""
+expected = """Request timeout for icmp_seq 0
+Request timeout for icmp_seq 1
+--- unreachable.example.com ping statistics ---
+2 packets transmitted, 0 packets received, 100.0% packet loss"""

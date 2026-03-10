@@ -1,0 +1,15 @@
+[filters.fail2ban-client]
+description = "Compact fail2ban-client output"
+match_command = "^fail2ban-client\\b"
+strip_lines_matching = ["^\\s*$"]
+max_lines = 30
+
+[[tests.fail2ban-client]]
+name = "strips blank lines"
+input = "Status for the jail: sshd\n|- Filter\n|  |- Currently failed: 3\n\n|- Actions\n   `- Total banned: 42"
+expected = "Status for the jail: sshd\n|- Filter\n|  |- Currently failed: 3\n|- Actions\n   `- Total banned: 42"
+
+[[tests.fail2ban-client]]
+name = "single line passthrough"
+input = "Shutdown successful"
+expected = "Shutdown successful"

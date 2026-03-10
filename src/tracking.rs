@@ -886,6 +886,45 @@ impl Tracker {
 
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    /// Count commands since a given timestamp (for telemetry).
+    pub fn count_commands_since(&self, since: chrono::DateTime<chrono::Utc>) -> Result<i64> {
+        let ts = since.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM commands WHERE timestamp >= ?1",
+            params![ts],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Get top N commands by frequency (for telemetry).
+    pub fn top_commands(&self, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd, COUNT(*) as cnt FROM commands
+             GROUP BY rtk_cmd ORDER BY cnt DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let cmd: String = row.get(0)?;
+            // Extract just the command name (e.g. "rtk git status" → "git")
+            Ok(cmd.split_whitespace().nth(1).unwrap_or(&cmd).to_string())
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Get overall savings percentage (for telemetry).
+    pub fn overall_savings_pct(&self) -> Result<f64> {
+        let (total_input, total_saved): (i64, i64) = self.conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(saved_tokens), 0) FROM commands",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if total_input > 0 {
+            Ok((total_saved as f64 / total_input as f64) * 100.0)
+        } else {
+            Ok(0.0)
+        }
+    }
 }
 
 fn get_db_path() -> Result<PathBuf> {
