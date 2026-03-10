@@ -15,13 +15,8 @@ pub fn maybe_ping() {
         return;
     }
 
-    // Check opt-out: env var
-    if std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1" {
-        return;
-    }
-
-    // Check opt-out: config.toml
-    if let Some(false) = config::telemetry_enabled() {
+    // Check opt-out: env var > config.toml > default
+    if !config::resolve_telemetry_enabled() {
         return;
     }
 

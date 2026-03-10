@@ -202,19 +202,20 @@ pub fn run(
     claude_md: bool,
     hook_only: bool,
     patch_mode: PatchMode,
+    claude_dir: Option<&Path>,
     verbose: u8,
 ) -> Result<()> {
     // Mode selection
     match (claude_md, hook_only) {
-        (true, _) => run_claude_md_mode(global, verbose),
-        (false, true) => run_hook_only_mode(global, patch_mode, verbose),
-        (false, false) => run_default_mode(global, patch_mode, verbose),
+        (true, _) => run_claude_md_mode(global, claude_dir, verbose),
+        (false, true) => run_hook_only_mode(global, patch_mode, claude_dir, verbose),
+        (false, false) => run_default_mode(global, patch_mode, claude_dir, verbose),
     }
 }
 
 /// Prepare hook directory and return paths (hook_dir, hook_path)
-fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
-    let claude_dir = resolve_claude_dir()?;
+fn prepare_hook_paths(claude_dir_override: Option<&Path>) -> Result<(PathBuf, PathBuf)> {
+    let claude_dir = resolve_claude_dir(claude_dir_override)?;
     let hook_dir = claude_dir.join("hooks");
     fs::create_dir_all(&hook_dir)
         .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
@@ -399,8 +400,8 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
 
 /// Remove RTK hook from settings.json file
 /// Backs up before modification, returns true if hook was found and removed
-fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
-    let claude_dir = resolve_claude_dir()?;
+fn remove_hook_from_settings(claude_dir_override: Option<&Path>, verbose: u8) -> Result<bool> {
+    let claude_dir = resolve_claude_dir(claude_dir_override)?;
     let settings_path = claude_dir.join("settings.json");
 
     if !settings_path.exists() {
@@ -442,12 +443,12 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
 }
 
 /// Full uninstall: remove hook, RTK.md, @RTK.md reference, settings.json entry
-pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
+pub fn uninstall(global: bool, claude_dir_override: Option<&Path>, verbose: u8) -> Result<()> {
     if !global {
         anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
     }
 
-    let claude_dir = resolve_claude_dir()?;
+    let claude_dir = resolve_claude_dir(claude_dir_override)?;
     let mut removed = Vec::new();
 
     // 1. Remove hook file
@@ -495,7 +496,7 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     }
 
     // 4. Remove hook entry from settings.json
-    if remove_hook_from_settings(verbose)? {
+    if remove_hook_from_settings(claude_dir_override, verbose)? {
         removed.push("settings.json: removed RTK hook entry".to_string());
     }
 
@@ -515,8 +516,13 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
 
 /// Orchestrator: patch settings.json with RTK hook
 /// Handles reading, checking, prompting, merging, backing up, and atomic writing
-fn patch_settings_json(hook_path: &Path, mode: PatchMode, verbose: u8) -> Result<PatchResult> {
-    let claude_dir = resolve_claude_dir()?;
+fn patch_settings_json(
+    hook_path: &Path,
+    mode: PatchMode,
+    claude_dir_override: Option<&Path>,
+    verbose: u8,
+) -> Result<PatchResult> {
+    let claude_dir = resolve_claude_dir(claude_dir_override)?;
     let settings_path = claude_dir.join("settings.json");
     let hook_command = hook_path
         .to_str()
@@ -687,28 +693,38 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
 #[cfg(not(unix))]
-fn run_default_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
+fn run_default_mode(
+    _global: bool,
+    _patch_mode: PatchMode,
+    _claude_dir_override: Option<&Path>,
+    _verbose: u8,
+) -> Result<()> {
     eprintln!("⚠️  Hook-based mode requires Unix (macOS/Linux).");
     eprintln!("    Windows: use --claude-md mode for full injection.");
     eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose)
+    run_claude_md_mode(_global, _claude_dir_override, _verbose)
 }
 
 #[cfg(unix)]
-fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+fn run_default_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    claude_dir_override: Option<&Path>,
+    verbose: u8,
+) -> Result<()> {
     if !global {
         // Local init: inject CLAUDE.md + generate project-local filters template
-        run_claude_md_mode(false, verbose)?;
+        run_claude_md_mode(false, claude_dir_override, verbose)?;
         generate_project_filters_template(verbose)?;
         return Ok(());
     }
 
-    let claude_dir = resolve_claude_dir()?;
+    let claude_dir = resolve_claude_dir(claude_dir_override)?;
     let rtk_md_path = claude_dir.join("RTK.md");
     let claude_md_path = claude_dir.join("CLAUDE.md");
 
     // 1. Prepare hook directory and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
+    let (_hook_dir, hook_path) = prepare_hook_paths(claude_dir_override)?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
     // 2. Write RTK.md
@@ -734,7 +750,7 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
     }
 
     // 5. Patch settings.json
-    let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
+    let patch_result = patch_settings_json(&hook_path, patch_mode, claude_dir_override, verbose)?;
 
     // Report result
     match patch_result {
@@ -809,12 +825,22 @@ fn generate_global_filters_template(verbose: u8) -> Result<()> {
 
 /// Hook-only mode: just the hook, no RTK.md
 #[cfg(not(unix))]
-fn run_hook_only_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
+fn run_hook_only_mode(
+    _global: bool,
+    _patch_mode: PatchMode,
+    _claude_dir_override: Option<&Path>,
+    _verbose: u8,
+) -> Result<()> {
     anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
 }
 
 #[cfg(unix)]
-fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+fn run_hook_only_mode(
+    global: bool,
+    patch_mode: PatchMode,
+    claude_dir_override: Option<&Path>,
+    verbose: u8,
+) -> Result<()> {
     if !global {
         eprintln!("⚠️  Warning: --hook-only only makes sense with --global");
         eprintln!("    For local projects, use default mode or --claude-md");
@@ -822,7 +848,7 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
     }
 
     // Prepare and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
+    let (_hook_dir, hook_path) = prepare_hook_paths(claude_dir_override)?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
     let hook_status = if hook_changed {
@@ -837,7 +863,7 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
     );
 
     // Patch settings.json
-    let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
+    let patch_result = patch_settings_json(&hook_path, patch_mode, claude_dir_override, verbose)?;
 
     // Report result
     match patch_result {
@@ -859,9 +885,9 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
 }
 
 /// Legacy mode: full 137-line injection into CLAUDE.md
-fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
+fn run_claude_md_mode(global: bool, claude_dir_override: Option<&Path>, verbose: u8) -> Result<()> {
     let path = if global {
-        resolve_claude_dir()?.join("CLAUDE.md")
+        resolve_claude_dir(claude_dir_override)?.join("CLAUDE.md")
     } else {
         PathBuf::from("CLAUDE.md")
     };
@@ -1084,16 +1110,14 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
     }
 }
 
-/// Resolve ~/.claude directory with proper home expansion
-fn resolve_claude_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".claude"))
-        .context("Cannot determine home directory. Is $HOME set?")
+/// Resolve Claude Code data directory, delegating to config cascade.
+fn resolve_claude_dir(cli_override: Option<&Path>) -> Result<PathBuf> {
+    crate::config::resolve_claude_dir(cli_override)
 }
 
 /// Show current rtk configuration
-pub fn show_config() -> Result<()> {
-    let claude_dir = resolve_claude_dir()?;
+pub fn show_config(claude_dir_override: Option<&Path>) -> Result<()> {
+    let claude_dir = resolve_claude_dir(claude_dir_override)?;
     let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
     let rtk_md_path = claude_dir.join("RTK.md");
     let global_claude_md = claude_dir.join("CLAUDE.md");
@@ -1284,7 +1308,9 @@ mod tests {
         // Guards (rtk/jq availability checks) must appear before the actual delegation call.
         // The thin delegating hook no longer uses set -euo pipefail.
         let jq_pos = REWRITE_HOOK.find("command -v jq").unwrap();
-        let rtk_delegate_pos = REWRITE_HOOK.find("rtk rewrite \"$CMD\"").unwrap();
+        let rtk_delegate_pos = REWRITE_HOOK
+            .find("rtk rewrite --hook-json \"$CMD\"")
+            .unwrap();
         assert!(
             jq_pos < rtk_delegate_pos,
             "Guards must appear before rtk rewrite delegation"

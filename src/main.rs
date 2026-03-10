@@ -336,6 +336,10 @@ enum Commands {
         /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
         #[arg(long)]
         uninstall: bool,
+
+        /// Claude Code data directory (default: ~/.claude, env: CLAUDE_CONFIG_DIR)
+        #[arg(long = "claude-dir")]
+        claude_dir: Option<PathBuf>,
     },
 
     /// Download with compact output (strips progress bars)
@@ -628,6 +632,10 @@ enum Commands {
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         cmd: String,
+
+        /// Output full Claude Code hook JSON (for use as a hook pipe target)
+        #[arg(long)]
+        hook_json: bool,
     },
 }
 
@@ -1492,11 +1500,12 @@ fn main() -> Result<()> {
             auto_patch,
             no_patch,
             uninstall,
+            claude_dir,
         } => {
             if show {
-                init::show_config()?;
+                init::show_config(claude_dir.as_deref())?;
             } else if uninstall {
-                init::uninstall(global, cli.verbose)?;
+                init::uninstall(global, claude_dir.as_deref(), cli.verbose)?;
             } else {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1505,7 +1514,14 @@ fn main() -> Result<()> {
                 } else {
                     init::PatchMode::Ask
                 };
-                init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
+                init::run(
+                    global,
+                    claude_md,
+                    hook_only,
+                    patch_mode,
+                    claude_dir.as_deref(),
+                    cli.verbose,
+                )?;
             }
         }
 
@@ -1840,8 +1856,8 @@ fn main() -> Result<()> {
             hook_audit_cmd::run(since, cli.verbose)?;
         }
 
-        Commands::Rewrite { cmd } => {
-            rewrite_cmd::run(&cmd)?;
+        Commands::Rewrite { cmd, hook_json } => {
+            rewrite_cmd::run(&cmd, hook_json)?;
         }
 
         Commands::Proxy { args } => {
