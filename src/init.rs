@@ -670,6 +670,9 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
                 "  opencode bash/tool execution now routes through `rtk rewrite`.".to_string(),
             );
             lines.push(
+                "  RTK lookup keeps the standard absolute-path fallbacks and also checks `<project>/target/debug/rtk`, `<project>/target/release/rtk`, and PATH for source-built installs.".to_string(),
+            );
+            lines.push(
                 "  If the active file is stale, delete that exact path and rerun `rtk init` for the same scope before restarting opencode.".to_string(),
             );
             lines.push(
@@ -702,6 +705,10 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
 
             lines.push(
                 "  Delete the exact stale plugin path above before rerunning `rtk init` if you need to refresh the asset."
+                    .to_string(),
+            );
+            lines.push(
+                "  RTK lookup uses the standard absolute-path fallbacks plus `<project>/target/debug/rtk`, `<project>/target/release/rtk`, and PATH when you refresh the plugin."
                     .to_string(),
             );
             lines.push("  Run `rtk init --uninstall` to remove opencode support.".to_string());
@@ -1731,6 +1738,7 @@ mod tests {
         assert!(message.contains(&global_path.display().to_string()));
         assert!(message.contains("local already installed"));
         assert!(message.contains(&local_path.display().to_string()));
+        assert!(message.contains("target/debug/rtk"));
         assert!(message.contains("rtk init --uninstall"));
     }
 
@@ -1748,6 +1756,7 @@ mod tests {
         assert!(message.contains(&plugin_path.display().to_string()));
         assert!(message.contains("Scope: local"));
         assert!(message.contains("rtk rewrite"));
+        assert!(message.contains("target/debug/rtk"));
         assert!(message.contains("git status"));
     }
 
@@ -1806,6 +1815,9 @@ mod tests {
             ".cargo/bin/rtk",
             "/usr/local/bin/rtk",
             "/opt/homebrew/bin/rtk",
+            "\"target\", \"debug\", \"rtk\"",
+            "\"target\", \"release\", \"rtk\"",
+            "process.env.PATH",
         ] {
             assert!(
                 OPENCODE_PLUGIN.contains(candidate),

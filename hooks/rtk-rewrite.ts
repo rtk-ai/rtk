@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { spawnSync } from "node:child_process"
 import { appendFileSync, existsSync, mkdirSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { delimiter, dirname, join } from "node:path"
 
 const RTK_CANDIDATES = [
   `${process.env.HOME ?? ""}/.cargo/bin/rtk`,
@@ -39,8 +39,28 @@ function writeDebug(event: string, details: Record<string, string | null> = {}):
   }
 }
 
-function findRtk(): string | null {
-  for (const candidate of RTK_CANDIDATES) {
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value && value.length > 0)))]
+}
+
+function getRtkCandidates(context: { directory: string; worktree: string }): string[] {
+  const pathCandidates = (process.env.PATH || "")
+    .split(delimiter)
+    .filter((segment) => segment.length > 0)
+    .map((segment) => join(segment, "rtk"))
+
+  return uniqueNonEmpty([
+    ...RTK_CANDIDATES,
+    join(context.directory, "target", "debug", "rtk"),
+    join(context.directory, "target", "release", "rtk"),
+    join(context.worktree, "target", "debug", "rtk"),
+    join(context.worktree, "target", "release", "rtk"),
+    ...pathCandidates,
+  ])
+}
+
+function findRtk(context: { directory: string; worktree: string }): string | null {
+  for (const candidate of getRtkCandidates(context)) {
     if (candidate && existsSync(candidate)) {
       writeDebug("rtk-candidate", { candidate })
       return candidate
@@ -116,8 +136,8 @@ function setCommandValue(accessor: CommandAccessor, value: string): boolean {
   return true
 }
 
-export const RtkRewritePlugin: Plugin = async () => {
-  writeDebug("plugin-loaded")
+export const RtkRewritePlugin: Plugin = async (context) => {
+  writeDebug("plugin-loaded", { directory: context.directory, worktree: context.worktree })
 
   return {
     "tool.execute.before": async (input, output) => {
@@ -142,7 +162,7 @@ export const RtkRewritePlugin: Plugin = async () => {
         return
       }
 
-      const rtkBin = findRtk()
+      const rtkBin = findRtk(context)
       if (!rtkBin) {
         writeDebug("rewrite-result", { outcome: "rewrite-noop", reason: "rtk-missing" })
         return
