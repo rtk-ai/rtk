@@ -569,6 +569,32 @@ fn filter_status_with_args(output: &str) -> String {
     }
 }
 
+fn non_empty_trimmed(text: &str) -> Option<String> {
+    let trimmed = text.trim_end();
+    (!trimmed.is_empty()).then_some(trimmed.to_string())
+}
+
+fn status_failure_message(stdout: &str, stderr: &str, has_args: bool) -> String {
+    if !has_args && stderr.contains("not a git repository") {
+        return "Not a git repository".to_string();
+    }
+
+    if let Some(message) = non_empty_trimmed(stderr) {
+        return message;
+    }
+
+    if has_args {
+        let filtered = filter_status_with_args(stdout);
+        if filtered != "ok ✓" {
+            return filtered;
+        }
+    } else if let Some(message) = non_empty_trimmed(stdout) {
+        return message;
+    }
+
+    "git status failed".to_string()
+}
+
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
@@ -583,11 +609,15 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
+        if !output.status.success() {
+            eprintln!("{}", status_failure_message(&stdout, &stderr, true));
+            std::process::exit(output.status.code().unwrap_or(1));
+        }
+
         if verbose > 0 || !stderr.is_empty() {
             eprint!("{}", stderr);
         }
 
-        // Apply minimal filtering: strip ANSI, remove hints, empty lines
         let filtered = filter_status_with_args(&stdout);
         print!("{}", filtered);
 
@@ -616,13 +646,12 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        eprintln!("{}", status_failure_message(&stdout, &stderr, false));
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
 
-    let formatted = if !stderr.is_empty() && stderr.contains("not a git repository") {
-        "Not a git repository".to_string()
-    } else {
-        format_status_output(&stdout)
-    };
-
+    let formatted = format_status_output(&stdout);
     println!("{}", formatted);
 
     // Track for statistics
@@ -1665,6 +1694,31 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let output = "nothing to commit, working tree clean\n";
         let result = filter_status_with_args(output);
         assert!(result.contains("nothing to commit"));
+    }
+
+    #[test]
+    fn test_status_failure_message_non_repo_default_mode() {
+        let result = status_failure_message(
+            "",
+            "fatal: not a git repository (or any of the parent directories): .git\n",
+            false,
+        );
+
+        assert_eq!(result, "Not a git repository");
+    }
+
+    #[test]
+    fn test_status_failure_message_non_repo_with_args() {
+        let result = status_failure_message(
+            "",
+            "fatal: not a git repository (or any of the parent directories): .git\n",
+            true,
+        );
+
+        assert_eq!(
+            result,
+            "fatal: not a git repository (or any of the parent directories): .git"
+        );
     }
 
     #[test]
