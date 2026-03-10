@@ -342,7 +342,7 @@ breakage, but future rule additions won't take effect until they migrate.
   - Idempotent: detects existing hook, skips modification if present
   - `rtk init --show` now displays settings.json status
 - **Uninstall command** for complete RTK removal
-  - `rtk init -g --uninstall` removes hook, RTK.md, CLAUDE.md reference, and settings.json entry
+  - historical init-based uninstall compatibility flow removes the hook, RTK.md, CLAUDE.md reference, and settings.json entry
   - Restores clean state for fresh installation or testing
 - **Improved error handling** with detailed context messages
   - All error messages now include file paths and actionable hints
