@@ -52,6 +52,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     // Build ls -la + any extra flags the user passed (e.g. -R)
     // Strip -l, -a, -h (we handle all of these ourselves)
     let mut cmd = Command::new("ls");
+    cmd.env("LC_ALL", "C"); // Force standard locale for predictable parsing
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
