@@ -737,7 +737,7 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Build (delegates to next build filter)
+    /// Build (generic passthrough, no framework-specific filter)
     Build {
         /// Additional build arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1335,7 +1335,10 @@ fn main() -> Result<()> {
                 )?;
             }
             PnpmCommands::Build { args } => {
-                next_cmd::run(&args, cli.verbose)?;
+                let mut build_args: Vec<String> = vec!["build".into()];
+                build_args.extend(args);
+                let os_args: Vec<OsString> = build_args.into_iter().map(OsString::from).collect();
+                pnpm_cmd::run_passthrough(&os_args, cli.verbose)?;
             }
             PnpmCommands::Typecheck { args } => {
                 tsc_cmd::run(&args, cli.verbose)?;
