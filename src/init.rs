@@ -2640,6 +2640,69 @@ More notes
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_opencode_agents_upsert_creates_section_from_empty_content() {
+        let (content, action) = upsert_opencode_agents_section("");
+
+        assert_eq!(action, OpencodeAgentsSectionUpsert::Added);
+        assert_eq!(content, RTK_OPENCODE_SECTION);
+        assert_eq!(content.matches("<!-- rtk-opencode-start -->").count(), 1);
+        assert_eq!(content.matches("<!-- rtk-opencode-end -->").count(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_agents_upsert_appends_without_overwriting_user_content() {
+        let input = "# User instructions\n\nKeep this note.";
+
+        let (content, action) = upsert_opencode_agents_section(input);
+
+        assert_eq!(action, OpencodeAgentsSectionUpsert::Added);
+        assert!(content.starts_with(input));
+        assert!(content.contains("Keep this note."));
+        assert!(content.contains(RTK_OPENCODE_SECTION));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_agents_upsert_is_idempotent_when_section_is_current() {
+        let input = format!("# User instructions\n\n{}\n", RTK_OPENCODE_SECTION);
+
+        let (content, action) = upsert_opencode_agents_section(&input);
+
+        assert_eq!(action, OpencodeAgentsSectionUpsert::Unchanged);
+        assert_eq!(content, input);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_agents_upsert_detects_malformed_markers_without_rewriting() {
+        let input = "# User instructions\n\n<!-- rtk-opencode-start -->\npartial section";
+
+        let (content, action) = upsert_opencode_agents_section(input);
+
+        assert_eq!(action, OpencodeAgentsSectionUpsert::Malformed);
+        assert_eq!(content, input);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_agents_remove_preserves_surrounding_user_content() {
+        let input = format!(
+            "# User instructions\n\n{}\n\n## Local rules\nDo not remove.",
+            RTK_OPENCODE_SECTION
+        );
+
+        let (content, action) = remove_opencode_agents_section(&input);
+
+        assert_eq!(action, OpencodeAgentsSectionRemove::Removed);
+        assert!(!content.contains("rtk-opencode-start"));
+        assert!(content.contains("# User instructions"));
+        assert!(content.contains("## Local rules"));
+        assert!(content.contains("Do not remove."));
+    }
+
+    #[test]
     fn test_init_is_idempotent() {
         let temp = TempDir::new().unwrap();
         let claude_md = temp.path().join("CLAUDE.md");
