@@ -325,6 +325,10 @@ enum Commands {
         #[arg(long = "hook-only", group = "mode")]
         hook_only: bool,
 
+        /// Install OpenCode plugin (auto-rewrite hook for opencode.ai)
+        #[arg(long, group = "mode")]
+        opencode: bool,
+
         /// Auto-patch settings.json without prompting
         #[arg(long = "auto-patch", group = "patch")]
         auto_patch: bool,
@@ -1486,6 +1490,7 @@ fn main() -> Result<()> {
             show,
             claude_md,
             hook_only,
+            opencode,
             auto_patch,
             no_patch,
             uninstall,
@@ -1494,6 +1499,8 @@ fn main() -> Result<()> {
                 init::show_config()?;
             } else if uninstall {
                 init::uninstall(global, cli.verbose)?;
+            } else if opencode {
+                init::run_opencode_mode(cli.verbose)?;
             } else {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto

@@ -98,23 +98,33 @@ rtk gain        # Should show token savings stats
 
 ## Quick Start
 
+### Claude Code
+
 ```bash
-# 1. Install hook for Claude Code (recommended)
+# Install hook for Claude Code
 rtk init --global
 # Follow instructions to register in ~/.claude/settings.json
-
-# 2. Restart Claude Code, then test
+# Restart Claude Code, then test
 git status  # Automatically rewritten to rtk git status
 ```
 
-The hook transparently rewrites commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+### OpenCode
+
+```bash
+# Install plugin for OpenCode (opencode.ai)
+rtk init --opencode
+# Restart OpenCode, then test
+git status  # Automatically rewritten to rtk git status
+```
+
+The hook/plugin transparently rewrites commands (e.g., `git status` -> `rtk git status`) before execution. The LLM never sees the rewrite, it just gets compressed output.
 
 ## How It Works
 
 ```
   Without rtk:                                    With rtk:
 
-  Claude  --git status-->  shell  -->  git         Claude  --git status-->  RTK  -->  git
+  Agent  --git status-->  shell  -->  git         Agent  --git status-->  RTK  -->  git
     ^                                   |            ^                      |          |
     |        ~2,000 tokens (raw)        |            |   ~200 tokens        | filter   |
     +-----------------------------------+            +------- (filtered) ---+----------+
@@ -268,7 +278,7 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
 
-### Setup
+### Claude Code Setup
 
 ```bash
 rtk init -g                 # Install hook + RTK.md (recommended)
@@ -278,6 +288,14 @@ rtk init --show             # Verify installation
 ```
 
 After install, **restart Claude Code**.
+
+### OpenCode Setup
+
+```bash
+rtk init --opencode         # Install plugin to ~/.config/opencode/plugins/
+```
+
+After install, **restart OpenCode**. The plugin uses OpenCode's `tool.execute.before` hook to rewrite commands transparently.
 
 ### Commands Rewritten
 

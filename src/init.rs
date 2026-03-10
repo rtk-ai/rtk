@@ -43,6 +43,9 @@ schema_version = 1
 # max_lines = 40
 "#;
 
+// Embedded OpenCode plugin for tool.execute.before hook
+const OPENCODE_PLUGIN: &str = include_str!("../hooks/opencode-rtk.js");
+
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
@@ -858,6 +861,50 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
     Ok(())
 }
 
+/// OpenCode mode: install plugin to ~/.config/opencode/plugins/
+pub fn run_opencode_mode(verbose: u8) -> Result<()> {
+    let opencode_dir = resolve_opencode_dir()?;
+    let plugins_dir = opencode_dir.join("plugins");
+    let plugin_path = plugins_dir.join("opencode-rtk.js");
+
+    // Check OpenCode is installed
+    if !opencode_dir.exists() {
+        anyhow::bail!(
+            "OpenCode config directory not found at {}\n\
+             Install OpenCode first: https://opencode.ai",
+            opencode_dir.display()
+        );
+    }
+
+    // Create plugins directory if needed
+    fs::create_dir_all(&plugins_dir).with_context(|| {
+        format!(
+            "Failed to create plugins directory: {}",
+            plugins_dir.display()
+        )
+    })?;
+
+    // Write plugin (idempotent)
+    let changed = write_if_changed(&plugin_path, OPENCODE_PLUGIN, "opencode-rtk.js", verbose)?;
+
+    let status = if changed {
+        "installed/updated"
+    } else {
+        "already up to date"
+    };
+
+    println!("\nRTK OpenCode plugin {} ✓\n", status);
+    println!("  Plugin: {}", plugin_path.display());
+    println!(
+        "  OpenCode auto-discovers plugins from {}/",
+        plugins_dir.display()
+    );
+    println!("\n  Restart OpenCode to activate. Test with: git status");
+    println!();
+
+    Ok(())
+}
+
 /// Legacy mode: full 137-line injection into CLAUDE.md
 fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
     let path = if global {
@@ -1088,6 +1135,13 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
 fn resolve_claude_dir() -> Result<PathBuf> {
     dirs::home_dir()
         .map(|h| h.join(".claude"))
+        .context("Cannot determine home directory. Is $HOME set?")
+}
+
+/// Resolve OpenCode configuration directory
+fn resolve_opencode_dir() -> Result<PathBuf> {
+    dirs::home_dir()
+        .map(|h| h.join(".config").join("opencode"))
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
