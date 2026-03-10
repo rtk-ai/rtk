@@ -90,7 +90,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.27.2"
+rtk --version   # Should show "rtk 0.28.0"
 rtk gain        # Should show token savings stats
 ```
 

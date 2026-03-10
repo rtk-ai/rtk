@@ -8,7 +8,14 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     let mut cmd = Command::new("npm");
     cmd.arg("run");
 
-    for arg in args {
+    // Strip leading "run" to avoid doubling (rtk npm run build → npm run build, not npm run run build)
+    let effective_args = if args.first().map(|s| s.as_str()) == Some("run") {
+        &args[1..]
+    } else {
+        args
+    };
+
+    for arg in effective_args {
         cmd.arg(arg);
     }
 
@@ -17,7 +24,7 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: npm run {}", args.join(" "));
+        eprintln!("Running: npm run {}", effective_args.join(" "));
     }
 
     let output = cmd.output().context("Failed to run npm run")?;
@@ -29,8 +36,8 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     println!("{}", filtered);
 
     timer.track(
-        &format!("npm run {}", args.join(" ")),
-        &format!("rtk npm run {}", args.join(" ")),
+        &format!("npm run {}", effective_args.join(" ")),
+        &format!("rtk npm run {}", effective_args.join(" ")),
         &raw,
         &filtered,
     );
@@ -98,6 +105,39 @@ npm notice
         assert!(!result.contains("npm notice"));
         assert!(!result.contains("> project@"));
         assert!(result.contains("Build completed"));
+    }
+
+    #[test]
+    fn test_strip_leading_run_from_args() {
+        // When user runs `rtk npm run build`, args = ["run", "build"]
+        // The "run" should be stripped since cmd.arg("run") already adds it
+        let args: Vec<String> = vec!["run".into(), "build".into()];
+        let effective_args = if args.first().map(|s| s.as_str()) == Some("run") {
+            &args[1..]
+        } else {
+            &args[..]
+        };
+        assert_eq!(effective_args, &["build"]);
+
+        // When user runs `rtk npm build`, args = ["build"]
+        // No stripping needed
+        let args2: Vec<String> = vec!["build".into()];
+        let effective_args2 = if args2.first().map(|s| s.as_str()) == Some("run") {
+            &args2[1..]
+        } else {
+            &args2[..]
+        };
+        assert_eq!(effective_args2, &["build"]);
+
+        // When user runs `rtk npm run`, args = ["run"]
+        // Strip "run" → empty args (npm run with no script)
+        let args3: Vec<String> = vec!["run".into()];
+        let effective_args3 = if args3.first().map(|s| s.as_str()) == Some("run") {
+            &args3[1..]
+        } else {
+            &args3[..]
+        };
+        assert!(effective_args3.is_empty());
     }
 
     #[test]
