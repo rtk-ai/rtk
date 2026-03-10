@@ -649,6 +649,10 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
         } => {
             lines.push(format!("  opencode plugin installed: {}", path.display()));
             lines.push(format!("  Scope: {}", scope.label()));
+            lines.push(format!(
+                "  Active plugin path to refresh/recheck: {}",
+                path.display()
+            ));
 
             if let Some(other) = other_existing {
                 lines.push(format!(
@@ -656,13 +660,21 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
                     other.scope.label(),
                     other.path.display()
                 ));
+                lines.push(
+                    "  Note: duplicate global/local installs can double-load; keep only the intended path before rechecking."
+                        .to_string(),
+                );
             }
 
             lines.push(
                 "  opencode bash/tool execution now routes through `rtk rewrite`.".to_string(),
             );
             lines.push(
-                "  Verify the plugin path exists, then run `git status` in opencode.".to_string(),
+                "  If the active file is stale, delete that exact path and rerun `rtk init` for the same scope before restarting opencode.".to_string(),
+            );
+            lines.push(
+                "  Verify the refreshed plugin path exists, then run `git status` in opencode."
+                    .to_string(),
             );
         }
         OpencodeInstallStatus::AlreadyInstalled {
@@ -671,6 +683,10 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
             ..
         } => {
             lines.push(format!("  already installed: {}", path.display()));
+            lines.push(format!(
+                "  Active plugin path to refresh/recheck: {}",
+                path.display()
+            ));
 
             if let Some(other) = other_existing {
                 lines.push(format!(
@@ -678,8 +694,16 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
                     other.scope.label(),
                     other.path.display()
                 ));
+                lines.push(
+                    "  Note: duplicate global/local installs can double-load; remove the non-target copy before rechecking."
+                        .to_string(),
+                );
             }
 
+            lines.push(
+                "  Delete the exact stale plugin path above before rerunning `rtk init` if you need to refresh the asset."
+                    .to_string(),
+            );
             lines.push("  Run `rtk init --uninstall` to remove opencode support.".to_string());
         }
         OpencodeInstallStatus::SkippedChoiceRequired => {
