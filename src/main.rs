@@ -1935,7 +1935,45 @@ fn is_operational_command(cmd: &Commands) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn test_uninstall_command_parses_as_top_level_variant() {
+        let cli = Cli::try_parse_from(["rtk", "uninstall"]).unwrap();
+
+        match cli.command {
+            Commands::Uninstall => {}
+            _ => panic!("Expected top-level uninstall command"),
+        }
+    }
+
+    #[test]
+    fn test_uninstall_legacy_init_alias_still_parses() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--uninstall"]).unwrap();
+
+        match cli.command {
+            Commands::Init { uninstall, .. } => assert!(uninstall),
+            _ => panic!("Expected init uninstall compatibility alias"),
+        }
+    }
+
+    #[test]
+    fn test_uninstall_help_promotes_top_level_command() {
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+
+        assert!(help.contains("uninstall"));
+        assert!(help.contains("Remove RTK-managed Claude and opencode artifacts"));
+    }
+
+    #[test]
+    fn test_uninstall_init_help_marks_legacy_alias_as_deprecated() {
+        let mut init_command = Cli::command().find_subcommand_mut("init").unwrap().clone();
+        let help = init_command.render_long_help().to_string();
+
+        assert!(help.contains("deprecated"));
+        assert!(help.contains("rtk uninstall"));
+    }
 
     #[test]
     fn test_git_commit_single_message() {

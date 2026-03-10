@@ -2728,7 +2728,7 @@ mod tests {
         assert!(message.contains("local already installed"));
         assert!(message.contains(&local_path.display().to_string()));
         assert!(message.contains("target/debug/rtk"));
-        assert!(message.contains("rtk init --uninstall"));
+        assert!(message.contains("rtk uninstall"));
     }
 
     #[test]
