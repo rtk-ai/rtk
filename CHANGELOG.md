@@ -60,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **init:** extend the opencode lifecycle so `rtk init` can install and report the full reviewer-facing integration surface
   - installs the rewrite plugin in the selected opencode plugin scope and adds the RTK guidance block to `~/.config/opencode/AGENTS.md`
   - `rtk init --show` reports marker-aware `AGENTS.md` status plus any configured global/local opencode plugin paths
-  - `rtk init -g --uninstall` removes RTK-managed opencode plugin copies and strips only the RTK block from `AGENTS.md`
+  - `rtk uninstall` is the canonical removal command and strips only the RTK-managed plugin copies plus the RTK block from `AGENTS.md`
+  - `rtk init --uninstall` remains available as a deprecated compatibility alias that routes into the same uninstall implementation
 
 ### Bug Fixes
 
