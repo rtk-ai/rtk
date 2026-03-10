@@ -1737,6 +1737,46 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_opencode_plugin_asset_exports_named_and_default_factory() {
+        assert!(OPENCODE_PLUGIN.contains("export const RtkRewritePlugin"));
+        assert!(OPENCODE_PLUGIN.contains("export default RtkRewritePlugin"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_plugin_asset_supports_runtime_command_shapes() {
+        assert!(OPENCODE_PLUGIN.contains("output.args.command"));
+        assert!(OPENCODE_PLUGIN.contains("output.args?.command"));
+        assert!(OPENCODE_PLUGIN.contains("output.args?.cmd"));
+        assert!(OPENCODE_PLUGIN.contains("output.args?.argv?.command"));
+        assert!(OPENCODE_PLUGIN.contains("output.args?.bash?.command"));
+        assert!(OPENCODE_PLUGIN.contains("setCommandValue"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_plugin_asset_has_opt_in_runtime_diagnostics() {
+        assert!(OPENCODE_PLUGIN.contains("RTK_OPENCODE_DEBUG"));
+        assert!(OPENCODE_PLUGIN.contains("RTK_OPENCODE_DEBUG_FILE"));
+        assert!(OPENCODE_PLUGIN.contains("plugin-loaded"));
+        assert!(OPENCODE_PLUGIN.contains("incoming-tool"));
+        assert!(OPENCODE_PLUGIN.contains("command-field"));
+        assert!(OPENCODE_PLUGIN.contains("rtk-candidate"));
+        assert!(OPENCODE_PLUGIN.contains("rewrite-result"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_plugin_asset_preserves_graceful_no_throw_fallbacks() {
+        assert!(OPENCODE_PLUGIN.contains("unsupported-command-shape"));
+        assert!(OPENCODE_PLUGIN.contains("rewrite-error"));
+        assert!(OPENCODE_PLUGIN.contains("rewrite-noop"));
+        assert!(OPENCODE_PLUGIN.contains("return null"));
+        assert!(OPENCODE_PLUGIN.contains("return false"));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_opencode_plugin_asset_has_rtk_fallbacks() {
         for candidate in [
             ".cargo/bin/rtk",
