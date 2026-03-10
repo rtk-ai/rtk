@@ -12,6 +12,37 @@ const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 
+/// Template written by `rtk init` when no filters.toml exists yet.
+const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
+# Filters here override user-global and built-in filters.
+# Docs: https://github.com/rtk-ai/rtk#custom-filters
+schema_version = 1
+
+# Example: suppress build noise from a custom tool
+# [filters.my-tool]
+# description = "Compact my-tool output"
+# match_command = "^my-tool\\s+build"
+# strip_ansi = true
+# strip_lines_matching = ["^\\s*$", "^Downloading", "^Installing"]
+# max_lines = 30
+# on_empty = "my-tool: ok"
+"#;
+
+/// Template for user-global filters (~/.config/rtk/filters.toml).
+const FILTERS_GLOBAL_TEMPLATE: &str = r#"# User-global RTK filters — apply to all your projects.
+# Project-local .rtk/filters.toml takes precedence over these.
+# Docs: https://github.com/rtk-ai/rtk#custom-filters
+schema_version = 1
+
+# Example: suppress noise from a tool you use everywhere
+# [filters.my-global-tool]
+# description = "Compact my-global-tool output"
+# match_command = "^my-global-tool\\b"
+# strip_ansi = true
+# strip_lines_matching = ["^\\s*$"]
+# max_lines = 40
+"#;
+
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
@@ -666,8 +697,10 @@ fn run_default_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Resu
 #[cfg(unix)]
 fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
     if !global {
-        // Local init: unchanged behavior (full injection into ./CLAUDE.md)
-        return run_claude_md_mode(false, verbose);
+        // Local init: inject CLAUDE.md + generate project-local filters template
+        run_claude_md_mode(false, verbose)?;
+        generate_project_filters_template(verbose)?;
+        return Ok(());
     }
 
     let claude_dir = resolve_claude_dir()?;
@@ -717,8 +750,60 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
         }
     }
 
+    // 6. Generate user-global filters template (~/.config/rtk/filters.toml)
+    generate_global_filters_template(verbose)?;
+
     println!(); // Final newline
 
+    Ok(())
+}
+
+/// Generate .rtk/filters.toml template in the current directory if not present.
+fn generate_project_filters_template(verbose: u8) -> Result<()> {
+    let rtk_dir = std::path::Path::new(".rtk");
+    let path = rtk_dir.join("filters.toml");
+
+    if path.exists() {
+        if verbose > 0 {
+            eprintln!(".rtk/filters.toml already exists, skipping template");
+        }
+        return Ok(());
+    }
+
+    fs::create_dir_all(rtk_dir)
+        .with_context(|| format!("Failed to create directory: {}", rtk_dir.display()))?;
+    fs::write(&path, FILTERS_TEMPLATE)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    println!(
+        "  filters:   {} (template, edit to add project filters)",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Generate ~/.config/rtk/filters.toml template if not present.
+fn generate_global_filters_template(verbose: u8) -> Result<()> {
+    let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
+    let rtk_dir = config_dir.join("rtk");
+    let path = rtk_dir.join("filters.toml");
+
+    if path.exists() {
+        if verbose > 0 {
+            eprintln!("{} already exists, skipping template", path.display());
+        }
+        return Ok(());
+    }
+
+    fs::create_dir_all(&rtk_dir)
+        .with_context(|| format!("Failed to create directory: {}", rtk_dir.display()))?;
+    fs::write(&path, FILTERS_GLOBAL_TEMPLATE)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    println!(
+        "  filters:   {} (template, edit to add user-global filters)",
+        path.display()
+    );
     Ok(())
 }
 
