@@ -5,6 +5,14 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.1](https://github.com/rtk-ai/rtk/compare/v0.28.0...v0.28.1) (2026-03-10)
+
+
+### Bug Fixes
+
+* 4 critical bugs + telemetry enrichment ([#462](https://github.com/rtk-ai/rtk/issues/462)) ([7d76af8](https://github.com/rtk-ai/rtk/commit/7d76af84b95e0f040e8b91a154edb89f80e5c380))
+* restore lost telemetry install_method enrichment ([#469](https://github.com/rtk-ai/rtk/issues/469)) ([0c5cde9](https://github.com/rtk-ai/rtk/commit/0c5cde9ec234a2b7b0376adbcb78f2be48a98e86))
+
 ## [0.28.0](https://github.com/rtk-ai/rtk/compare/v0.27.2...v0.28.0) (2026-03-10)
 
 
