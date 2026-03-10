@@ -1932,6 +1932,114 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_resolve_official_opencode_global_root_uses_config_dir() {
+        let temp = TempDir::new().expect("temp dir");
+
+        let root = resolve_opencode_global_root_at(temp.path());
+
+        assert_eq!(root, temp.path().join("opencode"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_official_opencode_plugin_path_uses_global_root() {
+        let temp = TempDir::new().expect("temp dir");
+
+        let path = resolve_opencode_plugin_path_from_config_dir(temp.path(), true);
+
+        assert_eq!(path, temp.path().join("opencode/plugins/rtk-rewrite.ts"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_final_setup_summary_includes_selected_targets_statuses_and_paths() {
+        let summary = FinalSetupSummary {
+            selected_target: SetupTarget::Both,
+            outcomes: vec![
+                FinalSetupTargetSummary {
+                    name: "Claude",
+                    status: SetupTargetStatus::Processed,
+                    detail: "configured",
+                    paths: vec![PathBuf::from("/tmp/.claude/hooks/rtk-rewrite.sh")],
+                    processed: true,
+                },
+                FinalSetupTargetSummary {
+                    name: "opencode",
+                    status: SetupTargetStatus::AlreadyConfigured,
+                    detail: "already configured",
+                    paths: vec![PathBuf::from(
+                        "/tmp/.config/opencode/plugins/rtk-rewrite.ts",
+                    )],
+                    processed: true,
+                },
+            ],
+        };
+
+        let rendered = format_final_setup_summary(&summary);
+
+        assert!(rendered.contains("Final setup summary"));
+        assert!(rendered.contains("Selected target: both"));
+        assert!(rendered.contains("Claude: configured"));
+        assert!(rendered.contains("opencode: already configured"));
+        assert!(rendered.contains("/tmp/.claude/hooks/rtk-rewrite.sh"));
+        assert!(rendered.contains("/tmp/.config/opencode/plugins/rtk-rewrite.ts"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_final_setup_summary_marks_skipped_targets_without_processing() {
+        let summary = FinalSetupSummary {
+            selected_target: SetupTarget::Claude,
+            outcomes: vec![
+                FinalSetupTargetSummary {
+                    name: "Claude",
+                    status: SetupTargetStatus::Processed,
+                    detail: "configured",
+                    paths: vec![PathBuf::from("/tmp/.claude/CLAUDE.md")],
+                    processed: true,
+                },
+                FinalSetupTargetSummary {
+                    name: "opencode",
+                    status: SetupTargetStatus::Skipped,
+                    detail: "not selected",
+                    paths: vec![PathBuf::from(
+                        "/tmp/.config/opencode/plugins/rtk-rewrite.ts",
+                    )],
+                    processed: false,
+                },
+            ],
+        };
+
+        let rendered = format_final_setup_summary(&summary);
+
+        assert!(rendered.contains("Selected target: claude"));
+        assert!(rendered.contains("Claude: configured"));
+        assert!(rendered.contains("opencode: not selected (not processed)"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_show_config_opencode_uses_official_global_root_and_target_aware_wording() {
+        let root = PathBuf::from("/tmp/.config/opencode");
+        let plugin_path = root.join("plugins/rtk-rewrite.ts");
+        let agents_path = root.join("AGENTS.md");
+
+        let rendered = format_show_config_opencode_status(&ShowConfigOpencodeStatus {
+            global_root: root.clone(),
+            plugin: Some((SetupTargetStatus::AlreadyConfigured, plugin_path.clone())),
+            agents: Some((SetupTargetStatus::Processed, agents_path.clone())),
+        });
+
+        assert!(rendered.contains(root.to_string_lossy().as_ref()));
+        assert!(rendered.contains(plugin_path.to_string_lossy().as_ref()));
+        assert!(rendered.contains(agents_path.to_string_lossy().as_ref()));
+        assert!(rendered.contains("opencode (global)"));
+        assert!(rendered.contains("plugin: already configured"));
+        assert!(rendered.contains("AGENTS.md: configured"));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_run_preserves_legacy_init_modes() {
         assert_eq!(resolve_init_mode(true, false), InitMode::ClaudeMd);
         assert_eq!(resolve_init_mode(false, true), InitMode::HookOnly);
