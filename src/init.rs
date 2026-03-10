@@ -15,6 +15,14 @@ const OPENCODE_PLUGIN: &str = include_str!("../hooks/rtk-rewrite.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 
+#[cfg(unix)]
+const RTK_OPENCODE_SECTION: &str = r#"<!-- rtk-opencode-start -->
+## RTK opencode guidance
+
+- Bash commands may be transparently rewritten through RTK for compact output.
+- Use `rtk proxy <command>` when you need raw passthrough behavior.
+<!-- rtk-opencode-end -->"#;
+
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
@@ -1692,6 +1700,23 @@ enum RtkBlockUpsert {
     Malformed,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpencodeAgentsSectionUpsert {
+    Added,
+    Updated,
+    Unchanged,
+    Malformed,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpencodeAgentsSectionRemove {
+    Removed,
+    Unchanged,
+    Malformed,
+}
+
 /// Insert or replace the RTK instructions block in `content`.
 ///
 /// Returns `(new_content, action)` describing what happened.
@@ -1739,6 +1764,78 @@ fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
             RtkBlockUpsert::Added,
         )
     }
+}
+
+#[cfg(unix)]
+fn upsert_opencode_agents_section(content: &str) -> (String, OpencodeAgentsSectionUpsert) {
+    let start_marker = "<!-- rtk-opencode-start -->";
+    let end_marker = "<!-- rtk-opencode-end -->";
+
+    if let Some(start) = content.find(start_marker) {
+        if let Some(relative_end) = content[start..].find(end_marker) {
+            let end = start + relative_end;
+            let end_pos = end + end_marker.len();
+            let current_block = content[start..end_pos].trim();
+            let desired_block = RTK_OPENCODE_SECTION.trim();
+
+            if current_block == desired_block {
+                return (content.to_string(), OpencodeAgentsSectionUpsert::Unchanged);
+            }
+
+            let before = content[..start].trim_end();
+            let after = content[end_pos..].trim_start();
+            let result = match (before.is_empty(), after.is_empty()) {
+                (true, true) => desired_block.to_string(),
+                (true, false) => format!("{desired_block}\n\n{after}"),
+                (false, true) => format!("{before}\n\n{desired_block}"),
+                (false, false) => format!("{before}\n\n{desired_block}\n\n{after}"),
+            };
+
+            return (result, OpencodeAgentsSectionUpsert::Updated);
+        }
+
+        return (content.to_string(), OpencodeAgentsSectionUpsert::Malformed);
+    }
+
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        (
+            RTK_OPENCODE_SECTION.to_string(),
+            OpencodeAgentsSectionUpsert::Added,
+        )
+    } else {
+        (
+            format!("{trimmed}\n\n{}", RTK_OPENCODE_SECTION.trim()),
+            OpencodeAgentsSectionUpsert::Added,
+        )
+    }
+}
+
+#[cfg(unix)]
+fn remove_opencode_agents_section(content: &str) -> (String, OpencodeAgentsSectionRemove) {
+    let start_marker = "<!-- rtk-opencode-start -->";
+    let end_marker = "<!-- rtk-opencode-end -->";
+
+    if let Some(start) = content.find(start_marker) {
+        if let Some(relative_end) = content[start..].find(end_marker) {
+            let end = start + relative_end;
+            let end_pos = end + end_marker.len();
+            let before = content[..start].trim_end();
+            let after = content[end_pos..].trim_start();
+            let result = match (before.is_empty(), after.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => after.to_string(),
+                (false, true) => before.to_string(),
+                (false, false) => format!("{before}\n\n{after}"),
+            };
+
+            return (result, OpencodeAgentsSectionRemove::Removed);
+        }
+
+        return (content.to_string(), OpencodeAgentsSectionRemove::Malformed);
+    }
+
+    (content.to_string(), OpencodeAgentsSectionRemove::Unchanged)
 }
 
 /// Patch CLAUDE.md: add @RTK.md, migrate if old block exists
