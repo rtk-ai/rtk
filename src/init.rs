@@ -9,6 +9,9 @@ use crate::integrity;
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 
+#[cfg(unix)]
+const OPENCODE_PLUGIN: &str = include_str!("../hooks/rtk-rewrite.ts");
+
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 
@@ -368,6 +371,78 @@ fn prompt_opencode_support() -> Result<bool> {
 
     let response = line.trim().to_lowercase();
     Ok(response == "y" || response == "yes")
+}
+
+#[cfg(unix)]
+fn resolve_opencode_plugin_path(global: bool) -> Result<PathBuf> {
+    if global {
+        let config_dir = dirs::config_dir().context("Cannot determine config directory")?;
+        Ok(config_dir
+            .join("opencode")
+            .join("plugins")
+            .join("rtk-rewrite.ts"))
+    } else {
+        Ok(std::env::current_dir()
+            .context("Cannot determine current directory")?
+            .join(".opencode")
+            .join("plugins")
+            .join("rtk-rewrite.ts"))
+    }
+}
+
+#[cfg(unix)]
+fn resolve_opencode_plugin_path_at(root: &Path, global: bool) -> PathBuf {
+    if global {
+        root.join("config")
+            .join("opencode")
+            .join("plugins")
+            .join("rtk-rewrite.ts")
+    } else {
+        root.join(".opencode")
+            .join("plugins")
+            .join("rtk-rewrite.ts")
+    }
+}
+
+#[cfg(unix)]
+fn install_opencode_plugin(global: bool, verbose: u8) -> Result<bool> {
+    let plugin_path = resolve_opencode_plugin_path(global)?;
+    install_opencode_plugin_file(&plugin_path, verbose)
+}
+
+#[cfg(unix)]
+fn install_opencode_plugin_at(root: &Path, global: bool, verbose: u8) -> Result<bool> {
+    let plugin_path = resolve_opencode_plugin_path_at(root, global);
+    install_opencode_plugin_file(&plugin_path, verbose)
+}
+
+#[cfg(unix)]
+fn install_opencode_plugin_file(path: &Path, verbose: u8) -> Result<bool> {
+    let parent = path.parent().with_context(|| {
+        format!(
+            "Cannot install opencode plugin at {}: missing parent directory",
+            path.display()
+        )
+    })?;
+
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create plugin directory: {}", parent.display()))?;
+
+    if path.exists() {
+        if verbose > 0 {
+            eprintln!("opencode plugin already installed: {}", path.display());
+        }
+        return Ok(false);
+    }
+
+    fs::write(path, OPENCODE_PLUGIN)
+        .with_context(|| format!("Failed to write opencode plugin: {}", path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Created opencode plugin: {}", path.display());
+    }
+
+    Ok(true)
 }
 
 /// Print manual instructions for settings.json patching
