@@ -32,6 +32,64 @@ pub enum PatchResult {
     Skipped,        // --no-patch flag used
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpencodeInstallScope {
+    Global,
+    Local,
+}
+
+#[cfg(unix)]
+impl OpencodeInstallScope {
+    fn is_global(self) -> bool {
+        matches!(self, Self::Global)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Local => "local",
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::Global => Self::Local,
+            Self::Local => Self::Global,
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExistingOpencodeInstall {
+    scope: OpencodeInstallScope,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpencodeInstallStatus {
+    Installed {
+        scope: OpencodeInstallScope,
+        path: PathBuf,
+        other_existing: Option<ExistingOpencodeInstall>,
+    },
+    AlreadyInstalled {
+        scope: OpencodeInstallScope,
+        path: PathBuf,
+        other_existing: Option<ExistingOpencodeInstall>,
+    },
+    SkippedChoiceRequired,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpencodeInstallTargetSelection {
+    Selected(OpencodeInstallScope),
+    SkippedChoiceRequired,
+}
+
 // Legacy full instructions for backward compatibility (--claude-md mode)
 const RTK_INSTRUCTIONS: &str = r##"<!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
@@ -181,7 +239,14 @@ pub fn run(
         (true, _) => run_claude_md_mode(global, verbose),
         (false, true) => run_hook_only_mode(global, patch_mode, verbose),
         (false, false) => run_default_mode(global, patch_mode, verbose),
+    }?;
+
+    #[cfg(unix)]
+    if !hook_only {
+        maybe_install_opencode(global, verbose)?;
     }
+
+    Ok(())
 }
 
 /// Prepare hook directory and return paths (hook_dir, hook_path)
@@ -374,6 +439,68 @@ fn prompt_opencode_support() -> Result<bool> {
 }
 
 #[cfg(unix)]
+fn resolve_opencode_install_target(
+    global_init: bool,
+    response: Option<&str>,
+    interactive: bool,
+) -> OpencodeInstallTargetSelection {
+    if global_init {
+        return OpencodeInstallTargetSelection::Selected(OpencodeInstallScope::Global);
+    }
+
+    if !interactive {
+        return OpencodeInstallTargetSelection::SkippedChoiceRequired;
+    }
+
+    match response.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(choice) if choice == "global" => {
+            OpencodeInstallTargetSelection::Selected(OpencodeInstallScope::Global)
+        }
+        Some(choice) if choice == "local" => {
+            OpencodeInstallTargetSelection::Selected(OpencodeInstallScope::Local)
+        }
+        _ => OpencodeInstallTargetSelection::SkippedChoiceRequired,
+    }
+}
+
+#[cfg(unix)]
+fn prompt_opencode_install_target(global_init: bool) -> Result<OpencodeInstallTargetSelection> {
+    use std::io::{self, BufRead, IsTerminal};
+
+    if global_init {
+        return Ok(OpencodeInstallTargetSelection::Selected(
+            OpencodeInstallScope::Global,
+        ));
+    }
+
+    eprintln!("\nWhere do you want to install opencode plugin? [global/local] ");
+
+    if !io::stdin().is_terminal() {
+        eprintln!("(non-interactive mode, explicit global/local choice required)");
+        return Ok(OpencodeInstallTargetSelection::SkippedChoiceRequired);
+    }
+
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+
+    loop {
+        let mut line = String::new();
+        handle
+            .read_line(&mut line)
+            .context("Failed to read opencode install target")?;
+
+        match resolve_opencode_install_target(false, Some(&line), true) {
+            OpencodeInstallTargetSelection::Selected(scope) => {
+                return Ok(OpencodeInstallTargetSelection::Selected(scope));
+            }
+            OpencodeInstallTargetSelection::SkippedChoiceRequired => {
+                eprintln!("Please answer global or local.");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 fn resolve_opencode_plugin_path(global: bool) -> Result<PathBuf> {
     if global {
         let config_dir = dirs::config_dir().context("Cannot determine config directory")?;
@@ -405,19 +532,76 @@ fn resolve_opencode_plugin_path_at(root: &Path, global: bool) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn resolve_opencode_plugin_path_for_scope(scope: OpencodeInstallScope) -> Result<PathBuf> {
+    resolve_opencode_plugin_path(scope.is_global())
+}
+
+#[cfg(unix)]
+fn resolve_opencode_plugin_path_at_for_scope(root: &Path, scope: OpencodeInstallScope) -> PathBuf {
+    resolve_opencode_plugin_path_at(root, scope.is_global())
+}
+
+#[cfg(unix)]
 fn install_opencode_plugin(global: bool, verbose: u8) -> Result<bool> {
-    let plugin_path = resolve_opencode_plugin_path(global)?;
-    install_opencode_plugin_file(&plugin_path, verbose)
+    let scope = if global {
+        OpencodeInstallScope::Global
+    } else {
+        OpencodeInstallScope::Local
+    };
+
+    Ok(matches!(
+        install_opencode_plugin_with_status(scope, verbose)?,
+        OpencodeInstallStatus::Installed { .. }
+    ))
 }
 
 #[cfg(unix)]
 fn install_opencode_plugin_at(root: &Path, global: bool, verbose: u8) -> Result<bool> {
-    let plugin_path = resolve_opencode_plugin_path_at(root, global);
-    install_opencode_plugin_file(&plugin_path, verbose)
+    let scope = if global {
+        OpencodeInstallScope::Global
+    } else {
+        OpencodeInstallScope::Local
+    };
+
+    Ok(matches!(
+        install_opencode_plugin_with_status_at(root, scope, verbose)?,
+        OpencodeInstallStatus::Installed { .. }
+    ))
 }
 
 #[cfg(unix)]
-fn install_opencode_plugin_file(path: &Path, verbose: u8) -> Result<bool> {
+fn install_opencode_plugin_with_status(
+    scope: OpencodeInstallScope,
+    verbose: u8,
+) -> Result<OpencodeInstallStatus> {
+    let plugin_path = resolve_opencode_plugin_path_for_scope(scope)?;
+    let other_path = resolve_opencode_plugin_path_for_scope(scope.other())?;
+    install_opencode_plugin_file_with_status(&plugin_path, &other_path, scope, verbose)
+}
+
+#[cfg(unix)]
+fn install_opencode_plugin_with_status_at(
+    root: &Path,
+    scope: OpencodeInstallScope,
+    verbose: u8,
+) -> Result<OpencodeInstallStatus> {
+    let plugin_path = resolve_opencode_plugin_path_at_for_scope(root, scope);
+    let other_path = resolve_opencode_plugin_path_at_for_scope(root, scope.other());
+    install_opencode_plugin_file_with_status(&plugin_path, &other_path, scope, verbose)
+}
+
+#[cfg(unix)]
+fn install_opencode_plugin_file_with_status(
+    path: &Path,
+    other_path: &Path,
+    scope: OpencodeInstallScope,
+    verbose: u8,
+) -> Result<OpencodeInstallStatus> {
+    let other_existing = other_path.exists().then(|| ExistingOpencodeInstall {
+        scope: scope.other(),
+        path: other_path.to_path_buf(),
+    });
+
     let parent = path.parent().with_context(|| {
         format!(
             "Cannot install opencode plugin at {}: missing parent directory",
@@ -432,7 +616,11 @@ fn install_opencode_plugin_file(path: &Path, verbose: u8) -> Result<bool> {
         if verbose > 0 {
             eprintln!("opencode plugin already installed: {}", path.display());
         }
-        return Ok(false);
+        return Ok(OpencodeInstallStatus::AlreadyInstalled {
+            scope,
+            path: path.to_path_buf(),
+            other_existing,
+        });
     }
 
     fs::write(path, OPENCODE_PLUGIN)
@@ -442,7 +630,71 @@ fn install_opencode_plugin_file(path: &Path, verbose: u8) -> Result<bool> {
         eprintln!("Created opencode plugin: {}", path.display());
     }
 
-    Ok(true)
+    Ok(OpencodeInstallStatus::Installed {
+        scope,
+        path: path.to_path_buf(),
+        other_existing,
+    })
+}
+
+#[cfg(unix)]
+fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
+    let mut lines = Vec::new();
+
+    match status {
+        OpencodeInstallStatus::Installed {
+            scope,
+            path,
+            other_existing,
+        } => {
+            lines.push(format!("  opencode plugin installed: {}", path.display()));
+            lines.push(format!("  Scope: {}", scope.label()));
+
+            if let Some(other) = other_existing {
+                lines.push(format!(
+                    "  Note: {} already installed: {}",
+                    other.scope.label(),
+                    other.path.display()
+                ));
+            }
+
+            lines.push(
+                "  opencode bash/tool execution now routes through `rtk rewrite`.".to_string(),
+            );
+            lines.push(
+                "  Verify the plugin path exists, then run `git status` in opencode.".to_string(),
+            );
+        }
+        OpencodeInstallStatus::AlreadyInstalled {
+            path,
+            other_existing,
+            ..
+        } => {
+            lines.push(format!("  already installed: {}", path.display()));
+
+            if let Some(other) = other_existing {
+                lines.push(format!(
+                    "  Note: {} already installed: {}",
+                    other.scope.label(),
+                    other.path.display()
+                ));
+            }
+
+            lines.push("  Run `rtk init --uninstall` to remove opencode support.".to_string());
+        }
+        OpencodeInstallStatus::SkippedChoiceRequired => {
+            lines.push(
+                "  Skipped plugin install: local init needs an explicit global/local choice."
+                    .to_string(),
+            );
+            lines.push(
+                "  Re-run `rtk init` interactively to choose where to install the plugin."
+                    .to_string(),
+            );
+        }
+    }
+
+    lines.join("\n")
 }
 
 /// Print manual instructions for settings.json patching
@@ -778,15 +1030,8 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         })
 }
 
-#[cfg(not(unix))]
-fn maybe_install_opencode(_verbose: u8) -> Result<()> {
-    eprintln!("⚠️  opencode support requires Unix (macOS/Linux).");
-    eprintln!("    Skipping opencode installation on this platform.");
-    Ok(())
-}
-
 #[cfg(unix)]
-fn maybe_install_opencode(verbose: u8) -> Result<()> {
+fn maybe_install_opencode(global: bool, verbose: u8) -> Result<()> {
     if !detect_opencode() {
         if verbose > 0 {
             eprintln!("opencode not detected; skipping support prompt");
@@ -801,8 +1046,18 @@ fn maybe_install_opencode(verbose: u8) -> Result<()> {
         return Ok(());
     }
 
+    let target = prompt_opencode_install_target(global)?;
+    let status = match target {
+        OpencodeInstallTargetSelection::Selected(scope) => {
+            install_opencode_plugin_with_status(scope, verbose)?
+        }
+        OpencodeInstallTargetSelection::SkippedChoiceRequired => {
+            OpencodeInstallStatus::SkippedChoiceRequired
+        }
+    };
+
     println!("\n  opencode detected");
-    println!("  Phase 2 will install the plugin + AGENTS.md support.");
+    println!("{}", format_opencode_install_status(&status));
 
     Ok(())
 }
@@ -869,8 +1124,6 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
             // Manual instructions already printed by patch_settings_json
         }
     }
-
-    maybe_install_opencode(verbose)?;
 
     println!(); // Final newline
 
@@ -1455,6 +1708,23 @@ mod tests {
         assert!(message.contains("local already installed"));
         assert!(message.contains(&local_path.display().to_string()));
         assert!(message.contains("rtk init --uninstall"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_install_opencode_plugin_status_installed_mentions_rewrite_and_verification() {
+        let temp = TempDir::new().unwrap();
+        let plugin_path = resolve_opencode_plugin_path_at(temp.path(), false);
+
+        let status =
+            install_opencode_plugin_with_status_at(temp.path(), OpencodeInstallScope::Local, 0)
+                .unwrap();
+        let message = format_opencode_install_status(&status);
+
+        assert!(message.contains(&plugin_path.display().to_string()));
+        assert!(message.contains("Scope: local"));
+        assert!(message.contains("rtk rewrite"));
+        assert!(message.contains("git status"));
     }
 
     #[test]
