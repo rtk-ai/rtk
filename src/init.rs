@@ -703,6 +703,35 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         })
 }
 
+#[cfg(not(unix))]
+fn maybe_install_opencode(_verbose: u8) -> Result<()> {
+    eprintln!("⚠️  opencode support requires Unix (macOS/Linux).");
+    eprintln!("    Skipping opencode installation on this platform.");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn maybe_install_opencode(verbose: u8) -> Result<()> {
+    if !detect_opencode() {
+        if verbose > 0 {
+            eprintln!("opencode not detected; skipping support prompt");
+        }
+        return Ok(());
+    }
+
+    if !prompt_opencode_support()? {
+        if verbose > 0 {
+            eprintln!("opencode support declined");
+        }
+        return Ok(());
+    }
+
+    println!("\n  opencode detected");
+    println!("  Phase 2 will install the plugin + AGENTS.md support.");
+
+    Ok(())
+}
+
 /// Default mode: hook + slim RTK.md + @RTK.md reference
 #[cfg(not(unix))]
 fn run_default_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Result<()> {
@@ -765,6 +794,8 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
             // Manual instructions already printed by patch_settings_json
         }
     }
+
+    maybe_install_opencode(verbose)?;
 
     println!(); // Final newline
 
