@@ -1304,6 +1304,82 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_opencode_plugin_asset_has_tool_execute_before() {
+        assert!(OPENCODE_PLUGIN.contains("tool.execute.before"));
+        assert!(OPENCODE_PLUGIN.contains("input.tool === \"bash\""));
+        assert!(OPENCODE_PLUGIN.contains("spawnSync"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_plugin_asset_has_rtk_fallbacks() {
+        for candidate in [
+            ".cargo/bin/rtk",
+            "/usr/local/bin/rtk",
+            "/opt/homebrew/bin/rtk",
+        ] {
+            assert!(
+                OPENCODE_PLUGIN.contains(candidate),
+                "Missing fallback candidate {candidate}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_install_opencode_plugin_global_creates_file() {
+        let temp = TempDir::new().unwrap();
+
+        let installed = install_opencode_plugin_at(temp.path(), true, 0).unwrap();
+        let plugin_path = temp
+            .path()
+            .join("config")
+            .join("opencode")
+            .join("plugins")
+            .join("rtk-rewrite.ts");
+
+        assert!(installed);
+        assert_eq!(fs::read_to_string(plugin_path).unwrap(), OPENCODE_PLUGIN);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_install_opencode_plugin_local_creates_file() {
+        let temp = TempDir::new().unwrap();
+
+        let installed = install_opencode_plugin_at(temp.path(), false, 0).unwrap();
+        let plugin_path = temp
+            .path()
+            .join(".opencode")
+            .join("plugins")
+            .join("rtk-rewrite.ts");
+
+        assert!(installed);
+        assert_eq!(fs::read_to_string(plugin_path).unwrap(), OPENCODE_PLUGIN);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_install_opencode_plugin_skips_when_target_exists() {
+        let temp = TempDir::new().unwrap();
+        let plugin_path = temp
+            .path()
+            .join("config")
+            .join("opencode")
+            .join("plugins")
+            .join("rtk-rewrite.ts");
+
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+        fs::write(&plugin_path, "custom plugin").unwrap();
+
+        let installed = install_opencode_plugin_at(temp.path(), true, 0).unwrap();
+
+        assert!(!installed);
+        assert_eq!(fs::read_to_string(plugin_path).unwrap(), "custom plugin");
+    }
+
+    #[test]
     fn test_hook_has_guards() {
         assert!(REWRITE_HOOK.contains("command -v rtk"));
         assert!(REWRITE_HOOK.contains("command -v jq"));
