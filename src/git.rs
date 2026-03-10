@@ -352,9 +352,11 @@ fn run_log(
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
-    // Check if user provided limit flag
+    // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = args.iter().any(|arg| {
-        arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+        (arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()))
+            || arg == "-n"
+            || arg.starts_with("--max-count")
     });
 
     // Apply RTK defaults only if user didn't specify them
@@ -362,17 +364,22 @@ fn run_log(
         cmd.args(["--pretty=format:%h %s (%ar) <%an>"]);
     }
 
-    let limit = if !has_limit_flag {
+    // Only inject -10 limit when RTK is applying its own format.
+    // When user provides --oneline/--pretty/--format, respect git's default (no limit).
+    let limit = if !has_limit_flag && !has_format_flag {
         cmd.arg("-10");
         10
-    } else {
+    } else if has_limit_flag {
         // Extract limit from args if provided
         args.iter()
             .find(|arg| {
                 arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
             })
             .and_then(|arg| arg[1..].parse::<usize>().ok())
-            .unwrap_or(10)
+            .unwrap_or(500)
+    } else {
+        // User format, no limit — use a high cap for filter_log_output
+        500
     };
 
     // Only add --no-merges if user didn't explicitly request merge commits
