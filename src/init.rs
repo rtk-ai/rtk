@@ -77,6 +77,8 @@ pub(crate) enum SetupTargetStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SetupTargetOutcome {
     status: SetupTargetStatus,
+    detail: &'static str,
+    paths: Vec<PathBuf>,
 }
 
 #[cfg(unix)]
@@ -84,20 +86,61 @@ impl SetupTargetOutcome {
     fn processed() -> Self {
         Self {
             status: SetupTargetStatus::Processed,
+            detail: "configured",
+            paths: Vec::new(),
         }
     }
 
     fn already_configured() -> Self {
         Self {
             status: SetupTargetStatus::AlreadyConfigured,
+            detail: "already configured",
+            paths: Vec::new(),
         }
     }
 
     fn skipped() -> Self {
         Self {
             status: SetupTargetStatus::Skipped,
+            detail: "skipped",
+            paths: Vec::new(),
         }
     }
+
+    fn with_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.paths = paths;
+        self
+    }
+
+    fn with_detail(mut self, detail: &'static str) -> Self {
+        self.detail = detail;
+        self
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinalSetupTargetSummary {
+    name: &'static str,
+    status: SetupTargetStatus,
+    detail: &'static str,
+    paths: Vec<PathBuf>,
+    processed: bool,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinalSetupSummary {
+    selected_target: SetupTarget,
+    outcomes: Vec<FinalSetupTargetSummary>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShowConfigOpencodeStatus {
+    global_root: PathBuf,
+    plugin: Option<(SetupTargetStatus, PathBuf)>,
+    agents: Option<(SetupTargetStatus, PathBuf)>,
 }
 
 #[cfg(unix)]
@@ -153,6 +196,17 @@ impl OpencodeInstallScope {
         match self {
             Self::Global => Self::Local,
             Self::Local => Self::Global,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl SetupTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Opencode => "opencode",
+            Self::Both => "both",
         }
     }
 }
@@ -644,11 +698,11 @@ fn prompt_opencode_install_target(global_init: bool) -> Result<OpencodeInstallTa
 #[cfg(unix)]
 fn resolve_opencode_plugin_path(global: bool) -> Result<PathBuf> {
     if global {
-        let config_dir = dirs::config_dir().context("Cannot determine config directory")?;
-        Ok(config_dir
-            .join("opencode")
-            .join("plugins")
-            .join("rtk-rewrite.ts"))
+        let config_dir = resolve_official_opencode_config_dir()?;
+        Ok(resolve_opencode_plugin_path_from_config_dir(
+            &config_dir,
+            true,
+        ))
     } else {
         Ok(std::env::current_dir()
             .context("Cannot determine current directory")?
@@ -656,6 +710,57 @@ fn resolve_opencode_plugin_path(global: bool) -> Result<PathBuf> {
             .join("plugins")
             .join("rtk-rewrite.ts"))
     }
+}
+
+#[cfg(unix)]
+fn resolve_official_opencode_config_dir() -> Result<PathBuf> {
+    let config_dir = dirs::config_dir();
+    let home_dir = dirs::home_dir();
+    resolve_official_opencode_config_dir_with(config_dir.as_deref(), home_dir.as_deref())
+}
+
+#[cfg(unix)]
+fn resolve_official_opencode_config_dir_with(
+    config_dir: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(home) = home_dir {
+        return Ok(home.join(".config"));
+    }
+
+    config_dir
+        .map(Path::to_path_buf)
+        .context("Cannot determine config directory")
+}
+
+#[cfg(unix)]
+fn resolve_opencode_global_root() -> Result<PathBuf> {
+    let config_dir = resolve_official_opencode_config_dir()?;
+    Ok(resolve_opencode_global_root_at(&config_dir))
+}
+
+#[cfg(unix)]
+fn resolve_opencode_global_root_at(config_dir: &Path) -> PathBuf {
+    config_dir.join("opencode")
+}
+
+#[cfg(unix)]
+fn resolve_opencode_plugin_path_from_config_dir(config_dir: &Path, global: bool) -> PathBuf {
+    if global {
+        resolve_opencode_global_root_at(config_dir)
+            .join("plugins")
+            .join("rtk-rewrite.ts")
+    } else {
+        config_dir
+            .join(".opencode")
+            .join("plugins")
+            .join("rtk-rewrite.ts")
+    }
+}
+
+#[cfg(unix)]
+fn resolve_opencode_agents_path() -> Result<PathBuf> {
+    Ok(resolve_opencode_global_root()?.join("AGENTS.md"))
 }
 
 #[cfg(unix)]
@@ -867,6 +972,118 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
     }
 
     lines.join("\n")
+}
+
+#[cfg(unix)]
+fn build_final_setup_summary(
+    selected_target: SetupTarget,
+    execution: &SetupExecutionSummary,
+) -> FinalSetupSummary {
+    let outcomes = [
+        (
+            "Claude",
+            selected_target.includes_claude(),
+            &execution.claude,
+            "not selected",
+        ),
+        (
+            "opencode",
+            selected_target.includes_opencode(),
+            &execution.opencode,
+            "not selected",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(name, processed, outcome, skipped_detail)| FinalSetupTargetSummary {
+            name,
+            status: if processed {
+                outcome.status
+            } else {
+                SetupTargetStatus::Skipped
+            },
+            detail: if processed {
+                outcome.detail
+            } else {
+                skipped_detail
+            },
+            paths: if processed {
+                outcome.paths.clone()
+            } else {
+                Vec::new()
+            },
+            processed,
+        },
+    )
+    .collect();
+
+    FinalSetupSummary {
+        selected_target,
+        outcomes,
+    }
+}
+
+#[cfg(unix)]
+fn format_final_setup_summary(summary: &FinalSetupSummary) -> String {
+    let mut lines = vec![
+        "Final setup summary".to_string(),
+        format!("Selected target: {}", summary.selected_target.label()),
+    ];
+
+    for outcome in &summary.outcomes {
+        let status_line = if outcome.processed {
+            format!("- {}: {}", outcome.name, outcome.detail)
+        } else {
+            format!("- {}: {} (not processed)", outcome.name, outcome.detail)
+        };
+        lines.push(status_line);
+
+        for path in &outcome.paths {
+            lines.push(format!("  path: {}", path.display()));
+        }
+    }
+
+    lines.join("\n")
+}
+
+#[cfg(unix)]
+fn format_show_config_opencode_status(status: &ShowConfigOpencodeStatus) -> String {
+    let mut lines = vec![format!(
+        "opencode (global): {}",
+        status.global_root.display()
+    )];
+
+    match &status.plugin {
+        Some((entry_status, path)) => lines.push(format!(
+            "  plugin: {} ({})",
+            format_target_status(*entry_status),
+            path.display()
+        )),
+        None => lines.push("  plugin: not configured".to_string()),
+    }
+
+    match &status.agents {
+        Some((entry_status, path)) => lines.push(format!(
+            "  AGENTS.md: {} ({})",
+            format_target_status(*entry_status),
+            path.display()
+        )),
+        None => lines.push(format!(
+            "  AGENTS.md: not configured ({})",
+            status.global_root.join("AGENTS.md").display()
+        )),
+    }
+
+    lines.join("\n")
+}
+
+#[cfg(unix)]
+fn format_target_status(status: SetupTargetStatus) -> &'static str {
+    match status {
+        SetupTargetStatus::Processed => "configured",
+        SetupTargetStatus::AlreadyConfigured => "already configured",
+        SetupTargetStatus::Skipped => "skipped",
+    }
 }
 
 /// Print manual instructions for settings.json patching
@@ -1217,9 +1434,15 @@ fn run_opencode_target(global: bool, verbose: u8) -> Result<SetupTargetOutcome> 
     println!("{}", format_opencode_install_status(&status));
 
     Ok(match status {
-        OpencodeInstallStatus::Installed { .. } => SetupTargetOutcome::processed(),
-        OpencodeInstallStatus::AlreadyInstalled { .. } => SetupTargetOutcome::already_configured(),
-        OpencodeInstallStatus::SkippedChoiceRequired => SetupTargetOutcome::skipped(),
+        OpencodeInstallStatus::Installed { path, .. } => {
+            SetupTargetOutcome::processed().with_paths(vec![path])
+        }
+        OpencodeInstallStatus::AlreadyInstalled { path, .. } => {
+            SetupTargetOutcome::already_configured().with_paths(vec![path])
+        }
+        OpencodeInstallStatus::SkippedChoiceRequired => {
+            SetupTargetOutcome::skipped().with_detail("choice required")
+        }
     })
 }
 
@@ -1276,14 +1499,16 @@ fn run_claude_target(
         PatchResult::Declined | PatchResult::Skipped => {}
     }
 
+    let outcome_paths = vec![hook_path, rtk_md_path, claude_md_path];
+
     let status = if !hook_changed
         && !rtk_md_changed
         && !migrated
         && matches!(patch_result, PatchResult::AlreadyPresent)
     {
-        SetupTargetOutcome::already_configured()
+        SetupTargetOutcome::already_configured().with_paths(outcome_paths)
     } else {
-        SetupTargetOutcome::processed()
+        SetupTargetOutcome::processed().with_paths(outcome_paths)
     };
 
     Ok(status)
@@ -1300,7 +1525,7 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
         }
     };
 
-    let _summary = run_setup_target_with(
+    let summary = run_setup_target_with(
         selected_target,
         || {
             println!("\nClaude setup");
@@ -1311,6 +1536,11 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
             run_opencode_target(global, verbose)
         },
     )?;
+
+    println!(
+        "{}",
+        format_final_setup_summary(&build_final_setup_summary(selected_target, &summary))
+    );
 
     println!();
 
@@ -1740,6 +1970,23 @@ pub fn show_config() -> Result<()> {
         println!("⚪ settings.json: not found");
     }
 
+    #[cfg(unix)]
+    {
+        let global_root = resolve_opencode_global_root()?;
+        let global_plugin = resolve_opencode_plugin_path(true)?;
+        let agents_path = resolve_opencode_agents_path()?;
+        let opencode_status = ShowConfigOpencodeStatus {
+            global_root,
+            plugin: global_plugin
+                .exists()
+                .then(|| (SetupTargetStatus::AlreadyConfigured, global_plugin)),
+            agents: agents_path
+                .exists()
+                .then(|| (SetupTargetStatus::AlreadyConfigured, agents_path)),
+        };
+        println!("\n{}", format_show_config_opencode_status(&opencode_status));
+    }
+
     println!("\nUsage:");
     println!("  rtk init              # Full injection into local CLAUDE.md");
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
@@ -1948,6 +2195,18 @@ mod tests {
         let path = resolve_opencode_plugin_path_from_config_dir(temp.path(), true);
 
         assert_eq!(path, temp.path().join("opencode/plugins/rtk-rewrite.ts"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_official_opencode_config_dir_prefers_home_dot_config() {
+        let config_dir = Path::new("/tmp/Library/Application Support");
+        let home_dir = Path::new("/tmp/home");
+
+        let resolved = resolve_official_opencode_config_dir_with(Some(config_dir), Some(home_dir))
+            .expect("config dir");
+
+        assert_eq!(resolved, home_dir.join(".config"));
     }
 
     #[test]
