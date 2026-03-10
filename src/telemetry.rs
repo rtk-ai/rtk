@@ -52,6 +52,7 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
+    let install_method = detect_install_method();
 
     // Get stats from tracking DB
     let (commands_24h, top_commands, savings_pct) = get_stats();
@@ -61,6 +62,7 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         "version": version,
         "os": os,
         "arch": arch,
+        "install_method": install_method,
         "commands_24h": commands_24h,
         "top_commands": top_commands,
         "savings_pct": savings_pct,
@@ -112,6 +114,32 @@ fn get_stats() -> (i64, Vec<String>, Option<f64>) {
     (commands_24h, top_commands, savings_pct)
 }
 
+fn detect_install_method() -> &'static str {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return "unknown",
+    };
+    let real_path = std::fs::canonicalize(&exe)
+        .unwrap_or(exe)
+        .to_string_lossy()
+        .to_string();
+    install_method_from_path(&real_path)
+}
+
+fn install_method_from_path(path: &str) -> &'static str {
+    if path.contains("/Cellar/rtk/") || path.contains("/homebrew/") {
+        "homebrew"
+    } else if path.contains("/.cargo/bin/") || path.contains("\\.cargo\\bin\\") {
+        "cargo"
+    } else if path.contains("/.local/bin/") || path.contains("\\.local\\bin\\") {
+        "script"
+    } else if path.contains("/nix/store/") {
+        "nix"
+    } else {
+        "other"
+    }
+}
+
 fn telemetry_marker_path() -> PathBuf {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -140,5 +168,56 @@ mod tests {
     fn test_marker_path_exists() {
         let path = telemetry_marker_path();
         assert!(path.to_string_lossy().contains("rtk"));
+    }
+
+    #[test]
+    fn test_install_method_unix_paths() {
+        assert_eq!(
+            install_method_from_path("/opt/homebrew/Cellar/rtk/0.28.0/bin/rtk"),
+            "homebrew"
+        );
+        assert_eq!(
+            install_method_from_path("/usr/local/homebrew/bin/rtk"),
+            "homebrew"
+        );
+        assert_eq!(
+            install_method_from_path("/home/user/.cargo/bin/rtk"),
+            "cargo"
+        );
+        assert_eq!(
+            install_method_from_path("/home/user/.local/bin/rtk"),
+            "script"
+        );
+        assert_eq!(
+            install_method_from_path("/nix/store/abc123-rtk/bin/rtk"),
+            "nix"
+        );
+        assert_eq!(install_method_from_path("/usr/bin/rtk"), "other");
+    }
+
+    #[test]
+    fn test_install_method_windows_paths() {
+        assert_eq!(
+            install_method_from_path("C:\\Users\\user\\.cargo\\bin\\rtk.exe"),
+            "cargo"
+        );
+        assert_eq!(
+            install_method_from_path("C:\\Users\\user\\.local\\bin\\rtk.exe"),
+            "script"
+        );
+        assert_eq!(
+            install_method_from_path("C:\\Program Files\\rtk\\rtk.exe"),
+            "other"
+        );
+    }
+
+    #[test]
+    fn test_detect_install_method_returns_known_value() {
+        let method = detect_install_method();
+        assert!(
+            ["homebrew", "cargo", "script", "nix", "other", "unknown"].contains(&method),
+            "Unexpected install method: {}",
+            method
+        );
     }
 }
