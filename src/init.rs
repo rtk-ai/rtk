@@ -1380,6 +1380,85 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_resolve_opencode_install_target_global_init_uses_global_without_prompt() {
+        assert_eq!(
+            resolve_opencode_install_target(true, None, false),
+            OpencodeInstallTargetSelection::Selected(OpencodeInstallScope::Global)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_opencode_install_target_local_init_requires_explicit_choice() {
+        assert_eq!(
+            resolve_opencode_install_target(false, Some("global"), true),
+            OpencodeInstallTargetSelection::Selected(OpencodeInstallScope::Global)
+        );
+        assert_eq!(
+            resolve_opencode_install_target(false, Some("local"), true),
+            OpencodeInstallTargetSelection::Selected(OpencodeInstallScope::Local)
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_opencode_install_target_local_init_skips_when_non_interactive() {
+        assert_eq!(
+            resolve_opencode_install_target(false, None, false),
+            OpencodeInstallTargetSelection::SkippedChoiceRequired
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_install_status_already_installed_preserves_target_file() {
+        let temp = TempDir::new().unwrap();
+        let plugin_path = resolve_opencode_plugin_path_at(temp.path(), true);
+
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+        fs::write(&plugin_path, "custom plugin").unwrap();
+
+        let status =
+            install_opencode_plugin_with_status_at(temp.path(), OpencodeInstallScope::Global, 0)
+                .unwrap();
+
+        assert_eq!(
+            status,
+            OpencodeInstallStatus::AlreadyInstalled {
+                scope: OpencodeInstallScope::Global,
+                path: plugin_path.clone(),
+                other_existing: None,
+            }
+        );
+        assert_eq!(fs::read_to_string(plugin_path).unwrap(), "custom plugin");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_install_status_reports_other_location_and_uninstall_guidance() {
+        let temp = TempDir::new().unwrap();
+        let global_path = resolve_opencode_plugin_path_at(temp.path(), true);
+        let local_path = resolve_opencode_plugin_path_at(temp.path(), false);
+
+        fs::create_dir_all(global_path.parent().unwrap()).unwrap();
+        fs::write(&global_path, "custom plugin").unwrap();
+        fs::create_dir_all(local_path.parent().unwrap()).unwrap();
+        fs::write(&local_path, "project plugin").unwrap();
+
+        let status =
+            install_opencode_plugin_with_status_at(temp.path(), OpencodeInstallScope::Global, 0)
+                .unwrap();
+        let message = format_opencode_install_status(&status);
+
+        assert!(message.contains("already installed"));
+        assert!(message.contains(&global_path.display().to_string()));
+        assert!(message.contains("local already installed"));
+        assert!(message.contains(&local_path.display().to_string()));
+        assert!(message.contains("rtk init --uninstall"));
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_opencode_plugin_asset_has_tool_execute_before() {
         assert!(OPENCODE_PLUGIN.contains("tool.execute.before"));
         assert!(OPENCODE_PLUGIN.contains("input.tool === \"bash\""));
