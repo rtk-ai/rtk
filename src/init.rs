@@ -321,6 +321,55 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
     Ok(response == "y" || response == "yes")
 }
 
+#[cfg(unix)]
+fn detect_opencode() -> bool {
+    detect_opencode_with(dirs::config_dir().as_deref(), || {
+        std::process::Command::new("which")
+            .arg("opencode")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(unix)]
+fn detect_opencode_with<F>(config_dir: Option<&Path>, has_binary: F) -> bool
+where
+    F: FnOnce() -> bool,
+{
+    let has_config_dir = config_dir
+        .map(|dir| dir.join("opencode").exists())
+        .unwrap_or(false);
+
+    if has_config_dir {
+        return true;
+    }
+
+    has_binary()
+}
+
+#[cfg(unix)]
+fn prompt_opencode_support() -> Result<bool> {
+    use std::io::{self, BufRead, IsTerminal};
+
+    eprintln!("\nInstall opencode support (plugin + AGENTS.md)? [y/N] ");
+
+    if !io::stdin().is_terminal() {
+        eprintln!("(non-interactive mode, defaulting to N)");
+        return Ok(false);
+    }
+
+    let stdin = io::stdin();
+    let mut line = String::new();
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .context("Failed to read user input")?;
+
+    let response = line.trim().to_lowercase();
+    Ok(response == "y" || response == "yes")
+}
+
 /// Print manual instructions for settings.json patching
 fn print_manual_instructions(hook_path: &Path) {
     println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
