@@ -1273,6 +1273,37 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_detect_opencode_config_dir_present_returns_true() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir_all(temp.path().join("opencode")).unwrap();
+
+        let detected = detect_opencode_with(Some(temp.path()), || false);
+
+        assert!(detected);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_detect_opencode_without_config_dir_or_binary_returns_false() {
+        let temp = TempDir::new().unwrap();
+
+        let detected = detect_opencode_with(Some(temp.path()), || false);
+
+        assert!(!detected);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_detect_opencode_without_config_dir_but_binary_returns_true() {
+        let temp = TempDir::new().unwrap();
+
+        let detected = detect_opencode_with(Some(temp.path()), || true);
+
+        assert!(detected);
+    }
+
+    #[test]
     fn test_hook_has_guards() {
         assert!(REWRITE_HOOK.contains("command -v rtk"));
         assert!(REWRITE_HOOK.contains("command -v jq"));
