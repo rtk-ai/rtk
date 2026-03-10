@@ -3,18 +3,15 @@ use crate::tracking;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
-const TELEMETRY_URL: &str = match option_env!("RTK_TELEMETRY_URL") {
-    Some(url) => url,
-    None => "https://telemetry.rtk-ai.app/ping",
-};
+const TELEMETRY_URL: Option<&str> = option_env!("RTK_TELEMETRY_URL");
 const TELEMETRY_TOKEN: Option<&str> = option_env!("RTK_TELEMETRY_TOKEN");
 const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
 
 /// Send a telemetry ping if enabled and not already sent today.
 /// Fire-and-forget: errors are silently ignored.
 pub fn maybe_ping() {
-    // Empty URL → telemetry disabled
-    if TELEMETRY_URL.is_empty() {
+    // No URL compiled in → telemetry disabled
+    if TELEMETRY_URL.is_none() {
         return;
     }
 
@@ -50,7 +47,7 @@ pub fn maybe_ping() {
 }
 
 fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
-    let url = TELEMETRY_URL;
+    let url = TELEMETRY_URL.ok_or("no telemetry URL")?;
     let device_hash = generate_device_hash();
     let version = env!("CARGO_PKG_VERSION").to_string();
     let os = std::env::consts::OS.to_string();
@@ -130,26 +127,26 @@ fn get_stats() -> (i64, Vec<String>, Option<f64>, i64, i64) {
     )
 }
 
-/// Detect how RTK was installed by inspecting the binary path.
 fn detect_install_method() -> &'static str {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return "unknown",
     };
-
-    // Resolve symlinks to find the real binary location
     let real_path = std::fs::canonicalize(&exe)
         .unwrap_or(exe)
         .to_string_lossy()
         .to_string();
+    install_method_from_path(&real_path)
+}
 
-    if real_path.contains("/Cellar/rtk/") || real_path.contains("/homebrew/") {
+fn install_method_from_path(path: &str) -> &'static str {
+    if path.contains("/Cellar/rtk/") || path.contains("/homebrew/") {
         "homebrew"
-    } else if real_path.contains("/.cargo/bin/") {
+    } else if path.contains("/.cargo/bin/") || path.contains("\\.cargo\\bin\\") {
         "cargo"
-    } else if real_path.contains("/.local/bin/") {
+    } else if path.contains("/.local/bin/") || path.contains("\\.local\\bin\\") {
         "script"
-    } else if real_path.contains("/nix/store/") {
+    } else if path.contains("/nix/store/") {
         "nix"
     } else {
         "other"
@@ -186,12 +183,52 @@ mod tests {
         assert!(path.to_string_lossy().contains("rtk"));
     }
 
+    fn test_install_method_unix_paths() {
+        assert_eq!(
+            install_method_from_path("/opt/homebrew/Cellar/rtk/0.28.0/bin/rtk"),
+            "homebrew"
+        );
+        assert_eq!(
+            install_method_from_path("/usr/local/homebrew/bin/rtk"),
+            "homebrew"
+        );
+        assert_eq!(
+            install_method_from_path("/home/user/.cargo/bin/rtk"),
+            "cargo"
+        );
+        assert_eq!(
+            install_method_from_path("/home/user/.local/bin/rtk"),
+            "script"
+        );
+        assert_eq!(
+            install_method_from_path("/nix/store/abc123-rtk/bin/rtk"),
+            "nix"
+        );
+        assert_eq!(install_method_from_path("/usr/bin/rtk"), "other");
+    }
+
+    #[test]
+    fn test_install_method_windows_paths() {
+        assert_eq!(
+            install_method_from_path("C:\\Users\\user\\.cargo\\bin\\rtk.exe"),
+            "cargo"
+        );
+        assert_eq!(
+            install_method_from_path("C:\\Users\\user\\.local\\bin\\rtk.exe"),
+            "script"
+        );
+        assert_eq!(
+            install_method_from_path("C:\\Program Files\\rtk\\rtk.exe"),
+            "other"
+        );
+    }
+
     #[test]
     fn test_detect_install_method_returns_known_value() {
         let method = detect_install_method();
         assert!(
-            ["homebrew", "cargo", "script", "nix", "other"].contains(&method),
-            "unexpected install method: {}",
+            ["homebrew", "cargo", "script", "nix", "other", "unknown"].contains(&method),
+            "Unexpected install method: {}",
             method
         );
     }
@@ -204,7 +241,7 @@ mod tests {
         assert!(saved_24h >= 0);
         assert!(saved_total >= 0);
         if let Some(p) = pct {
-            assert!(p >= 0.0 && p <= 100.0);
+            assert!((0.0..=100.0).contains(&p));
         }
     }
 }

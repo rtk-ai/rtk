@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn test_run_unsupported_returns_none() {
-        assert!(registry::rewrite_command("terraform plan", &[]).is_none());
+        assert!(registry::rewrite_command("htop", &[]).is_none());
     }
 
     #[test]

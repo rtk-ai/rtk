@@ -37,3 +37,7 @@ benchmark-report.md
 rtk_tracking.db
 claudedocs
 .history
+
+# Vitals provenance data
+.vitals/
+.worktrees/

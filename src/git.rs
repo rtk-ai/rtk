@@ -352,9 +352,11 @@ fn run_log(
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
-    // Check if user provided limit flag
+    // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = args.iter().any(|arg| {
-        arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+        (arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()))
+            || arg == "-n"
+            || arg.starts_with("--max-count")
     });
 
     // Apply RTK defaults only if user didn't specify them
@@ -362,17 +364,22 @@ fn run_log(
         cmd.args(["--pretty=format:%h %s (%ar) <%an>"]);
     }
 
-    let limit = if !has_limit_flag {
+    // Only inject -10 limit when RTK is applying its own format.
+    // When user provides --oneline/--pretty/--format, respect git's default (no limit).
+    let limit = if !has_limit_flag && !has_format_flag {
         cmd.arg("-10");
         10
-    } else {
+    } else if has_limit_flag {
         // Extract limit from args if provided
         args.iter()
             .find(|arg| {
                 arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
             })
             .and_then(|arg| arg[1..].parse::<usize>().ok())
-            .unwrap_or(10)
+            .unwrap_or(500)
+    } else {
+        // User format, no limit — use a high cap for filter_log_output
+        500
     };
 
     // Only add --no-merges if user didn't explicitly request merge commits
@@ -617,11 +624,14 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    let formatted = if !stderr.is_empty() && stderr.contains("not a git repository") {
-        "Not a git repository".to_string()
-    } else {
-        format_status_output(&stdout)
-    };
+    if !stderr.is_empty() && stderr.contains("not a git repository") {
+        let message = "Not a git repository".to_string();
+        eprintln!("{}", message);
+        timer.track("git status", "rtk git status", &raw_output, &message);
+        std::process::exit(output.status.code().unwrap_or(128));
+    }
+
+    let formatted = format_status_output(&stdout);
 
     println!("{}", formatted);
 
@@ -1809,5 +1819,42 @@ no changes added to commit (use "git add" and/or "git commit -a")
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         assert_eq!(cmd_args, vec!["commit", "--amend", "-m", "new msg"]);
+    }
+
+    #[test]
+    fn test_git_status_not_a_repo_exits_nonzero() {
+        // Run rtk git status in a directory that is not a git repo
+        let tmp = std::env::temp_dir().join("rtk_test_not_a_repo");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        // Build the path to the test binary
+        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("rtk");
+        let output = std::process::Command::new(&bin_path)
+            .args(["git", "status"])
+            .current_dir(&tmp)
+            .output()
+            .expect("Failed to run rtk");
+
+        // Should exit with non-zero (128 from git)
+        assert!(
+            !output.status.success(),
+            "Expected non-zero exit code for git status outside a repo, got {:?}",
+            output.status.code()
+        );
+
+        // Message should be on stderr, not stdout
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stderr.contains("Not a git repository"),
+            "Expected 'Not a git repository' on stderr, got stderr={:?}, stdout={:?}",
+            stderr,
+            stdout
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
