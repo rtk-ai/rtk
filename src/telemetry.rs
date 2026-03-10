@@ -55,7 +55,8 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
     let install_method = detect_install_method();
 
     // Get stats from tracking DB
-    let (commands_24h, top_commands, savings_pct) = get_stats();
+    let (commands_24h, top_commands, savings_pct, tokens_saved_24h, tokens_saved_total) =
+        get_stats();
 
     let payload = serde_json::json!({
         "device_hash": device_hash,
@@ -66,6 +67,8 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         "commands_24h": commands_24h,
         "top_commands": top_commands,
         "savings_pct": savings_pct,
+        "tokens_saved_24h": tokens_saved_24h,
+        "tokens_saved_total": tokens_saved_total,
     });
 
     let mut req = ureq::post(url).set("Content-Type", "application/json");
@@ -96,22 +99,32 @@ fn generate_device_hash() -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn get_stats() -> (i64, Vec<String>, Option<f64>) {
+fn get_stats() -> (i64, Vec<String>, Option<f64>, i64, i64) {
     let tracker = match tracking::Tracker::new() {
         Ok(t) => t,
-        Err(_) => return (0, vec![], None),
+        Err(_) => return (0, vec![], None, 0, 0),
     };
 
+    let since_24h = chrono::Utc::now() - chrono::Duration::hours(24);
+
     // Get 24h command count and top commands from tracking DB
-    let commands_24h = tracker
-        .count_commands_since(chrono::Utc::now() - chrono::Duration::hours(24))
-        .unwrap_or(0);
+    let commands_24h = tracker.count_commands_since(since_24h).unwrap_or(0);
 
     let top_commands = tracker.top_commands(5).unwrap_or_default();
 
     let savings_pct = tracker.overall_savings_pct().ok();
 
-    (commands_24h, top_commands, savings_pct)
+    let tokens_saved_24h = tracker.tokens_saved_24h(since_24h).unwrap_or(0);
+
+    let tokens_saved_total = tracker.total_tokens_saved().unwrap_or(0);
+
+    (
+        commands_24h,
+        top_commands,
+        savings_pct,
+        tokens_saved_24h,
+        tokens_saved_total,
+    )
 }
 
 fn detect_install_method() -> &'static str {
@@ -219,5 +232,17 @@ mod tests {
             "Unexpected install method: {}",
             method
         );
+    }
+
+    #[test]
+    fn test_get_stats_returns_tuple() {
+        let (cmds, top, pct, saved_24h, saved_total) = get_stats();
+        assert!(cmds >= 0);
+        assert!(top.len() <= 5);
+        assert!(saved_24h >= 0);
+        assert!(saved_total >= 0);
+        if let Some(p) = pct {
+            assert!((0.0..=100.0).contains(&p));
+        }
     }
 }
