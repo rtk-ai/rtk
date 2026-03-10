@@ -978,7 +978,7 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
                 "  RTK lookup uses the standard absolute-path fallbacks plus `<project>/target/debug/rtk`, `<project>/target/release/rtk`, and PATH when you refresh the plugin."
                     .to_string(),
             );
-            lines.push("  Run `rtk init --uninstall` to remove opencode support.".to_string());
+            lines.push("  Run `rtk uninstall` to remove opencode support.".to_string());
         }
         OpencodeInstallStatus::SkippedChoiceRequired => {
             lines.push(
@@ -1446,11 +1446,7 @@ fn uninstall_opencode_artifacts_at(
 }
 
 /// Full uninstall: remove hook, RTK.md, @RTK.md reference, settings.json entry
-pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
-    if !global {
-        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
-    }
-
+pub fn uninstall(_global: bool, verbose: u8) -> Result<()> {
     let claude_dir = resolve_claude_dir()?;
     let mut removed = Vec::new();
 
@@ -2338,7 +2334,8 @@ pub fn show_config() -> Result<()> {
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
     println!("  rtk init -g --auto-patch    # Same as above but no prompt");
     println!("  rtk init -g --no-patch      # Skip settings.json (manual setup)");
-    println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
+    println!("  rtk uninstall               # Remove all RTK artifacts");
+    println!("  rtk init --uninstall        # Deprecated compatibility alias for `rtk uninstall`");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
 

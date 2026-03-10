@@ -331,10 +331,13 @@ enum Commands {
         #[arg(long = "no-patch", group = "patch")]
         no_patch: bool,
 
-        /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
+        /// Deprecated compatibility alias for `rtk uninstall`
         #[arg(long)]
         uninstall: bool,
     },
+
+    /// Remove RTK-managed Claude and opencode artifacts
+    Uninstall,
 
     /// Download with compact output (strips progress bars)
     Wget {
@@ -942,11 +945,15 @@ const RTK_META_COMMANDS: &[&str] = &[
     "discover",
     "learn",
     "init",
+    "uninstall",
     "config",
     "proxy",
     "hook-audit",
     "cc-economics",
 ];
+
+const LEGACY_UNINSTALL_NOTICE: &str =
+    "Deprecated: `rtk init --uninstall` is a compatibility alias. Use `rtk uninstall` instead.";
 
 fn run_fallback(parse_error: clap::Error) -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1417,6 +1424,7 @@ fn main() -> Result<()> {
             if show {
                 init::show_config()?;
             } else if uninstall {
+                eprintln!("{LEGACY_UNINSTALL_NOTICE}");
                 init::uninstall(global, cli.verbose)?;
             } else {
                 let patch_mode = if auto_patch {
@@ -1428,6 +1436,10 @@ fn main() -> Result<()> {
                 };
                 init::run(global, claude_md, hook_only, patch_mode, cli.verbose)?;
             }
+        }
+
+        Commands::Uninstall => {
+            init::uninstall(false, cli.verbose)?;
         }
 
         Commands::Wget { url, stdout, args } => {
@@ -1969,7 +1981,10 @@ mod tests {
     #[test]
     fn test_uninstall_init_help_marks_legacy_alias_as_deprecated() {
         let mut init_command = Cli::command().find_subcommand_mut("init").unwrap().clone();
-        let help = init_command.render_long_help().to_string();
+        let help = init_command
+            .render_long_help()
+            .to_string()
+            .to_ascii_lowercase();
 
         assert!(help.contains("deprecated"));
         assert!(help.contains("rtk uninstall"));
