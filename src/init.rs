@@ -2800,6 +2800,90 @@ More notes
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_opencode_agents_setup_creates_global_agents_file_and_reports_processed() {
+        let temp = TempDir::new().unwrap();
+
+        let outcome = run_opencode_target_at(temp.path(), OpencodeInstallScope::Global, 0).unwrap();
+        let agents_path = resolve_opencode_global_root_at(temp.path()).join("AGENTS.md");
+        let plugin_path = resolve_opencode_plugin_path_from_config_dir(temp.path(), true);
+
+        assert_eq!(outcome.status, SetupTargetStatus::Processed);
+        assert!(outcome.paths.contains(&agents_path));
+        assert!(outcome.paths.contains(&plugin_path));
+        assert_eq!(
+            fs::read_to_string(agents_path).unwrap(),
+            RTK_OPENCODE_SECTION
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_agents_setup_preserves_existing_content_and_reports_already_configured() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = resolve_opencode_global_root_at(temp.path()).join("AGENTS.md");
+        let plugin_path = resolve_opencode_plugin_path_from_config_dir(temp.path(), true);
+        let existing = format!("# User instructions\n\n{}\n", RTK_OPENCODE_SECTION);
+
+        fs::create_dir_all(agents_path.parent().unwrap()).unwrap();
+        fs::write(&agents_path, &existing).unwrap();
+        fs::create_dir_all(plugin_path.parent().unwrap()).unwrap();
+        fs::write(&plugin_path, OPENCODE_PLUGIN).unwrap();
+
+        let outcome = run_opencode_target_at(temp.path(), OpencodeInstallScope::Global, 0).unwrap();
+
+        assert_eq!(outcome.status, SetupTargetStatus::AlreadyConfigured);
+        assert!(outcome.paths.contains(&agents_path));
+        assert!(outcome.paths.contains(&plugin_path));
+        assert_eq!(fs::read_to_string(agents_path).unwrap(), existing);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_opencode_agents_setup_skips_malformed_agents_file_without_overwriting() {
+        let temp = TempDir::new().unwrap();
+        let agents_path = resolve_opencode_global_root_at(temp.path()).join("AGENTS.md");
+        let malformed = "# User instructions\n\n<!-- rtk-opencode-start -->\npartial section";
+
+        fs::create_dir_all(agents_path.parent().unwrap()).unwrap();
+        fs::write(&agents_path, malformed).unwrap();
+
+        let outcome = run_opencode_target_at(temp.path(), OpencodeInstallScope::Global, 0).unwrap();
+
+        assert_eq!(outcome.status, SetupTargetStatus::Skipped);
+        assert!(outcome.detail.contains("AGENTS.md"));
+        assert_eq!(fs::read_to_string(agents_path).unwrap(), malformed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_show_config_opencode_reports_agents_section_presence_from_markers() {
+        let temp = TempDir::new().unwrap();
+        let global_root = resolve_opencode_global_root_at(temp.path());
+        let agents_path = global_root.join("AGENTS.md");
+
+        fs::create_dir_all(global_root.join("plugins")).unwrap();
+        fs::write(global_root.join("plugins/rtk-rewrite.ts"), OPENCODE_PLUGIN).unwrap();
+        fs::create_dir_all(agents_path.parent().unwrap()).unwrap();
+        fs::write(&agents_path, "# User instructions only\n").unwrap();
+
+        let without_markers = collect_show_config_opencode_status_at(temp.path()).unwrap();
+        assert!(without_markers.agents.is_none());
+
+        fs::write(
+            &agents_path,
+            format!("# User instructions\n\n{}\n", RTK_OPENCODE_SECTION),
+        )
+        .unwrap();
+
+        let with_markers = collect_show_config_opencode_status_at(temp.path()).unwrap();
+        assert_eq!(
+            with_markers.agents,
+            Some((SetupTargetStatus::AlreadyConfigured, agents_path.clone()))
+        );
+    }
+
+    #[test]
     fn test_init_is_idempotent() {
         let temp = TempDir::new().unwrap();
         let claude_md = temp.path().join("CLAUDE.md");
