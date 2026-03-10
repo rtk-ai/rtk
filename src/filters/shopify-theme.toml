@@ -1,0 +1,29 @@
+[filters.shopify-theme]
+description = "Compact shopify theme push/pull output"
+match_command = "^shopify\\s+theme\\s+(push|pull)"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*Uploading",
+  "^\\s*Downloading",
+]
+tail_lines = 5
+max_lines = 15
+on_empty = "shopify theme: ok"
+
+[[tests.shopify-theme]]
+name = "strips upload/download lines, keeps tail"
+input = """
+Uploading assets/app.css
+Uploading assets/app.js
+Uploading templates/index.liquid
+Downloading assets/old.css
+
+Theme 'Development' (id: 12345) pushed to store.example.myshopify.com
+"""
+expected = "Theme 'Development' (id: 12345) pushed to store.example.myshopify.com"
+
+[[tests.shopify-theme]]
+name = "on_empty when all stripped"
+input = "Uploading assets/app.css\nDownloading assets/base.css\n"
+expected = "shopify theme: ok"

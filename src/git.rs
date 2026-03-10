@@ -10,7 +10,7 @@ pub enum GitCommand {
     Status,
     Show,
     Add,
-    Commit { messages: Vec<String> },
+    Commit,
     Push,
     Pull,
     Branch,
@@ -42,7 +42,7 @@ pub fn run(
         GitCommand::Status => run_status(args, verbose, global_args),
         GitCommand::Show => run_show(args, max_lines, verbose, global_args),
         GitCommand::Add => run_add(args, verbose, global_args),
-        GitCommand::Commit { messages } => run_commit(&messages, verbose, global_args),
+        GitCommand::Commit => run_commit(args, verbose, global_args),
         GitCommand::Push => run_push(args, verbose, global_args),
         GitCommand::Pull => run_pull(args, verbose, global_args),
         GitCommand::Branch => run_branch(args, verbose, global_args),
@@ -130,7 +130,7 @@ fn run_diff(
     let mut final_output = stat_stdout.to_string();
     if !diff_stdout.is_empty() {
         println!("\n--- Changes ---");
-        let compacted = compact_diff(&diff_stdout, max_lines.unwrap_or(100));
+        let compacted = compact_diff(&diff_stdout, max_lines.unwrap_or(500));
         println!("{}", compacted);
         final_output.push_str("\n--- Changes ---\n");
         final_output.push_str(&compacted);
@@ -250,7 +250,7 @@ fn run_show(
         if verbose > 0 {
             println!("\n--- Changes ---");
         }
-        let compacted = compact_diff(diff_text, max_lines.unwrap_or(100));
+        let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
         println!("{}", compacted);
         final_output.push_str(&format!("\n{}", compacted));
     }
@@ -277,7 +277,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut removed = 0;
     let mut in_hunk = false;
     let mut hunk_lines = 0;
-    let max_hunk_lines = 10;
+    let max_hunk_lines = 30;
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
@@ -617,11 +617,14 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    let formatted = if !stderr.is_empty() && stderr.contains("not a git repository") {
-        "Not a git repository".to_string()
-    } else {
-        format_status_output(&stdout)
-    };
+    if !stderr.is_empty() && stderr.contains("not a git repository") {
+        let message = "Not a git repository".to_string();
+        eprintln!("{}", message);
+        timer.track("git status", "rtk git status", &raw_output, &message);
+        std::process::exit(output.status.code().unwrap_or(128));
+    }
+
+    let formatted = format_status_output(&stdout);
 
     println!("{}", formatted);
 
@@ -703,30 +706,25 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn build_commit_command(messages: &[String], global_args: &[String]) -> Command {
+fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("commit");
-    for msg in messages {
-        cmd.args(["-m", msg]);
+    for arg in args {
+        cmd.arg(arg);
     }
     cmd
 }
 
-fn run_commit(messages: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
+fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let original_cmd = messages
-        .iter()
-        .map(|m| format!("-m \"{}\"", m))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let original_cmd = format!("git commit {}", original_cmd);
+    let original_cmd = format!("git commit {}", args.join(" "));
 
     if verbose > 0 {
         eprintln!("{}", original_cmd);
     }
 
-    let output = build_commit_command(messages, global_args)
+    let output = build_commit_command(args, global_args)
         .output()
         .context("Failed to run git commit")?;
 
@@ -1455,6 +1453,40 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_diff_increased_hunk_limit() {
+        // Build a hunk with 25 changed lines — should NOT be truncated with limit 30
+        let mut diff =
+            "diff --git a/big.rs b/big.rs\n--- a/big.rs\n+++ b/big.rs\n@@ -1,25 +1,25 @@\n"
+                .to_string();
+        for i in 1..=25 {
+            diff.push_str(&format!("+line{}\n", i));
+        }
+        let result = compact_diff(&diff, 500);
+        assert!(
+            !result.contains("... (truncated)"),
+            "25 lines should not be truncated with max_hunk_lines=30"
+        );
+        assert!(result.contains("+line25"));
+    }
+
+    #[test]
+    fn test_compact_diff_increased_total_limit() {
+        // Build a diff with 150 output result lines across multiple files — should NOT be cut at 100
+        let mut diff = String::new();
+        for f in 1..=5 {
+            diff.push_str(&format!("diff --git a/file{f}.rs b/file{f}.rs\n--- a/file{f}.rs\n+++ b/file{f}.rs\n@@ -1,20 +1,20 @@\n"));
+            for i in 1..=20 {
+                diff.push_str(&format!("+line{f}_{i}\n"));
+            }
+        }
+        let result = compact_diff(&diff, 500);
+        assert!(
+            !result.contains("more changes truncated"),
+            "5 files × 20 lines should not exceed max_lines=500"
+        );
+    }
+
+    #[test]
     fn test_is_blob_show_arg() {
         assert!(is_blob_show_arg("develop:modules/pairs_backtest.py"));
         assert!(is_blob_show_arg("HEAD:src/main.rs"));
@@ -1721,28 +1753,30 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
     #[test]
     fn test_commit_single_message() {
-        let messages = vec!["fix: typo".to_string()];
-        let cmd = build_commit_command(&messages, &[]);
-        let args: Vec<_> = cmd
+        let args = vec!["-m".to_string(), "fix: typo".to_string()];
+        let cmd = build_commit_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert_eq!(args, vec!["commit", "-m", "fix: typo"]);
+        assert_eq!(cmd_args, vec!["commit", "-m", "fix: typo"]);
     }
 
     #[test]
     fn test_commit_multiple_messages() {
-        let messages = vec![
+        let args = vec![
+            "-m".to_string(),
             "feat: add multi-paragraph support".to_string(),
+            "-m".to_string(),
             "This allows git commit -m \"title\" -m \"body\".".to_string(),
         ];
-        let cmd = build_commit_command(&messages, &[]);
-        let args: Vec<_> = cmd
+        let cmd = build_commit_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         assert_eq!(
-            args,
+            cmd_args,
             vec![
                 "commit",
                 "-m",
@@ -1753,29 +1787,67 @@ no changes added to commit (use "git add" and/or "git commit -a")
         );
     }
 
+    // #327: git commit -am "msg" must pass -am through to git
     #[test]
-    fn test_commit_three_messages() {
-        let messages = vec![
-            "title".to_string(),
-            "body".to_string(),
-            "footer: refs #202".to_string(),
-        ];
-        let cmd = build_commit_command(&messages, &[]);
-        let args: Vec<_> = cmd
+    fn test_commit_am_flag() {
+        let args = vec!["-am".to_string(), "quick fix".to_string()];
+        let cmd = build_commit_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert_eq!(
-            args,
-            vec![
-                "commit",
-                "-m",
-                "title",
-                "-m",
-                "body",
-                "-m",
-                "footer: refs #202"
-            ]
+        assert_eq!(cmd_args, vec!["commit", "-am", "quick fix"]);
+    }
+
+    #[test]
+    fn test_commit_amend() {
+        let args = vec![
+            "--amend".to_string(),
+            "-m".to_string(),
+            "new msg".to_string(),
+        ];
+        let cmd = build_commit_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(cmd_args, vec!["commit", "--amend", "-m", "new msg"]);
+    }
+
+    #[test]
+    fn test_git_status_not_a_repo_exits_nonzero() {
+        // Run rtk git status in a directory that is not a git repo
+        let tmp = std::env::temp_dir().join("rtk_test_not_a_repo");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        // Build the path to the test binary
+        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("rtk");
+        let output = std::process::Command::new(&bin_path)
+            .args(["git", "status"])
+            .current_dir(&tmp)
+            .output()
+            .expect("Failed to run rtk");
+
+        // Should exit with non-zero (128 from git)
+        assert!(
+            !output.status.success(),
+            "Expected non-zero exit code for git status outside a repo, got {:?}",
+            output.status.code()
         );
+
+        // Message should be on stderr, not stdout
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stderr.contains("Not a git repository"),
+            "Expected 'Not a git repository' on stderr, got stderr={:?}, stdout={:?}",
+            stderr,
+            stdout
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
