@@ -331,15 +331,18 @@ pub fn run(
     patch_mode: PatchMode,
     verbose: u8,
 ) -> Result<()> {
+    #[cfg(unix)]
+    match resolve_init_mode(claude_md, hook_only) {
+        InitMode::ClaudeMd => run_claude_md_mode(global, verbose)?,
+        InitMode::HookOnly => run_hook_only_mode(global, patch_mode, verbose)?,
+        InitMode::Default => run_default_mode(global, patch_mode, verbose)?,
+    }
+
+    #[cfg(not(unix))]
     match (claude_md, hook_only) {
         (true, _) => run_claude_md_mode(global, verbose)?,
         (false, true) => run_hook_only_mode(global, patch_mode, verbose)?,
         (false, false) => run_default_mode(global, patch_mode, verbose)?,
-    }
-
-    #[cfg(unix)]
-    if !hook_only {
-        maybe_install_opencode(global, verbose)?;
     }
 
     Ok(())
@@ -502,36 +505,34 @@ where
 }
 
 #[cfg(unix)]
-fn detect_opencode() -> bool {
-    detect_opencode_with(dirs::config_dir().as_deref(), || {
-        std::process::Command::new("which")
-            .arg("opencode")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    })
-}
-
-#[cfg(unix)]
-fn prompt_opencode_support() -> Result<bool> {
+fn prompt_setup_target() -> Result<SetupTargetSelection> {
     use std::io::{self, BufRead, IsTerminal};
 
-    eprintln!("\nInstall opencode support (plugin + AGENTS.md)? [y/N] ");
+    eprintln!("\nChoose setup target: [Claude/opencode/both] ");
 
     if !io::stdin().is_terminal() {
-        eprintln!("(non-interactive mode, defaulting to N)");
-        return Ok(false);
+        eprintln!("(non-interactive mode, explicit Claude/opencode/both choice required)");
+        return Ok(SetupTargetSelection::SkippedChoiceRequired);
     }
 
     let stdin = io::stdin();
-    let mut line = String::new();
-    stdin
-        .lock()
-        .read_line(&mut line)
-        .context("Failed to read user input")?;
+    let mut handle = stdin.lock();
 
-    let response = line.trim().to_lowercase();
-    Ok(response == "y" || response == "yes")
+    loop {
+        let mut line = String::new();
+        handle
+            .read_line(&mut line)
+            .context("Failed to read setup target")?;
+
+        match resolve_setup_target(Some(&line), true) {
+            SetupTargetSelection::Selected(target) => {
+                return Ok(SetupTargetSelection::Selected(target));
+            }
+            SetupTargetSelection::SkippedChoiceRequired => {
+                eprintln!("Please answer Claude, opencode, or both.");
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1201,35 +1202,25 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn maybe_install_opencode(global: bool, verbose: u8) -> Result<()> {
-    if !detect_opencode() {
-        if verbose > 0 {
-            eprintln!("opencode not detected; skipping support prompt");
-        }
-        return Ok(());
-    }
-
-    if !prompt_opencode_support()? {
-        if verbose > 0 {
-            eprintln!("opencode support declined");
-        }
-        return Ok(());
-    }
-
+fn run_opencode_target(global: bool, verbose: u8) -> Result<SetupTargetOutcome> {
     let target = prompt_opencode_install_target(global)?;
     let status = match target {
         OpencodeInstallTargetSelection::Selected(scope) => {
             install_opencode_plugin_with_status(scope, verbose)?
         }
         OpencodeInstallTargetSelection::SkippedChoiceRequired => {
-            OpencodeInstallStatus::SkippedChoiceRequired
+            println!("  Skipped opencode setup: local init needs an explicit global/local choice.");
+            return Ok(SetupTargetOutcome::skipped());
         }
     };
 
-    println!("\n  opencode detected");
     println!("{}", format_opencode_install_status(&status));
 
-    Ok(())
+    Ok(match status {
+        OpencodeInstallStatus::Installed { .. } => SetupTargetOutcome::processed(),
+        OpencodeInstallStatus::AlreadyInstalled { .. } => SetupTargetOutcome::already_configured(),
+        OpencodeInstallStatus::SkippedChoiceRequired => SetupTargetOutcome::skipped(),
+    })
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -1242,27 +1233,24 @@ fn run_default_mode(_global: bool, _patch_mode: PatchMode, _verbose: u8) -> Resu
 }
 
 #[cfg(unix)]
-fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+fn run_claude_target(
+    global: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
+) -> Result<SetupTargetOutcome> {
     if !global {
-        // Local init: unchanged behavior (full injection into ./CLAUDE.md)
-        return run_claude_md_mode(false, verbose);
+        return run_claude_md_mode_with_status(false, verbose);
     }
 
     let claude_dir = resolve_claude_dir()?;
     let rtk_md_path = claude_dir.join("RTK.md");
     let claude_md_path = claude_dir.join("CLAUDE.md");
 
-    // 1. Prepare hook directory and install hook
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
-
-    // 2. Write RTK.md
-    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
-
-    // 3. Patch CLAUDE.md (add @RTK.md, migrate if needed)
+    let rtk_md_changed = write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
     let migrated = patch_claude_md(&claude_md_path, verbose)?;
 
-    // 4. Print success message
     let hook_status = if hook_changed {
         "installed/updated"
     } else {
@@ -1278,24 +1266,53 @@ fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<
         println!("              replaced with @RTK.md (10 lines)");
     }
 
-    // 5. Patch settings.json
     let patch_result = patch_settings_json(&hook_path, patch_mode, verbose)?;
-
-    // Report result
     match patch_result {
-        PatchResult::Patched => {
-            // Already printed by patch_settings_json
-        }
+        PatchResult::Patched => {}
         PatchResult::AlreadyPresent => {
             println!("\n  settings.json: hook already present");
             println!("  Restart Claude Code. Test with: git status");
         }
-        PatchResult::Declined | PatchResult::Skipped => {
-            // Manual instructions already printed by patch_settings_json
-        }
+        PatchResult::Declined | PatchResult::Skipped => {}
     }
 
-    println!(); // Final newline
+    let status = if !hook_changed
+        && !rtk_md_changed
+        && !migrated
+        && matches!(patch_result, PatchResult::AlreadyPresent)
+    {
+        SetupTargetOutcome::already_configured()
+    } else {
+        SetupTargetOutcome::processed()
+    };
+
+    Ok(status)
+}
+
+#[cfg(unix)]
+fn run_default_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    let target = prompt_setup_target()?;
+    let selected_target = match target {
+        SetupTargetSelection::Selected(target) => target,
+        SetupTargetSelection::SkippedChoiceRequired => {
+            println!("\nSkipped init: default mode needs an explicit Claude/opencode/both choice.");
+            return Ok(());
+        }
+    };
+
+    let _summary = run_setup_target_with(
+        selected_target,
+        || {
+            println!("\nClaude setup");
+            run_claude_target(global, patch_mode, verbose)
+        },
+        || {
+            println!("\nopencode setup");
+            run_opencode_target(global, verbose)
+        },
+    )?;
+
+    println!();
 
     Ok(())
 }
@@ -1353,6 +1370,10 @@ fn run_hook_only_mode(global: bool, patch_mode: PatchMode, verbose: u8) -> Resul
 
 /// Legacy mode: full 137-line injection into CLAUDE.md
 fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
+    run_claude_md_mode_with_status(global, verbose).map(|_| ())
+}
+
+fn run_claude_md_mode_with_status(global: bool, verbose: u8) -> Result<SetupTargetOutcome> {
     let path = if global {
         resolve_claude_dir()?.join("CLAUDE.md")
     } else {
@@ -1388,7 +1409,7 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
                     "✅ {} already contains up-to-date rtk instructions",
                     path.display()
                 );
-                return Ok(());
+                return Ok(SetupTargetOutcome::already_configured());
             }
             RtkBlockUpsert::Malformed => {
                 eprintln!(
@@ -1410,7 +1431,7 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
                 } else {
                     eprintln!("            rtk init --claude-md");
                 }
-                return Ok(());
+                return Ok(SetupTargetOutcome::skipped());
             }
         }
     } else {
@@ -1424,7 +1445,7 @@ fn run_claude_md_mode(global: bool, verbose: u8) -> Result<()> {
         println!("   Claude Code will use rtk in this project");
     }
 
-    Ok(())
+    Ok(SetupTargetOutcome::processed())
 }
 
 // --- upsert_rtk_block: idempotent RTK block management ---
