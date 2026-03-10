@@ -1,3 +1,8 @@
+// Cursor stores conversation data in internal SQLite databases (state.vscdb for
+// desktop, store.db for agent CLI). These schemas are undocumented and may change
+// without notice across Cursor updates. All row/column parsing errors are silently
+// skipped so that schema changes degrade to empty results rather than hard failures.
+
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;

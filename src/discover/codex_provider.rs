@@ -13,14 +13,22 @@ pub struct CodexProvider;
 
 impl CodexProvider {
     fn base_dir() -> Option<PathBuf> {
-        // $CODEX_HOME overrides default location
-        if let Ok(home) = std::env::var("CODEX_HOME") {
-            let p = PathBuf::from(home);
+        let user_home = dirs::home_dir();
+
+        // $CODEX_HOME overrides default location, but must exist and sit under $HOME
+        if let Ok(val) = std::env::var("CODEX_HOME") {
+            let p = PathBuf::from(val);
             if p.exists() {
-                return Some(p);
+                if let Some(ref home) = user_home {
+                    if p.starts_with(home) {
+                        return Some(p);
+                    }
+                }
             }
+            return None;
         }
-        let home = dirs::home_dir()?;
+
+        let home = user_home?;
         let dir = home.join(".codex");
         if dir.exists() {
             Some(dir)
