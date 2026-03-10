@@ -70,6 +70,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **curl:** skip JSON schema replacement when schema is larger than original payload ([#297](https://github.com/rtk-ai/rtk/issues/297))
 * **toml-dsl:** fix regex overmatch on `tofu-plan/init/validate/fmt` and `mix-format/compile` — add `(\s|$)` word boundary to prevent matching subcommands (e.g. `tofu planet`, `mix formats`) ([#349](https://github.com/rtk-ai/rtk/issues/349))
+* **toml-dsl:** remove 3 dead built-in filters (`docker-inspect`, `docker-compose-ps`, `pnpm-build`) — Clap routes these commands before `run_fallback`, so the TOML filters never fire ([#351](https://github.com/rtk-ai/rtk/issues/351))
+* **toml-dsl:** `uv-sync` — remove `Resolved` short-circuit; it fires before the package list is printed, hiding installed packages ([#386](https://github.com/rtk-ai/rtk/issues/386))
+* **toml-dsl:** `dotnet-build` — short-circuit only when both warning and error counts are zero; builds with warnings now pass through ([#386](https://github.com/rtk-ai/rtk/issues/386))
+* **toml-dsl:** `poetry-install` — support Poetry 2.x bullet syntax (`•`) and `No changes.` up-to-date message ([#386](https://github.com/rtk-ai/rtk/issues/386))
+* **toml-dsl:** `ping` — add Windows format support (`Pinging` header, `Reply from` per-packet lines) ([#386](https://github.com/rtk-ai/rtk/issues/386))
 
 ## [0.25.0](https://github.com/rtk-ai/rtk/compare/v0.24.0...v0.25.0) (2026-03-05)
 

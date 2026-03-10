@@ -1,0 +1,27 @@
+[filters.shellcheck]
+description = "Compact shellcheck output — strip blank lines, keep caret indicators for error position"
+match_command = "^shellcheck\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 50
+
+[[tests.shellcheck]]
+name = "multi-warning output stripped of blank lines only"
+input = """
+In script.sh line 3:
+if [[ $1 == "" ]]
+     ^-- SC2236: Use -z instead of ! -n.
+
+In script.sh line 7:
+echo $var
+     ^-- SC2086: Double quote to prevent globbing.
+
+"""
+expected = "In script.sh line 3:\nif [[ $1 == \"\" ]]\n     ^-- SC2236: Use -z instead of ! -n.\nIn script.sh line 7:\necho $var\n     ^-- SC2086: Double quote to prevent globbing."
+
+[[tests.shellcheck]]
+name = "empty input passes through"
+input = ""
+expected = ""

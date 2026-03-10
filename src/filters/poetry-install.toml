@@ -1,0 +1,50 @@
+[filters.poetry-install]
+description = "Compact poetry install/lock/update output — strip downloads, short-circuit when up-to-date"
+match_command = "^poetry\\s+(install|lock|update)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^  [-•] Downloading ",
+  "^  [-•] Installing .* \\(",
+  "^Creating virtualenv",
+  "^Using virtualenv",
+]
+match_output = [
+  { pattern = "No dependencies to install or update|No changes\\.", message = "ok (up to date)" },
+]
+max_lines = 30
+
+[[tests.poetry-install]]
+name = "up to date short-circuits"
+input = """
+Installing dependencies from lock file
+
+No dependencies to install or update
+"""
+expected = "ok (up to date)"
+
+[[tests.poetry-install]]
+name = "poetry 2.x bullet syntax short-circuits to ok"
+input = """
+• Installing requests (2.31.0)
+• Installing certifi (2023.11.17)
+
+No changes.
+"""
+expected = "ok (up to date)"
+
+[[tests.poetry-install]]
+name = "install strips download lines"
+input = """
+Installing dependencies from lock file
+
+  - Downloading requests-2.31.0-py3-none-any.whl (62.6 kB)
+  - Installing certifi (2023.11.17)
+  - Installing charset-normalizer (3.3.2)
+  - Installing idna (3.6)
+  - Installing urllib3 (2.1.0)
+  - Installing requests (2.31.0)
+
+Writing lock file
+"""
+expected = "Installing dependencies from lock file\nWriting lock file"

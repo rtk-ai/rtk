@@ -37,11 +37,15 @@ const BUILTIN_TOML: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin_filte
 /// A match-output rule: if `pattern` matches anywhere in the full output blob,
 /// the filter short-circuits and returns `message` immediately.
 /// First matching rule wins; remaining rules are not evaluated.
+/// Optional `unless`: if this regex also matches the blob, the rule is skipped
+/// (prevents short-circuiting when errors or warnings are present).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MatchOutputRule {
     pattern: String,
     message: String,
+    #[serde(default)]
+    unless: Option<String>,
 }
 
 /// A regex substitution applied line-by-line. Rules are chained sequentially:
@@ -107,6 +111,8 @@ struct TomlFilterDef {
 struct CompiledMatchOutputRule {
     pattern: Regex,
     message: String,
+    /// If set and matches the blob, this rule is skipped (prevents swallowing errors).
+    unless: Option<Regex>,
 }
 
 #[derive(Debug)]
@@ -320,14 +326,23 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
     let match_output = def
         .match_output
         .into_iter()
-        .map(|r| {
+        .map(|r| -> Result<CompiledMatchOutputRule, String> {
             let pat = r.pattern.clone();
-            Regex::new(&r.pattern)
-                .map(|pattern| CompiledMatchOutputRule {
-                    pattern,
-                    message: r.message,
+            let pattern = Regex::new(&r.pattern)
+                .map_err(|e| format!("invalid match_output pattern '{}': {}", pat, e))?;
+            let unless = r
+                .unless
+                .as_deref()
+                .map(|u| {
+                    Regex::new(u)
+                        .map_err(|e| format!("invalid match_output unless pattern '{}': {}", u, e))
                 })
-                .map_err(|e| format!("invalid match_output pattern '{}': {}", pat, e))
+                .transpose()?;
+            Ok(CompiledMatchOutputRule {
+                pattern,
+                message: r.message,
+                unless,
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -419,10 +434,16 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     }
 
     // 3. match_output — short-circuit on full blob match (first rule wins)
+    //    If `unless` is set and also matches the blob, the rule is skipped.
     if !filter.match_output.is_empty() {
         let blob = lines.join("\n");
         for rule in &filter.match_output {
             if rule.pattern.is_match(&blob) {
+                if let Some(ref unless_re) = rule.unless {
+                    if unless_re.is_match(&blob) {
+                        continue; // errors/warnings present — skip this rule
+                    }
+                }
                 return rule.message.clone();
             }
         }
@@ -1211,6 +1232,103 @@ match_output = [
         assert!(result.is_empty());
     }
 
+    // --- match_output unless tests (PR3) ---
+
+    #[test]
+    fn test_match_output_unless_blocks_short_circuit_when_errors_present() {
+        // "total size is" matches, but "error" also matches — unless fires, rule is skipped.
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^rsync"
+match_output = [
+  { pattern = "total size is", message = "ok (synced)", unless = "error|failed" },
+]
+"#,
+        );
+        let input = "rsync: [sender] error\ntotal size is 1000  speedup is 3.33\n";
+        let out = apply_filter(&f, input);
+        // Should NOT return "ok (synced)" because "error" matches the unless pattern
+        assert_ne!(
+            out.trim(),
+            "ok (synced)",
+            "unless should have blocked short-circuit when errors are present"
+        );
+        // The raw lines should pass through (no further strip rules in this filter)
+        assert!(out.contains("error"));
+    }
+
+    #[test]
+    fn test_match_output_unless_allows_short_circuit_when_no_errors() {
+        // "total size is" matches and "error" does NOT appear — unless does not fire, rule wins.
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^rsync"
+match_output = [
+  { pattern = "total size is", message = "ok (synced)", unless = "error|failed" },
+]
+"#,
+        );
+        let input = "file.txt\ntotal size is 98765  speedup is 77.31\n";
+        let out = apply_filter(&f, input);
+        assert_eq!(out.trim(), "ok (synced)");
+    }
+
+    #[test]
+    fn test_match_output_unless_falls_through_to_next_rule() {
+        // First rule blocked by unless; second rule (no unless) should match.
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+match_output = [
+  { pattern = "success", message = "ok", unless = "error" },
+  { pattern = "success", message = "ok with warnings" },
+]
+"#,
+        );
+        let input = "success\nerror: something went wrong\n";
+        let out = apply_filter(&f, input);
+        // First rule skipped (unless matched), second rule (no unless) fires
+        assert_eq!(out.trim(), "ok with warnings");
+    }
+
+    #[test]
+    fn test_match_output_unless_no_field_behaves_like_before() {
+        // When unless is absent, behaviour is identical to original (no regression).
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+match_output = [
+  { pattern = "Build complete", message = "ok (build complete)" },
+]
+"#,
+        );
+        let out = apply_filter(&f, "Build complete!\n");
+        assert_eq!(out.trim(), "ok (build complete)");
+    }
+
+    #[test]
+    fn test_match_output_unless_invalid_regex_rejected() {
+        let result = make_filters(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+match_output = [
+  { pattern = "success", message = "ok", unless = "[invalid" },
+]
+"#,
+        );
+        assert!(result.is_empty());
+    }
+
     // --- replace tests (PR1) ---
 
     #[test]
@@ -1408,26 +1526,41 @@ match_command = "^make\\b"
 
         let expected = [
             "ansible-playbook",
+            "brew-install",
+            "composer-install",
+            "df",
+            "dotnet-build",
             "du",
             "fail2ban-client",
             "gcloud",
+            "hadolint",
             "helm",
             "iptables",
             "make",
+            "markdownlint",
             "mix-compile",
             "mix-format",
             "mvn-build",
+            "ping",
             "pio-run",
+            "poetry-install",
             "pre-commit",
+            "ps",
             "quarto-render",
+            "rsync",
+            "shellcheck",
             "shopify-theme",
             "sops",
+            "swift-build",
+            "systemctl-status",
             "terraform-plan",
             "tofu-fmt",
             "tofu-init",
             "tofu-plan",
             "tofu-validate",
             "trunk-build",
+            "uv-sync",
+            "yamllint",
         ];
 
         for name in &expected {
@@ -1446,8 +1579,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            21,
-            "Expected exactly 21 built-in filters, got {}. \
+            36,
+            "Expected exactly 36 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1504,11 +1637,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 21 existing filters still present + 1 new = 22
+        // All 36 existing filters still present + 1 new = 37
         assert_eq!(
             filters.len(),
-            22,
-            "Expected 22 filters after concat (21 built-in + 1 new)"
+            37,
+            "Expected 37 filters after concat (36 built-in + 1 new)"
         );
 
         // New filter is discoverable

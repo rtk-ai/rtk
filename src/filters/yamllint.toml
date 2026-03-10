@@ -1,0 +1,25 @@
+[filters.yamllint]
+description = "Compact yamllint output — strip blank lines, limit rows"
+match_command = "^yamllint\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 50
+truncate_lines_at = 120
+
+[[tests.yamllint]]
+name = "multi-warning output stripped of blank lines"
+input = """
+config.yml
+  3:1     warning  missing document start "---"  (document-start)
+  5:12    error    too many spaces inside braces  (braces)
+
+  8:1     error    wrong indentation: expected 2 but found 4  (indentation)
+"""
+expected = "config.yml\n  3:1     warning  missing document start \"---\"  (document-start)\n  5:12    error    too many spaces inside braces  (braces)\n  8:1     error    wrong indentation: expected 2 but found 4  (indentation)"
+
+[[tests.yamllint]]
+name = "empty input passes through"
+input = ""
+expected = ""
