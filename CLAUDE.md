@@ -132,6 +132,7 @@ main.rs (CLI entry)
 - Reads ~/.config/rtk/config.toml for user preferences
 - `rtk init` command bootstraps LLM integration
 - **New**: `tracking.database_path` field for custom DB location
+- **Custom Claude config dir**: Respects `CLAUDE_CONFIG_DIR` env var for users who run multiple Claude instances (e.g., `CLAUDE_CONFIG_DIR=~/.claude-a claude`). Falls back to `~/.claude` if unset.
 
 **5. Tee Output Recovery** (src/tee.rs)
 - Saves raw unfiltered output to `~/.local/share/rtk/tee/` on command failure

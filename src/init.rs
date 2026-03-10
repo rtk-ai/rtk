@@ -323,7 +323,10 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
 
 /// Print manual instructions for settings.json patching
 fn print_manual_instructions(hook_path: &Path) {
-    println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
+    let settings_hint = resolve_claude_dir()
+        .map(|d| format!("{}/settings.json", d.display()))
+        .unwrap_or_else(|_| "~/.claude/settings.json".to_string());
+    println!("\n  MANUAL STEP: Add this to {}:", settings_hint);
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
@@ -999,8 +1002,31 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
     }
 }
 
-/// Resolve ~/.claude directory with proper home expansion
-fn resolve_claude_dir() -> Result<PathBuf> {
+/// Resolve Claude config directory with proper home expansion.
+///
+/// Priority:
+/// 1. `CLAUDE_CONFIG_DIR` environment variable (supports `~` expansion)
+/// 2. Default: `~/.claude`
+pub(crate) fn resolve_claude_dir() -> Result<PathBuf> {
+    resolve_claude_dir_impl(std::env::var("CLAUDE_CONFIG_DIR").ok())
+}
+
+/// Inner implementation for testability (avoids env var races in parallel tests).
+fn resolve_claude_dir_impl(env_override: Option<String>) -> Result<PathBuf> {
+    if let Some(custom) = env_override {
+        let expanded = if custom.starts_with('~') {
+            let home =
+                dirs::home_dir().context("Cannot determine home directory for ~ expansion")?;
+            home.join(
+                custom
+                    .strip_prefix("~/")
+                    .unwrap_or(custom.strip_prefix('~').unwrap_or(&custom)),
+            )
+        } else {
+            PathBuf::from(&custom)
+        };
+        return Ok(expanded);
+    }
     dirs::home_dir()
         .map(|h| h.join(".claude"))
         .context("Cannot determine home directory. Is $HOME set?")
@@ -1091,19 +1117,27 @@ pub fn show_config() -> Result<()> {
     }
 
     // Check global CLAUDE.md
+    let claude_dir_display = claude_dir.display();
     if global_claude_md.exists() {
         let content = fs::read_to_string(&global_claude_md)?;
         if content.contains("@RTK.md") {
-            println!("✅ Global (~/.claude/CLAUDE.md): @RTK.md reference");
+            println!(
+                "✅ Global ({}/CLAUDE.md): @RTK.md reference",
+                claude_dir_display
+            );
         } else if content.contains("<!-- rtk-instructions") {
             println!(
-                "⚠️  Global (~/.claude/CLAUDE.md): old RTK block (run: rtk init -g to migrate)"
+                "⚠️  Global ({}/CLAUDE.md): old RTK block (run: rtk init -g to migrate)",
+                claude_dir_display
             );
         } else {
-            println!("⚪ Global (~/.claude/CLAUDE.md): exists but rtk not configured");
+            println!(
+                "⚪ Global ({}/CLAUDE.md): exists but rtk not configured",
+                claude_dir_display
+            );
         }
     } else {
-        println!("⚪ Global (~/.claude/CLAUDE.md): not found");
+        println!("⚪ Global ({}/CLAUDE.md): not found", claude_dir_display);
     }
 
     // Check local CLAUDE.md
@@ -1147,7 +1181,13 @@ pub fn show_config() -> Result<()> {
     println!("  rtk init -g --auto-patch    # Same as above but no prompt");
     println!("  rtk init -g --no-patch      # Skip settings.json (manual setup)");
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
-    println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
+    let legacy_path = resolve_claude_dir()
+        .map(|d| format!("{}/CLAUDE.md", d.display()))
+        .unwrap_or_else(|_| "~/.claude/CLAUDE.md".to_string());
+    println!(
+        "  rtk init -g --claude-md     # Legacy: full injection into {}",
+        legacy_path
+    );
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
 
     Ok(())
@@ -1571,5 +1611,36 @@ More notes
 
         let removed = remove_hook_from_json(&mut json_content);
         assert!(!removed);
+    }
+
+    // --- resolve_claude_dir() tests ---
+
+    #[test]
+    fn test_resolve_claude_dir_default() {
+        // No env override => falls back to ~/.claude
+        let result = resolve_claude_dir_impl(None).unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home.join(".claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_custom_absolute() {
+        let custom = "/tmp/my-custom-claude-dir";
+        let result = resolve_claude_dir_impl(Some(custom.to_string())).unwrap();
+        assert_eq!(result, PathBuf::from(custom));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_tilde_expansion() {
+        let result = resolve_claude_dir_impl(Some("~/.claude-custom".to_string())).unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home.join(".claude-custom"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_tilde_only() {
+        let result = resolve_claude_dir_impl(Some("~".to_string())).unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home);
     }
 }

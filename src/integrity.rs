@@ -17,6 +17,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::init::resolve_claude_dir;
+
 /// Filename for the stored hash (dotfile alongside hook)
 const HASH_FILENAME: &str = ".rtk-hook.sha256";
 
@@ -178,11 +180,11 @@ fn read_stored_hash(path: &Path) -> Result<String> {
     Ok(hash.to_string())
 }
 
-/// Resolve the default hook path (~/.claude/hooks/rtk-rewrite.sh)
+/// Resolve the hook path using the Claude config directory.
+///
+/// Respects `CLAUDE_CONFIG_DIR` env var via `resolve_claude_dir()`.
 pub fn resolve_hook_path() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".claude").join("hooks").join("rtk-rewrite.sh"))
-        .context("Cannot determine home directory. Is $HOME set?")
+    resolve_claude_dir().map(|d| d.join("hooks").join("rtk-rewrite.sh"))
 }
 
 /// Run integrity check and print results (for `rtk verify` subcommand)
@@ -262,7 +264,10 @@ pub fn runtime_check() -> Result<()> {
                 actual.get(..16).unwrap_or(&actual)
             );
             eprintln!();
-            eprintln!("  The hook at ~/.claude/hooks/rtk-rewrite.sh has been modified.");
+            let hook_display = resolve_hook_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "~/.claude/hooks/rtk-rewrite.sh".to_string());
+            eprintln!("  The hook at {} has been modified.", hook_display);
             eprintln!("  This may indicate tampering. RTK will not execute.");
             eprintln!();
             eprintln!("  To restore:  rtk init -g --auto-patch");

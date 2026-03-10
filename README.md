@@ -107,6 +107,8 @@ rtk init --global
 git status  # Automatically rewritten to rtk git status
 ```
 
+> **Custom config directory**: If you launch Claude with a custom config directory (e.g., `CLAUDE_CONFIG_DIR=~/.claude-a claude`), RTK will automatically detect and use it. Just make sure `CLAUDE_CONFIG_DIR` is set when you run `rtk init --global`.
+
 The hook transparently rewrites commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
 
 ## How It Works
