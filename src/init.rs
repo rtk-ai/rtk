@@ -243,6 +243,14 @@ enum OpencodeInstallStatus {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpencodeAgentsInstallStatus {
+    Installed { path: PathBuf },
+    AlreadyConfigured { path: PathBuf },
+    Malformed { path: PathBuf },
+}
+
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpencodeInstallTargetSelection {
     Selected(OpencodeInstallScope),
@@ -772,6 +780,11 @@ fn resolve_opencode_agents_path() -> Result<PathBuf> {
 }
 
 #[cfg(unix)]
+fn resolve_opencode_agents_path_from_config_dir(config_dir: &Path) -> PathBuf {
+    resolve_opencode_global_root_at(config_dir).join("AGENTS.md")
+}
+
+#[cfg(unix)]
 fn resolve_opencode_plugin_path_at(root: &Path, global: bool) -> PathBuf {
     if global {
         root.join("config")
@@ -980,6 +993,174 @@ fn format_opencode_install_status(status: &OpencodeInstallStatus) -> String {
     }
 
     lines.join("\n")
+}
+
+#[cfg(unix)]
+fn install_opencode_agents_with_status(verbose: u8) -> Result<OpencodeAgentsInstallStatus> {
+    let config_dir = resolve_official_opencode_config_dir()?;
+    install_opencode_agents_with_status_at(&config_dir, verbose)
+}
+
+#[cfg(unix)]
+fn install_opencode_agents_with_status_at(
+    config_dir: &Path,
+    verbose: u8,
+) -> Result<OpencodeAgentsInstallStatus> {
+    let agents_path = resolve_opencode_agents_path_from_config_dir(config_dir);
+    let parent = agents_path.parent().with_context(|| {
+        format!(
+            "Cannot install opencode AGENTS.md at {}: missing parent directory",
+            agents_path.display()
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create opencode directory: {}", parent.display()))?;
+
+    let existing = if agents_path.exists() {
+        fs::read_to_string(&agents_path)
+            .with_context(|| format!("Failed to read {}", agents_path.display()))?
+    } else {
+        String::new()
+    };
+
+    let (new_content, action) = upsert_opencode_agents_section(&existing);
+    match action {
+        OpencodeAgentsSectionUpsert::Added | OpencodeAgentsSectionUpsert::Updated => {
+            fs::write(&agents_path, new_content)
+                .with_context(|| format!("Failed to write {}", agents_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Configured opencode AGENTS.md: {}", agents_path.display());
+            }
+            Ok(OpencodeAgentsInstallStatus::Installed { path: agents_path })
+        }
+        OpencodeAgentsSectionUpsert::Unchanged => {
+            if verbose > 0 {
+                eprintln!(
+                    "opencode AGENTS.md already configured: {}",
+                    agents_path.display()
+                );
+            }
+            Ok(OpencodeAgentsInstallStatus::AlreadyConfigured { path: agents_path })
+        }
+        OpencodeAgentsSectionUpsert::Malformed => {
+            if verbose > 0 {
+                eprintln!(
+                    "Skipped opencode AGENTS.md update due to malformed RTK markers: {}",
+                    agents_path.display()
+                );
+            }
+            Ok(OpencodeAgentsInstallStatus::Malformed { path: agents_path })
+        }
+    }
+}
+
+#[cfg(unix)]
+fn format_opencode_agents_install_status(status: &OpencodeAgentsInstallStatus) -> String {
+    match status {
+        OpencodeAgentsInstallStatus::Installed { path } => {
+            format!("  AGENTS.md configured: {}", path.display())
+        }
+        OpencodeAgentsInstallStatus::AlreadyConfigured { path } => {
+            format!("  AGENTS.md already configured: {}", path.display())
+        }
+        OpencodeAgentsInstallStatus::Malformed { path } => format!(
+            "  AGENTS.md skipped: malformed RTK markers in {}\n  Fix the RTK block markers manually, then rerun `rtk init`.",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn has_opencode_agents_section(content: &str) -> bool {
+    let start_marker = "<!-- rtk-opencode-start -->";
+    let end_marker = "<!-- rtk-opencode-end -->";
+
+    content
+        .find(start_marker)
+        .and_then(|start| content[start..].find(end_marker).map(|end| (start, end)))
+        .is_some()
+}
+
+#[cfg(unix)]
+fn detect_opencode_agents_status(path: &Path) -> Result<Option<(SetupTargetStatus, PathBuf)>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    Ok(has_opencode_agents_section(&content)
+        .then_some((SetupTargetStatus::AlreadyConfigured, path.to_path_buf())))
+}
+
+#[cfg(unix)]
+fn collect_show_config_opencode_status_at(config_dir: &Path) -> Result<ShowConfigOpencodeStatus> {
+    let global_root = resolve_opencode_global_root_at(config_dir);
+    let global_plugin = resolve_opencode_plugin_path_from_config_dir(config_dir, true);
+    let agents_path = resolve_opencode_agents_path_from_config_dir(config_dir);
+
+    Ok(ShowConfigOpencodeStatus {
+        global_root,
+        plugin: global_plugin
+            .exists()
+            .then_some((SetupTargetStatus::AlreadyConfigured, global_plugin)),
+        agents: detect_opencode_agents_status(&agents_path)?,
+    })
+}
+
+#[cfg(unix)]
+fn collect_show_config_opencode_status() -> Result<ShowConfigOpencodeStatus> {
+    let config_dir = resolve_official_opencode_config_dir()?;
+    collect_show_config_opencode_status_at(&config_dir)
+}
+
+#[cfg(unix)]
+fn build_opencode_target_outcome(
+    plugin_status: &OpencodeInstallStatus,
+    agents_status: &OpencodeAgentsInstallStatus,
+) -> SetupTargetOutcome {
+    let mut paths = match plugin_status {
+        OpencodeInstallStatus::Installed { path, .. }
+        | OpencodeInstallStatus::AlreadyInstalled { path, .. } => vec![path.clone()],
+        OpencodeInstallStatus::SkippedChoiceRequired => Vec::new(),
+    };
+
+    let agents_path = match agents_status {
+        OpencodeAgentsInstallStatus::Installed { path }
+        | OpencodeAgentsInstallStatus::AlreadyConfigured { path }
+        | OpencodeAgentsInstallStatus::Malformed { path } => path.clone(),
+    };
+    paths.push(agents_path);
+
+    match (plugin_status, agents_status) {
+        (_, OpencodeAgentsInstallStatus::Malformed { .. }) => SetupTargetOutcome::skipped()
+            .with_detail("AGENTS.md has malformed RTK markers; fix the file and rerun")
+            .with_paths(paths),
+        (
+            OpencodeInstallStatus::AlreadyInstalled { .. },
+            OpencodeAgentsInstallStatus::AlreadyConfigured { .. },
+        ) => SetupTargetOutcome::already_configured().with_paths(paths),
+        _ => SetupTargetOutcome::processed().with_paths(paths),
+    }
+}
+
+#[cfg(unix)]
+fn run_opencode_target_at(
+    config_dir: &Path,
+    scope: OpencodeInstallScope,
+    verbose: u8,
+) -> Result<SetupTargetOutcome> {
+    let plugin_path = resolve_opencode_plugin_path_from_config_dir(config_dir, scope.is_global());
+    let other_path =
+        resolve_opencode_plugin_path_from_config_dir(config_dir, scope.other().is_global());
+    let plugin_status =
+        install_opencode_plugin_file_with_status(&plugin_path, &other_path, scope, verbose)?;
+    let agents_status = install_opencode_agents_with_status_at(config_dir, verbose)?;
+
+    Ok(build_opencode_target_outcome(
+        &plugin_status,
+        &agents_status,
+    ))
 }
 
 #[cfg(unix)]
@@ -1429,29 +1610,24 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 #[cfg(unix)]
 fn run_opencode_target(global: bool, verbose: u8) -> Result<SetupTargetOutcome> {
     let target = prompt_opencode_install_target(global)?;
-    let status = match target {
-        OpencodeInstallTargetSelection::Selected(scope) => {
-            install_opencode_plugin_with_status(scope, verbose)?
-        }
+    let scope = match target {
+        OpencodeInstallTargetSelection::Selected(scope) => scope,
         OpencodeInstallTargetSelection::SkippedChoiceRequired => {
             println!("  Skipped opencode setup: local init needs an explicit global/local choice.");
             return Ok(SetupTargetOutcome::skipped());
         }
     };
 
-    println!("{}", format_opencode_install_status(&status));
+    let plugin_status = install_opencode_plugin_with_status(scope, verbose)?;
+    let agents_status = install_opencode_agents_with_status(verbose)?;
 
-    Ok(match status {
-        OpencodeInstallStatus::Installed { path, .. } => {
-            SetupTargetOutcome::processed().with_paths(vec![path])
-        }
-        OpencodeInstallStatus::AlreadyInstalled { path, .. } => {
-            SetupTargetOutcome::already_configured().with_paths(vec![path])
-        }
-        OpencodeInstallStatus::SkippedChoiceRequired => {
-            SetupTargetOutcome::skipped().with_detail("choice required")
-        }
-    })
+    println!("{}", format_opencode_install_status(&plugin_status));
+    println!("{}", format_opencode_agents_install_status(&agents_status));
+
+    Ok(build_opencode_target_outcome(
+        &plugin_status,
+        &agents_status,
+    ))
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -2069,18 +2245,7 @@ pub fn show_config() -> Result<()> {
 
     #[cfg(unix)]
     {
-        let global_root = resolve_opencode_global_root()?;
-        let global_plugin = resolve_opencode_plugin_path(true)?;
-        let agents_path = resolve_opencode_agents_path()?;
-        let opencode_status = ShowConfigOpencodeStatus {
-            global_root,
-            plugin: global_plugin
-                .exists()
-                .then(|| (SetupTargetStatus::AlreadyConfigured, global_plugin)),
-            agents: agents_path
-                .exists()
-                .then(|| (SetupTargetStatus::AlreadyConfigured, agents_path)),
-        };
+        let opencode_status = collect_show_config_opencode_status()?;
         println!("\n{}", format_show_config_opencode_status(&opencode_status));
     }
 
