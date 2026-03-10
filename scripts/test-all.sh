@@ -459,6 +459,7 @@ else
     skip_test "rtk rake" "rake not installed"
 fi
 
+
 # ── 31. Global flags ────────────────────────────────
 
 section "Global flags"
@@ -479,7 +480,7 @@ section "Learn"
 assert_ok      "rtk learn --help"             rtk learn --help
 assert_ok      "rtk learn (no sessions)"      rtk learn --since 0 2>&1 || true
 
-# ── 32. Rewrite ───────────────────────────────────────
+# ── 34. Rewrite ───────────────────────────────────────
 
 section "Rewrite"
 
