@@ -289,11 +289,12 @@ After install, restart Claude Code or opencode before testing rewritten commands
 
 ```bash
 rtk init --show             # Print Claude hook status, opencode plugin path(s), and AGENTS.md status
-rtk init -g --uninstall     # Remove Claude artifacts, opencode plugin copies, and the RTK AGENTS.md block
+rtk uninstall               # Remove Claude artifacts, opencode plugin copies, and the RTK AGENTS.md block
 ```
 
 - `rtk init --show` reports the active opencode lifecycle exactly as installed: global plugin, local plugin, and whether the RTK marker block is present in `~/.config/opencode/AGENTS.md`.
-- `rtk init -g --uninstall` removes RTK-managed opencode plugin files from both supported plugin scopes and strips only the RTK section from `~/.config/opencode/AGENTS.md`; it does not delete unrelated user content from that file.
+- `rtk uninstall` is the canonical teardown command. It removes RTK-managed opencode plugin files from both supported plugin scopes and strips only the RTK section from `~/.config/opencode/AGENTS.md`; it does not delete unrelated user content from that file.
+- `rtk init --uninstall` still works as a deprecated compatibility alias for the same shared uninstall path, but it is no longer the primary reviewer-facing lifecycle command.
 
 ### Commands Rewritten
 
@@ -354,7 +355,8 @@ FAILED: 2/15 tests
 ### Uninstall
 
 ```bash
-rtk init -g --uninstall     # Remove Claude hook artifacts, opencode plugin files, and the RTK AGENTS.md block
+rtk uninstall               # Canonical RTK teardown command for Claude + opencode artifacts
+rtk init --uninstall        # Deprecated compatibility alias for rtk uninstall
 cargo uninstall rtk          # Remove binary
 brew uninstall rtk           # If installed via Homebrew
 ```
