@@ -161,6 +161,138 @@ fn extract_duration(output: &str) -> Option<u64> {
     })
 }
 
+/// Check if a path is an executable file (unix: checks permission bits).
+fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.is_file()
+            && path
+                .metadata()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Check if user already passed a format flag to RSpec.
+/// Handles: --format, -f, --format=..., -fj, -fjson, -fdocumentation
+fn has_format_flag(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "--format"
+            || a == "-f"
+            || a.starts_with("--format=")
+            || (a.starts_with("-f") && a.len() > 2 && !a.starts_with("--"))
+    })
+}
+
+pub fn run(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    // Auto-detect invocation: bin/rspec (executable) → bundle exec rspec → rspec
+    let mut cmd = if is_executable(std::path::Path::new("bin/rspec")) {
+        Command::new("bin/rspec")
+    } else if std::path::Path::new("Gemfile.lock").exists() {
+        let mut c = Command::new("bundle");
+        c.arg("exec").arg("rspec");
+        c
+    } else {
+        Command::new("rspec")
+    };
+
+    // Pass through all user arguments first
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    // Determine if we can inject JSON format
+    let inject_json = !has_format_flag(args);
+    let json_tempfile = if inject_json {
+        let path = std::env::temp_dir().join(format!("rtk-rspec-{}.json", std::process::id()));
+        cmd.arg("--format").arg("json").arg("--out").arg(&path);
+        Some(path)
+    } else {
+        None
+    };
+
+    if verbose > 0 {
+        eprintln!("Running: rspec (inject_json={})", inject_json);
+    }
+
+    let output = cmd
+        .output()
+        .context("Failed to run rspec. Is it installed? Try: gem install rspec")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{}", stdout, stderr);
+
+    // Try Tier 1: Parse JSON from temp file
+    let parse_result = if let Some(ref path) = json_tempfile {
+        match std::fs::read_to_string(path) {
+            Ok(json_content) => {
+                let _ = std::fs::remove_file(path);
+                RspecParser::parse(&json_content)
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(path);
+                RspecParser::parse(&stdout)
+            }
+        }
+    } else {
+        RspecParser::parse(&stdout)
+    };
+
+    let mode = FormatMode::from_verbosity(verbose);
+
+    let filtered = match parse_result {
+        ParseResult::Full(data) => {
+            if verbose > 0 {
+                eprintln!("rspec (Tier 1: Full JSON parse)");
+            }
+            data.format(mode)
+        }
+        ParseResult::Degraded(data, warnings) => {
+            if verbose > 0 {
+                emit_degradation_warning("rspec", &warnings.join(", "));
+            }
+            data.format(mode)
+        }
+        ParseResult::Passthrough(raw) => {
+            emit_passthrough_warning("rspec", "All parsing tiers failed");
+            raw
+        }
+    };
+
+    let exit_code = output.status.code().unwrap_or(1);
+    if let Some(hint) = crate::tee::tee_and_hint(&combined, "rspec", exit_code) {
+        println!("{}\n{}", filtered, hint);
+    } else {
+        println!("{}", filtered);
+    }
+
+    // Stderr for Ruby warnings, Bundler messages
+    if !stderr.trim().is_empty() {
+        eprintln!("{}", stderr.trim());
+    }
+
+    timer.track(
+        &format!("rspec {}", args.join(" ")),
+        &format!("rtk rspec {}", args.join(" ")),
+        &combined,
+        &filtered,
+    );
+
+    // Propagate exit code
+    if !output.status.success() {
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,5 +597,17 @@ Finished in 0.05 seconds (files took 1.2 seconds to load)
             input_tokens,
             output_tokens
         );
+    }
+
+    #[test]
+    fn test_has_format_flag() {
+        assert!(!has_format_flag(&[]));
+        assert!(!has_format_flag(&["spec/".to_string(), "--tag".to_string(), "focus".to_string()]));
+        assert!(has_format_flag(&["--format".to_string(), "documentation".to_string()]));
+        assert!(has_format_flag(&["-f".to_string(), "progress".to_string()]));
+        assert!(has_format_flag(&["--format=json".to_string()]));
+        assert!(has_format_flag(&["-fj".to_string()]));
+        assert!(has_format_flag(&["-fjson".to_string()]));
+        assert!(has_format_flag(&["-fdocumentation".to_string()]));
     }
 }
