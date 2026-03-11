@@ -163,4 +163,175 @@ mod tests {
         assert_eq!(data.skipped, 0);
         assert_eq!(data.duration_ms, Some(50));
     }
+
+    #[test]
+    fn test_rspec_parser_json_with_failures() {
+        let json = r#"{
+            "examples": [
+                {
+                    "id": "./spec/models/user_spec.rb[1:1]",
+                    "description": "is valid",
+                    "full_description": "User#valid? is valid",
+                    "status": "passed",
+                    "file_path": "./spec/models/user_spec.rb",
+                    "line_number": 5,
+                    "run_time": 0.001
+                },
+                {
+                    "id": "./spec/models/user_spec.rb[1:2]",
+                    "description": "saves to database",
+                    "full_description": "User#save saves to database",
+                    "status": "failed",
+                    "file_path": "./spec/models/user_spec.rb",
+                    "line_number": 15,
+                    "run_time": 0.002,
+                    "exception": {
+                        "class": "RSpec::Expectations::ExpectationNotMetError",
+                        "message": "expected true, got false",
+                        "backtrace": ["./spec/models/user_spec.rb:16:in `block (2 levels)'"]
+                    }
+                }
+            ],
+            "summary": {
+                "duration": 0.05,
+                "example_count": 2,
+                "failure_count": 1,
+                "pending_count": 0,
+                "errors_outside_of_examples_count": 0
+            },
+            "summary_line": "2 examples, 1 failure"
+        }"#;
+
+        let result = RspecParser::parse(json);
+        assert_eq!(result.tier(), 1);
+        let data = result.unwrap();
+        assert_eq!(data.total, 2);
+        assert_eq!(data.passed, 1);
+        assert_eq!(data.failed, 1);
+        assert_eq!(data.failures.len(), 1);
+        assert!(data.failures[0].test_name.contains("saves to database"));
+        assert!(data.failures[0].error_message.contains("expected true"));
+        assert!(data.failures[0].file_path.contains("user_spec.rb"));
+        assert!(data.failures[0].file_path.contains("rspec"));
+    }
+
+    #[test]
+    fn test_rspec_parser_json_with_pending() {
+        let json = r#"{
+            "examples": [
+                {
+                    "id": "./spec/test_spec.rb[1:1]",
+                    "description": "passed test",
+                    "full_description": "Suite passed test",
+                    "status": "passed",
+                    "file_path": "./spec/test_spec.rb",
+                    "line_number": 5,
+                    "run_time": 0.001
+                },
+                {
+                    "id": "./spec/test_spec.rb[1:2]",
+                    "description": "pending test",
+                    "full_description": "Suite pending test",
+                    "status": "pending",
+                    "file_path": "./spec/test_spec.rb",
+                    "line_number": 10,
+                    "run_time": 0.0,
+                    "pending_message": "TODO: implement this"
+                }
+            ],
+            "summary": {
+                "duration": 0.05,
+                "example_count": 2,
+                "failure_count": 0,
+                "pending_count": 1,
+                "errors_outside_of_examples_count": 0
+            },
+            "summary_line": "2 examples, 0 failures, 1 pending"
+        }"#;
+
+        let result = RspecParser::parse(json);
+        let data = result.unwrap();
+        assert_eq!(data.total, 2);
+        assert_eq!(data.passed, 1);
+        assert_eq!(data.skipped, 1);
+        assert_eq!(data.failed, 0);
+    }
+
+    #[test]
+    fn test_rspec_parser_json_errors_outside_examples() {
+        let json = r#"{
+            "examples": [],
+            "summary": {
+                "duration": 0.01,
+                "example_count": 0,
+                "failure_count": 0,
+                "pending_count": 0,
+                "errors_outside_of_examples_count": 2
+            },
+            "summary_line": "0 examples, 0 failures, 2 errors occurred outside of examples"
+        }"#;
+
+        let result = RspecParser::parse(json);
+        let data = result.unwrap();
+        assert_eq!(data.total, 0);
+        assert_eq!(data.failed, 2);
+    }
+
+    #[test]
+    fn test_rspec_parser_json_no_examples() {
+        let json = r#"{
+            "examples": [],
+            "summary": {
+                "duration": 0.01,
+                "example_count": 0,
+                "failure_count": 0,
+                "pending_count": 0,
+                "errors_outside_of_examples_count": 0
+            },
+            "summary_line": "0 examples, 0 failures"
+        }"#;
+
+        let result = RspecParser::parse(json);
+        let data = result.unwrap();
+        assert_eq!(data.total, 0);
+        assert_eq!(data.passed, 0);
+        assert_eq!(data.failed, 0);
+    }
+
+    #[test]
+    fn test_rspec_parser_exception_no_backtrace() {
+        let json = r#"{
+            "examples": [
+                {
+                    "id": "./spec/test_spec.rb[1:1]",
+                    "description": "fails",
+                    "full_description": "Test fails",
+                    "status": "failed",
+                    "file_path": "./spec/test_spec.rb",
+                    "line_number": 5,
+                    "run_time": 0.001,
+                    "exception": {
+                        "class": "RuntimeError",
+                        "message": "Something went wrong",
+                        "backtrace": []
+                    }
+                }
+            ],
+            "summary": {
+                "duration": 0.05,
+                "example_count": 1,
+                "failure_count": 1,
+                "pending_count": 0,
+                "errors_outside_of_examples_count": 0
+            },
+            "summary_line": "1 example, 1 failure"
+        }"#;
+
+        let result = RspecParser::parse(json);
+        let data = result.unwrap();
+        assert_eq!(data.failed, 1);
+        assert_eq!(data.failures.len(), 1);
+        assert!(data.failures[0].stack_trace.is_none());
+        assert!(data.failures[0].error_message.contains("Something went wrong"));
+    }
 }
