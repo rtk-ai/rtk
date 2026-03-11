@@ -8,6 +8,7 @@ pub fn run(
     file: &Path,
     level: FilterLevel,
     max_lines: Option<usize>,
+    tail_lines: Option<usize>,
     line_numbers: bool,
     verbose: u8,
 ) -> Result<()> {
@@ -50,10 +51,7 @@ pub fn run(
         );
     }
 
-    // Apply smart truncation if max_lines is set
-    if let Some(max) = max_lines {
-        filtered = filter::smart_truncate(&filtered, max, &lang);
-    }
+    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
     let rtk_output = if line_numbers {
         format_with_line_numbers(&filtered)
@@ -73,6 +71,7 @@ pub fn run(
 pub fn run_stdin(
     level: FilterLevel,
     max_lines: Option<usize>,
+    tail_lines: Option<usize>,
     line_numbers: bool,
     verbose: u8,
 ) -> Result<()> {
@@ -116,10 +115,7 @@ pub fn run_stdin(
         );
     }
 
-    // Apply smart truncation if max_lines is set
-    if let Some(max) = max_lines {
-        filtered = filter::smart_truncate(&filtered, max, &lang);
-    }
+    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
     let rtk_output = if line_numbers {
         format_with_line_numbers(&filtered)
@@ -142,6 +138,32 @@ fn format_with_line_numbers(content: &str) -> String {
     out
 }
 
+fn apply_line_window(
+    content: &str,
+    max_lines: Option<usize>,
+    tail_lines: Option<usize>,
+    lang: &Language,
+) -> String {
+    if let Some(tail) = tail_lines {
+        if tail == 0 {
+            return String::new();
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(tail);
+        let mut result = lines[start..].join("\n");
+        if content.ends_with('\n') {
+            result.push('\n');
+        }
+        return result;
+    }
+
+    if let Some(max) = max_lines {
+        return filter::smart_truncate(content, max, lang);
+    }
+
+    content.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,7 +182,7 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, false, 0)?;
+        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
         Ok(())
     }
 
@@ -169,5 +191,27 @@ fn main() {{
         // Test that run_stdin has correct signature and compiles
         // We don't actually run it because it would hang waiting for stdin
         // Compile-time verification that the function exists with correct signature
+    }
+
+    #[test]
+    fn test_apply_line_window_tail_lines() {
+        let input = "a\nb\nc\nd\n";
+        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        assert_eq!(output, "c\nd\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_tail_lines_no_trailing_newline() {
+        let input = "a\nb\nc\nd";
+        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        assert_eq!(output, "c\nd");
+    }
+
+    #[test]
+    fn test_apply_line_window_max_lines_still_works() {
+        let input = "a\nb\nc\nd\n";
+        let output = apply_line_window(input, Some(2), None, &Language::Unknown);
+        assert!(output.starts_with("a\n"));
+        assert!(output.contains("more lines"));
     }
 }
