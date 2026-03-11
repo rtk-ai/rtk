@@ -1,11 +1,12 @@
 use crate::display_helpers::{format_duration, print_period_table};
+use crate::hook_check;
 use crate::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::utils::format_tokens;
 use anyhow::{Context, Result};
-use colored::Colorize; // added: terminal colors
+use colored::Colorize;
 use serde::Serialize;
-use std::io::IsTerminal; // added: TTY detection for graceful degradation
-use std::path::PathBuf; // added: for project path resolution
+use std::io::IsTerminal;
+use std::path::PathBuf;
 
 pub fn run(
     project: bool, // added: per-project scope flag
@@ -99,8 +100,28 @@ pub fn run(
                 format_duration(summary.avg_time_ms)
             ),
         );
-        print_efficiency_meter(summary.avg_savings_pct); // added: visual meter
+        print_efficiency_meter(summary.avg_savings_pct);
         println!();
+
+        // Warn about hook issues that silently kill savings
+        match hook_check::status() {
+            hook_check::HookStatus::Missing => {
+                println!(
+                    "{}",
+                    "⚠️  No hook installed — run `rtk init -g` for automatic token savings"
+                        .yellow()
+                );
+                println!();
+            }
+            hook_check::HookStatus::Outdated => {
+                println!(
+                    "{}",
+                    "⚠️  Hook outdated — run `rtk init -g` to update".yellow()
+                );
+                println!();
+            }
+            hook_check::HookStatus::Ok => {}
+        }
 
         if !summary.by_command.is_empty() {
             // added: styled section header

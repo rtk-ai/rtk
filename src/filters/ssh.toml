@@ -11,8 +11,8 @@ strip_lines_matching = [
   "^OpenSSH_",
   "^Pseudo-terminal",
 ]
-max_lines = 50
-truncate_lines_at = 120
+max_lines = 200
+truncate_lines_at = 200
 
 [[tests.ssh]]
 name = "strips connection banners, keeps command output"

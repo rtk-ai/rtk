@@ -1822,6 +1822,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     #[test]
+    #[ignore] // Requires `cargo build` first — run with `cargo test --ignored`
     fn test_git_status_not_a_repo_exits_nonzero() {
         // Run rtk git status in a directory that is not a git repo
         let tmp = std::env::temp_dir().join("rtk_test_not_a_repo");
@@ -1832,6 +1833,11 @@ no changes added to commit (use "git add" and/or "git commit -a")
             .join("target")
             .join("debug")
             .join("rtk");
+        assert!(
+            bin_path.exists(),
+            "Debug binary not found at {:?} — run `cargo build` first",
+            bin_path
+        );
         let output = std::process::Command::new(&bin_path)
             .args(["git", "status"])
             .current_dir(&tmp)
