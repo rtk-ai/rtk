@@ -608,6 +608,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+
+    /// RSpec test runner with compact output
+    Rspec {
+        /// RSpec arguments (file paths, --tag, --seed, --fail-fast, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Go commands with compact output
     Go {
         #[command(subcommand)]
@@ -1907,6 +1914,9 @@ fn main() -> Result<()> {
         Commands::Pip { args } => {
             pip_cmd::run(&args, cli.verbose)?;
         }
+        Commands::Rspec { args } => {
+            rspec_cmd::run(&args, cli.verbose)?;
+        }
 
         Commands::Go { command } => match command {
             GoCommands::Test { args } => {
@@ -2147,6 +2157,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
             | Commands::Pip { .. }
+            | Commands::Rspec { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
