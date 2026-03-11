@@ -1,8 +1,8 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
-use std::process::Command;
 
 pub fn run(
     pattern: &str,
@@ -23,7 +23,7 @@ pub fn run(
     // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
     let rg_pattern = pattern.replace(r"\|", "|");
 
-    let mut rg_cmd = Command::new("rg");
+    let mut rg_cmd = resolved_command("rg");
     rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
@@ -40,7 +40,11 @@ pub fn run(
 
     let output = rg_cmd
         .output()
-        .or_else(|_| Command::new("grep").args(["-rn", pattern, path]).output())
+        .or_else(|_| {
+            resolved_command("grep")
+                .args(["-rn", pattern, path])
+                .output()
+        })
         .context("grep/rg failed")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -274,7 +278,7 @@ mod tests {
     fn test_rg_always_has_line_numbers() {
         // grep_cmd::run() always passes "-n" to rg (line 24).
         // This test documents that -n is built-in, so the clap flag is safe to ignore.
-        let mut cmd = std::process::Command::new("rg");
+        let mut cmd = resolved_command("rg");
         cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
         // If rg is available, it should accept -n without error (exit 1 = no match, not error)
         if let Ok(output) = cmd.output() {

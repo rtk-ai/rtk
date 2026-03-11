@@ -32,6 +32,7 @@ ureq = "2"
 hostname = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"
+which = "8"
 
 [build-dependencies]
 toml = "0.8"

@@ -200,6 +200,34 @@ rtk init --show  # Should show "OpenCode: plugin installed"
 
 ---
 
+## Problem: RTK commands fail on Windows ("program not found" or "No such file")
+
+### Symptom
+```
+rtk vitest --run
+# Error: program not found
+# Or: The system cannot find the file specified
+
+rtk lint .
+# Error: No such file or directory
+```
+
+### Root Cause
+On Windows, Node.js tools (vitest, eslint, tsc, etc.) are installed as `.CMD` or `.BAT` wrapper scripts, not as native `.exe` binaries. Rust's `std::process::Command::new("vitest")` does not honor the Windows `PATHEXT` environment variable, so it cannot find `vitest.CMD` even when it's on PATH.
+
+### Solution
+Update to rtk v0.23.1+ which resolves this via the `which` crate for proper PATH+PATHEXT resolution. All 16+ command modules now use `resolved_command()` instead of `Command::new()`.
+
+```bash
+cargo install --git https://github.com/rtk-ai/rtk
+rtk --version  # Should be 0.23.1+
+```
+
+### Affected Commands
+All commands that spawn external tools: `rtk vitest`, `rtk lint`, `rtk tsc`, `rtk pnpm`, `rtk playwright`, `rtk prisma`, `rtk next`, `rtk prettier`, `rtk ruff`, `rtk pytest`, `rtk pip`, `rtk mypy`, `rtk golangci-lint`, and others.
+
+---
+
 ## Problem: "command not found: rtk" after installation
 
 ### Symptom
