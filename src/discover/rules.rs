@@ -694,8 +694,8 @@ pub const RULES: &[RtkRule] = &[
         rtk_cmd: "rtk mvn",
         rewrite_prefixes: &["mvn"],
         category: "Build",
-        savings_pct: 70.0,
-        subcmd_savings: &[],
+        savings_pct: 80.0,
+        subcmd_savings: &[("test", 85.0), ("verify", 85.0)],
         subcmd_status: &[],
     },
     RtkRule {
