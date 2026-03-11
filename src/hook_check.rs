@@ -15,12 +15,22 @@ pub enum HookStatus {
 }
 
 /// Return the current hook status without printing anything.
+/// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
+    // Don't warn users who don't have Claude Code installed
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return HookStatus::Ok,
+    };
+    if !home.join(".claude").exists() {
+        return HookStatus::Ok;
+    }
+
     let Some(hook_path) = hook_installed_path() else {
         return HookStatus::Missing;
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
-        return HookStatus::Missing;
+        return HookStatus::Outdated; // exists but unreadable — treat as needs-update
     };
     if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
         HookStatus::Ok
@@ -66,11 +76,11 @@ fn check_and_warn() -> Option<()> {
         }
     }
 
-    // Touch marker
+    eprintln!("{}", warning);
+
+    // Touch marker after warning is printed
     let _ = std::fs::create_dir_all(marker.parent()?);
     let _ = std::fs::write(&marker, b"");
-
-    eprintln!("{}", warning);
 
     Some(())
 }
@@ -124,17 +134,26 @@ mod tests {
     }
 
     #[test]
-    fn test_status_missing_when_no_hook() {
-        // When hook file doesn't exist, status should be Missing
-        // (tested implicitly — hook_installed_path returns None for non-existent paths)
+    fn test_parse_hook_version_no_tag() {
+        // Content without version tag returns 0
         assert_eq!(parse_hook_version("no version here"), 0);
     }
 
     #[test]
     fn test_hook_status_variants() {
-        // Verify enum derives work
         assert_ne!(HookStatus::Ok, HookStatus::Missing);
         assert_ne!(HookStatus::Outdated, HookStatus::Missing);
         assert_eq!(HookStatus::Ok, HookStatus::Ok);
+    }
+
+    #[test]
+    fn test_status_returns_ok_or_outdated_when_hook_exists() {
+        // On this dev machine the hook should exist — verify status() works end-to-end
+        let s = status();
+        assert!(
+            s == HookStatus::Ok || s == HookStatus::Outdated,
+            "Expected Ok or Outdated on dev machine, got {:?}",
+            s
+        );
     }
 }
