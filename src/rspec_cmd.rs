@@ -119,9 +119,46 @@ fn extract_failures_from_json(json: &RspecJsonOutput) -> Vec<TestFailure> {
         .collect()
 }
 
-fn extract_stats_regex(_output: &str) -> Option<TestResult> {
-    // Placeholder — implemented in Task 3
-    None
+fn extract_stats_regex(output: &str) -> Option<TestResult> {
+    lazy_static::lazy_static! {
+        static ref SUMMARY_RE: regex::Regex = regex::Regex::new(
+            r"(\d+) examples?, (\d+) failures?(?:, (\d+) pending)?"
+        ).unwrap();
+    }
+
+    if let Some(caps) = SUMMARY_RE.captures(output) {
+        let total: usize = caps.get(1)?.as_str().parse().ok()?;
+        let failed: usize = caps.get(2)?.as_str().parse().ok()?;
+        let skipped: usize = caps
+            .get(3)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
+        let passed = total.saturating_sub(failed).saturating_sub(skipped);
+
+        Some(TestResult {
+            total,
+            passed,
+            failed,
+            skipped,
+            duration_ms: extract_duration(output),
+            failures: Vec::new(),
+        })
+    } else {
+        None
+    }
+}
+
+fn extract_duration(output: &str) -> Option<u64> {
+    lazy_static::lazy_static! {
+        static ref DURATION_RE: regex::Regex = regex::Regex::new(
+            r"Finished in ([\d.]+) seconds?"
+        ).unwrap();
+    }
+
+    DURATION_RE.captures(output).and_then(|caps| {
+        let secs: f64 = caps.get(1)?.as_str().parse().ok()?;
+        Some((secs * 1000.0) as u64)
+    })
 }
 
 #[cfg(test)]
@@ -333,5 +370,55 @@ mod tests {
         assert_eq!(data.failures.len(), 1);
         assert!(data.failures[0].stack_trace.is_none());
         assert!(data.failures[0].error_message.contains("Something went wrong"));
+    }
+
+    #[test]
+    fn test_rspec_parser_progress_format_fallback() {
+        let progress = r#"..F.
+
+Failures:
+
+  1) User#valid? should validate presence
+     Failure/Error: expect(user.valid?).to eq(true)
+
+       expected: true
+            got: false
+
+     # ./spec/models/user_spec.rb:10:in `block (2 levels)'
+
+Finished in 0.05 seconds (files took 1.2 seconds to load)
+4 examples, 1 failure"#;
+
+        let result = RspecParser::parse(progress);
+        assert_eq!(result.tier(), 2);
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert_eq!(data.total, 4);
+        assert_eq!(data.failed, 1);
+        assert_eq!(data.passed, 3);
+    }
+
+    #[test]
+    fn test_rspec_parser_progress_all_pass() {
+        let progress = "......\n\nFinished in 0.03 seconds\n6 examples, 0 failures";
+
+        let result = RspecParser::parse(progress);
+        assert_eq!(result.tier(), 2);
+        let data = result.unwrap();
+        assert_eq!(data.total, 6);
+        assert_eq!(data.passed, 6);
+        assert_eq!(data.failed, 0);
+    }
+
+    #[test]
+    fn test_rspec_parser_progress_with_pending() {
+        let progress = "..*..\n\nFinished in 0.04 seconds\n5 examples, 0 failures, 1 pending";
+
+        let result = RspecParser::parse(progress);
+        assert_eq!(result.tier(), 2);
+        let data = result.unwrap();
+        assert_eq!(data.total, 5);
+        assert_eq!(data.skipped, 1);
+        assert_eq!(data.passed, 4);
     }
 }
