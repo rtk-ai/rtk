@@ -366,14 +366,8 @@ fn run_log(
 
     // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
     let (limit, user_set_limit) = if has_limit_flag {
-        // User explicitly passed -N → respect their choice
-        let n = args
-            .iter()
-            .find(|arg| {
-                arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
-            })
-            .and_then(|arg| arg[1..].parse::<usize>().ok())
-            .unwrap_or(10);
+        // User explicitly passed -N / -n N / --max-count=N → respect their choice
+        let n = parse_user_limit(args).unwrap_or(10);
         (n, true)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
@@ -428,7 +422,46 @@ fn run_log(
 }
 
 /// Filter git log output: truncate long messages, cap lines
-///
+/// Parse the user-specified limit from git log args.
+/// Handles: -20, -n 20, --max-count=20, --max-count 20
+fn parse_user_limit(args: &[String]) -> Option<usize> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        // -20 (combined digit form)
+        if arg.starts_with('-')
+            && arg.len() > 1
+            && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+        {
+            if let Ok(n) = arg[1..].parse::<usize>() {
+                return Some(n);
+            }
+        }
+        // -n 20 (two-token form)
+        if arg == "-n" {
+            if let Some(next) = iter.next() {
+                if let Ok(n) = next.parse::<usize>() {
+                    return Some(n);
+                }
+            }
+        }
+        // --max-count=20
+        if let Some(rest) = arg.strip_prefix("--max-count=") {
+            if let Ok(n) = rest.parse::<usize>() {
+                return Some(n);
+            }
+        }
+        // --max-count 20 (two-token form)
+        if arg == "--max-count" {
+            if let Some(next) = iter.next() {
+                if let Ok(n) = next.parse::<usize>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// When `user_set_limit` is true, the user explicitly passed `-N` to git log,
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
@@ -1702,6 +1735,60 @@ M  file7.rs
         assert!(
             !result_user.contains("..."),
             "User limit should not truncate 90-char line"
+        );
+    }
+
+    #[test]
+    fn test_parse_user_limit_combined() {
+        let args: Vec<String> = vec!["-20".into()];
+        assert_eq!(parse_user_limit(&args), Some(20));
+    }
+
+    #[test]
+    fn test_parse_user_limit_n_space() {
+        let args: Vec<String> = vec!["-n".into(), "15".into()];
+        assert_eq!(parse_user_limit(&args), Some(15));
+    }
+
+    #[test]
+    fn test_parse_user_limit_max_count_eq() {
+        let args: Vec<String> = vec!["--max-count=30".into()];
+        assert_eq!(parse_user_limit(&args), Some(30));
+    }
+
+    #[test]
+    fn test_parse_user_limit_max_count_space() {
+        let args: Vec<String> = vec!["--max-count".into(), "25".into()];
+        assert_eq!(parse_user_limit(&args), Some(25));
+    }
+
+    #[test]
+    fn test_parse_user_limit_none() {
+        let args: Vec<String> = vec!["--oneline".into()];
+        assert_eq!(parse_user_limit(&args), None);
+    }
+
+    #[test]
+    fn test_filter_log_output_token_savings() {
+        fn count_tokens(text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+        // Simulate verbose git log output (default format with full metadata)
+        let input = (0..20)
+            .map(|i| {
+                format!(
+                    "commit abc123{:02x}\nAuthor: User Name <user@example.com>\nDate:   Mon Mar 10 10:00:00 2026 +0000\n\n    fix: commit message number {}\n\n    Extended body with details about the change.\n",
+                    i, i
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = filter_log_output(&input, 10, false);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected ≥60% token savings, got {:.1}%",
+            savings
         );
     }
 
