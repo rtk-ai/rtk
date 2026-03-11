@@ -41,6 +41,8 @@ pub const PATTERNS: &[&str] = &[
     r"^ruff\s+(check|format)",
     r"^(python\s+-m\s+)?pytest(\s|$)",
     r"^(pip3?|uv\s+pip)\s+(list|outdated|install)",
+    // Ruby tooling
+    r"^(bundle\s+exec\s+)?rspec(\s|$)",
     // Go tooling
     r"^go\s+(test|build|vet)",
     r"^golangci-lint(\s|$)",
@@ -313,6 +315,15 @@ pub const RULES: &[RtkRule] = &[
         category: "Python",
         savings_pct: 75.0,
         subcmd_savings: &[("list", 75.0), ("outdated", 80.0)],
+        subcmd_status: &[],
+    },
+    // Ruby tooling
+    RtkRule {
+        rtk_cmd: "rtk rspec",
+        rewrite_prefixes: &["bundle exec rspec", "bin/rspec", "rspec"],
+        category: "Ruby",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
         subcmd_status: &[],
     },
     // Go tooling

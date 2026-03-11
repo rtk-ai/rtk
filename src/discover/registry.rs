@@ -1637,6 +1637,46 @@ mod tests {
         );
     }
 
+    // --- Ruby tooling ---
+
+    #[test]
+    fn test_classify_rspec() {
+        assert!(matches!(
+            classify_command("rspec spec/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk rspec",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_bundle_exec_rspec() {
+        assert!(matches!(
+            classify_command("bundle exec rspec spec/models/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk rspec",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_rspec() {
+        assert_eq!(
+            rewrite_command("rspec spec/", &[]),
+            Some("rtk rspec spec/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bundle_exec_rspec() {
+        assert_eq!(
+            rewrite_command("bundle exec rspec spec/models/ --tag focus", &[]),
+            Some("rtk rspec spec/models/ --tag focus".into())
+        );
+    }
+
     // --- Go tooling ---
 
     #[test]
