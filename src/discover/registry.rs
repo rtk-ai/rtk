@@ -262,6 +262,25 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     results
 }
 
+/// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
+pub fn has_rtk_disabled_prefix(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    let prefix_len = trimmed.len() - stripped.len();
+    let prefix_part = &trimmed[..prefix_len];
+    prefix_part.contains("RTK_DISABLED=")
+}
+
+/// Strip RTK_DISABLED=X and other env prefixes, return the actual command.
+pub fn strip_disabled_prefix(cmd: &str) -> &str {
+    let trimmed = cmd.trim();
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    // stripped is a Cow<str> that borrows from trimmed when no replacement happens.
+    // We need to return a &str into the original, so compute the offset.
+    let prefix_len = trimmed.len() - stripped.len();
+    trimmed[prefix_len..].trim_start()
+}
+
 /// Rewrite a raw command to its RTK equivalent.
 ///
 /// Returns `Some(rewritten)` if the command has an RTK equivalent or is already RTK.
@@ -496,7 +515,7 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let cmd_clean = stripped_cow.trim();
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
-    if env_prefix.contains("RTK_DISABLED=") {
+    if has_rtk_disabled_prefix(trimmed) {
         return None;
     }
 
@@ -1894,5 +1913,32 @@ mod tests {
             rewrite_command("gh pr list", &[]),
             Some("rtk gh pr list".into())
         );
+    }
+
+    // --- #508: RTK_DISABLED detection helpers ---
+
+    #[test]
+    fn test_has_rtk_disabled_prefix() {
+        assert!(has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert!(has_rtk_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"));
+        assert!(has_rtk_disabled_prefix(
+            "RTK_DISABLED=true git log --oneline"
+        ));
+        assert!(!has_rtk_disabled_prefix("git status"));
+        assert!(!has_rtk_disabled_prefix("rtk git status"));
+        assert!(!has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix() {
+        assert_eq!(
+            strip_disabled_prefix("RTK_DISABLED=1 git status"),
+            "git status"
+        );
+        assert_eq!(
+            strip_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
+            "cargo test"
+        );
+        assert_eq!(strip_disabled_prefix("git status"), "git status");
     }
 }

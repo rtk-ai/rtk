@@ -19,6 +19,8 @@ secrets.json
 *.swo
 *~
 
+.next
+
 # OS
 .DS_Store
 Thumbs.db
@@ -40,3 +42,6 @@ claudedocs
 # Vitals provenance data
 .vitals/
 .worktrees/
+
+# icm 
+.fastembed_cache/
