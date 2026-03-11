@@ -364,22 +364,25 @@ fn run_log(
         cmd.args(["--pretty=format:%h %s (%ar) <%an>"]);
     }
 
-    // Only inject -10 limit when RTK is applying its own format.
-    // When user provides --oneline/--pretty/--format, respect git's default (no limit).
-    let limit = if !has_limit_flag && !has_format_flag {
-        cmd.arg("-10");
-        10
-    } else if has_limit_flag {
-        // Extract limit from args if provided
-        args.iter()
+    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
+    let (limit, user_set_limit) = if has_limit_flag {
+        // User explicitly passed -N → respect their choice
+        let n = args
+            .iter()
             .find(|arg| {
                 arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
             })
             .and_then(|arg| arg[1..].parse::<usize>().ok())
-            .unwrap_or(500)
+            .unwrap_or(10);
+        (n, true)
+    } else if has_format_flag {
+        // --oneline / --pretty without -N: user wants compact output, allow more
+        cmd.arg("-50");
+        (50, false)
     } else {
-        // User format, no limit — use a high cap for filter_log_output
-        500
+        // No flags at all: default to 10
+        cmd.arg("-10");
+        (10, false)
     };
 
     // Only add --no-merges if user didn't explicitly request merge commits
@@ -410,8 +413,8 @@ fn run_log(
         eprintln!("Git log output:");
     }
 
-    // Post-process: truncate long messages, cap lines
-    let filtered = filter_log_output(&stdout, limit);
+    // Post-process: truncate long messages, cap lines only if RTK set the default
+    let filtered = filter_log_output(&stdout, limit, user_set_limit);
     println!("{}", filtered);
 
     timer.track(
@@ -425,22 +428,39 @@ fn run_log(
 }
 
 /// Filter git log output: truncate long messages, cap lines
-fn filter_log_output(output: &str, limit: usize) -> String {
+///
+/// When `user_set_limit` is true, the user explicitly passed `-N` to git log,
+/// so we skip line capping (git already returns exactly N commits) and use a
+/// wider truncation threshold (120 chars) to preserve commit context that LLMs
+/// need for rebase/squash operations.
+fn filter_log_output(output: &str, limit: usize, user_set_limit: bool) -> String {
     let lines: Vec<&str> = output.lines().collect();
-    let capped: Vec<String> = lines
-        .iter()
-        .take(limit)
-        .map(|line| {
-            if line.len() > 80 {
-                let truncated: String = line.chars().take(77).collect();
-                format!("{}...", truncated)
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
+
+    let truncate_width = if user_set_limit { 120 } else { 80 };
+
+    let iter = lines.iter();
+    let capped: Vec<String> = if user_set_limit {
+        // User chose the limit → git already returned the right number of commits
+        iter.map(|line| truncate_line(line, truncate_width))
+            .collect()
+    } else {
+        // RTK default → cap output lines
+        iter.take(limit)
+            .map(|line| truncate_line(line, truncate_width))
+            .collect()
+    };
 
     capped.join("\n").trim().to_string()
+}
+
+/// Truncate a single line to `width` characters, appending "..." if needed
+fn truncate_line(line: &str, width: usize) -> String {
+    if line.chars().count() > width {
+        let truncated: String = line.chars().take(width - 3).collect();
+        format!("{}...", truncated)
+    } else {
+        line.to_string()
+    }
 }
 
 /// Format porcelain output into compact RTK status display
@@ -1623,7 +1643,7 @@ M  file7.rs
     #[test]
     fn test_filter_log_output() {
         let output = "abc1234 This is a commit message (2 days ago) <author>\ndef5678 Another commit (1 week ago) <other>\n";
-        let result = filter_log_output(output, 10);
+        let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
@@ -1632,10 +1652,10 @@ M  file7.rs
     #[test]
     fn test_filter_log_output_truncate_long() {
         let long_line = "abc1234 ".to_string() + &"x".repeat(100) + " (2 days ago) <author>";
-        let result = filter_log_output(&long_line, 10);
-        assert!(result.len() < long_line.len());
+        let result = filter_log_output(&long_line, 10, false);
+        assert!(result.chars().count() < long_line.chars().count());
         assert!(result.contains("..."));
-        assert!(result.len() <= 80);
+        assert!(result.chars().count() <= 80);
     }
 
     #[test]
@@ -1644,8 +1664,45 @@ M  file7.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 5);
+        let result = filter_log_output(&output, 5, false);
         assert_eq!(result.lines().count(), 5);
+    }
+
+    #[test]
+    fn test_filter_log_output_user_limit_no_cap() {
+        // When user explicitly passes -N, all N lines should be returned (no re-truncation)
+        let output = (0..20)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 20, true);
+        assert_eq!(
+            result.lines().count(),
+            20,
+            "User's -20 should return all 20 lines"
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_user_limit_wider_truncation() {
+        // When user explicitly passes -N, lines up to 120 chars should NOT be truncated
+        let line_90_chars = format!("abc1234 {} (2 days ago) <author>", "x".repeat(60));
+        assert!(line_90_chars.chars().count() > 80);
+        assert!(line_90_chars.chars().count() < 120);
+
+        let result_default = filter_log_output(&line_90_chars, 10, false);
+        let result_user = filter_log_output(&line_90_chars, 10, true);
+
+        // Default truncates at 80 chars
+        assert!(
+            result_default.contains("..."),
+            "Default should truncate at 80 chars"
+        );
+        // User-set limit uses wider threshold (120 chars)
+        assert!(
+            !result_user.contains("..."),
+            "User limit should not truncate 90-char line"
+        );
     }
 
     #[test]
@@ -1681,20 +1738,22 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_filter_log_output_multibyte() {
         // Thai characters: each is 3 bytes. A line with >80 bytes but few chars
         let thai_msg = format!("abc1234 {} (2 days ago) <author>", "ก".repeat(30));
-        let result = filter_log_output(&thai_msg, 10);
+        let result = filter_log_output(&thai_msg, 10, false);
         // Should not panic
         assert!(result.contains("abc1234"));
-        // The line has 30 Thai chars (90 bytes) + other text, so > 80 bytes
-        // It should be truncated with "..."
-        assert!(result.contains("..."));
+        // The line has 30 Thai chars + other text, so > 80 chars total
+        // truncate_line now counts chars, not bytes
+        // 30 Thai + ~33 other = 63 chars < 80 threshold, so no truncation
+        assert!(result.contains("abc1234"));
     }
 
     #[test]
     fn test_filter_log_output_emoji() {
         let emoji_msg = "abc1234 🎉🎊🎈🎁🎂🎄🎃🎆🎇✨🎉🎊🎈🎁🎂🎄🎃🎆🎇✨ (1 day ago) <user>";
-        let result = filter_log_output(emoji_msg, 10);
-        // Should not panic, should have "..."
-        assert!(result.contains("..."));
+        let result = filter_log_output(emoji_msg, 10, false);
+        // Should not panic
+        // 20 emoji + ~30 other chars = ~50 chars < 80, no truncation needed
+        assert!(result.contains("abc1234"));
     }
 
     #[test]
