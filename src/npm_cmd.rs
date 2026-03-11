@@ -2,6 +2,75 @@ use crate::tracking;
 use anyhow::{Context, Result};
 use std::process::Command;
 
+/// Known npm subcommands that should NOT get "run" injected.
+/// Shared between production code and tests to avoid drift.
+const NPM_SUBCOMMANDS: &[&str] = &[
+    "install",
+    "i",
+    "ci",
+    "uninstall",
+    "remove",
+    "rm",
+    "update",
+    "up",
+    "list",
+    "ls",
+    "outdated",
+    "init",
+    "create",
+    "publish",
+    "pack",
+    "link",
+    "audit",
+    "fund",
+    "exec",
+    "explain",
+    "why",
+    "search",
+    "view",
+    "info",
+    "show",
+    "config",
+    "set",
+    "get",
+    "cache",
+    "prune",
+    "dedupe",
+    "doctor",
+    "help",
+    "version",
+    "prefix",
+    "root",
+    "bin",
+    "bugs",
+    "docs",
+    "home",
+    "repo",
+    "ping",
+    "whoami",
+    "token",
+    "profile",
+    "team",
+    "access",
+    "owner",
+    "deprecate",
+    "dist-tag",
+    "star",
+    "stars",
+    "login",
+    "logout",
+    "adduser",
+    "unpublish",
+    "pkg",
+    "diff",
+    "rebuild",
+    "test",
+    "t",
+    "start",
+    "stop",
+    "restart",
+];
+
 pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
@@ -9,77 +78,10 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
 
     // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
     // Only inject "run" when args look like a script name, not a known npm subcommand.
-    let npm_subcommands = [
-        "install",
-        "i",
-        "ci",
-        "uninstall",
-        "remove",
-        "rm",
-        "update",
-        "up",
-        "list",
-        "ls",
-        "outdated",
-        "init",
-        "create",
-        "publish",
-        "pack",
-        "link",
-        "audit",
-        "fund",
-        "exec",
-        "explain",
-        "why",
-        "search",
-        "view",
-        "info",
-        "show",
-        "config",
-        "set",
-        "get",
-        "cache",
-        "prune",
-        "dedupe",
-        "doctor",
-        "help",
-        "version",
-        "prefix",
-        "root",
-        "bin",
-        "bugs",
-        "docs",
-        "home",
-        "repo",
-        "ping",
-        "whoami",
-        "token",
-        "profile",
-        "team",
-        "access",
-        "owner",
-        "deprecate",
-        "dist-tag",
-        "star",
-        "stars",
-        "login",
-        "logout",
-        "adduser",
-        "unpublish",
-        "pkg",
-        "diff",
-        "rebuild",
-        "test",
-        "t",
-        "start",
-        "stop",
-        "restart",
-    ];
-
     let first_arg = args.first().map(|s| s.as_str());
     let is_run_explicit = first_arg == Some("run");
     let is_npm_subcommand = first_arg
-        .map(|a| npm_subcommands.contains(&a) || a.starts_with('-'))
+        .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
         .unwrap_or(false);
 
     let effective_args = if is_run_explicit {
@@ -189,88 +191,20 @@ npm notice
 
     #[test]
     fn test_npm_subcommand_routing() {
-        // Test the actual routing logic used in run()
-        let npm_subcommands = [
-            "install",
-            "i",
-            "ci",
-            "uninstall",
-            "remove",
-            "rm",
-            "update",
-            "up",
-            "list",
-            "ls",
-            "outdated",
-            "init",
-            "create",
-            "publish",
-            "pack",
-            "link",
-            "audit",
-            "fund",
-            "exec",
-            "explain",
-            "why",
-            "search",
-            "view",
-            "info",
-            "show",
-            "config",
-            "set",
-            "get",
-            "cache",
-            "prune",
-            "dedupe",
-            "doctor",
-            "help",
-            "version",
-            "prefix",
-            "root",
-            "bin",
-            "bugs",
-            "docs",
-            "home",
-            "repo",
-            "ping",
-            "whoami",
-            "token",
-            "profile",
-            "team",
-            "access",
-            "owner",
-            "deprecate",
-            "dist-tag",
-            "star",
-            "stars",
-            "login",
-            "logout",
-            "adduser",
-            "unpublish",
-            "pkg",
-            "diff",
-            "rebuild",
-            "test",
-            "t",
-            "start",
-            "stop",
-            "restart",
-        ];
-        // Helper: simulate the routing logic from run()
-        fn needs_run_injection(args: &[&str], subcommands: &[&str]) -> bool {
+        // Uses the shared NPM_SUBCOMMANDS constant — no drift between prod and test
+        fn needs_run_injection(args: &[&str]) -> bool {
             let first = args.first().copied();
             let is_run_explicit = first == Some("run");
             let is_subcommand = first
-                .map(|a| subcommands.contains(&a) || a.starts_with('-'))
+                .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
                 .unwrap_or(false);
-            // "run" injection happens when: explicit "run" OR unknown script name
             !is_run_explicit && !is_subcommand
         }
 
         // Known subcommands should NOT get "run" injected
-        for subcmd in &npm_subcommands {
+        for subcmd in NPM_SUBCOMMANDS {
             assert!(
-                !needs_run_injection(&[subcmd], &npm_subcommands),
+                !needs_run_injection(&[subcmd]),
                 "'npm {}' should NOT inject 'run'",
                 subcmd
             );
@@ -279,18 +213,18 @@ npm notice
         // Script names SHOULD get "run" injected
         for script in &["build", "dev", "lint", "typecheck", "deploy"] {
             assert!(
-                needs_run_injection(&[script], &npm_subcommands),
+                needs_run_injection(&[script]),
                 "'npm {}' SHOULD inject 'run'",
                 script
             );
         }
 
         // Flags should NOT get "run" injected
-        assert!(!needs_run_injection(&["--version"], &npm_subcommands));
-        assert!(!needs_run_injection(&["-h"], &npm_subcommands));
+        assert!(!needs_run_injection(&["--version"]));
+        assert!(!needs_run_injection(&["-h"]));
 
         // Explicit "run" should NOT inject another "run"
-        assert!(!needs_run_injection(&["run", "build"], &npm_subcommands));
+        assert!(!needs_run_injection(&["run", "build"]));
     }
 
     #[test]

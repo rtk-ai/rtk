@@ -352,7 +352,7 @@ pub const RULES: &[RtkRule] = &[
     },
     // TOML-filtered commands
     RtkRule {
-        rtk_cmd: "rtk proxy ansible-playbook",
+        rtk_cmd: "rtk ansible-playbook",
         rewrite_prefixes: &["ansible-playbook"],
         category: "Infra",
         savings_pct: 70.0,
@@ -360,7 +360,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy brew",
+        rtk_cmd: "rtk brew",
         rewrite_prefixes: &["brew"],
         category: "PackageManager",
         savings_pct: 65.0,
@@ -368,7 +368,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy composer",
+        rtk_cmd: "rtk composer",
         rewrite_prefixes: &["composer"],
         category: "PackageManager",
         savings_pct: 65.0,
@@ -376,7 +376,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy df",
+        rtk_cmd: "rtk df",
         rewrite_prefixes: &["df"],
         category: "System",
         savings_pct: 60.0,
@@ -384,7 +384,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy dotnet",
+        rtk_cmd: "rtk dotnet",
         rewrite_prefixes: &["dotnet"],
         category: "Build",
         savings_pct: 70.0,
@@ -392,7 +392,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy du",
+        rtk_cmd: "rtk du",
         rewrite_prefixes: &["du"],
         category: "System",
         savings_pct: 60.0,
@@ -400,7 +400,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy fail2ban-client",
+        rtk_cmd: "rtk fail2ban-client",
         rewrite_prefixes: &["fail2ban-client"],
         category: "Infra",
         savings_pct: 60.0,
@@ -408,7 +408,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy gcloud",
+        rtk_cmd: "rtk gcloud",
         rewrite_prefixes: &["gcloud"],
         category: "Infra",
         savings_pct: 65.0,
@@ -416,7 +416,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy hadolint",
+        rtk_cmd: "rtk hadolint",
         rewrite_prefixes: &["hadolint"],
         category: "Build",
         savings_pct: 65.0,
@@ -424,7 +424,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy helm",
+        rtk_cmd: "rtk helm",
         rewrite_prefixes: &["helm"],
         category: "Infra",
         savings_pct: 65.0,
@@ -432,7 +432,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy iptables",
+        rtk_cmd: "rtk iptables",
         rewrite_prefixes: &["iptables"],
         category: "Infra",
         savings_pct: 60.0,
@@ -440,7 +440,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy make",
+        rtk_cmd: "rtk make",
         rewrite_prefixes: &["make"],
         category: "Build",
         savings_pct: 65.0,
@@ -448,7 +448,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy markdownlint",
+        rtk_cmd: "rtk markdownlint",
         rewrite_prefixes: &["markdownlint"],
         category: "Build",
         savings_pct: 65.0,
@@ -456,7 +456,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy mix",
+        rtk_cmd: "rtk mix",
         rewrite_prefixes: &["mix"],
         category: "Build",
         savings_pct: 65.0,
@@ -464,7 +464,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy mvn",
+        rtk_cmd: "rtk mvn",
         rewrite_prefixes: &["mvn"],
         category: "Build",
         savings_pct: 70.0,
@@ -472,7 +472,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy ping",
+        rtk_cmd: "rtk ping",
         rewrite_prefixes: &["ping"],
         category: "Network",
         savings_pct: 60.0,
@@ -480,7 +480,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy pio",
+        rtk_cmd: "rtk pio",
         rewrite_prefixes: &["pio"],
         category: "Build",
         savings_pct: 65.0,
@@ -488,7 +488,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy poetry",
+        rtk_cmd: "rtk poetry",
         rewrite_prefixes: &["poetry"],
         category: "Python",
         savings_pct: 65.0,
@@ -496,7 +496,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy pre-commit",
+        rtk_cmd: "rtk pre-commit",
         rewrite_prefixes: &["pre-commit"],
         category: "Build",
         savings_pct: 65.0,
@@ -504,7 +504,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy ps",
+        rtk_cmd: "rtk ps",
         rewrite_prefixes: &["ps"],
         category: "System",
         savings_pct: 60.0,
@@ -512,7 +512,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy quarto",
+        rtk_cmd: "rtk quarto",
         rewrite_prefixes: &["quarto"],
         category: "Build",
         savings_pct: 65.0,
@@ -520,7 +520,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy rsync",
+        rtk_cmd: "rtk rsync",
         rewrite_prefixes: &["rsync"],
         category: "Network",
         savings_pct: 65.0,
@@ -528,7 +528,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy shellcheck",
+        rtk_cmd: "rtk shellcheck",
         rewrite_prefixes: &["shellcheck"],
         category: "Build",
         savings_pct: 65.0,
@@ -536,7 +536,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy shopify",
+        rtk_cmd: "rtk shopify",
         rewrite_prefixes: &["shopify"],
         category: "Build",
         savings_pct: 65.0,
@@ -544,7 +544,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy sops",
+        rtk_cmd: "rtk sops",
         rewrite_prefixes: &["sops"],
         category: "Infra",
         savings_pct: 60.0,
@@ -552,7 +552,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy swift",
+        rtk_cmd: "rtk swift",
         rewrite_prefixes: &["swift"],
         category: "Build",
         savings_pct: 65.0,
@@ -560,7 +560,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy systemctl",
+        rtk_cmd: "rtk systemctl",
         rewrite_prefixes: &["systemctl"],
         category: "System",
         savings_pct: 65.0,
@@ -568,7 +568,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy terraform",
+        rtk_cmd: "rtk terraform",
         rewrite_prefixes: &["terraform"],
         category: "Infra",
         savings_pct: 70.0,
@@ -576,7 +576,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy tofu",
+        rtk_cmd: "rtk tofu",
         rewrite_prefixes: &["tofu"],
         category: "Infra",
         savings_pct: 70.0,
@@ -584,7 +584,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy trunk",
+        rtk_cmd: "rtk trunk",
         rewrite_prefixes: &["trunk"],
         category: "Build",
         savings_pct: 65.0,
@@ -592,7 +592,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy uv",
+        rtk_cmd: "rtk uv",
         rewrite_prefixes: &["uv"],
         category: "Python",
         savings_pct: 65.0,
@@ -600,7 +600,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        rtk_cmd: "rtk proxy yamllint",
+        rtk_cmd: "rtk yamllint",
         rewrite_prefixes: &["yamllint"],
         category: "Build",
         savings_pct: 65.0,
