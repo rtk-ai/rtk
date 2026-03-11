@@ -1109,6 +1109,33 @@ enum GtCommands {
     Other(Vec<OsString>),
 }
 
+/// Split a string into shell-like tokens, respecting single and double quotes.
+/// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
+fn shell_split(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ' ' | '\t' if !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
 fn main() -> Result<()> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     telemetry::maybe_ping();
@@ -1857,15 +1884,16 @@ fn main() -> Result<()> {
 
             let timer = tracking::TimedExecution::start();
 
-            // If a single quoted arg contains spaces, split it (#388).
+            // If a single quoted arg contains spaces, split it respecting quotes (#388).
             // e.g. rtk proxy 'head -50 file.php' → cmd=head, args=["-50", "file.php"]
+            // e.g. rtk proxy 'git log --format="%H %s"' → cmd=git, args=["log", "--format=%H %s"]
             let (cmd_name, cmd_args): (String, Vec<String>) = if args.len() == 1 {
                 let full = args[0].to_string_lossy();
-                let parts: Vec<&str> = full.split_whitespace().collect();
+                let parts = shell_split(&full);
                 if parts.len() > 1 {
                     (
-                        parts[0].to_string(),
-                        parts[1..].iter().map(|s| s.to_string()).collect(),
+                        parts[0].clone(),
+                        parts[1..].to_vec(),
                     )
                 } else {
                     (full.into_owned(), vec![])
@@ -2283,4 +2311,37 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_shell_split_simple() {
+        assert_eq!(shell_split("head -50 file.php"), vec!["head", "-50", "file.php"]);
+    }
+
+    #[test]
+    fn test_shell_split_double_quotes() {
+        assert_eq!(
+            shell_split(r#"git log --format="%H %s""#),
+            vec!["git", "log", "--format=%H %s"]
+        );
+    }
+
+    #[test]
+    fn test_shell_split_single_quotes() {
+        assert_eq!(
+            shell_split("grep -r 'hello world' ."),
+            vec!["grep", "-r", "hello world", "."]
+        );
+    }
+
+    #[test]
+    fn test_shell_split_single_word() {
+        assert_eq!(shell_split("ls"), vec!["ls"]);
+    }
+
+    #[test]
+    fn test_shell_split_empty() {
+        let result: Vec<String> = shell_split("");
+        assert!(result.is_empty());
+    }
 }
+

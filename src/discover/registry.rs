@@ -81,8 +81,11 @@ pub fn classify_command(cmd: &str) -> Classification {
         || cmd_clean.starts_with("head ")
         || cmd_clean.starts_with("tail ")
     {
-        let after_cmd = cmd_clean.split_whitespace().nth(1).unwrap_or("");
-        if after_cmd.starts_with('>') || after_cmd.starts_with('<') || after_cmd.starts_with('|') {
+        let has_redirect = cmd_clean
+            .split_whitespace()
+            .skip(1)
+            .any(|t| t.starts_with('>') || t == "<" || t.starts_with(">>"));
+        if has_redirect {
             return Classification::Unsupported {
                 base_command: cmd_clean
                     .split_whitespace()
@@ -612,17 +615,21 @@ mod tests {
     #[test]
     fn test_classify_cat_redirect_not_supported() {
         // cat > file and cat >> file are writes, not reads — should not be classified as supported
-        match classify_command("cat > /tmp/output.txt") {
-            Classification::Supported { .. } => {
-                panic!("cat > should NOT be classified as Supported")
+        let write_commands = [
+            "cat > /tmp/output.txt",
+            "cat >> /tmp/output.txt",
+            "cat file.txt > output.txt",
+            "cat -n file.txt >> log.txt",
+            "head -10 README.md > output.txt",
+            "tail -f app.log > /dev/null",
+        ];
+        for cmd in &write_commands {
+            match classify_command(cmd) {
+                Classification::Supported { .. } => {
+                    panic!("{} should NOT be classified as Supported", cmd)
+                }
+                _ => {} // Unsupported or Ignored is fine
             }
-            _ => {} // Unsupported or Ignored is fine
-        }
-        match classify_command("cat >> /tmp/output.txt") {
-            Classification::Supported { .. } => {
-                panic!("cat >> should NOT be classified as Supported")
-            }
-            _ => {}
         }
     }
 
