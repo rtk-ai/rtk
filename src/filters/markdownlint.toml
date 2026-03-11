@@ -1,0 +1,24 @@
+[filters.markdownlint]
+description = "Compact markdownlint output — strip blank lines, limit rows"
+match_command = "^markdownlint\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 50
+truncate_lines_at = 120
+
+[[tests.markdownlint]]
+name = "linting errors stripped of blank lines"
+input = """
+README.md:1:1 MD041/first-line-heading/first-line-h1 First line in file should be a top level heading
+README.md:10:1 MD022/blanks-around-headings Headings should be surrounded by blank lines
+
+README.md:15:80 MD013/line-length Line length [Expected: 80; Actual: 95]
+"""
+expected = "README.md:1:1 MD041/first-line-heading/first-line-h1 First line in file should be a top level heading\nREADME.md:10:1 MD022/blanks-around-headings Headings should be surrounded by blank lines\nREADME.md:15:80 MD013/line-length Line length [Expected: 80; Actual: 95]"
+
+[[tests.markdownlint]]
+name = "empty input passes through"
+input = ""
+expected = ""

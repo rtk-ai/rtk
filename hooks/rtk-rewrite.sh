@@ -8,10 +8,12 @@
 # To add or change rewrite rules, edit the Rust registry — not this file.
 
 if ! command -v jq &>/dev/null; then
+  echo "[rtk] WARNING: jq is not installed. Hook cannot rewrite commands. Install jq: https://jqlang.github.io/jq/download/" >&2
   exit 0
 fi
 
 if ! command -v rtk &>/dev/null; then
+  echo "[rtk] WARNING: rtk is not installed or not in PATH. Hook cannot rewrite commands. Install: https://github.com/rtk-ai/rtk#installation" >&2
   exit 0
 fi
 

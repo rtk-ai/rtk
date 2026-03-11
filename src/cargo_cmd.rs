@@ -28,43 +28,38 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
     }
 }
 
-/// Split Clap-parsed args into (before_dd, after_dd) based on raw process args.
-///
-/// Clap with `trailing_var_arg=true` consumes the `--` separator — it does not
-/// appear in the captured args Vec. This function detects `--` in `raw_args` and
-/// returns the split point so callers can re-insert it when building a Command.
-///
-/// Returns `(args_before, Some(args_after))` if `--` was present, or
-/// `(all_args, None)` if not.
-fn split_at_double_dash<'a>(
-    raw_args: &[String],
-    subcommand: &str,
-    clap_args: &'a [String],
-) -> (&'a [String], Option<&'a [String]>) {
-    let sub_pos = raw_args.iter().position(|a| a == subcommand);
-    let dd_offset = sub_pos.and_then(|pos| raw_args[pos + 1..].iter().position(|a| a == "--"));
-    match dd_offset {
-        Some(offset) => {
-            let split = offset.min(clap_args.len());
-            (&clap_args[..split], Some(&clap_args[split..]))
-        }
-        None => (clap_args, None),
-    }
+/// Reconstruct args with `--` separator preserved from the original command line.
+/// Clap strips `--` from parsed args, but cargo subcommands need it to separate
+/// their own flags from test runner flags (e.g. `cargo test -- --nocapture`).
+fn restore_double_dash(args: &[String]) -> Vec<String> {
+    let raw_args: Vec<String> = std::env::args().collect();
+    restore_double_dash_with_raw(args, &raw_args)
 }
 
-/// Add args to a Command, re-inserting `--` if the user's original invocation had it.
-fn build_cargo_args(cmd: &mut Command, subcommand: &str, args: &[String]) {
-    let raw: Vec<String> = std::env::args().collect();
-    let (before, after) = split_at_double_dash(&raw, subcommand, args);
-    for arg in before {
-        cmd.arg(arg);
+/// Testable version that takes raw_args explicitly.
+fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<String> {
+    if args.is_empty() {
+        return args.to_vec();
     }
-    if let Some(after_args) = after {
-        cmd.arg("--");
-        for arg in after_args {
-            cmd.arg(arg);
-        }
-    }
+
+    // Find `--` in the original command line
+    let sep_pos = match raw_args.iter().position(|a| a == "--") {
+        Some(pos) => pos,
+        None => return args.to_vec(),
+    };
+
+    // Count how many of our parsed args appeared before `--` in the original.
+    // Args before `--` are positional (e.g. test name), args after are flags.
+    let args_before_sep = raw_args[..sep_pos]
+        .iter()
+        .filter(|a| args.contains(a))
+        .count();
+
+    let mut result = Vec::with_capacity(args.len() + 1);
+    result.extend_from_slice(&args[..args_before_sep]);
+    result.push("--".to_string());
+    result.extend_from_slice(&args[args_before_sep..]);
+    result
 }
 
 /// Generic cargo command runner with filtering
@@ -76,10 +71,14 @@ where
 
     let mut cmd = Command::new("cargo");
     cmd.arg(subcommand);
-    build_cargo_args(&mut cmd, subcommand, args);
+
+    let restored_args = restore_double_dash(args);
+    for arg in &restored_args {
+        cmd.arg(arg);
+    }
 
     if verbose > 0 {
-        eprintln!("Running: cargo {} {}", subcommand, args.join(" "));
+        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
     }
 
     let output = cmd
@@ -103,8 +102,8 @@ where
     }
 
     timer.track(
-        &format!("cargo {} {}", subcommand, args.join(" ")),
-        &format!("rtk cargo {} {}", subcommand, args.join(" ")),
+        &format!("cargo {} {}", subcommand, restored_args.join(" ")),
+        &format!("rtk cargo {} {}", subcommand, restored_args.join(" ")),
         &raw,
         &filtered,
     );
@@ -269,10 +268,13 @@ fn run_test(args: &[String], verbose: u8) -> Result<()> {
 
     let mut cmd = Command::new("cargo");
     cmd.arg("test");
-    build_cargo_args(&mut cmd, "test", args);
+    let restored_args = restore_double_dash(args);
+    for arg in &restored_args {
+        cmd.arg(arg);
+    }
 
     if verbose > 0 {
-        eprintln!("Running: cargo test {}", args.join(" "));
+        eprintln!("Running: cargo test {}", restored_args.join(" "));
     }
 
     let filter = CargoTestStreamFilter::new();
@@ -1168,6 +1170,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_restore_double_dash_with_separator() {
+        // rtk cargo test -- --nocapture → clap gives ["--nocapture"]
+        let args: Vec<String> = vec!["--nocapture".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "test".into(),
+            "--".into(),
+            "--nocapture".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert_eq!(result, vec!["--", "--nocapture"]);
+    }
+
+    #[test]
+    fn test_restore_double_dash_with_test_name() {
+        // rtk cargo test my_test -- --nocapture → clap gives ["my_test", "--nocapture"]
+        let args: Vec<String> = vec!["my_test".into(), "--nocapture".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "test".into(),
+            "my_test".into(),
+            "--".into(),
+            "--nocapture".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert_eq!(result, vec!["my_test", "--", "--nocapture"]);
+    }
+
+    #[test]
+    fn test_restore_double_dash_without_separator() {
+        // rtk cargo test my_test → no --, args unchanged
+        let args: Vec<String> = vec!["my_test".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "test".into(),
+            "my_test".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert_eq!(result, vec!["my_test"]);
+    }
+
+    #[test]
+    fn test_restore_double_dash_empty_args() {
+        let args: Vec<String> = vec![];
+        let raw = vec!["rtk".into(), "cargo".into(), "test".into()];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_restore_double_dash_clippy() {
+        // rtk cargo clippy -- -D warnings → clap gives ["-D", "warnings"]
+        let args: Vec<String> = vec!["-D".into(), "warnings".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "clippy".into(),
+            "--".into(),
+            "-D".into(),
+            "warnings".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert_eq!(result, vec!["--", "-D", "warnings"]);
+    }
+
+    #[test]
     fn test_filter_cargo_build_success() {
         let output = r#"   Compiling libc v0.2.153
    Compiling cfg-if v1.0.0
@@ -1921,72 +1992,93 @@ test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
         assert_eq!(f1.flush(), f2.flush());
     }
 
-    // ── split_at_double_dash tests ───────────────────────────────────────────
-
-    fn s(vals: &[&str]) -> Vec<String> {
-        vals.iter().map(|v| v.to_string()).collect()
-    }
+    // ── additional restore_double_dash edge case tests ─────────────────────
+    // (adapted from hooks-v2's split_at_double_dash tests to cover extra cases)
 
     #[test]
-    fn test_split_at_double_dash_present() {
+    fn test_restore_double_dash_with_flag_before_separator() {
         // rtk cargo test --lib -- --test-threads=1
-        let raw = s(&["rtk", "cargo", "test", "--lib", "--", "--test-threads=1"]);
-        let clap_args = s(&["--lib", "--test-threads=1"]);
-        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
-        assert_eq!(before, &[String::from("--lib")]);
-        assert_eq!(after.unwrap(), &[String::from("--test-threads=1")]);
+        // Clap gives ["--lib", "--test-threads=1"] (-- stripped)
+        let args = vec!["--lib".into(), "--test-threads=1".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "test".into(),
+            "--lib".into(),
+            "--".into(),
+            "--test-threads=1".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert_eq!(result, vec!["--lib", "--", "--test-threads=1"]);
     }
 
     #[test]
-    fn test_split_at_double_dash_absent() {
-        // rtk cargo test --lib
-        let raw = s(&["rtk", "cargo", "test", "--lib"]);
-        let clap_args = s(&["--lib"]);
-        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
-        assert_eq!(before, &[String::from("--lib")]);
-        assert!(after.is_none());
-    }
-
-    #[test]
-    fn test_split_at_double_dash_no_args_before() {
-        // rtk cargo test -- --ignored
-        let raw = s(&["rtk", "cargo", "test", "--", "--ignored"]);
-        let clap_args = s(&["--ignored"]);
-        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
-        assert!(before.is_empty());
-        assert_eq!(after.unwrap(), &[String::from("--ignored")]);
-    }
-
-    #[test]
-    fn test_split_at_double_dash_no_args_after() {
+    fn test_restore_double_dash_bare_separator_no_args_after() {
         // rtk cargo test --lib --  (bare -- with nothing after)
-        let raw = s(&["rtk", "cargo", "test", "--lib", "--"]);
-        let clap_args = s(&["--lib"]);
-        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
-        assert_eq!(before, &[String::from("--lib")]);
-        assert_eq!(after.unwrap(), &[] as &[String]);
+        // Clap gives ["--lib"] (-- stripped, nothing after it)
+        let args = vec!["--lib".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "test".into(),
+            "--lib".into(),
+            "--".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        // Should insert -- even though nothing follows it
+        assert_eq!(result, vec!["--lib", "--"]);
     }
 
     #[test]
-    fn test_split_at_double_dash_clippy() {
-        // rtk cargo clippy -- -W clippy::pedantic
-        let raw = s(&["rtk", "cargo", "clippy", "--", "-W", "clippy::pedantic"]);
-        let clap_args = s(&["-W", "clippy::pedantic"]);
-        let (before, after) = split_at_double_dash(&raw, "clippy", &clap_args);
-        assert!(before.is_empty());
+    fn test_restore_double_dash_no_separator_in_raw() {
+        // rtk cargo test --lib (no -- anywhere)
+        let args = vec!["--lib".into()];
+        let raw = vec!["rtk".into(), "cargo".into(), "test".into(), "--lib".into()];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        // No --, args unchanged
+        assert_eq!(result, vec!["--lib"]);
+    }
+
+    #[test]
+    fn test_restore_double_dash_multiple_args_before_and_after() {
+        // rtk cargo test --lib my_test -- --nocapture --test-threads=4
+        let args = vec![
+            "--lib".into(),
+            "my_test".into(),
+            "--nocapture".into(),
+            "--test-threads=4".into(),
+        ];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "test".into(),
+            "--lib".into(),
+            "my_test".into(),
+            "--".into(),
+            "--nocapture".into(),
+            "--test-threads=4".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
         assert_eq!(
-            after.unwrap(),
-            &[String::from("-W"), String::from("clippy::pedantic")]
+            result,
+            vec!["--lib", "my_test", "--", "--nocapture", "--test-threads=4"]
         );
     }
 
     #[test]
-    fn test_split_at_double_dash_subcommand_not_found() {
-        // Edge: subcommand name doesn't match anything in raw args
-        let raw = s(&["rtk", "cargo", "build"]);
-        let clap_args = s(&["--release"]);
-        let (before, after) = split_at_double_dash(&raw, "test", &clap_args);
-        assert_eq!(before, &[String::from("--release")]);
-        assert!(after.is_none());
+    fn test_restore_double_dash_nextest() {
+        // rtk cargo nextest run -- --test-threads 1
+        let args = vec!["--test-threads".into(), "1".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "nextest".into(),
+            "run".into(),
+            "--".into(),
+            "--test-threads".into(),
+            "1".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert_eq!(result, vec!["--", "--test-threads", "1"]);
     }
 }

@@ -1,0 +1,16 @@
+[filters.tofu-fmt]
+description = "Compact OpenTofu fmt output"
+match_command = "^tofu\\s+fmt(\\s|$)"
+strip_ansi = true
+on_empty = "tofu fmt: ok (no changes)"
+max_lines = 30
+
+[[tests.tofu-fmt]]
+name = "empty output returns on_empty message"
+input = ""
+expected = "tofu fmt: ok (no changes)"
+
+[[tests.tofu-fmt]]
+name = "changed files pass through"
+input = "main.tf\nvariables.tf"
+expected = "main.tf\nvariables.tf"

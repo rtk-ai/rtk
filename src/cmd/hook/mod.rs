@@ -430,6 +430,8 @@ fn hook_lookup<'a>(binary: &'a str, sub: &str) -> Option<(&'static str, &'a str)
         "curl" => Some(("rtk curl", binary)),
         "pytest" => Some(("rtk pytest", binary)),
         "wc" => Some(("rtk wc", binary)),
+        // Graphite CLI — all subcommands route through RTK for token optimization
+        "gt" => Some(("rtk gt", binary)),
         "wget" | "diff" | "tree" | "find" => None, // passthrough: builtins_not_blocked
         _ => None,
     }
@@ -1548,6 +1550,11 @@ mod tests {
             ("gh run view 123", "rtk gh run view 123"),
             ("git stash pop", "rtk git stash pop"),
             ("git fetch origin", "rtk git fetch origin"),
+            // Graphite CLI — all subcommands route through RTK
+            ("gt log", "rtk gt log"),
+            ("gt submit", "rtk gt submit"),
+            ("gt sync", "rtk gt sync"),
+            ("gt create feat/new-branch", "rtk gt create feat/new-branch"),
         ];
         for (input, expected) in cases {
             assert_rewrite(input, expected);

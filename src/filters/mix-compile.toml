@@ -1,0 +1,27 @@
+[filters.mix-compile]
+description = "Compact mix compile output"
+match_command = "^mix\\s+compile(\\s|$)"
+strip_ansi = true
+strip_lines_matching = [
+  "^Compiling \\d+ file",
+  "^\\s*$",
+  "^Generated\\s",
+]
+max_lines = 40
+on_empty = "mix compile: ok"
+
+[[tests.mix-compile]]
+name = "strips compile noise, preserves warnings"
+input = """
+Compiling 12 files (.ex)
+Generated my_app app
+
+warning: variable "conn" is unused
+  lib/router.ex:42
+"""
+expected = "warning: variable \"conn\" is unused\n  lib/router.ex:42"
+
+[[tests.mix-compile]]
+name = "on_empty when only noise"
+input = "Compiling 3 files (.ex)\nGenerated my_app app\n"
+expected = "mix compile: ok"

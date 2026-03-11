@@ -1,0 +1,33 @@
+[filters.systemctl-status]
+description = "Compact systemctl status output — strip blank lines, limit to 20 lines"
+match_command = "^systemctl\\s+status\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 20
+
+[[tests.systemctl-status]]
+name = "verbose unit status stripped of blank lines"
+input = """
+● nginx.service - A high performance web server
+     Loaded: loaded (/lib/systemd/system/nginx.service; enabled)
+     Active: active (running) since Mon 2024-01-15 10:30:00 UTC; 2h ago
+       Docs: man:nginx(8)
+   Main PID: 1234 (nginx)
+      Tasks: 3 (limit: 4915)
+     Memory: 8.5M
+
+     CGroup: /system.slice/nginx.service
+             ├─1234 nginx: master process /usr/sbin/nginx
+             └─1235 nginx: worker process
+
+Jan 15 10:30:00 host nginx[1234]: nginx/1.24.0
+Jan 15 10:30:00 host systemd[1]: Started nginx.service
+"""
+expected = "● nginx.service - A high performance web server\n     Loaded: loaded (/lib/systemd/system/nginx.service; enabled)\n     Active: active (running) since Mon 2024-01-15 10:30:00 UTC; 2h ago\n       Docs: man:nginx(8)\n   Main PID: 1234 (nginx)\n      Tasks: 3 (limit: 4915)\n     Memory: 8.5M\n     CGroup: /system.slice/nginx.service\n             ├─1234 nginx: master process /usr/sbin/nginx\n             └─1235 nginx: worker process\nJan 15 10:30:00 host nginx[1234]: nginx/1.24.0\nJan 15 10:30:00 host systemd[1]: Started nginx.service"
+
+[[tests.systemctl-status]]
+name = "empty input passes through"
+input = ""
+expected = ""

@@ -1,0 +1,40 @@
+[filters.composer-install]
+description = "Compact composer install/update/require output — strip downloads, short-circuit when up-to-date"
+match_command = "^composer\\s+(install|update|require)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^  - Downloading ",
+  "^  - Installing ",
+  "^Loading composer",
+  "^Updating dependencies",
+]
+match_output = [
+  { pattern = "Nothing to install, update or remove", message = "ok (up to date)" },
+]
+max_lines = 30
+
+[[tests.composer-install]]
+name = "nothing to do short-circuits"
+input = """
+Loading composer repositories with package information
+Updating dependencies
+Lock file operations: 0 installs, 0 updates, 0 removals
+Nothing to install, update or remove
+Generating autoload files
+"""
+expected = "ok (up to date)"
+
+[[tests.composer-install]]
+name = "install strips download lines"
+input = """
+Loading composer repositories with package information
+Updating dependencies
+  - Downloading symfony/console (v6.4.0)
+  - Installing symfony/console (v6.4.0): Extracting archive
+  - Downloading psr/log (3.0.0)
+  - Installing psr/log (3.0.0): Extracting archive
+Writing lock file
+Generating autoload files
+"""
+expected = "Writing lock file\nGenerating autoload files"
