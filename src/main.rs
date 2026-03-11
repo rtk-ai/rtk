@@ -1,4 +1,5 @@
 mod aws_cmd;
+mod binlog;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
@@ -9,6 +10,9 @@ mod deps;
 mod diff_cmd;
 mod discover;
 mod display_helpers;
+mod dotnet_cmd;
+mod dotnet_format_report;
+mod dotnet_trx;
 mod env_cmd;
 mod filter;
 mod find_cmd;
@@ -262,6 +266,12 @@ enum Commands {
     Log {
         /// Log file (omit for stdin)
         file: Option<PathBuf>,
+    },
+
+    /// .NET commands with compact output (build/test/restore/format)
+    Dotnet {
+        #[command(subcommand)]
+        command: DotnetCommands,
     },
 
     /// Docker commands with compact output
@@ -925,6 +935,33 @@ enum CargoCommands {
 }
 
 #[derive(Subcommand)]
+enum DotnetCommands {
+    /// Build with compact output
+    Build {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Test with compact output
+    Test {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Restore with compact output
+    Restore {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Format with compact output
+    Format {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported dotnet subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
 enum GoCommands {
     /// Run tests with compact output (90% token reduction via JSON streaming)
     Test {
@@ -1436,6 +1473,24 @@ fn main() -> Result<()> {
                 log_cmd::run_stdin(cli.verbose)?;
             }
         }
+
+        Commands::Dotnet { command } => match command {
+            DotnetCommands::Build { args } => {
+                dotnet_cmd::run_build(&args, cli.verbose)?;
+            }
+            DotnetCommands::Test { args } => {
+                dotnet_cmd::run_test(&args, cli.verbose)?;
+            }
+            DotnetCommands::Restore { args } => {
+                dotnet_cmd::run_restore(&args, cli.verbose)?;
+            }
+            DotnetCommands::Format { args } => {
+                dotnet_cmd::run_format(&args, cli.verbose)?;
+            }
+            DotnetCommands::Other(args) => {
+                dotnet_cmd::run_passthrough(&args, cli.verbose)?;
+            }
+        },
 
         Commands::Docker { command } => match command {
             DockerCommands::Ps => {
@@ -2055,6 +2110,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Find { .. }
             | Commands::Diff { .. }
             | Commands::Log { .. }
+            | Commands::Dotnet { .. }
             | Commands::Docker { .. }
             | Commands::Kubectl { .. }
             | Commands::Summary { .. }
