@@ -1856,6 +1856,9 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let output = std::process::Command::new(&bin_path)
             .args(["git", "status"])
             .current_dir(&tmp)
+            // Point GIT_DIR to a non-existent path so git always fails,
+            // regardless of whether a parent directory has .git
+            .env("GIT_DIR", tmp.join("nonexistent.git"))
             .output()
             .expect("Failed to run rtk");
 
