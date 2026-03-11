@@ -30,29 +30,50 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
 /// Reconstruct args with `--` separator preserved from the original command line.
 /// Clap strips `--` from parsed args, but cargo subcommands need it to separate
 /// their own flags from test runner flags (e.g. `cargo test -- --nocapture`).
-fn restore_double_dash(args: &[String]) -> Vec<String> {
+fn restore_double_dash(subcommand: &str, args: &[String]) -> Vec<String> {
     let raw_args: Vec<String> = std::env::args().collect();
-    restore_double_dash_with_raw(args, &raw_args)
+    restore_double_dash_with_raw(subcommand, args, &raw_args)
 }
 
 /// Testable version that takes raw_args explicitly.
-fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<String> {
+fn restore_double_dash_with_raw(
+    subcommand: &str,
+    args: &[String],
+    raw_args: &[String],
+) -> Vec<String> {
     if args.is_empty() {
         return args.to_vec();
     }
 
-    // Find `--` in the original command line
-    let sep_pos = match raw_args.iter().position(|a| a == "--") {
+    let subcommand_index = match raw_args.iter().position(|a| a == subcommand) {
+        Some(idx) => idx,
+        None => return args.to_vec(),
+    };
+
+    if subcommand_index + 1 >= raw_args.len() {
+        return args.to_vec();
+    }
+
+    let sep_relative = match raw_args[subcommand_index + 1..]
+        .iter()
+        .position(|a| a == "--")
+    {
         Some(pos) => pos,
         None => return args.to_vec(),
     };
 
-    // Count how many of our parsed args appeared before `--` in the original.
-    // Args before `--` are positional (e.g. test name), args after are flags.
-    let args_before_sep = raw_args[..sep_pos]
-        .iter()
-        .filter(|a| args.contains(a))
-        .count();
+    let args_before_sep = sep_relative;
+
+    if args_before_sep == 0 {
+        let mut result = Vec::with_capacity(args.len() + 1);
+        result.push("--".to_string());
+        result.extend_from_slice(args);
+        return result;
+    }
+
+    if args_before_sep > args.len() {
+        return args.to_vec();
+    }
 
     let mut result = Vec::with_capacity(args.len() + 1);
     result.extend_from_slice(&args[..args_before_sep]);
@@ -71,7 +92,7 @@ where
     let mut cmd = Command::new("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = restore_double_dash(args);
+    let restored_args = restore_double_dash(subcommand, args);
     for arg in &restored_args {
         cmd.arg(arg);
     }
@@ -997,7 +1018,7 @@ mod tests {
             "--".into(),
             "--nocapture".into(),
         ];
-        let result = restore_double_dash_with_raw(&args, &raw);
+        let result = restore_double_dash_with_raw("test", &args, &raw);
         assert_eq!(result, vec!["--", "--nocapture"]);
     }
 
@@ -1013,7 +1034,7 @@ mod tests {
             "--".into(),
             "--nocapture".into(),
         ];
-        let result = restore_double_dash_with_raw(&args, &raw);
+        let result = restore_double_dash_with_raw("test", &args, &raw);
         assert_eq!(result, vec!["my_test", "--", "--nocapture"]);
     }
 
@@ -1027,7 +1048,7 @@ mod tests {
             "test".into(),
             "my_test".into(),
         ];
-        let result = restore_double_dash_with_raw(&args, &raw);
+        let result = restore_double_dash_with_raw("test", &args, &raw);
         assert_eq!(result, vec!["my_test"]);
     }
 
@@ -1035,7 +1056,7 @@ mod tests {
     fn test_restore_double_dash_empty_args() {
         let args: Vec<String> = vec![];
         let raw = vec!["rtk".into(), "cargo".into(), "test".into()];
-        let result = restore_double_dash_with_raw(&args, &raw);
+        let result = restore_double_dash_with_raw("test", &args, &raw);
         assert!(result.is_empty());
     }
 
@@ -1051,8 +1072,37 @@ mod tests {
             "-D".into(),
             "warnings".into(),
         ];
-        let result = restore_double_dash_with_raw(&args, &raw);
+        let result = restore_double_dash_with_raw("clippy", &args, &raw);
         assert_eq!(result, vec!["--", "-D", "warnings"]);
+    }
+
+    #[test]
+    fn test_restore_double_dash_multiple_packages() {
+        let args: Vec<String> = vec![
+            "-p".into(),
+            "my-service".into(),
+            "-p".into(),
+            "my-crate".into(),
+            "-D".into(),
+            "warnings".into(),
+        ];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "clippy".into(),
+            "-p".into(),
+            "my-service".into(),
+            "-p".into(),
+            "my-crate".into(),
+            "--".into(),
+            "-D".into(),
+            "warnings".into(),
+        ];
+        let result = restore_double_dash_with_raw("clippy", &args, &raw);
+        assert_eq!(
+            result,
+            vec!["-p", "my-service", "-p", "my-crate", "--", "-D", "warnings"]
+        );
     }
 
     #[test]
