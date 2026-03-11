@@ -150,7 +150,11 @@ fn apply_line_window(
         }
         let lines: Vec<&str> = content.lines().collect();
         let start = lines.len().saturating_sub(tail);
-        return lines[start..].join("\n");
+        let mut result = lines[start..].join("\n");
+        if content.ends_with('\n') {
+            result.push('\n');
+        }
+        return result;
     }
 
     if let Some(max) = max_lines {
@@ -192,6 +196,13 @@ fn main() {{
     #[test]
     fn test_apply_line_window_tail_lines() {
         let input = "a\nb\nc\nd\n";
+        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
+        assert_eq!(output, "c\nd\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_tail_lines_no_trailing_newline() {
+        let input = "a\nb\nc\nd";
         let output = apply_line_window(input, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
     }

@@ -1173,6 +1173,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_tail_lines_space_flag() {
+        assert_eq!(
+            rewrite_command("tail --lines 7 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 7".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_tail_other_flag_skipped() {
         assert_eq!(rewrite_command("tail -c 100 src/main.rs", &[]), None);
     }
