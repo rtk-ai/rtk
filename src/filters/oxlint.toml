@@ -1,0 +1,43 @@
+[filters.oxlint]
+description = "Compact oxlint output — strip blank lines, keep diagnostics"
+match_command = "^oxlint\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Finished in \\d+",
+  "^Found \\d+ warning",
+]
+max_lines = 50
+on_empty = "oxlint: ok"
+
+[[tests.oxlint]]
+name = "strips noise, keeps diagnostics"
+input = """
+  × eslint(no-console): Unexpected console statement.
+   ╭─[src/app.ts:5:3]
+ 5 │   console.log("debug");
+   │   ^^^^^^^^^^^
+   ╰────
+
+  × eslint(no-unused-vars): 'x' is defined but never used.
+   ╭─[src/utils.ts:2:7]
+ 2 │   let x = 42;
+   │       ^
+   ╰────
+
+Found 2 warnings on 2 files.
+Finished in 12ms on 100 files.
+"""
+expected = "  × eslint(no-console): Unexpected console statement.\n   ╭─[src/app.ts:5:3]\n 5 │   console.log(\"debug\");\n   │   ^^^^^^^^^^^\n   ╰────\n  × eslint(no-unused-vars): 'x' is defined but never used.\n   ╭─[src/utils.ts:2:7]\n 2 │   let x = 42;\n   │       ^\n   ╰────"
+
+[[tests.oxlint]]
+name = "clean output"
+input = """
+Finished in 5ms on 100 files.
+"""
+expected = "oxlint: ok"
+
+[[tests.oxlint]]
+name = "empty input passes through"
+input = ""
+expected = ""
