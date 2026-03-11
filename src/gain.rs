@@ -103,22 +103,22 @@ pub fn run(
         print_efficiency_meter(summary.avg_savings_pct);
         println!();
 
-        // Warn about hook issues that silently kill savings
+        // Warn about hook issues that silently kill savings (stderr, not stdout)
         match hook_check::status() {
             hook_check::HookStatus::Missing => {
-                println!(
+                eprintln!(
                     "{}",
                     "⚠️  No hook installed — run `rtk init -g` for automatic token savings"
                         .yellow()
                 );
-                println!();
+                eprintln!();
             }
             hook_check::HookStatus::Outdated => {
-                println!(
+                eprintln!(
                     "{}",
                     "⚠️  Hook outdated — run `rtk init -g` to update".yellow()
                 );
-                println!();
+                eprintln!();
             }
             hook_check::HookStatus::Ok => {}
         }

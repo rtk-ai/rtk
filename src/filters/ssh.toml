@@ -12,7 +12,7 @@ strip_lines_matching = [
   "^Pseudo-terminal",
 ]
 max_lines = 200
-truncate_lines_at = 200
+truncate_lines_at = 120
 
 [[tests.ssh]]
 name = "strips connection banners, keeps command output"

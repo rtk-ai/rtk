@@ -4,13 +4,13 @@ const CURRENT_HOOK_VERSION: u8 = 2;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
 
 /// Hook status for diagnostics and `rtk gain`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum HookStatus {
     /// Hook is installed and up to date.
     Ok,
-    /// Hook exists but is outdated.
+    /// Hook exists but is outdated or unreadable.
     Outdated,
-    /// No hook file found at all.
+    /// No hook file found (but Claude Code is installed).
     Missing,
 }
 
@@ -45,32 +45,21 @@ pub fn maybe_warn() {
     let _ = check_and_warn();
 }
 
+/// Single source of truth: delegates to `status()` then rate-limits the warning.
 fn check_and_warn() -> Option<()> {
-    let warning = match hook_installed_path() {
-        Some(hook_path) => {
-            let content = std::fs::read_to_string(&hook_path).ok()?;
-            let installed_version = parse_hook_version(&content);
-            if installed_version >= CURRENT_HOOK_VERSION {
-                return Some(()); // Up to date, nothing to do
-            }
-            "[rtk] /!\\ Hook outdated — run `rtk init -g` to update"
-        }
-        None => {
-            // No hook installed — check if Claude Code config dir exists
-            // (only warn if user has Claude Code installed)
-            let home = dirs::home_dir()?;
-            if !home.join(".claude").exists() {
-                return Some(()); // No Claude Code, no point warning
-            }
+    let warning = match status() {
+        HookStatus::Ok => return Some(()),
+        HookStatus::Missing => {
             "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings"
         }
+        HookStatus::Outdated => "[rtk] /!\\ Hook outdated — run `rtk init -g` to update",
     };
 
     // Rate limit: warn once per day
     let marker = warn_marker_path()?;
     if let Ok(meta) = std::fs::metadata(&marker) {
-        if let Ok(elapsed) = meta.modified().ok()?.elapsed() {
-            if elapsed.as_secs() < WARN_INTERVAL_SECS {
+        if let Ok(modified) = meta.modified() {
+            if modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < WARN_INTERVAL_SECS {
                 return Some(());
             }
         }
@@ -86,6 +75,7 @@ fn check_and_warn() -> Option<()> {
 }
 
 pub fn parse_hook_version(content: &str) -> u8 {
+    // Version tag must be in the first 5 lines (shebang + header convention)
     for line in content.lines().take(5) {
         if let Some(rest) = line.strip_prefix("# rtk-hook-version:") {
             if let Ok(v) = rest.trim().parse::<u8>() {
@@ -135,24 +125,46 @@ mod tests {
 
     #[test]
     fn test_parse_hook_version_no_tag() {
-        // Content without version tag returns 0
         assert_eq!(parse_hook_version("no version here"), 0);
+        assert_eq!(parse_hook_version(""), 0);
     }
 
     #[test]
-    fn test_hook_status_variants() {
+    fn test_hook_status_enum() {
         assert_ne!(HookStatus::Ok, HookStatus::Missing);
         assert_ne!(HookStatus::Outdated, HookStatus::Missing);
         assert_eq!(HookStatus::Ok, HookStatus::Ok);
+        // Clone works
+        let s = HookStatus::Missing;
+        assert_eq!(s.clone(), HookStatus::Missing);
     }
 
     #[test]
-    fn test_status_returns_ok_or_outdated_when_hook_exists() {
-        // On this dev machine the hook should exist — verify status() works end-to-end
+    fn test_status_returns_valid_variant() {
+        // Skip on machines without Claude Code or without hook
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return,
+        };
+        if !home
+            .join(".claude")
+            .join("hooks")
+            .join("rtk-rewrite.sh")
+            .exists()
+        {
+            // No hook — status should be Missing (if .claude exists) or Ok (if not)
+            let s = status();
+            if home.join(".claude").exists() {
+                assert_eq!(s, HookStatus::Missing);
+            } else {
+                assert_eq!(s, HookStatus::Ok);
+            }
+            return;
+        }
         let s = status();
         assert!(
             s == HookStatus::Ok || s == HookStatus::Outdated,
-            "Expected Ok or Outdated on dev machine, got {:?}",
+            "Expected Ok or Outdated when hook exists, got {:?}",
             s
         );
     }

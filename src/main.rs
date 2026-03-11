@@ -1142,9 +1142,6 @@ fn main() -> Result<()> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     telemetry::maybe_ping();
 
-    // Warn if installed hook is outdated (1/day, non-blocking)
-    hook_check::maybe_warn();
-
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -1154,6 +1151,12 @@ fn main() -> Result<()> {
             return run_fallback(e);
         }
     };
+
+    // Warn if installed hook is outdated/missing (1/day, non-blocking).
+    // Skip for Gain — it shows its own inline hook warning.
+    if !matches!(cli.command, Commands::Gain { .. }) {
+        hook_check::maybe_warn();
+    }
 
     // Runtime integrity check for operational commands.
     // Meta commands (init, gain, verify, config, etc.) skip the check
@@ -1894,10 +1897,7 @@ fn main() -> Result<()> {
                 let full = args[0].to_string_lossy();
                 let parts = shell_split(&full);
                 if parts.len() > 1 {
-                    (
-                        parts[0].clone(),
-                        parts[1..].to_vec(),
-                    )
+                    (parts[0].clone(), parts[1..].to_vec())
                 } else {
                     (full.into_owned(), vec![])
                 }
@@ -2317,7 +2317,10 @@ mod tests {
 
     #[test]
     fn test_shell_split_simple() {
-        assert_eq!(shell_split("head -50 file.php"), vec!["head", "-50", "file.php"]);
+        assert_eq!(
+            shell_split("head -50 file.php"),
+            vec!["head", "-50", "file.php"]
+        );
     }
 
     #[test]
@@ -2370,10 +2373,7 @@ mod tests {
             if let Ok(cli) = result {
                 match cli.command {
                     Commands::Rewrite { ref args } => {
-                        assert!(
-                            args.len() >= 2,
-                            "rewrite args should capture all tokens"
-                        );
+                        assert!(args.len() >= 2, "rewrite args should capture all tokens");
                     }
                     _ => panic!("expected Rewrite command"),
                 }
@@ -2397,4 +2397,3 @@ mod tests {
         }
     }
 }
-

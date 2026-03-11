@@ -1855,8 +1855,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stderr.contains("Not a git repository"),
-            "Expected 'Not a git repository' on stderr, got stderr={:?}, stdout={:?}",
+            stderr.to_lowercase().contains("not a git repository"),
+            "Expected 'not a git repository' on stderr, got stderr={:?}, stdout={:?}",
             stderr,
             stdout
         );
