@@ -421,4 +421,49 @@ Finished in 0.05 seconds (files took 1.2 seconds to load)
         assert_eq!(data.skipped, 1);
         assert_eq!(data.passed, 4);
     }
+
+    #[test]
+    fn test_rspec_parser_passthrough() {
+        let garbage = "random output with no structure whatsoever";
+        let result = RspecParser::parse(garbage);
+        assert_eq!(result.tier(), 3);
+        assert!(!result.is_ok());
+    }
+
+    #[test]
+    fn test_rspec_token_savings() {
+        let json = r#"{
+            "examples": [
+                {"id": "./spec/a_spec.rb[1:1]", "description": "test 1", "full_description": "Model test 1", "status": "passed", "file_path": "./spec/a_spec.rb", "line_number": 5, "run_time": 0.001},
+                {"id": "./spec/a_spec.rb[1:2]", "description": "test 2", "full_description": "Model test 2", "status": "passed", "file_path": "./spec/a_spec.rb", "line_number": 10, "run_time": 0.002},
+                {"id": "./spec/a_spec.rb[1:3]", "description": "test 3", "full_description": "Model test 3", "status": "passed", "file_path": "./spec/a_spec.rb", "line_number": 15, "run_time": 0.001},
+                {"id": "./spec/b_spec.rb[1:1]", "description": "test 4", "full_description": "Service test 4", "status": "passed", "file_path": "./spec/b_spec.rb", "line_number": 5, "run_time": 0.003},
+                {"id": "./spec/b_spec.rb[1:2]", "description": "test 5", "full_description": "Service test 5", "status": "passed", "file_path": "./spec/b_spec.rb", "line_number": 10, "run_time": 0.001}
+            ],
+            "summary": {
+                "duration": 0.05,
+                "example_count": 5,
+                "failure_count": 0,
+                "pending_count": 0,
+                "errors_outside_of_examples_count": 0
+            },
+            "summary_line": "5 examples, 0 failures"
+        }"#;
+
+        let result = RspecParser::parse(json);
+        let data = result.unwrap();
+        let output = data.format(FormatMode::Compact);
+
+        let input_tokens = json.split_whitespace().count();
+        let output_tokens = output.split_whitespace().count();
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(
+            savings >= 60.0,
+            "Expected >=60% savings, got {:.1}% (input: {} tokens, output: {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
 }
