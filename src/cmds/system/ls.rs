@@ -99,7 +99,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let filtered = if is_tty {
         format!("{}{}", entries, summary)
     } else {
-        entries.clone()
+        entries
     };
 
     if verbose > 0 {
