@@ -407,6 +407,12 @@ else
     skip_test "rtk pip" "pip not installed"
 fi
 
+if command -v rspec &>/dev/null; then
+    assert_help    "rtk rspec"                     rtk rspec --help
+else
+    skip_test "rtk rspec" "rspec not installed"
+fi
+
 # ── 28. Go (conditional) ────────────────────────────
 
 section "Go (conditional)"
@@ -434,7 +440,7 @@ if command -v gt &>/dev/null; then
     assert_help   "rtk gt"                          rtk gt --help
     assert_ok     "rtk gt log short"                rtk gt log short
 else
-    skip "gt not installed"
+    skip_test "rtk gt" "gt not installed"
 fi
 
 # ── 30. Global flags ────────────────────────────────
