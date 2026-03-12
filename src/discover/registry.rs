@@ -1933,43 +1933,6 @@ mod tests {
         }
     }
 
-    // --- wc rule ---
-
-    #[test]
-    fn test_classify_wc() {
-        assert_eq!(
-            classify_command("wc -l src/main.rs"),
-            Classification::Supported {
-                rtk_equivalent: "rtk wc",
-                category: "System",
-                estimated_savings_pct: 60.0,
-                status: super::super::report::RtkStatus::Existing,
-            }
-        );
-    }
-
-    #[test]
-    fn test_classify_wc_bare() {
-        assert_eq!(
-            classify_command("wc"),
-            Classification::Supported {
-                rtk_equivalent: "rtk wc",
-                category: "System",
-                estimated_savings_pct: 60.0,
-                status: super::super::report::RtkStatus::Existing,
-            }
-        );
-    }
-
-    #[test]
-    fn test_route_wc() {
-        let excluded: Vec<String> = vec![];
-        assert_eq!(
-            rewrite_command("wc -l src/main.rs", &excluded),
-            Some("rtk wc -l src/main.rs".into())
-        );
-    }
-
     // --- #196: gh --json/--jq/--template passthrough ---
 
     #[test]

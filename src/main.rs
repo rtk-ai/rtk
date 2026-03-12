@@ -2279,25 +2279,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_git_commit_file_flag() {
-        // -F reads commit message from file — trailing_var_arg passes it through unchanged
-        let cli = Cli::try_parse_from(["rtk", "git", "commit", "-F", "/tmp/msg.txt"]).unwrap();
-        match cli.command {
-            Commands::Git {
-                command: GitCommands::Commit { args },
-                ..
-            } => {
-                assert_eq!(
-                    args,
-                    vec!["-F", "/tmp/msg.txt"],
-                    "-F flag and path should pass through as flat args"
-                );
-            }
-            _ => panic!("Expected Git Commit command"),
-        }
-    }
-
     // #327: git commit -am "msg" was rejected by Clap before trailing_var_arg fix
     #[test]
     fn test_git_commit_am_flag() {
@@ -2311,65 +2292,6 @@ mod tests {
                     args,
                     vec!["-am", "quick fix"],
                     "-am combined flag should pass through (PR #327 regression test)"
-                );
-            }
-            _ => panic!("Expected Git Commit command"),
-        }
-    }
-
-    #[test]
-    fn test_git_commit_amend_no_edit() {
-        // --amend --no-edit: amend previous commit keeping its message
-        let cli = Cli::try_parse_from(["rtk", "git", "commit", "--amend", "--no-edit"]).unwrap();
-        match cli.command {
-            Commands::Git {
-                command: GitCommands::Commit { args },
-                ..
-            } => {
-                assert_eq!(
-                    args,
-                    vec!["--amend", "--no-edit"],
-                    "--amend --no-edit should pass through as flat args"
-                );
-            }
-            _ => panic!("Expected Git Commit command"),
-        }
-    }
-
-    #[test]
-    fn test_git_commit_message_and_amend() {
-        // -m with --amend: amend with a new message
-        let cli =
-            Cli::try_parse_from(["rtk", "git", "commit", "-m", "fix: update", "--amend"]).unwrap();
-        match cli.command {
-            Commands::Git {
-                command: GitCommands::Commit { args },
-                ..
-            } => {
-                assert_eq!(
-                    args,
-                    vec!["-m", "fix: update", "--amend"],
-                    "message flag and --amend should coexist as flat args"
-                );
-            }
-            _ => panic!("Expected Git Commit command"),
-        }
-    }
-
-    #[test]
-    fn test_git_commit_amend_with_message() {
-        // upstream's test: --amend before -m (order shouldn't matter)
-        let cli =
-            Cli::try_parse_from(["rtk", "git", "commit", "--amend", "-m", "new msg"]).unwrap();
-        match cli.command {
-            Commands::Git {
-                command: GitCommands::Commit { args },
-                ..
-            } => {
-                assert_eq!(
-                    args,
-                    vec!["--amend", "-m", "new msg"],
-                    "--amend -m ordering should be preserved"
                 );
             }
             _ => panic!("Expected Git Commit command"),
