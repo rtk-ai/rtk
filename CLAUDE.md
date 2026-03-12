@@ -210,6 +210,7 @@ rtk gain --history | grep proxy
 |--------|---------|----------------|
 | git.rs | Git operations | Stat summaries + compact diffs |
 | grep_cmd.rs | Code search | Group by file, truncate lines |
+| jira_cmd.rs | Jira CLI | Compact issue/epic/sprint lists, strip ANSI + padding (70-80% reduction) |
 | ls.rs | Directory listing | Tree format, aggregate counts |
 | read.rs | File reading | Filter-level based stripping |
 | runner.rs | Command execution | Stderr only (err), failures only (test) |

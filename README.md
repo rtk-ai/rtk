@@ -160,6 +160,30 @@ rtk gh issue list               # Compact issue listing
 rtk gh run list                 # Workflow run status
 ```
 
+### Jira
+Proxy for [jira-cli](https://github.com/ankitpokhrel/jira-cli) with compact output.
+
+```sh
+# Issue list (auto-injects --plain, compacts tab padding)
+$ rtk jira issue list
+
+# View an issue (strips ANSI, blank lines, footer)
+$ rtk jira issue view ACME-101
+
+# Epic list (auto-injects --table --plain)
+$ rtk jira epic list
+
+# Sprint list (auto-injects --table --plain)
+$ rtk jira sprint list
+
+# Current sprint issues
+$ rtk jira sprint list --current
+
+# Passthrough for any jira command
+$ rtk jira me
+$ rtk jira board list
+```
+
 ### Test Runners
 ```bash
 rtk test cargo test             # Show failures only (-90%)
