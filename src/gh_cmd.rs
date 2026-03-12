@@ -5,12 +5,11 @@
 
 use crate::git;
 use crate::tracking;
-use crate::utils::{ok_confirmation, truncate};
+use crate::utils::{ok_confirmation, resolved_command, truncate};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
-use std::process::Command;
 
 lazy_static! {
     static ref HTML_COMMENT_RE: Regex = Regex::new(r"(?s)<!--.*?-->").unwrap();
@@ -121,7 +120,16 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
     }
 
     // Known gh flags that take a value — skip these and their values
-    let flags_with_value = ["-R", "--repo", "-q", "--jq", "-t", "--template"];
+    let flags_with_value = [
+        "-R",
+        "--repo",
+        "-q",
+        "--jq",
+        "-t",
+        "--template",
+        "--job",
+        "--attempt",
+    ];
     let mut identifier = None;
     let mut extra = Vec::new();
     let mut skip_next = false;
@@ -194,7 +202,7 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
 fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args([
         "pr",
         "list",
@@ -295,7 +303,7 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
         return run_passthrough_with_extra("gh", &["pr", "view", &pr_number], &extra_args);
     }
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args([
         "pr",
         "view",
@@ -466,7 +474,7 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> 
         None => return Err(anyhow::anyhow!("PR number required")),
     };
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args(["pr", "checks", &pr_number]);
     for arg in &extra_args {
         cmd.arg(arg);
@@ -549,7 +557,7 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> 
 fn pr_status(_verbose: u8, _ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args([
         "pr",
         "status",
@@ -605,7 +613,7 @@ fn run_issue(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
 fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args(["issue", "list", "--json", "number,title,state,author"]);
 
     for arg in args {
@@ -677,7 +685,7 @@ fn view_issue(args: &[String], _verbose: u8) -> Result<()> {
         None => return Err(anyhow::anyhow!("Issue number required")),
     };
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args([
         "issue",
         "view",
@@ -773,7 +781,7 @@ fn run_workflow(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()>
 fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args([
         "run",
         "list",
@@ -875,7 +883,7 @@ fn view_run(args: &[String], _verbose: u8) -> Result<()> {
 
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args(["run", "view", &run_id]);
     for arg in &extra_args {
         cmd.arg(arg);
@@ -951,7 +959,7 @@ fn run_repo(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> {
 
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.arg("repo").arg("view");
 
     for arg in rest_args {
@@ -1021,7 +1029,7 @@ fn run_repo(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<()> {
 fn pr_create(args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args(["pr", "create"]);
     for arg in args {
         cmd.arg(arg);
@@ -1059,7 +1067,7 @@ fn pr_create(args: &[String], _verbose: u8) -> Result<()> {
 fn pr_merge(args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args(["pr", "merge"]);
     for arg in args {
         cmd.arg(arg);
@@ -1117,7 +1125,7 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
 
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.args(["pr", "diff"]);
     for arg in gh_args.iter() {
         cmd.arg(arg);
@@ -1152,7 +1160,7 @@ fn pr_action(action: &str, args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
     let subcmd = &args[0];
 
-    let mut cmd = Command::new("gh");
+    let mut cmd = resolved_command("gh");
     cmd.arg("pr");
     for arg in args {
         cmd.arg(arg);
@@ -1212,7 +1220,7 @@ fn run_api(args: &[String], _verbose: u8) -> Result<()> {
 fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut command = Command::new(cmd);
+    let mut command = resolved_command(cmd);
     for arg in base_args {
         command.arg(arg);
     }
@@ -1243,7 +1251,7 @@ fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[Strin
 fn run_passthrough(cmd: &str, subcommand: &str, args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut command = Command::new(cmd);
+    let mut command = resolved_command(cmd);
     command.arg(subcommand);
     for arg in args {
         command.arg(arg);
@@ -1416,6 +1424,47 @@ mod tests {
     #[test]
     fn test_run_view_no_passthrough_other_flags() {
         assert!(!should_passthrough_run_view(&["--web".into()]));
+    }
+
+    #[test]
+    fn test_extract_identifier_with_job_flag_after() {
+        // gh run view 12345 --job 67890
+        let args: Vec<String> = vec!["12345".into(), "--job".into(), "67890".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["--job", "67890"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_job_flag_before() {
+        // gh run view --job 67890 12345
+        let args: Vec<String> = vec!["--job".into(), "67890".into(), "12345".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["--job", "67890"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_job_and_log_failed() {
+        // gh run view --log-failed --job 67890 12345
+        let args: Vec<String> = vec![
+            "--log-failed".into(),
+            "--job".into(),
+            "67890".into(),
+            "12345".into(),
+        ];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["--log-failed", "--job", "67890"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_attempt_flag() {
+        // gh run view 12345 --attempt 3
+        let args: Vec<String> = vec!["12345".into(), "--attempt".into(), "3".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["--attempt", "3"]);
     }
 
     // --- should_passthrough_pr_view tests ---

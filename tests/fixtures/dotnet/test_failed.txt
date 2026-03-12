@@ -1,0 +1,18 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  RtkDotnetSmoke -> /private/tmp/RtkDotnetSmoke/bin/Debug/net10.0/RtkDotnetSmoke.dll
+Test run for /private/tmp/RtkDotnetSmoke/bin/Debug/net10.0/RtkDotnetSmoke.dll (.NETCoreApp,Version=v10.0)
+VSTest version 18.0.1 (arm64)
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+[xUnit.net 00:00:00.11]     RtkDotnetSmoke.UnitTest1.Test1 [FAIL]
+  Failed RtkDotnetSmoke.UnitTest1.Test1 [4 ms]
+  Error Message:
+   Assert.Equal() Failure: Values differ
+Expected: 2
+Actual:   3
+  Stack Trace:
+     at RtkDotnetSmoke.UnitTest1.Test1() in /private/tmp/RtkDotnetSmoke/UnitTest1.cs:line 8
+
+Failed!  - Failed:     1, Passed:     0, Skipped:     0, Total:     1, Duration: 13 ms - RtkDotnetSmoke.dll (net10.0)
