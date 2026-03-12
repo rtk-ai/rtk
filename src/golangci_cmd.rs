@@ -1,9 +1,8 @@
 use crate::tracking;
-use crate::utils::truncate;
+use crate::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 struct Position {
@@ -34,7 +33,7 @@ struct GolangciOutput {
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("golangci-lint");
+    let mut cmd = resolved_command("golangci-lint");
 
     // Force JSON output
     let has_format = args

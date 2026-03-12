@@ -1,12 +1,11 @@
 use crate::json_cmd;
 use crate::tracking;
-use crate::utils::truncate;
+use crate::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
-use std::process::Command;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
-    let mut cmd = Command::new("curl");
+    let mut cmd = resolved_command("curl");
     cmd.arg("-s"); // Silent mode (no progress bar)
 
     for arg in args {

@@ -1,12 +1,10 @@
 use crate::mypy_cmd;
 use crate::ruff_cmd;
 use crate::tracking;
-use crate::utils::{package_manager_exec, truncate};
+use crate::utils::{package_manager_exec, resolved_command, truncate};
 use anyhow::{Context, Result};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::process::Command;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct EslintMessage {
@@ -90,10 +88,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     let (linter, explicit) = detect_linter(effective_args);
 
-    // Python linters use Command::new() directly (they're on PATH via pip/pipx)
+    // Python linters use resolved_command() directly (they're on PATH via pip/pipx)
     // JS linters use package_manager_exec (npx/pnpm exec)
     let mut cmd = if is_python_linter(linter) {
-        Command::new(linter)
+        resolved_command(linter)
     } else {
         package_manager_exec(linter)
     };
