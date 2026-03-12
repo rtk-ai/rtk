@@ -43,6 +43,8 @@ mod psql_cmd;
 mod pytest_cmd;
 mod read;
 mod rewrite_cmd;
+mod rspec_cmd;
+mod rubocop_cmd;
 mod ruff_cmd;
 mod runner;
 mod summary;
@@ -606,6 +608,20 @@ enum Commands {
     #[command(name = "golangci-lint")]
     GolangciLint {
         /// golangci-lint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// RSpec test runner with compact output
+    Rspec {
+        /// RSpec arguments (e.g., spec/models/user_spec.rb, --tag focus)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// RuboCop linter with compact output
+    Rubocop {
+        /// RuboCop arguments (e.g., app/models/, --only Style)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1836,6 +1852,14 @@ fn main() -> Result<()> {
             golangci_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Rspec { args } => {
+            rspec_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::Rubocop { args } => {
+            rubocop_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
         }
@@ -2017,6 +2041,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
+            | Commands::Rspec { .. }
+            | Commands::Rubocop { .. }
             | Commands::Gt { .. }
     )
 }
