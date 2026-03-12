@@ -1,4 +1,4 @@
-use crate::discover::provider::{ClaudeProvider, SessionProvider};
+use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use crate::utils::format_tokens;
 use anyhow::{Context, Result};
 use std::fs;
@@ -20,6 +20,17 @@ impl SessionSummary {
         }
         self.rtk_cmds as f64 / self.total_cmds as f64 * 100.0
     }
+}
+
+/// Count RTK vs raw commands from extracted commands.
+fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
+    let total = cmds.len();
+    let rtk = cmds
+        .iter()
+        .filter(|c| c.command.starts_with("rtk "))
+        .count();
+    let output: usize = cmds.iter().filter_map(|c| c.output_len).sum();
+    (total, rtk, output)
 }
 
 fn progress_bar(pct: f64, width: usize) -> String {
@@ -75,12 +86,7 @@ pub fn run(_verbose: u8) -> Result<()> {
             continue;
         }
 
-        let total_cmds = cmds.len();
-        let rtk_cmds = cmds
-            .iter()
-            .filter(|c| c.command.starts_with("rtk "))
-            .count();
-        let output_tokens: usize = cmds.iter().filter_map(|c| c.output_len).sum();
+        let (total_cmds, rtk_cmds, output_tokens) = count_rtk_commands(&cmds);
 
         // Extract session ID from filename
         let id = path
@@ -168,31 +174,87 @@ pub fn run(_verbose: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discover::provider::ExtractedCommand;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn make_cmd(command: &str, output_len: Option<usize>) -> ExtractedCommand {
+        ExtractedCommand {
+            command: command.to_string(),
+            output_len,
+            session_id: "test".to_string(),
+            output_content: None,
+            is_error: false,
+            sequence_index: 0,
+        }
+    }
+
+    // --- Progress bar ---
 
     #[test]
-    fn test_progress_bar_empty() {
+    fn test_progress_bar_boundaries() {
         assert_eq!(progress_bar(0.0, 5), ".....");
-    }
-
-    #[test]
-    fn test_progress_bar_full() {
         assert_eq!(progress_bar(100.0, 5), "@@@@@");
-    }
-
-    #[test]
-    fn test_progress_bar_half() {
         assert_eq!(progress_bar(50.0, 5), "@@@..");
     }
 
+    // --- count_rtk_commands: core counting logic ---
+
     #[test]
-    fn test_progress_bar_partial() {
-        assert_eq!(progress_bar(80.0, 5), "@@@@.");
+    fn test_count_all_rtk() {
+        let cmds = vec![
+            make_cmd("rtk git status", Some(200)),
+            make_cmd("rtk cargo test", Some(5000)),
+            make_cmd("rtk git log -10", Some(800)),
+        ];
+        let (total, rtk, output) = count_rtk_commands(&cmds);
+        assert_eq!(total, 3);
+        assert_eq!(rtk, 3);
+        assert_eq!(output, 6000);
     }
 
     #[test]
-    fn test_session_summary_adoption_zero_cmds() {
+    fn test_count_no_rtk() {
+        let cmds = vec![
+            make_cmd("git status", Some(500)),
+            make_cmd("cargo test", Some(3000)),
+            make_cmd("ls -la", Some(100)),
+        ];
+        let (total, rtk, output) = count_rtk_commands(&cmds);
+        assert_eq!(total, 3);
+        assert_eq!(rtk, 0);
+        assert_eq!(output, 3600);
+    }
+
+    #[test]
+    fn test_count_mixed_rtk_and_raw() {
+        let cmds = vec![
+            make_cmd("rtk git status", Some(200)),
+            make_cmd("git log -5", Some(1000)),
+            make_cmd("rtk cargo test", Some(5000)),
+            make_cmd("ls -la", None),
+        ];
+        let (total, rtk, output) = count_rtk_commands(&cmds);
+        assert_eq!(total, 4);
+        assert_eq!(rtk, 2);
+        assert_eq!(output, 6200); // None is skipped in sum
+    }
+
+    #[test]
+    fn test_count_empty_commands() {
+        let cmds: Vec<ExtractedCommand> = vec![];
+        let (total, rtk, output) = count_rtk_commands(&cmds);
+        assert_eq!(total, 0);
+        assert_eq!(rtk, 0);
+        assert_eq!(output, 0);
+    }
+
+    // --- adoption_pct ---
+
+    #[test]
+    fn test_adoption_pct_zero_division() {
         let s = SessionSummary {
-            id: "test".to_string(),
+            id: "x".to_string(),
             date: "Today".to_string(),
             total_cmds: 0,
             rtk_cmds: 0,
@@ -202,26 +264,83 @@ mod tests {
     }
 
     #[test]
-    fn test_session_summary_adoption_all_rtk() {
+    fn test_adoption_pct_75_percent() {
         let s = SessionSummary {
-            id: "test".to_string(),
-            date: "Today".to_string(),
-            total_cmds: 10,
-            rtk_cmds: 10,
-            output_tokens: 5000,
-        };
-        assert_eq!(s.adoption_pct(), 100.0);
-    }
-
-    #[test]
-    fn test_session_summary_adoption_partial() {
-        let s = SessionSummary {
-            id: "test".to_string(),
+            id: "x".to_string(),
             date: "Today".to_string(),
             total_cmds: 20,
             rtk_cmds: 15,
-            output_tokens: 8000,
+            output_tokens: 0,
         };
         assert_eq!(s.adoption_pct(), 75.0);
+    }
+
+    // --- End-to-end: parse real JSONL and count ---
+
+    #[test]
+    fn test_parse_jsonl_session_and_count() {
+        // Simulate a session with 3 Bash commands: 2 rtk, 1 raw
+        let jsonl = [
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"rtk git status"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"On branch main"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"git log -5"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"commit abc123\ncommit def456"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"rtk cargo test"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"test result: ok. 5 passed"}]}}"#,
+        ];
+
+        let mut tmp = NamedTempFile::new().expect("create tempfile");
+        for line in &jsonl {
+            writeln!(tmp, "{}", line).expect("write line");
+        }
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+
+        let (total, rtk, _output) = count_rtk_commands(&cmds);
+        assert_eq!(total, 3, "should find 3 Bash commands");
+        assert_eq!(rtk, 2, "should find 2 rtk commands");
+    }
+
+    #[test]
+    fn test_parse_jsonl_ignores_non_bash_tools() {
+        // Read/Grep/Edit tools should NOT be counted
+        let jsonl = [
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/tmp/foo"}}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Grep","input":{"pattern":"TODO"}}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"rtk git status"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"clean"}]}}"#,
+        ];
+
+        let mut tmp = NamedTempFile::new().expect("create tempfile");
+        for line in &jsonl {
+            writeln!(tmp, "{}", line).expect("write line");
+        }
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 1, "only Bash tool should be counted");
+        assert_eq!(rtk, 1, "the one Bash command is rtk");
+    }
+
+    #[test]
+    fn test_parse_empty_session() {
+        // Session with no Bash commands at all
+        let jsonl = [
+            r#"{"type":"user","message":{"role":"user","content":"Hello"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":"Hi there!"}}"#,
+        ];
+
+        let mut tmp = NamedTempFile::new().expect("create tempfile");
+        for line in &jsonl {
+            writeln!(tmp, "{}", line).expect("write line");
+        }
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+
+        assert!(cmds.is_empty(), "no Bash commands = empty");
     }
 }
