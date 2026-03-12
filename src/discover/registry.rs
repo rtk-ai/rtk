@@ -2019,4 +2019,73 @@ mod tests {
         );
         assert_eq!(strip_disabled_prefix("git status"), "git status");
     }
+
+    #[test]
+    fn test_classify_jira_issue() {
+        assert_eq!(
+            classify_command("jira issue list --plain"),
+            Classification::Supported {
+                rtk_equivalent: "rtk jira",
+                category: "Jira",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_jira_sprint() {
+        assert_eq!(
+            classify_command("jira sprint list --current"),
+            Classification::Supported {
+                rtk_equivalent: "rtk jira",
+                category: "Jira",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_jira_me_passthrough() {
+        assert_eq!(
+            classify_command("jira me"),
+            Classification::Supported {
+                rtk_equivalent: "rtk jira",
+                category: "Jira",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_jira_unsupported_subcommand() {
+        // board, project, open are NOT in the pattern — should be unsupported
+        match classify_command("jira board list") {
+            Classification::Unsupported { .. } => {} // expected
+            other => panic!(
+                "Expected Unsupported for 'jira board list', got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_jira() {
+        assert_eq!(
+            rewrite_command("jira issue list --plain", &[]),
+            Some("rtk jira issue list --plain".to_string())
+        );
+        assert_eq!(
+            rewrite_command("jira sprint list --current", &[]),
+            Some("rtk jira sprint list --current".to_string())
+        );
+        assert_eq!(
+            rewrite_command("jira me", &[]),
+            Some("rtk jira me".to_string())
+        );
+        // Unsupported subcommands should NOT rewrite
+        assert_eq!(rewrite_command("jira board list", &[]), None);
+    }
 }

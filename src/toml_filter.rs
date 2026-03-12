@@ -1536,6 +1536,7 @@ match_command = "^make\\b"
             "hadolint",
             "helm",
             "iptables",
+            "jira",
             "make",
             "markdownlint",
             "mix-compile",
@@ -1579,8 +1580,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            47,
-            "Expected exactly 47 built-in filters, got {}. \
+            48,
+            "Expected exactly 48 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1637,11 +1638,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 47 existing filters still present + 1 new = 48
+        // All 48 existing filters still present + 1 new = 49
         assert_eq!(
             filters.len(),
-            48,
-            "Expected 48 filters after concat (47 built-in + 1 new)"
+            49,
+            "Expected 49 filters after concat (48 built-in + 1 new)"
         );
 
         // New filter is discoverable

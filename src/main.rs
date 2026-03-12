@@ -28,6 +28,7 @@ mod hook_audit_cmd;
 mod hook_check;
 mod init;
 mod integrity;
+mod jira_cmd;
 mod json_cmd;
 mod learn;
 mod lint_cmd;
@@ -179,6 +180,15 @@ enum Commands {
     /// GitHub CLI (gh) commands with token-optimized output
     Gh {
         /// Subcommand: pr, issue, run, repo
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Jira CLI with compact output (proxy to jira-cli)
+    Jira {
+        /// Subcommand: issue, epic, sprint, me, board, project, open
         subcommand: String,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1396,6 +1406,10 @@ fn main() -> Result<()> {
             gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?;
         }
 
+        Commands::Jira { subcommand, args } => {
+            jira_cmd::run(&subcommand, &args, cli.verbose)?;
+        }
+
         Commands::Aws { subcommand, args } => {
             aws_cmd::run(&subcommand, &args, cli.verbose)?;
         }
@@ -2149,6 +2163,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Jira { .. }
     )
 }
 

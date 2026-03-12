@@ -1,0 +1,22 @@
+[filters.jira]
+description = "Compact jira-cli output"
+match_command = "^jira\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^\\s*View this issue on Jira:"]
+max_lines = 60
+on_empty = "jira: ok ✓"
+
+[[tests.jira]]
+name = "strips empty lines and footer"
+input = "TYPE\tKEY\tSUMMARY\tSTATUS\n\n  View this issue on Jira: https://example.com\n"
+expected = "TYPE\tKEY\tSUMMARY\tSTATUS"
+
+[[tests.jira]]
+name = "preserves issue list rows"
+input = "TYPE\tKEY\tSUMMARY\tSTATUS\nTask\tACME-1\tFix login timeout\tBacklog\n"
+expected = "TYPE\tKEY\tSUMMARY\tSTATUS\nTask\tACME-1\tFix login timeout\tBacklog"
+
+[[tests.jira]]
+name = "strips ansi codes and blank lines"
+input = "\u001b[32mTask\u001b[0m\tACME-2\tUpdate search index\tDone\n\n"
+expected = "Task\tACME-2\tUpdate search index\tDone"

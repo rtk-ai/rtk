@@ -81,6 +81,8 @@ pub const PATTERNS: &[&str] = &[
     r"^trunk\s+build",
     r"^uv\s+(sync|pip\s+install)\b",
     r"^yamllint\b",
+    // Jira CLI
+    r"^jira\s+(issue|epic|sprint|me)",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -606,6 +608,15 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
+    },
+    // Jira CLI
+    RtkRule {
+        rtk_cmd: "rtk jira",
+        rewrite_prefixes: &["jira"],
+        category: "Jira",
+        savings_pct: 70.0,
+        subcmd_savings: &[("issue", 75.0), ("epic", 70.0), ("sprint", 70.0)],
+        subcmd_status: &[("me", RtkStatus::Passthrough)],
     },
 ];
 
