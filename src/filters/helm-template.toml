@@ -1,0 +1,61 @@
+[filters.helm-template]
+description = "Compact helm template output"
+match_command = "^helm\\s+template\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*app\\.kubernetes\\.io/managed-by:\\s*Helm\\s*$",
+  "^\\s*app\\.kubernetes\\.io/version:\\s*.*$",
+  "^\\s*helm\\.sh/chart:\\s*.*$",
+  "^\\s*kubectl\\.kubernetes\\.io/last-applied-configuration:\\s*.*$",
+]
+truncate_lines_at = 120
+max_lines = 120
+
+[[tests.helm-template]]
+name = "strips boilerplate helm labels and last applied annotation"
+input = """
+---
+# Source: nginx/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  labels:
+    app.kubernetes.io/instance: nginx
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: nginx
+    app.kubernetes.io/version: 1.29.4
+    helm.sh/chart: nginx-22.4.3
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: {\"apiVersion\":\"v1\"}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+"""
+expected = "---\n# Source: nginx/templates/service.yaml\napiVersion: v1\nkind: Service\nmetadata:\n  name: nginx\n  labels:\n    app.kubernetes.io/instance: nginx\n    app.kubernetes.io/name: nginx\n  annotations:\nspec:\n  type: ClusterIP\n  ports:\n    - name: http\n      port: 80"
+
+[[tests.helm-template]]
+name = "preserves document boundaries across rendered manifests"
+input = """
+---
+# Source: chart/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  APP_MODE: production
+
+---
+# Source: chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  replicas: 2
+"""
+expected = "---\n# Source: chart/templates/configmap.yaml\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app-config\ndata:\n  APP_MODE: production\n---\n# Source: chart/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\nspec:\n  replicas: 2"

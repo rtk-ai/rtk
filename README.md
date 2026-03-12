@@ -192,7 +192,7 @@ rtk pip outdated                # Outdated packages
 rtk prisma generate             # Schema generation (no ASCII art)
 ```
 
-### Containers
+### Containers & Helm
 ```bash
 rtk docker ps                   # Compact container list
 rtk docker images               # Compact image list
@@ -201,6 +201,9 @@ rtk docker compose ps           # Compose services
 rtk kubectl pods                # Compact pod list
 rtk kubectl logs <pod>          # Deduplicated logs
 rtk kubectl services            # Compact service list
+rtk helm show values <chart>    # Strip commented defaults from chart values
+rtk helm show chart <chart>     # Compact chart metadata
+rtk helm template <r> <chart>   # Reduce Helm boilerplate in rendered manifests
 ```
 
 ### Data & Analytics
@@ -326,6 +329,7 @@ cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
 | `golangci-lint` | `rtk golangci-lint` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
+| `helm show/template` | `rtk helm ...` |
 | `curl` | `rtk curl` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
 

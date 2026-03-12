@@ -1,0 +1,28 @@
+[filters.helm-show-chart]
+description = "Compact helm show chart output"
+match_command = "^helm\\s+show\\s+chart\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^#.*$",
+]
+truncate_lines_at = 120
+max_lines = 80
+
+[[tests.helm-show-chart]]
+name = "preserves chart metadata and dependencies"
+input = """
+# Chart metadata
+apiVersion: v2
+name: nginx
+description: NGINX Open Source is a web server that can be also used as a reverse proxy, load balancer, and HTTP cache.
+type: application
+version: 22.4.3
+appVersion: 1.29.4
+
+dependencies:
+  - name: common
+    version: 2.x.x
+    repository: oci://registry-1.docker.io/bitnamicharts
+"""
+expected = "apiVersion: v2\nname: nginx\ndescription: NGINX Open Source is a web server that can be also used as a reverse proxy, load balancer, and HTTP cache.\ntype: application\nversion: 22.4.3\nappVersion: 1.29.4\ndependencies:\n  - name: common\n    version: 2.x.x\n    repository: oci://registry-1.docker.io/bitnamicharts"

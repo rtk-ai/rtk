@@ -164,6 +164,7 @@ rtk docker images       # Compact image list
 rtk docker logs <c>     # Deduplicated logs
 rtk kubectl get         # Compact resource list
 rtk kubectl logs        # Deduplicated pod logs
+rtk helm show values    # Strip commented chart defaults
 ```
 
 ### Network (65-70% savings)
@@ -192,7 +193,7 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 | GitHub | gh pr, gh run, gh issue | 26-87% |
 | Package Managers | pnpm, npm, npx | 70-90% |
 | Files | ls, read, grep, find | 60-75% |
-| Infrastructure | docker, kubectl | 85% |
+| Infrastructure | docker, kubectl, helm | 85% |
 | Network | curl, wget | 65-70% |
 
 Overall average: **60-90% token reduction** on common development operations.
@@ -1426,6 +1427,7 @@ mod tests {
             "rtk git",
             "rtk docker",
             "rtk kubectl",
+            "rtk helm",
         ] {
             assert!(
                 RTK_INSTRUCTIONS.contains(cmd),

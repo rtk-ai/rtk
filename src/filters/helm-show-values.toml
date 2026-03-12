@@ -1,0 +1,39 @@
+[filters.helm-show-values]
+description = "Compact helm show values output"
+match_command = "^helm\\s+show\\s+values\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^#.*$",
+]
+truncate_lines_at = 120
+max_lines = 120
+
+[[tests.helm-show-values]]
+name = "strips comments and preserves values structure"
+input = """
+# Copyright Example Corp.
+## @section Global parameters
+## @param image.registry Container registry
+image:
+  registry: docker.io
+  repository: bitnami/nginx
+
+## @param service.type Kubernetes Service type
+service:
+  type: ClusterIP
+  port: 80
+"""
+expected = "image:\n  registry: docker.io\n  repository: bitnami/nginx\nservice:\n  type: ClusterIP\n  port: 80"
+
+[[tests.helm-show-values]]
+name = "keeps uncommented examples and strips comment-only separators"
+input = """
+## Example values
+affinity: {}
+
+extraEnvVars:
+  - name: FOO
+    value: bar
+"""
+expected = "affinity: {}\nextraEnvVars:\n  - name: FOO\n    value: bar"
