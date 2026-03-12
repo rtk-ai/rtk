@@ -167,6 +167,7 @@ rtk err npm run build           # Errors/warnings only
 rtk vitest run                  # Vitest compact (failures only)
 rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
+rtk rspec                       # RSpec tests (failures + pending, -87%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 ```
@@ -321,6 +322,7 @@ cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
 | `prisma` | `rtk prisma` |
 | `ruff check/format` | `rtk ruff ...` |
 | `pytest` | `rtk pytest` |
+| `rspec` | `rtk rspec` |
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint` | `rtk golangci-lint` |

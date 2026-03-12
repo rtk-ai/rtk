@@ -615,6 +615,9 @@ breakage, but future rule additions won't take effect until they migrate.
 - `prisma` command for Prisma CLI output filtering
   - Removes ASCII art and verbose logs (~88% token reduction)
   - Supports generate, migrate (dev/status/deploy), and db push
+- `rspec` command for RSpec test output filtering (~87% token reduction)
+  - Shows only failures and pending tests
+  - Compact progress summary with pass/fail/pending counts
 - `utils` module with common utilities (truncate, strip_ansi, execute_command)
   - Shared functionality for consistent output formatting
   - ANSI escape code stripping for clean parsing
