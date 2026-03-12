@@ -938,25 +938,23 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         println!("{}", compact);
 
         timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
+    } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
+        println!("ok (nothing to commit)");
+        timer.track(
+            &original_cmd,
+            "rtk git commit",
+            &raw_output,
+            "ok (nothing to commit)",
+        );
     } else {
-        if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
-            println!("ok (nothing to commit)");
-            timer.track(
-                &original_cmd,
-                "rtk git commit",
-                &raw_output,
-                "ok (nothing to commit)",
-            );
-        } else {
-            if !stderr.trim().is_empty() {
-                eprint!("{}", stderr);
-            }
-            if !stdout.trim().is_empty() {
-                eprint!("{}", stdout);
-            }
-            timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
-            return Ok(exit_code_from_output(&output, "git"));
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
         }
+        if !stdout.trim().is_empty() {
+            eprint!("{}", stdout);
+        }
+        timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
+        return Ok(exit_code_from_output(&output, "git"));
     }
 
     Ok(0)

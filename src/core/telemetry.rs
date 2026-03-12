@@ -4,7 +4,8 @@ use super::constants::RTK_DATA_DIR;
 use crate::core::config;
 use crate::core::tracking;
 use sha2::{Digest, Sha256};
-use std::io::Write;
+use std::fmt::Write as FmtWrite;
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -149,7 +150,10 @@ fn random_salt() -> String {
         hasher.update(fallback.as_bytes());
         return format!("{:x}", hasher.finalize());
     }
-    buf.iter().map(|b| format!("{:02x}", b)).collect()
+    buf.iter().fold(String::new(), |mut output, b| {
+        let _ = write!(output, "{b:02x}");
+        output
+    })
 }
 
 fn salt_file_path() -> PathBuf {
