@@ -67,6 +67,7 @@ mod verify_cmd;
 mod vitest_cmd;
 mod wc_cmd;
 mod wget_cmd;
+mod yarn_cmd;
 
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
@@ -534,6 +535,13 @@ enum Commands {
     /// npm run with filtered output (strip boilerplate)
     Npm {
         /// npm run arguments (script name + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Yarn scripts with intelligent routing (test, build, lint, typecheck -> specialized filters)
+    Yarn {
+        /// Yarn arguments (script name + options)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1896,6 +1904,10 @@ fn main() -> Result<()> {
             npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
         }
 
+        Commands::Yarn { args } => {
+            yarn_cmd::run(&args, cli.verbose, cli.skip_env)?;
+        }
+
         Commands::Curl { args } => {
             curl_cmd::run(&args, cli.verbose)?;
         }
@@ -2291,6 +2303,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Playwright { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
+            | Commands::Yarn { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
