@@ -802,12 +802,6 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Build (generic passthrough, no framework-specific filter)
-    Build {
-        /// Additional build arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Typecheck (delegates to tsc filter)
     Typecheck {
         /// Additional typecheck arguments
@@ -1224,15 +1218,14 @@ fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
         .collect()
 }
 
-/// Validate that pnpm filters are only used in the global context, not before subcommands like build or tsc.
+/// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
 fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
     // Check if this is a Build or Typecheck command with filters
     match command {
-        PnpmCommands::Build { .. } | PnpmCommands::Typecheck { .. } => {
-            // FIXME: if filters are present, we should find out which workspaces are build before running build
+        PnpmCommands::Typecheck { .. } => {
+            // FIXME: if filters are present, we should find out which workspaces are selected before running rtk dedicated commands
             if !filters.is_empty() {
                 let cmd_name = match command {
-                    PnpmCommands::Build { .. } => "build",
                     PnpmCommands::Typecheck { .. } => "tsc",
                     _ => unreachable!(),
                 };
@@ -1240,7 +1233,6 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
                     "[rtk] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
                     cmd_name
                 );
-                eprintln!("{}", msg);
                 return Some(msg);
             }
             None
@@ -1455,7 +1447,7 @@ fn run_cli() -> Result<i32> {
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
         Commands::Pnpm { filter, command } => {
-            // Warns user if filters are used with unsupported subcommands like build or typecheck
+            // Warns user if filters are used with unsupported subcommands like typecheck
             if let Some(warning) = validate_pnpm_filters(&filter, &command) {
                 eprintln!("{}", warning);
             }
@@ -1476,13 +1468,6 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Build { args } => {
-                    let mut build_args: Vec<String> = vec!["build".into()];
-                    build_args.extend(args);
-                    let os_args: Vec<OsString> =
-                        build_args.into_iter().map(OsString::from).collect();
-                    pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &os_args), cli.verbose)?
-                }
                 PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
                 PnpmCommands::Other(args) => {
                     pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
@@ -2600,41 +2585,6 @@ mod tests {
                 assert_eq!(filter, vec!["@app1", "@app2"]);
             }
             _ => panic!("Expected Pnpm command"),
-        }
-    }
-
-    #[test]
-    fn test_pnpm_build_without_filters() {
-        let cli = Cli::try_parse_from([
-            "rtk", "pnpm", "build", "--filter", "@app3", "--filter", "@app4",
-        ])
-        .unwrap();
-        match cli.command {
-            Commands::Pnpm { filter, command } => {
-                let warning = validate_pnpm_filters(&filter, &command);
-
-                assert!(filter.is_empty());
-                assert!(warning.is_none())
-            }
-            _ => panic!("Expected Pnpm Build command"),
-        }
-    }
-
-    #[test]
-    fn test_pnpm_build_with_filters() {
-        let cli = Cli::try_parse_from([
-            "rtk", "pnpm", "--filter", "@app1", "--filter", "@app2", "build", "--filter", "@app3",
-            "--filter", "@app4",
-        ])
-        .unwrap();
-        match cli.command {
-            Commands::Pnpm { filter, command } => {
-                let warning = validate_pnpm_filters(&filter, &command).unwrap();
-
-                assert_eq!(filter, vec!["@app1", "@app2"]);
-                assert_eq!(warning, "[rtk] warning: --filter is not yet supported for pnpm build, filters preceding the subcommand will be ignored")
-            }
-            _ => panic!("Expected Pnpm Build command"),
         }
     }
 
