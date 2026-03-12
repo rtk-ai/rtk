@@ -55,7 +55,7 @@ chore/release-pipeline-cleanup
 ```bash
 git checkout develop
 git pull origin develop
-git checkout -b "feat(scope): your-clear-description"
+git checkout -b feat/scope-your-clear-description
 ```
 
 ### 2. Make Your Changes
