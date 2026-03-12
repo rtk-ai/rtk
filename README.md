@@ -102,6 +102,7 @@ rtk gain        # Should show token savings stats
 # 1. Install hook for Claude Code (recommended)
 rtk init --global
 # Follow instructions to register in ~/.claude/settings.json
+# Claude Code only by default (use --opencode for OpenCode)
 
 # 2. Restart Claude Code, then test
 git status  # Automatically rewritten to rtk git status
@@ -272,12 +273,35 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 ```bash
 rtk init -g                 # Install hook + RTK.md (recommended)
+rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
 ```
 
 After install, **restart Claude Code**.
+
+## OpenCode Plugin (Global)
+
+OpenCode supports plugins that can intercept tool execution. RTK provides a global plugin that mirrors the Claude auto-rewrite behavior by rewriting Bash tool commands to `rtk ...` before they execute. This plugin is **not** installed by default.
+
+> **Note**: This plugin uses OpenCode's `tool.execute.before` hook. Known limitation: plugin hooks do not intercept subagent tool calls ([upstream issue](https://github.com/sst/opencode/issues/5894)). See [OpenCode plugin docs](https://open-code.ai/en/docs/plugins) for API details.
+
+**Install OpenCode plugin:**
+```bash
+rtk init -g --opencode
+```
+
+**What it creates:**
+- `~/.config/opencode/plugins/rtk.ts`
+
+**Restart Required**: Restart OpenCode, then test with `git status` in a session.
+
+**Manual install (fallback):**
+```bash
+mkdir -p ~/.config/opencode/plugins
+cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
+```
 
 ### Commands Rewritten
 

@@ -1,0 +1,47 @@
+[filters.basedpyright]
+description = "Compact basedpyright type checker output — strip blank lines, keep errors"
+match_command = "^basedpyright\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Searching for source files",
+  "^Found \\d+ source file",
+  "^Pyright \\d+\\.\\d+",
+  "^basedpyright \\d+\\.\\d+",
+]
+max_lines = 50
+on_empty = "basedpyright: ok"
+
+[[tests.basedpyright]]
+name = "strips noise, keeps errors and summary"
+input = """
+basedpyright 1.22.0
+Searching for source files
+Found 42 source files
+
+/home/user/app/main.py
+  /home/user/app/main.py:10:5 - error: "foo" is not defined (reportUndefinedVariable)
+  /home/user/app/main.py:25:1 - error: Type "str" is not assignable to type "int" (reportAssignmentType)
+
+/home/user/app/utils.py
+  /home/user/app/utils.py:8:9 - warning: Variable "x" is not accessed (reportUnusedVariable)
+
+3 errors, 1 warning, 0 informations
+"""
+expected = "/home/user/app/main.py\n  /home/user/app/main.py:10:5 - error: \"foo\" is not defined (reportUndefinedVariable)\n  /home/user/app/main.py:25:1 - error: Type \"str\" is not assignable to type \"int\" (reportAssignmentType)\n/home/user/app/utils.py\n  /home/user/app/utils.py:8:9 - warning: Variable \"x\" is not accessed (reportUnusedVariable)\n3 errors, 1 warning, 0 informations"
+
+[[tests.basedpyright]]
+name = "clean output"
+input = """
+basedpyright 1.22.0
+Searching for source files
+Found 10 source files
+
+0 errors, 0 warnings, 0 informations
+"""
+expected = "0 errors, 0 warnings, 0 informations"
+
+[[tests.basedpyright]]
+name = "empty input passes through"
+input = ""
+expected = ""

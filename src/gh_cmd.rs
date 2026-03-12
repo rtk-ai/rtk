@@ -121,7 +121,16 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
     }
 
     // Known gh flags that take a value — skip these and their values
-    let flags_with_value = ["-R", "--repo", "-q", "--jq", "-t", "--template"];
+    let flags_with_value = [
+        "-R",
+        "--repo",
+        "-q",
+        "--jq",
+        "-t",
+        "--template",
+        "--job",
+        "--attempt",
+    ];
     let mut identifier = None;
     let mut extra = Vec::new();
     let mut skip_next = false;
@@ -1416,6 +1425,47 @@ mod tests {
     #[test]
     fn test_run_view_no_passthrough_other_flags() {
         assert!(!should_passthrough_run_view(&["--web".into()]));
+    }
+
+    #[test]
+    fn test_extract_identifier_with_job_flag_after() {
+        // gh run view 12345 --job 67890
+        let args: Vec<String> = vec!["12345".into(), "--job".into(), "67890".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["--job", "67890"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_job_flag_before() {
+        // gh run view --job 67890 12345
+        let args: Vec<String> = vec!["--job".into(), "67890".into(), "12345".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["--job", "67890"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_job_and_log_failed() {
+        // gh run view --log-failed --job 67890 12345
+        let args: Vec<String> = vec![
+            "--log-failed".into(),
+            "--job".into(),
+            "67890".into(),
+            "12345".into(),
+        ];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["--log-failed", "--job", "67890"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_attempt_flag() {
+        // gh run view 12345 --attempt 3
+        let args: Vec<String> = vec!["12345".into(), "--attempt".into(), "3".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["--attempt", "3"]);
     }
 
     // --- should_passthrough_pr_view tests ---
