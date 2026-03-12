@@ -2287,6 +2287,7 @@ mod tests {
     #[test]
     fn test_rewrite_pnpm_command() {
         let commands = vec![
+            "build",
             "exec",
             "i",
             "install",
