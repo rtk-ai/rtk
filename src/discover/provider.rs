@@ -1,4 +1,8 @@
 use anyhow::{Context, Result};
+use clap::ValueEnum;
+use rusqlite::Connection;
+use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -33,6 +37,18 @@ pub trait SessionProvider {
 
 pub struct ClaudeProvider;
 
+pub struct OpenCodeProvider {
+    db_path: PathBuf,
+    conn: RefCell<Option<Connection>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum DiscoverProvider {
+    Auto,
+    Claude,
+    Opencode,
+}
+
 impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
@@ -52,6 +68,71 @@ impl ClaudeProvider {
     pub fn encode_project_path(path: &str) -> String {
         path.replace('/', "-")
     }
+}
+
+impl OpenCodeProvider {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            db_path: Self::resolve_db_path()?,
+            conn: RefCell::new(None),
+        })
+    }
+
+    fn resolve_db_path() -> Result<PathBuf> {
+        if let Ok(path) = std::env::var("OPENCODE_DB_PATH") {
+            let p = PathBuf::from(path);
+            if p.exists() {
+                return Ok(p);
+            }
+        }
+
+        let home = dirs::home_dir().context("could not determine home directory")?;
+        let db = home
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("opencode.db");
+        if !db.exists() {
+            anyhow::bail!(
+                "OpenCode database not found: {}\nSet OPENCODE_DB_PATH to override.",
+                db.display()
+            );
+        }
+        Ok(db)
+    }
+
+    pub fn db_exists() -> bool {
+        Self::resolve_db_path().is_ok()
+    }
+
+    fn parse_session_ref(path: &Path) -> Option<String> {
+        let value = path.to_string_lossy();
+        value
+            .strip_prefix("opencode-session-")
+            .map(|s| s.to_string())
+    }
+
+    fn with_connection<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let mut conn_slot = self.conn.borrow_mut();
+        if conn_slot.is_none() {
+            let conn = Connection::open(&self.db_path).with_context(|| {
+                format!("failed to open OpenCode DB {}", self.db_path.display())
+            })?;
+            *conn_slot = Some(conn);
+        }
+
+        let conn = conn_slot
+            .as_ref()
+            .context("OpenCode DB connection was not initialized")?;
+        f(conn)
+    }
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 impl SessionProvider for ClaudeProvider {
@@ -234,6 +315,127 @@ impl SessionProvider for ClaudeProvider {
     }
 }
 
+impl SessionProvider for OpenCodeProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let cutoff_ms = since_days.map(|days| {
+            let cutoff = SystemTime::now()
+                .checked_sub(Duration::from_secs(days.saturating_mul(86400)))
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            cutoff
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
+        });
+        let escaped_project_filter = project_filter.map(escape_like_pattern);
+
+        self.with_connection(|conn| {
+            let mut sessions: Vec<PathBuf> = Vec::new();
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT id
+                FROM session
+                WHERE (?1 IS NULL OR directory LIKE '%' || ?1 || '%' ESCAPE '\')
+                  AND (?2 IS NULL OR time_updated >= ?2)
+                ORDER BY time_updated DESC
+                "#,
+            )?;
+
+            let rows = stmt.query_map(
+                rusqlite::params![escaped_project_filter.as_deref(), cutoff_ms],
+                |row| row.get::<_, String>(0),
+            )?;
+
+            for row in rows {
+                let session_id = row?;
+                sessions.push(PathBuf::from(format!("opencode-session-{session_id}")));
+            }
+
+            Ok(sessions)
+        })
+    }
+
+    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+        let session_id = Self::parse_session_ref(path).with_context(|| {
+            format!(
+                "invalid OpenCode session reference '{}'; expected opencode-session-<id>",
+                path.display()
+            )
+        })?;
+
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "
+                SELECT data
+                FROM part
+                WHERE session_id = ?1
+                  AND json_extract(data, '$.type') = 'tool'
+                  AND json_extract(data, '$.tool') = 'bash'
+                ORDER BY time_created ASC
+                ",
+            )?;
+
+            let mut commands = Vec::new();
+            let mut sequence_index = 0usize;
+            let rows =
+                stmt.query_map(rusqlite::params![session_id], |row| row.get::<_, String>(0))?;
+
+            for row in rows {
+                let raw = row?;
+                let json: Value = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let command = json
+                    .pointer("/state/input/command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if command.is_empty() {
+                    continue;
+                }
+
+                let output = json
+                    .pointer("/state/output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let status = json
+                    .pointer("/state/status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let output_content: Option<String> = if output.is_empty() {
+                    None
+                } else {
+                    Some(output.chars().take(1000).collect())
+                };
+
+                commands.push(ExtractedCommand {
+                    command,
+                    output_len: if output.is_empty() {
+                        None
+                    } else {
+                        Some(output.len())
+                    },
+                    session_id: session_id.clone(),
+                    output_content,
+                    is_error: status == "error",
+                    sequence_index,
+                });
+                sequence_index += 1;
+            }
+
+            Ok(commands)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,6 +536,14 @@ mod tests {
         let encoded = ClaudeProvider::encode_project_path("/Users/foo/Sites/rtk");
         assert!(encoded.contains("rtk"));
         assert!(encoded.contains("Sites"));
+    }
+
+    #[test]
+    fn test_escape_like_pattern_escapes_wildcards() {
+        assert_eq!(
+            escape_like_pattern(r"foo%bar_baz\\qux"),
+            r"foo\%bar\_baz\\\\qux"
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
+use std::path::Path;
 
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, PATTERNS, RULES};
 
@@ -57,6 +58,11 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    // Ignore script-like snippets captured as a single "command" (multiline, comments).
+    if trimmed.contains('\n') || trimmed.starts_with('#') {
+        return Classification::Ignored;
+    }
+
     // Check ignored
     for exact in IGNORED_EXACT {
         if trimmed == *exact {
@@ -71,8 +77,26 @@ pub fn classify_command(cmd: &str) -> Classification {
 
     // Strip env prefixes (sudo, env VAR=val, VAR=val)
     let stripped = ENV_PREFIX.replace(trimmed, "");
+    let cmd_clean_storage;
     let cmd_clean = stripped.trim();
     if cmd_clean.is_empty() {
+        return Classification::Ignored;
+    }
+
+    // Normalize RTK path invocations to canonical "rtk ..." form.
+    // Examples:
+    //   /home/user/.cargo/bin/rtk git status -> rtk git status
+    //   "/home/user/.cargo/bin/rtk" git status -> rtk git status
+    //   ./rtk git status -> rtk git status
+    let cmd_clean = if let Some(norm) = normalize_rtk_invocation(cmd_clean) {
+        cmd_clean_storage = norm;
+        cmd_clean_storage.as_str()
+    } else {
+        cmd_clean
+    };
+
+    // Already an RTK command (directly or via normalized absolute path)
+    if cmd_clean == "rtk" || cmd_clean.starts_with("rtk ") {
         return Classification::Ignored;
     }
 
@@ -146,6 +170,67 @@ pub fn classify_command(cmd: &str) -> Classification {
             }
         }
     }
+}
+
+/// Returns true when a command is an RTK invocation (direct or path-based),
+/// including env/sudo-prefixed forms.
+pub fn is_rtk_invocation(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    let cmd_clean = stripped.trim();
+    if cmd_clean.is_empty() {
+        return false;
+    }
+
+    if cmd_clean == "rtk" || cmd_clean.starts_with("rtk ") {
+        return true;
+    }
+
+    normalize_rtk_invocation(cmd_clean)
+        .map(|norm| norm == "rtk" || norm.starts_with("rtk "))
+        .unwrap_or(false)
+}
+
+fn normalize_rtk_invocation(cmd: &str) -> Option<String> {
+    let mut parts = cmd.splitn(2, char::is_whitespace);
+    let first = parts.next()?.trim();
+    let first = strip_matching_quotes(first);
+
+    let is_rtk = first == "rtk"
+        || first.ends_with("/rtk")
+        || first.ends_with("\\rtk")
+        || Path::new(first)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == "rtk")
+            .unwrap_or(false);
+
+    if !is_rtk {
+        return None;
+    }
+
+    let rest = parts.next().map(str::trim_start).unwrap_or("");
+    if rest.is_empty() {
+        Some("rtk".to_string())
+    } else {
+        Some(format!("rtk {rest}"))
+    }
+}
+
+fn strip_matching_quotes(token: &str) -> &str {
+    let bytes = token.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &token[1..token.len() - 1];
+        }
+    }
+    token
 }
 
 /// Extract the base command (first word, or first two if it looks like a subcommand pattern).
@@ -696,6 +781,55 @@ mod tests {
     #[test]
     fn test_classify_rtk_already() {
         assert_eq!(classify_command("rtk git status"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_is_rtk_invocation_direct() {
+        assert!(is_rtk_invocation("rtk git status"));
+    }
+
+    #[test]
+    fn test_is_rtk_invocation_absolute_path() {
+        assert!(is_rtk_invocation("/home/vadikas/.cargo/bin/rtk git status"));
+    }
+
+    #[test]
+    fn test_is_rtk_invocation_env_prefixed() {
+        assert!(is_rtk_invocation(
+            "FOO=1 /home/vadikas/.cargo/bin/rtk git status"
+        ));
+    }
+
+    #[test]
+    fn test_classify_absolute_rtk_path_ignored() {
+        assert_eq!(
+            classify_command("/home/vadikas/.cargo/bin/rtk git status"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_quoted_absolute_rtk_path_ignored() {
+        assert_eq!(
+            classify_command("\"/home/vadikas/.cargo/bin/rtk\" git status"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_env_prefixed_absolute_rtk_path_ignored() {
+        assert_eq!(
+            classify_command("FOO=1 /home/vadikas/.cargo/bin/rtk git status"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_sudo_absolute_rtk_path_ignored() {
+        assert_eq!(
+            classify_command("sudo /home/vadikas/.cargo/bin/rtk git status"),
+            Classification::Ignored
+        );
     }
 
     #[test]
@@ -1485,7 +1619,7 @@ mod tests {
         );
     }
 
-    // --- AWS / psql (PR #216) ---
+    // --- AWS / SQL clients (PR #216 + sqlite3) ---
 
     #[test]
     fn test_classify_aws() {
@@ -1955,6 +2089,22 @@ mod tests {
         assert_eq!(
             rewrite_command("curl https://api.example.com/health", &excluded),
             None
+        );
+    }
+
+    #[test]
+    fn test_classify_multiline_script_ignored() {
+        assert_eq!(
+            classify_command("# comment\ngit status"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_single_line_comment_ignored() {
+        assert_eq!(
+            classify_command("# just a comment"),
+            Classification::Ignored
         );
     }
 

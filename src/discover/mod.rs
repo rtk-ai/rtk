@@ -6,10 +6,10 @@ pub mod rules;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, DiscoverProvider, OpenCodeProvider, SessionProvider};
 use registry::{
-    category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
-    strip_disabled_prefix, Classification,
+    category_avg_tokens, classify_command, has_rtk_disabled_prefix, is_rtk_invocation,
+    split_command_chain, strip_disabled_prefix, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -37,8 +37,20 @@ pub fn run(
     limit: usize,
     format: &str,
     verbose: u8,
+    provider: DiscoverProvider,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
+    let (session_provider, uses_claude_path_encoding): (Box<dyn SessionProvider>, bool) =
+        match provider {
+            DiscoverProvider::Claude => (Box::new(ClaudeProvider), true),
+            DiscoverProvider::Opencode => (Box::new(OpenCodeProvider::new()?), false),
+            DiscoverProvider::Auto => {
+                if OpenCodeProvider::db_exists() {
+                    (Box::new(OpenCodeProvider::new()?), false)
+                } else {
+                    (Box::new(ClaudeProvider), true)
+                }
+            }
+        };
 
     // Determine project filter
     let project_filter = if all {
@@ -49,11 +61,15 @@ pub fn run(
         // Default: current working directory
         let cwd = std::env::current_dir()?;
         let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        if uses_claude_path_encoding {
+            Some(ClaudeProvider::encode_project_path(&cwd_str))
+        } else {
+            Some(cwd_str)
+        }
     };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    let sessions =
+        session_provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
@@ -71,7 +87,7 @@ pub fn run(
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
     for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
+        let extracted = match session_provider.extract_commands(session_path) {
             Ok(cmds) => cmds,
             Err(e) => {
                 if verbose > 0 {
@@ -156,8 +172,8 @@ pub fn run(
                         bucket.count += 1;
                     }
                     Classification::Ignored => {
-                        // Check if it starts with "rtk "
-                        if part.trim().starts_with("rtk ") {
+                        // Count direct and path-based RTK invocations as already using RTK.
+                        if is_rtk_invocation(part) {
                             already_rtk += 1;
                         }
                         // Otherwise just skip

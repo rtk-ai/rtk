@@ -50,6 +50,7 @@ mod rewrite_cmd;
 mod ruff_cmd;
 mod runner;
 mod session_cmd;
+mod sqlite3_cmd;
 mod summary;
 mod tee;
 mod telemetry;
@@ -67,6 +68,7 @@ mod wget_cmd;
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
+use discover::provider::DiscoverProvider;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -199,6 +201,13 @@ enum Commands {
     /// PostgreSQL client with compact output (strip borders, compress tables)
     Psql {
         /// psql arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// SQLite client passthrough with usage tracking
+    Sqlite3 {
+        /// sqlite3 arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -520,8 +529,11 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Discover missed RTK savings from Claude Code history
+    /// Discover missed RTK savings from session history
     Discover {
+        /// Session provider: auto, claude, opencode
+        #[arg(long, value_enum, default_value_t = DiscoverProvider::Auto)]
+        provider: DiscoverProvider,
         /// Filter by project path (substring match)
         #[arg(short, long)]
         project: Option<String>,
@@ -1419,6 +1431,10 @@ fn main() -> Result<()> {
             psql_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Sqlite3 { args } => {
+            sqlite3_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::Pnpm { command } => match command {
             PnpmCommands::List { depth, args } => {
                 pnpm_cmd::run(pnpm_cmd::PnpmCommand::List { depth }, &args, cli.verbose)?;
@@ -1799,13 +1815,22 @@ fn main() -> Result<()> {
         }
 
         Commands::Discover {
+            provider,
             project,
             limit,
             all,
             since,
             format,
         } => {
-            discover::run(project.as_deref(), all, since, limit, &format, cli.verbose)?;
+            discover::run(
+                project.as_deref(),
+                all,
+                since,
+                limit,
+                &format,
+                cli.verbose,
+                provider,
+            )?;
         }
 
         Commands::Session {} => {
@@ -2144,6 +2169,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Smart { .. }
             | Commands::Git { .. }
             | Commands::Gh { .. }
+            | Commands::Psql { .. }
+            | Commands::Sqlite3 { .. }
             | Commands::Pnpm { .. }
             | Commands::Err { .. }
             | Commands::Test { .. }
@@ -2400,6 +2427,27 @@ mod tests {
                 cmd
             );
         }
+    }
+
+    #[test]
+    fn test_discover_provider_parses_value_enum() {
+        let result = Cli::try_parse_from(["rtk", "discover", "--provider", "opencode"]);
+        assert!(result.is_ok());
+
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Discover { provider, .. } => {
+                    assert_eq!(provider, DiscoverProvider::Opencode)
+                }
+                _ => panic!("Expected Discover command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_discover_provider_rejects_typo() {
+        let result = Cli::try_parse_from(["rtk", "discover", "--provider", "opnecode"]);
+        assert!(result.is_err());
     }
 
     #[test]
