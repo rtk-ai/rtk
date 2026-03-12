@@ -103,7 +103,7 @@ fi
 # ALL handlers run — no short-circuit before this point.
 HANDLER_EXITS=()
 for pid in "${HANDLER_PIDS[@]}"; do
-  wait "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
   HANDLER_EXITS+=($?)
 done
 
