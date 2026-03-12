@@ -1,0 +1,44 @@
+[filters.ssh]
+description = "Compact ssh output — strip connection banners, keep command output"
+match_command = "^ssh\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Warning: Permanently added",
+  "^Connection to .+ closed",
+  "^Authenticated to",
+  "^debug1:",
+  "^OpenSSH_",
+  "^Pseudo-terminal",
+]
+max_lines = 200
+truncate_lines_at = 120
+
+[[tests.ssh]]
+name = "strips connection banners, keeps command output"
+input = """
+Warning: Permanently added '192.168.1.10' (ED25519) to the list of known hosts.
+
+total 32
+drwxr-xr-x 4 user user 4096 Mar 10 12:00 app
+-rw-r--r-- 1 user user 1234 Mar 10 11:00 config.yaml
+
+Connection to 192.168.1.10 closed.
+"""
+expected = "total 32\ndrwxr-xr-x 4 user user 4096 Mar 10 12:00 app\n-rw-r--r-- 1 user user 1234 Mar 10 11:00 config.yaml"
+
+[[tests.ssh]]
+name = "verbose debug lines stripped"
+input = """
+debug1: Connecting to host.example.com port 22.
+debug1: Connection established.
+Authenticated to host.example.com ([1.2.3.4]:22).
+uptime: 12:00:00 up 42 days, load average: 0.10, 0.15, 0.12
+Connection to host.example.com closed.
+"""
+expected = "uptime: 12:00:00 up 42 days, load average: 0.10, 0.15, 0.12"
+
+[[tests.ssh]]
+name = "empty input passes through"
+input = ""
+expected = ""

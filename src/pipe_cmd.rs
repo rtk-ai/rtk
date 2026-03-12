@@ -57,7 +57,7 @@ fn go_test_wrapper(input: &str) -> String {
 
 fn git_log_wrapper(input: &str) -> String {
     // Default to 50 log lines when used as a pipe filter
-    crate::git::filter_log_output(input, 50)
+    crate::git::filter_log_output(input, 50, false)
 }
 
 fn git_diff_wrapper(input: &str) -> String {
