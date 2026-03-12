@@ -176,12 +176,23 @@ Savings by ecosystem:
   RUST (cmds/rust/)        60-99%    cargo test/build/clippy, err
 ```
 
+**Total: 64 modules** (42 command modules + 22 infrastructure modules)
+
 ### Module Breakdown
 
 - **Command Modules**: `src/cmds/` — organized by ecosystem (git, rust, js, python, go, dotnet, cloud, system, ruby). Each ecosystem README lists its files.
 - **Core Infrastructure**: `src/core/` — utils, filter, tracking, tee, config, toml_filter, display_helpers, telemetry
 - **Hook System**: `src/hooks/` — init, rewrite, permissions, hook_cmd, hook_check, hook_audit, verify, trust, integrity
 - **Analytics**: `src/analytics/` — gain, cc_economics, ccusage, session_cmd
+
+### Module Count Breakdown
+
+- **Command Modules**: 42 (directly exposed to users)
+- **Infrastructure Modules**: 22 (utils, filter, tracking, tee, config, init, gain, toml_filter, verify_cmd, etc.)
+- **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
+- **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
+- **Python Tooling**: 3 modules (ruff, pytest, pip)
+- **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
 
 ---
 
