@@ -22,9 +22,6 @@ pub mod exec;
 // Hook logic + LLM protocol adapters (hook/mod.rs, hook/claude.rs)
 pub mod hook;
 
-// Safety wrapper for rm→trash (renamed from trash_cmd.rs; wired up in main branch)
-// pub(crate) mod trash;  // not declared here to avoid name collision with external `trash` crate
-
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
