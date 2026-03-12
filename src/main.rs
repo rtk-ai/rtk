@@ -45,9 +45,9 @@ mod prettier_cmd;
 mod prisma_cmd;
 mod psql_cmd;
 mod pytest_cmd;
-mod rspec_cmd;
 mod read;
 mod rewrite_cmd;
+mod rspec_cmd;
 mod ruff_cmd;
 mod runner;
 mod summary;
@@ -607,7 +607,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-
 
     /// RSpec test runner with compact output
     Rspec {

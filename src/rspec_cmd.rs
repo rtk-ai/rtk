@@ -1,6 +1,6 @@
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_output,
-    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, truncate_output, FormatMode, OutputParser,
+    ParseResult, TestFailure, TestResult, TokenFormatter,
 };
 use crate::tracking;
 use anyhow::{Context, Result};
@@ -59,11 +59,13 @@ impl OutputParser for RspecParser {
         match serde_json::from_str::<RspecJsonOutput>(input) {
             Ok(json) => {
                 let failures = extract_failures_from_json(&json);
-                let passed = json.summary.example_count
+                let passed = json
+                    .summary
+                    .example_count
                     .saturating_sub(json.summary.failure_count)
                     .saturating_sub(json.summary.pending_count);
-                let failed = json.summary.failure_count
-                    + json.summary.errors_outside_of_examples_count;
+                let failed =
+                    json.summary.failure_count + json.summary.errors_outside_of_examples_count;
 
                 let result = TestResult {
                     total: json.summary.example_count,
@@ -76,16 +78,12 @@ impl OutputParser for RspecParser {
 
                 ParseResult::Full(result)
             }
-            Err(e) => {
-                match extract_stats_regex(input) {
-                    Some(result) => {
-                        ParseResult::Degraded(result, vec![format!("JSON parse failed: {}", e)])
-                    }
-                    None => {
-                        ParseResult::Passthrough(truncate_output(input, 500))
-                    }
+            Err(e) => match extract_stats_regex(input) {
+                Some(result) => {
+                    ParseResult::Degraded(result, vec![format!("JSON parse failed: {}", e)])
                 }
-            }
+                None => ParseResult::Passthrough(truncate_output(input, 500)),
+            },
         }
     }
 }
@@ -501,7 +499,9 @@ mod tests {
         assert_eq!(data.failed, 1);
         assert_eq!(data.failures.len(), 1);
         assert!(data.failures[0].stack_trace.is_none());
-        assert!(data.failures[0].error_message.contains("Something went wrong"));
+        assert!(data.failures[0]
+            .error_message
+            .contains("Something went wrong"));
     }
 
     #[test]
@@ -602,8 +602,15 @@ Finished in 0.05 seconds (files took 1.2 seconds to load)
     #[test]
     fn test_has_format_flag() {
         assert!(!has_format_flag(&[]));
-        assert!(!has_format_flag(&["spec/".to_string(), "--tag".to_string(), "focus".to_string()]));
-        assert!(has_format_flag(&["--format".to_string(), "documentation".to_string()]));
+        assert!(!has_format_flag(&[
+            "spec/".to_string(),
+            "--tag".to_string(),
+            "focus".to_string()
+        ]));
+        assert!(has_format_flag(&[
+            "--format".to_string(),
+            "documentation".to_string()
+        ]));
         assert!(has_format_flag(&["-f".to_string(), "progress".to_string()]));
         assert!(has_format_flag(&["--format=json".to_string()]));
         assert!(has_format_flag(&["-fj".to_string()]));
