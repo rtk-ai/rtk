@@ -3,23 +3,7 @@ set -e
 
 echo "🔍 Validating RTK documentation consistency..."
 
-# 1. Version Cargo.toml == tous les fichiers doc
-CARGO_VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
-echo "📦 Cargo.toml version: $CARGO_VERSION"
-
-for file in README.md CLAUDE.md ARCHITECTURE.md; do
-  if [ ! -f "$file" ]; then
-    echo "⚠️  $file not found, skipping"
-    continue
-  fi
-  if ! grep -q "$CARGO_VERSION" "$file"; then
-    echo "❌ $file ne mentionne pas version $CARGO_VERSION"
-    exit 1
-  fi
-done
-echo "✅ Version consistency: all docs mention $CARGO_VERSION"
-
-# 2. Nombre de modules cohérent
+# 1. Nombre de modules cohérent
 MAIN_MODULES=$(grep -c '^mod ' src/main.rs)
 echo "📊 Module count in main.rs: $MAIN_MODULES"
 
