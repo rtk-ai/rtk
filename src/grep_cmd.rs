@@ -1,4 +1,5 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
@@ -23,7 +24,7 @@ pub fn run(
     // BRE alternation \| → | for rg (which uses PCRE-style regex)
     let rg_pattern = pattern.replace(r"\|", "|");
 
-    let mut rg_cmd = Command::new("rg");
+    let mut rg_cmd = resolved_command("rg");
     rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
@@ -435,7 +436,7 @@ mod tests {
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
     #[test]
     fn test_rg_always_has_line_numbers() {
-        let mut cmd = std::process::Command::new("rg");
+        let mut cmd = resolved_command("rg");
         cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
         if let Ok(output) = cmd.output() {
             assert!(

@@ -1,4 +1,5 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
@@ -22,7 +23,7 @@ pub enum GitCommand {
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
 /// prepended before any subcommand arguments.
 fn git_cmd(global_args: &[String]) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = resolved_command("git");
     for arg in global_args {
         cmd.arg(arg);
     }
@@ -1447,8 +1448,13 @@ mod tests {
     #[test]
     fn test_git_cmd_no_global_args() {
         let cmd = git_cmd(&[]);
-        let program = cmd.get_program();
-        assert_eq!(program, "git");
+        let program = cmd.get_program().to_string_lossy();
+        // resolved_command may return full path (e.g. /usr/bin/git) or bare name
+        assert!(
+            program == "git" || program.ends_with("/git"),
+            "expected 'git' or path ending in '/git', got {:?}",
+            program
+        );
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.is_empty());
     }
