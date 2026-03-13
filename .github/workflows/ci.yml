@@ -274,9 +274,14 @@ jobs:
             exit 0
           fi
 
+          echo "::group::Preparing API request"
+          echo "System prompt: $(wc -c < system_prompt.txt) bytes"
+          echo "User prompt: $(wc -c < user_prompt.txt) bytes"
           SYSTEM_JSON=$(jq -Rs . < system_prompt.txt)
           USER_JSON=$(jq -Rs . < user_prompt.txt)
+          echo "::endgroup::"
 
+          echo "::group::Calling Claude API (claude-sonnet-4-6)"
           RESPONSE=$(curl -s -w "\n%{http_code}" https://api.anthropic.com/v1/messages \
             -H "content-type: application/json" \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
@@ -305,12 +310,14 @@ jobs:
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP status: $HTTP_CODE"
+          echo "::endgroup::"
 
           if [ "$HTTP_CODE" != "200" ]; then
             echo "::warning::Claude API returned HTTP $HTTP_CODE — skipping doc review"
             echo "Skipped: API error (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            echo "$BODY" | head -5 >> $GITHUB_STEP_SUMMARY
+            echo "$BODY" | head -10 >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             exit 0
           fi
@@ -321,8 +328,14 @@ jobs:
           if [ -z "$REVIEW_JSON" ]; then
             echo "::warning::Empty response from Claude API — skipping doc review"
             echo "Skipped: empty API response" >> $GITHUB_STEP_SUMMARY
+            echo "Raw response:"
+            echo "$BODY" | head -20
             exit 0
           fi
+
+          echo "::group::AI Review Result"
+          echo "$REVIEW_JSON" | jq .
+          echo "::endgroup::"
 
           STATUS=$(echo "$REVIEW_JSON" | jq -r '.status')
           REASONING=$(echo "$REVIEW_JSON" | jq -r '.reasoning[]' 2>/dev/null)
@@ -347,7 +360,12 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
 
-          if [ "$STATUS" = "FAIL" ]; then
+          if [ "$STATUS" = "PASS" ]; then
+            echo "Documentation review passed."
+          elif [ "$STATUS" = "FAIL" ]; then
             echo "::error::Documentation review failed — see summary for details"
             exit 1
+          else
+            echo "::warning::Unexpected status '${STATUS}' — skipping"
+            echo "Unexpected AI response status: ${STATUS}" >> $GITHUB_STEP_SUMMARY
           fi
