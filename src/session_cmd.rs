@@ -1,5 +1,5 @@
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
-use crate::discover::registry::{classify_command, Classification};
+use crate::discover::registry::{classify_command, split_command_chain, Classification};
 use crate::utils::format_tokens;
 use anyhow::{Context, Result};
 use std::fs;
@@ -27,18 +27,23 @@ impl SessionSummary {
 /// A command is "covered" if it either:
 /// - starts with "rtk " (explicit rtk invocation), or
 /// - would be rewritten by the hook (classify_command returns Supported)
+///
+/// Chained commands (e.g. "cd ./path && rtk ls") are split so each part
+/// is classified independently — matching the discover module's behavior.
 fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
-    let total = cmds.len();
-    let rtk = cmds
-        .iter()
-        .filter(|c| {
-            c.command.starts_with("rtk ")
-                || matches!(
-                    classify_command(&c.command),
-                    Classification::Supported { .. }
-                )
-        })
-        .count();
+    let mut total: usize = 0;
+    let mut rtk: usize = 0;
+    for c in cmds {
+        let parts = split_command_chain(&c.command);
+        for part in &parts {
+            total += 1;
+            if part.starts_with("rtk ")
+                || matches!(classify_command(part), Classification::Supported { .. })
+            {
+                rtk += 1;
+            }
+        }
+    }
     let output: usize = cmds.iter().filter_map(|c| c.output_len).sum();
     (total, rtk, output)
 }
@@ -274,6 +279,44 @@ mod tests {
         assert_eq!(output, 0);
     }
 
+    // --- chained commands ---
+
+    #[test]
+    fn test_count_chained_commands_split() {
+        // "cd ./path && rtk ls" is one ExtractedCommand but two logical commands.
+        // cd is ignored/unsupported, ls is supported → 1 out of 2 covered.
+        let cmds = vec![make_cmd("cd ./your/app/path && rtk ls", Some(200))];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 2, "chain should split into 2 commands");
+        assert_eq!(rtk, 1, "only 'rtk ls' is RTK-covered");
+    }
+
+    #[test]
+    fn test_count_chained_all_supported() {
+        // Both parts are RTK-supported
+        let cmds = vec![make_cmd("git status && git log -5", Some(500))];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 2, "chain should split into 2 commands");
+        assert_eq!(rtk, 2, "both git commands are RTK-covered");
+    }
+
+    #[test]
+    fn test_count_chained_with_semicolon() {
+        let cmds = vec![make_cmd("cd /tmp; git status; echo done", Some(100))];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 3, "semicolon chain splits into 3 commands");
+        assert_eq!(rtk, 1, "only git status is RTK-covered");
+    }
+
+    #[test]
+    fn test_count_chained_no_false_inflation() {
+        // Single command should still count as 1
+        let cmds = vec![make_cmd("git status", Some(100))];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 1);
+        assert_eq!(rtk, 1);
+    }
+
     // --- adoption_pct ---
 
     #[test]
@@ -368,5 +411,28 @@ mod tests {
         let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
 
         assert!(cmds.is_empty(), "no Bash commands = empty");
+    }
+
+    #[test]
+    fn test_parse_jsonl_chained_command() {
+        // Claude often runs "cd ./path && git status" as a single Bash call.
+        // The adoption metric should split the chain and count each part.
+        let jsonl = [
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cd ./your/app/path && rtk ls"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file1.rs\nfile2.rs"}]}}"#,
+        ];
+
+        let mut tmp = NamedTempFile::new().expect("create tempfile");
+        for line in &jsonl {
+            writeln!(tmp, "{}", line).expect("write line");
+        }
+
+        let provider = ClaudeProvider;
+        let cmds = provider.extract_commands(tmp.path()).expect("parse JSONL");
+
+        assert_eq!(cmds.len(), 1, "one Bash tool call");
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 2, "chain splits into cd + rtk ls");
+        assert_eq!(rtk, 1, "rtk ls is covered, cd is not");
     }
 }
