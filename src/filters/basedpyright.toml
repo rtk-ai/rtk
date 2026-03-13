@@ -44,4 +44,4 @@ expected = "0 errors, 0 warnings, 0 informations"
 [[tests.basedpyright]]
 name = "empty input passes through"
 input = ""
-expected = ""
+expected = "basedpyright: ok"

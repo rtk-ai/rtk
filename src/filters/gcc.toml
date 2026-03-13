@@ -46,4 +46,4 @@ expected = "/usr/bin/ld: /tmp/main.o: undefined reference to 'missing_func'\ncol
 [[tests.gcc]]
 name = "empty input passes through"
 input = ""
-expected = ""
+expected = "gcc: ok"

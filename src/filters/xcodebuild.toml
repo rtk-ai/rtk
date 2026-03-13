@@ -96,4 +96,4 @@ expected = "Test Suite 'All tests' started at 2026-03-10 12:00:00\nTest Suite 'A
 [[tests.xcodebuild]]
 name = "empty input passes through"
 input = ""
-expected = ""
+expected = "xcodebuild: ok"

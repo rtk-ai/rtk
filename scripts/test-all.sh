@@ -106,6 +106,31 @@ if [[ -z "$RTK" ]]; then
     exit 1
 fi
 
+TEMP_RTK_DIR=""
+cleanup() {
+    if [[ -n "$TEMP_RTK_DIR" && -d "$TEMP_RTK_DIR" ]]; then
+        rm -rf "$TEMP_RTK_DIR"
+    fi
+}
+trap cleanup EXIT
+
+if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+    RTK_REAL="$RTK"
+    if [[ ! -f "$RTK_REAL" && -f "${RTK}.exe" ]]; then
+        RTK_REAL="${RTK}.exe"
+    fi
+
+    case "$RTK_REAL" in
+        */target/debug/rtk|*/target/debug/rtk.exe|*/target/release/rtk|*/target/release/rtk.exe)
+            TEMP_RTK_DIR=$(mktemp -d /tmp/rtk-smoke-XXXXX)
+            cp "$RTK_REAL" "$TEMP_RTK_DIR/rtk.exe"
+            export PATH="$TEMP_RTK_DIR:$PATH"
+            hash -r
+            RTK=$(command -v rtk || echo "$TEMP_RTK_DIR/rtk.exe")
+            ;;
+    esac
+fi
+
 printf "${BOLD}RTK Smoke Test Suite${NC}\n"
 printf "Binary: %s\n" "$RTK"
 printf "Version: %s\n" "$(rtk --version)"
@@ -118,6 +143,7 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
+CLAUDE_PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 
 # ── 1. Version & Help ───────────────────────────────
 
@@ -455,7 +481,11 @@ assert_ok      "rtk cc-economics"             rtk cc-economics
 section "Learn"
 
 assert_ok      "rtk learn --help"             rtk learn --help
-assert_ok      "rtk learn (no sessions)"      rtk learn --since 0 2>&1 || true
+if [[ -d "$CLAUDE_PROJECTS_DIR" ]]; then
+    assert_ok  "rtk learn (no sessions)"      rtk learn --since 0
+else
+    skip_test  "rtk learn (no sessions)"      "Claude Code projects not found"
+fi
 
 # ── 32. Rewrite ───────────────────────────────────────
 
@@ -499,7 +529,11 @@ assert_contains "rtk proxy passthrough"       "hello" rtk proxy echo hello
 
 section "Discover"
 
-assert_ok      "rtk discover"                 rtk discover
+if [[ -d "$CLAUDE_PROJECTS_DIR" ]]; then
+    assert_ok  "rtk discover"                 rtk discover
+else
+    skip_test  "rtk discover"                 "Claude Code projects not found"
+fi
 
 # ── 36. Diff ──────────────────────────────────────────
 
@@ -540,7 +574,19 @@ fi
 
 section "Hook check (#344)"
 
-assert_contains "rtk init --show hook version" "version" rtk init --show
+hook_status=$(rtk init --show 2>&1 || true)
+if echo "$hook_status" | grep -q "Hook: not found"; then
+    skip_test "rtk init --show hook version" "RTK hook not installed"
+elif echo "$hook_status" | grep -q "version"; then
+    PASS=$((PASS + 1))
+    printf "  ${GREEN}PASS${NC}  %s\n" "rtk init --show hook version"
+else
+    FAIL=$((FAIL + 1))
+    FAILURES+=("rtk init --show hook version")
+    printf "  ${RED}FAIL${NC}  %s\n" "rtk init --show hook version"
+    printf "        expected: '%s'\n" "version"
+    printf "        got: %s\n" "$(echo "$hook_status" | head -3)"
+fi
 
 # ══════════════════════════════════════════════════════
 # Report

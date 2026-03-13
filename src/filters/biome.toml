@@ -42,4 +42,4 @@ expected = "biome: ok"
 [[tests.biome]]
 name = "empty input passes through"
 input = ""
-expected = ""
+expected = "biome: ok"

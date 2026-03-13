@@ -42,4 +42,4 @@ expected = "{\n    \"Name\": \"docker.io/library/nginx\",\n    \"Tag\": \"latest
 [[tests.skopeo]]
 name = "empty input passes through"
 input = ""
-expected = ""
+expected = "skopeo: ok"

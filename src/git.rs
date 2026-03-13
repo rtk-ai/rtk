@@ -1,5 +1,5 @@
 use crate::tracking;
-use crate::utils::{resolved_command, truncate};
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
@@ -1452,7 +1452,14 @@ mod tests {
     fn test_git_cmd_no_global_args() {
         let cmd = git_cmd(&[]);
         let program = cmd.get_program();
-        assert_eq!(program, "git");
+        let program_text = program.to_string_lossy();
+        assert!(
+            program_text == "git"
+                || program_text.ends_with("/git")
+                || program_text.ends_with("\\git.exe"),
+            "unexpected git program path: {}",
+            program_text
+        );
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.is_empty());
     }

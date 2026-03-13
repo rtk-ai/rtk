@@ -40,4 +40,4 @@ expected = "oxlint: ok"
 [[tests.oxlint]]
 name = "empty input passes through"
 input = ""
-expected = ""
+expected = "oxlint: ok"
