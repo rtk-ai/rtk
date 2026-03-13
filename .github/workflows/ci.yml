@@ -230,6 +230,37 @@ jobs:
           gh pr diff "$PR_NUM" | head -c 12000 > diff.txt
           gh pr view "$PR_NUM" --json title,body --jq '"PR Title: \(.title)\nPR Description: \(.body)"' > pr_info.txt
 
+      - name: Build prompt files
+        run: |
+          # System prompt
+          cat <<'EOF' > system_prompt.txt
+          You are a documentation reviewer for the RTK project.
+          You will receive the project's CONTRIBUTING.md (which contains the documentation rules), the PR info, changed files, and diff.
+          Your job: based ONLY on the documentation rules in CONTRIBUTING.md, decide if the PR includes the required documentation updates.
+
+          IMPORTANT:
+          - CI/CD changes, test-only changes, and refactors with no user-facing impact do NOT require doc updates.
+          - Be practical, not pedantic. Small obvious fixes don't need CHANGELOG entries.
+          - Only flag missing docs when there is a clear user-facing change.
+          EOF
+
+          # User prompt: concatenate files (no printf, no variable expansion issues)
+          {
+            cat pr_info.txt
+            echo ""
+            echo "---"
+            echo "CONTRIBUTING.md:"
+            cat CONTRIBUTING.md
+            echo ""
+            echo "---"
+            echo "Changed files:"
+            cat changed_files.txt
+            echo ""
+            echo "---"
+            echo "Diff (may be truncated):"
+            cat diff.txt
+          } > user_prompt.txt
+
       - name: AI documentation review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.RTK_DOCS_ANTHROPIC_KEY }}
@@ -243,28 +274,8 @@ jobs:
             exit 0
           fi
 
-          CONTRIBUTING=$(cat CONTRIBUTING.md)
-          CHANGED_FILES=$(cat changed_files.txt)
-          DIFF=$(cat diff.txt)
-          PR_INFO=$(cat pr_info.txt)
-
-          SYSTEM_PROMPT=$(cat <<'SYSTEM'
-          You are a documentation reviewer for the RTK project.
-          You will receive the project's CONTRIBUTING.md (which contains the documentation rules), the PR info, changed files, and diff.
-          Your job: based ONLY on the documentation rules in CONTRIBUTING.md, decide if the PR includes the required documentation updates.
-
-          IMPORTANT:
-          - CI/CD changes, test-only changes, and refactors with no user-facing impact do NOT require doc updates.
-          - Be practical, not pedantic. Small obvious fixes don't need CHANGELOG entries.
-          - Only flag missing docs when there is a clear user-facing change.
-          SYSTEM
-          )
-
-          USER_PROMPT=$(printf '%s\n\n---\nCONTRIBUTING.md:\n%s\n\n---\nChanged files:\n%s\n\n---\nDiff (may be truncated):\n%s' \
-            "$PR_INFO" "$CONTRIBUTING" "$CHANGED_FILES" "$DIFF")
-
-          SYSTEM_JSON=$(echo "$SYSTEM_PROMPT" | jq -Rs .)
-          USER_JSON=$(echo "$USER_PROMPT" | jq -Rs .)
+          SYSTEM_JSON=$(jq -Rs . < system_prompt.txt)
+          USER_JSON=$(jq -Rs . < user_prompt.txt)
 
           RESPONSE=$(curl -s -w "\n%{http_code}" https://api.anthropic.com/v1/messages \
             -H "content-type: application/json" \
