@@ -166,7 +166,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
 /// Parse pytest output using state machine.
 ///
-/// Buffered variant — for use when input is already fully accumulated (e.g.
+/// Buffered variant -- for use when input is already fully accumulated (e.g.
 /// `rtk pipe --filter pytest`). For live subprocess output, prefer
 /// `PyTestStreamFilter` with `run_streaming`.
 pub(crate) fn filter_pytest_output(output: &str) -> String {
