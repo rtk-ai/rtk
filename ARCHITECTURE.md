@@ -290,6 +290,7 @@ SYSTEM            init.rs           init                   N/A        ✓
                   gain.rs           gain                   N/A        ✓
                   config.rs         (internal)             N/A        ✓
                   rewrite_cmd.rs    rewrite                N/A        ✓
+                  permissions.rs    CC permission checks   N/A        ✓
 
 SHARED            utils.rs          Helpers                N/A        ✓
                   filter.rs         Language filters       N/A        ✓
