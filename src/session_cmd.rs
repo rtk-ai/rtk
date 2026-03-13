@@ -1,4 +1,5 @@
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
+use crate::discover::registry::{classify_command, Classification};
 use crate::utils::format_tokens;
 use anyhow::{Context, Result};
 use std::fs;
@@ -22,12 +23,21 @@ impl SessionSummary {
     }
 }
 
-/// Count RTK vs raw commands from extracted commands.
+/// Count RTK-covered commands from extracted commands.
+/// A command is "covered" if it either:
+/// - starts with "rtk " (explicit rtk invocation), or
+/// - would be rewritten by the hook (classify_command returns Supported)
 fn count_rtk_commands(cmds: &[ExtractedCommand]) -> (usize, usize, usize) {
     let total = cmds.len();
     let rtk = cmds
         .iter()
-        .filter(|c| c.command.starts_with("rtk "))
+        .filter(|c| {
+            c.command.starts_with("rtk ")
+                || matches!(
+                    classify_command(&c.command),
+                    Classification::Supported { .. }
+                )
+        })
         .count();
     let output: usize = cmds.iter().filter_map(|c| c.output_len).sum();
     (total, rtk, output)
@@ -214,30 +224,45 @@ mod tests {
     }
 
     #[test]
-    fn test_count_no_rtk() {
+    fn test_count_hook_rewritten_commands() {
+        // Hook rewrites "git status" → "rtk git status" but JSONL logs the original.
+        // count_rtk_commands should detect these via classify_command.
         let cmds = vec![
             make_cmd("git status", Some(500)),
             make_cmd("cargo test", Some(3000)),
-            make_cmd("ls -la", Some(100)),
+            make_cmd("echo hello", Some(100)),
         ];
         let (total, rtk, output) = count_rtk_commands(&cmds);
         assert_eq!(total, 3);
-        assert_eq!(rtk, 0);
+        // git status + cargo test are supported by RTK, echo is not
+        assert_eq!(rtk, 2);
         assert_eq!(output, 3600);
     }
 
     #[test]
-    fn test_count_mixed_rtk_and_raw() {
+    fn test_count_mixed_explicit_and_hook() {
         let cmds = vec![
-            make_cmd("rtk git status", Some(200)),
-            make_cmd("git log -5", Some(1000)),
-            make_cmd("rtk cargo test", Some(5000)),
-            make_cmd("ls -la", None),
+            make_cmd("rtk git status", Some(200)),  // explicit rtk
+            make_cmd("git log -5", Some(1000)),     // hook-rewritten (logged as raw)
+            make_cmd("rtk cargo test", Some(5000)), // explicit rtk
+            make_cmd("echo hello", None),           // not supported
         ];
         let (total, rtk, output) = count_rtk_commands(&cmds);
         assert_eq!(total, 4);
-        assert_eq!(rtk, 2);
-        assert_eq!(output, 6200); // None is skipped in sum
+        assert_eq!(rtk, 3); // rtk git status + git log + rtk cargo test
+        assert_eq!(output, 6200);
+    }
+
+    #[test]
+    fn test_count_unsupported_commands_not_counted() {
+        let cmds = vec![
+            make_cmd("echo hello", Some(100)),
+            make_cmd("mkdir -p /tmp/foo", Some(10)),
+            make_cmd("cd /tmp", Some(5)),
+        ];
+        let (total, rtk, _) = count_rtk_commands(&cmds);
+        assert_eq!(total, 3);
+        assert_eq!(rtk, 0);
     }
 
     #[test]
@@ -299,7 +324,8 @@ mod tests {
 
         let (total, rtk, _output) = count_rtk_commands(&cmds);
         assert_eq!(total, 3, "should find 3 Bash commands");
-        assert_eq!(rtk, 2, "should find 2 rtk commands");
+        // All 3 are RTK-covered: 2 explicit "rtk ..." + 1 hook-rewritten "git log"
+        assert_eq!(rtk, 3, "all 3 commands should be RTK-covered");
     }
 
     #[test]

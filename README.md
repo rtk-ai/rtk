@@ -227,6 +227,8 @@ rtk gain --all --format json    # JSON export for dashboards
 
 rtk discover                    # Find missed savings opportunities
 rtk discover --all --since 7    # All projects, last 7 days
+
+rtk session                     # Show RTK adoption across recent sessions
 ```
 
 ## Global Flags
