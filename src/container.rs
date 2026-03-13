@@ -651,11 +651,12 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
 }
 
 /// Run `docker compose logs` with deduplication
-pub fn run_compose_logs(service: Option<&str>, verbose: u8) -> Result<()> {
+pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
+    let tail_str = tail.to_string();
     let mut cmd = resolved_command("docker");
-    cmd.args(["compose", "logs", "--tail", "100"]);
+    cmd.args(["compose", "logs", "--tail", &tail_str]);
     if let Some(svc) = service {
         cmd.arg(svc);
     }
@@ -862,6 +863,15 @@ api-1  | Connected to database";
     fn test_format_compose_logs_empty() {
         let out = format_compose_logs("");
         assert!(out.contains("No logs"), "should indicate no logs");
+    }
+
+    // ── run_compose_logs tail arg ──────────────────────────
+
+    #[test]
+    fn test_run_compose_logs_signature_accepts_tail() {
+        // Verify the function accepts a tail argument — compile-time check.
+        // We don't invoke docker here; just confirm the signature compiles correctly.
+        let _f: fn(Option<&str>, u32, u8) -> anyhow::Result<()> = run_compose_logs;
     }
 
     // ── format_compose_build ───────────────────────────────
