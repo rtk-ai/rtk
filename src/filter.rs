@@ -50,6 +50,7 @@ pub enum Language {
     Java,
     Ruby,
     Shell,
+    Data,
     Unknown,
 }
 
@@ -66,6 +67,9 @@ impl Language {
             "java" => Language::Java,
             "rb" => Language::Ruby,
             "sh" | "bash" | "zsh" => Language::Shell,
+            "json" | "jsonc" | "json5" | "yaml" | "yml" | "toml" | "xml" | "html" | "htm"
+            | "css" | "scss" | "svg" | "md" | "markdown" | "txt" | "csv" | "tsv" | "env"
+            | "ini" | "cfg" | "conf" | "lock" => Language::Data,
             _ => Language::Unknown,
         }
     }
@@ -107,6 +111,13 @@ impl Language {
             },
             Language::Shell => CommentPatterns {
                 line: Some("#"),
+                block_start: None,
+                block_end: None,
+                doc_line: None,
+                doc_block_start: None,
+            },
+            Language::Data => CommentPatterns {
+                line: None,
                 block_start: None,
                 block_end: None,
                 doc_line: None,
@@ -387,6 +398,52 @@ mod tests {
         assert_eq!(Language::from_extension("rs"), Language::Rust);
         assert_eq!(Language::from_extension("py"), Language::Python);
         assert_eq!(Language::from_extension("js"), Language::JavaScript);
+    }
+
+    #[test]
+    fn test_language_detection_data_formats() {
+        assert_eq!(Language::from_extension("json"), Language::Data);
+        assert_eq!(Language::from_extension("yaml"), Language::Data);
+        assert_eq!(Language::from_extension("yml"), Language::Data);
+        assert_eq!(Language::from_extension("toml"), Language::Data);
+        assert_eq!(Language::from_extension("xml"), Language::Data);
+        assert_eq!(Language::from_extension("md"), Language::Data);
+        assert_eq!(Language::from_extension("csv"), Language::Data);
+        assert_eq!(Language::from_extension("lock"), Language::Data);
+    }
+
+    #[test]
+    fn test_data_files_no_comment_stripping() {
+        // Regression test for #464: package.json with `/*` in strings
+        let json = r#"{
+  "workspaces": {
+    "packages": [
+      "packages/*"
+    ]
+  },
+  "scripts": {
+    "build": "bun run --workspaces build"
+  },
+  "lint-staged": {
+    "**/package.json": [
+      "sort-package-json"
+    ]
+  }
+}"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(json, &Language::Data);
+        assert!(
+            result.contains("scripts"),
+            "scripts section must be preserved"
+        );
+        assert!(
+            result.contains("packages/*"),
+            "glob pattern must be preserved"
+        );
+        assert!(
+            result.contains("**/package.json"),
+            "glob pattern must be preserved"
+        );
     }
 
     #[test]

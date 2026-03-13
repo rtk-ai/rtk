@@ -1,8 +1,7 @@
 use crate::stream::{FilterMode, StdinMode, StreamFilter};
 use crate::tracking;
-use crate::utils::truncate;
+use crate::utils::{resolved_command, tool_exists, truncate};
 use anyhow::{Context, Result};
-use std::process::Command;
 
 #[derive(Debug, PartialEq, Default)]
 enum ParseState {
@@ -109,11 +108,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Try to detect pytest command (could be "pytest", "python -m pytest", etc.)
-    let mut cmd = if which_command("pytest").is_some() {
-        Command::new("pytest")
+    let mut cmd = if tool_exists("pytest") {
+        resolved_command("pytest")
     } else {
         // Fallback to python -m pytest
-        let mut c = Command::new("python");
+        let mut c = resolved_command("python");
         c.arg("-m").arg("pytest");
         c
     };
@@ -165,15 +164,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Check if a command exists in PATH and return its path.
-/// Delegates to utils::which_command for cross-platform compatibility.
-fn which_command(cmd: &str) -> Option<String> {
-    crate::utils::which_command(cmd)
-}
-
 /// Parse pytest output using state machine.
 ///
-/// Buffered variant — for use when input is already fully accumulated (e.g.
+/// Buffered variant -- for use when input is already fully accumulated (e.g.
 /// `rtk pipe --filter pytest`). For live subprocess output, prefer
 /// `PyTestStreamFilter` with `run_streaming`.
 pub(crate) fn filter_pytest_output(output: &str) -> String {

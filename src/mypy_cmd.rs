@@ -1,17 +1,16 @@
 use crate::tracking;
-use crate::utils::{strip_ansi, truncate};
+use crate::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
-use std::process::Command;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = if which_command("mypy").is_some() {
-        Command::new("mypy")
+    let mut cmd = if tool_exists("mypy") {
+        resolved_command("mypy")
     } else {
-        let mut c = Command::new("python3");
+        let mut c = resolved_command("python3");
         c.arg("-m").arg("mypy");
         c
     };
@@ -45,12 +44,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     );
 
     std::process::exit(output.status.code().unwrap_or(1));
-}
-
-/// Check if a command exists in PATH and return its path.
-/// Delegates to utils::which_command for cross-platform compatibility.
-fn which_command(cmd: &str) -> Option<String> {
-    crate::utils::which_command(cmd)
 }
 
 struct MypyError {
