@@ -1,5 +1,5 @@
 use crate::tracking;
-use crate::utils::{resolved_command, truncate};
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
@@ -361,8 +361,10 @@ fn run_log(
     });
 
     // Apply RTK defaults only if user didn't specify them
+    // Use %b (body) to preserve first line of commit body for agent context
+    // (BREAKING CHANGE, Closes #xxx, design notes)
     if !has_format_flag {
-        cmd.args(["--pretty=format:%h %s (%ar) <%an>"]);
+        cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
     }
 
     // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
@@ -468,23 +470,39 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
 /// need for rebase/squash operations.
 fn filter_log_output(output: &str, limit: usize, user_set_limit: bool) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
-    let iter = lines.iter();
-    let capped: Vec<String> = if user_set_limit {
-        // User chose the limit → git already returned the right number of commits
-        iter.map(|line| truncate_line(line, truncate_width))
-            .collect()
-    } else {
-        // RTK default → cap output lines
-        iter.take(limit)
-            .map(|line| truncate_line(line, truncate_width))
-            .collect()
-    };
+    // Split output into commit blocks separated by ---END---
+    let commits: Vec<&str> = output.split("---END---").collect();
+    let max_commits = if user_set_limit { commits.len() } else { limit };
 
-    capped.join("\n").trim().to_string()
+    let mut result = Vec::new();
+    for block in commits.iter().take(max_commits) {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        let mut lines = block.lines();
+        // First line is the header: hash subject (date) <author>
+        let header = match lines.next() {
+            Some(h) => truncate_line(h.trim(), truncate_width),
+            None => continue,
+        };
+        // Remaining lines are the body — keep first non-empty line only
+        let body_line = lines.map(|l| l.trim()).find(|l| {
+            !l.is_empty() && !l.starts_with("Signed-off-by:") && !l.starts_with("Co-authored-by:")
+        });
+
+        match body_line {
+            Some(body) => {
+                let truncated_body = truncate_line(body, truncate_width);
+                result.push(format!("{}\n  {}", header, truncated_body));
+            }
+            None => result.push(header),
+        }
+    }
+
+    result.join("\n").trim().to_string()
 }
 
 /// Truncate a single line to `width` characters, appending "..." if needed
@@ -1682,11 +1700,36 @@ M  file7.rs
 
     #[test]
     fn test_filter_log_output() {
-        let output = "abc1234 This is a commit message (2 days ago) <author>\ndef5678 Another commit (1 week ago) <other>\n";
+        let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
         let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_filter_log_output_with_body() {
+        // Commit with body: first non-trailer body line should appear indented
+        let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---END---\ndef5678 fix: typo (1 day ago) <other>\n\n---END---\n";
+        let result = filter_log_output(output, 10, false);
+        assert!(result.contains("abc1234"));
+        assert!(result.contains("BREAKING CHANGE: removed old API"));
+        assert!(!result.contains("Signed-off-by:"));
+        // def5678 has no body — just header
+        assert!(result.contains("def5678"));
+        // 3 lines: header1, body1 indented, header2
+        assert_eq!(result.lines().count(), 3);
+    }
+
+    #[test]
+    fn test_filter_log_output_skips_trailers() {
+        // Body with only trailers should not produce a body line
+        let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---END---\n";
+        let result = filter_log_output(output, 10, false);
+        assert!(result.contains("abc1234"));
+        assert!(!result.contains("Signed-off-by:"));
+        assert!(!result.contains("Co-authored-by:"));
+        assert_eq!(result.lines().count(), 1);
     }
 
     #[test]
@@ -1701,7 +1744,7 @@ M  file7.rs
     #[test]
     fn test_filter_log_output_cap_lines() {
         let output = (0..20)
-            .map(|i| format!("hash{} message {} (1 day ago) <author>", i, i))
+            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false);
@@ -1712,7 +1755,7 @@ M  file7.rs
     fn test_filter_log_output_user_limit_no_cap() {
         // When user explicitly passes -N, all N lines should be returned (no re-truncation)
         let output = (0..20)
-            .map(|i| format!("hash{} message {} (1 day ago) <author>", i, i))
+            .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 20, true);
