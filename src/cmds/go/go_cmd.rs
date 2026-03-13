@@ -37,6 +37,7 @@ struct PackageResult {
     skip: usize,
     build_failed: bool,
     build_errors: Vec<String>,
+    benchmark_outputs: Vec<String>,
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
 }
 
@@ -358,13 +359,21 @@ fn filter_go_test_json(output: &str) -> String {
                 }
             }
             "output" => {
-                // Collect output for current test
-                if let (Some(test), Some(output_text)) = (&event.test, &event.output) {
-                    let key = (package.clone(), test.clone());
-                    current_test_output
-                        .entry(key)
-                        .or_default()
-                        .push(output_text.trim_end().to_string());
+                if let Some(output_text) = &event.output {
+                    let trimmed = output_text.trim_end();
+
+                    if is_benchmark_result_line(trimmed) {
+                        pkg_result.benchmark_outputs.push(trimmed.to_string());
+                    }
+
+                    // Collect output for current test
+                    if let Some(test) = &event.test {
+                        let key = (package.clone(), test.clone());
+                        current_test_output
+                            .entry(key)
+                            .or_default()
+                            .push(trimmed.to_string());
+                    }
                 }
             }
             _ => {} // run, pause, cont, etc.
@@ -377,14 +386,22 @@ fn filter_go_test_json(output: &str) -> String {
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
     let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
+    let total_benchmark_packages: usize = packages
+        .values()
+        .filter(|p| !p.benchmark_outputs.is_empty())
+        .count();
 
     let has_failures = total_fail > 0 || total_build_fail > 0;
 
-    if !has_failures && total_pass == 0 {
+    if !has_failures && total_pass == 0 && total_benchmark_packages == 0 {
         return "Go test: No tests found".to_string();
     }
 
     if !has_failures {
+        if total_benchmark_packages > 0 {
+            return format_go_test_success_with_benchmarks(&packages, total_pass, total_packages);
+        }
+
         return format!(
             "Go test: {} passed in {} packages",
             total_pass, total_packages
@@ -519,6 +536,54 @@ fn is_go_test_failure_line(line: &str) -> bool {
         || lower.contains("unexpected")
         || lower.contains("fatal")
         || line.starts_with("at ")
+}
+
+fn is_benchmark_result_line(line: &str) -> bool {
+    let trimmed = line.trim();
+
+    trimmed.starts_with("Benchmark")
+        && (trimmed.contains("ns/op")
+            || trimmed.contains("B/op")
+            || trimmed.contains("allocs/op")
+            || trimmed.contains("MB/s"))
+}
+
+fn format_go_test_success_with_benchmarks(
+    packages: &HashMap<String, PackageResult>,
+    total_pass: usize,
+    total_packages: usize,
+) -> String {
+    let benchmark_packages: Vec<_> = packages
+        .iter()
+        .filter(|(_, pkg_result)| !pkg_result.benchmark_outputs.is_empty())
+        .collect();
+
+    let mut result = if total_pass > 0 {
+        format!(
+            "✓ Go test: {} passed in {} packages",
+            total_pass, total_packages
+        )
+    } else {
+        format!(
+            "✓ Go test: benchmark results in {} packages",
+            benchmark_packages.len()
+        )
+    };
+
+    result.push_str("\n═══════════════════════════════════════");
+
+    for (package, pkg_result) in benchmark_packages {
+        result.push_str(&format!(
+            "\n\n📦 {} [benchmarks]",
+            compact_package_name(package)
+        ));
+
+        for line in &pkg_result.benchmark_outputs {
+            result.push_str(&format!("\n  {}", truncate(line, 120)));
+        }
+    }
+
+    result
 }
 
 /// Filter go build output - show only errors
@@ -693,6 +758,40 @@ mod tests {
         let result = filter_go_test_json(output);
         assert!(result.contains("foo_test.go:42:"));
         assert!(result.contains("values differ after normalization"));
+    }
+
+    #[test]
+    fn test_filter_go_test_benchmark_only() {
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"start","Package":"example.com/foo"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Output":"goos: linux\n"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Output":"goarch: amd64\n"}
+{"Time":"2024-01-01T10:00:01Z","Action":"run","Package":"example.com/foo","Test":"BenchmarkFib10"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"BenchmarkFib10","Output":"=== RUN   BenchmarkFib10\n"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"BenchmarkFib10","Output":"BenchmarkFib10\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Test":"BenchmarkFib10","Output":"BenchmarkFib10-6   \t 1922632\t       602.9 ns/op\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Output":"PASS\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Output":"ok  \texample.com/foo\t1.619s\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"pass","Package":"example.com/foo","Elapsed":1.619}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(!result.contains("No tests found"));
+        assert!(result.contains("BenchmarkFib10-6"));
+        assert!(result.contains("602.9 ns/op"));
+    }
+
+    #[test]
+    fn test_filter_go_test_benchmark_only_package_level_output() {
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"start","Package":"example.com/foo"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Output":"goos: linux\n"}
+{"Time":"2024-01-01T10:00:01Z","Action":"run","Package":"example.com/foo","Test":"BenchmarkFib10"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Output":"BenchmarkFib10-6   \t 1922632\t       602.9 ns/op\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Output":"PASS\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"pass","Package":"example.com/foo","Elapsed":1.619}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(!result.contains("No tests found"));
+        assert!(result.contains("BenchmarkFib10-6"));
+        assert!(result.contains("602.9 ns/op"));
     }
 
     #[test]
