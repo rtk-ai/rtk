@@ -266,7 +266,7 @@ fn build_cargo_test_summary(failures: &[String], summary_lines: &[String]) -> St
 fn run_test(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("cargo");
+    let mut cmd = resolved_command("cargo");
     cmd.arg("test");
     let restored_args = restore_double_dash(args);
     for arg in &restored_args {

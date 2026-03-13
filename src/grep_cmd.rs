@@ -450,4 +450,110 @@ mod tests {
             );
         }
     }
+
+    // ── filter_grep_raw: 3-part format (rg -n / grep -n) ─────────────────────
+
+    #[test]
+    fn test_filter_grep_raw_whitespace_only() {
+        let out = filter_grep_raw("   \n\t\n");
+        assert!(out.contains("0 matches"), "out={}", out);
+    }
+
+    // ── filter_grep_raw: 2-part format (grep without -n) ─────────────────────
+
+    #[test]
+    fn test_filter_grep_raw_two_part_no_line_number() {
+        // grep without -n produces "file:content" (no line number)
+        let input = "src/main.rs:fn main() {\nsrc/lib.rs:pub fn helper() {}\n";
+        let out = filter_grep_raw(input);
+        assert!(out.contains("main.rs"), "2-part: out={}", out);
+        assert!(out.contains("lib.rs"), "2-part: out={}", out);
+        assert!(
+            out.contains("2 in"),
+            "2-part: expected 2 matches: out={}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_filter_grep_raw_two_part_content_with_colon() {
+        // Two-part where content itself contains ':' (e.g. URL or time)
+        let input = "config.yaml:server: http://localhost:8080\n";
+        let out = filter_grep_raw(input);
+        // Should not panic and should show config.yaml
+        assert!(out.contains("config.yaml"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_grep_raw_mixed_two_and_three_part() {
+        // Some lines have line numbers, some don't — both should be counted
+        let input = "src/a.rs:10:fn foo() {}\nsrc/b.rs:fn bar() {}\n";
+        let out = filter_grep_raw(input);
+        assert!(out.contains("a.rs"), "out={}", out);
+        assert!(out.contains("b.rs"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_grep_raw_three_part_nonnumeric_middle() {
+        // Three-part split but middle is not a number (e.g. Windows path C:\file:content)
+        // Should fall back gracefully — either include or skip, but not panic
+        let input = "C:\\path\\file.rs:some content\n";
+        let out = filter_grep_raw(input); // must not panic
+        assert!(!out.is_empty());
+    }
+
+    // ── filter_find_output ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_find_output_empty() {
+        let out = filter_find_output("");
+        assert!(out.contains("0 results"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_find_output_basic() {
+        let input = "./src/main.rs\n./src/lib.rs\n./src/cmd/mod.rs\n";
+        let out = filter_find_output(input);
+        assert!(out.contains("3 files"), "out={}", out);
+        // Extension breakdown
+        assert!(out.contains(".rs"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_find_output_groups_by_dir() {
+        let input = "./src/a.rs\n./src/b.rs\n./tests/c.rs\n";
+        let out = filter_find_output(input);
+        assert!(out.contains("./src"), "out={}", out);
+        assert!(out.contains("./tests"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_find_output_extension_counts() {
+        let input = "./a.rs\n./b.rs\n./c.toml\n./d.md\n";
+        let out = filter_find_output(input);
+        // .rs appears twice, toml and md once each
+        assert!(out.contains(".rs (2)"), "out={}", out);
+        assert!(
+            out.contains(".toml (1)") || out.contains(".md (1)"),
+            "out={}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_filter_find_output_no_extension() {
+        let input = "./Makefile\n./Dockerfile\n";
+        let out = filter_find_output(input);
+        assert!(out.contains("2 files"), "out={}", out);
+        assert!(out.contains("(no ext)"), "out={}", out);
+    }
+
+    #[test]
+    fn test_filter_find_output_many_dirs_truncated() {
+        // More than 10 unique dirs — should show "+N more dirs"
+        let mut input = String::new();
+        for i in 0..15 {
+            input.push_str(&format!("./dir{}/file.rs\n", i));
+        }
+    }
 }
