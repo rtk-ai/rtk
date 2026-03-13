@@ -7,13 +7,13 @@
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
-use std::process::Command;
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("wc");
+    let mut cmd = resolved_command("wc");
     for arg in args {
         cmd.arg(arg);
     }

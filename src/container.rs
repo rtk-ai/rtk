@@ -1,7 +1,7 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
-use std::process::Command;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ContainerCmd {
@@ -27,13 +27,13 @@ pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<()> {
 fn docker_ps(_verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let raw = Command::new("docker")
+    let raw = resolved_command("docker")
         .args(["ps"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
 
-    let output = Command::new("docker")
+    let output = resolved_command("docker")
         .args([
             "ps",
             "--format",
@@ -84,13 +84,13 @@ fn docker_ps(_verbose: u8) -> Result<()> {
 fn docker_images(_verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let raw = Command::new("docker")
+    let raw = resolved_command("docker")
         .args(["images"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
 
-    let output = Command::new("docker")
+    let output = resolved_command("docker")
         .args(["images", "--format", "{{.Repository}}:{{.Tag}}\t{{.Size}}"])
         .output()
         .context("Failed to run docker images")?;
@@ -160,7 +160,7 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<()> {
         return Ok(());
     }
 
-    let output = Command::new("docker")
+    let output = resolved_command("docker")
         .args(["logs", "--tail", "100", container])
         .output()
         .context("Failed to run docker logs")?;
@@ -184,7 +184,7 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<()> {
 fn kubectl_pods(args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = resolved_command("kubectl");
     cmd.args(["get", "pods", "-o", "json"]);
     for arg in args {
         cmd.arg(arg);
@@ -285,7 +285,7 @@ fn kubectl_pods(args: &[String], _verbose: u8) -> Result<()> {
 fn kubectl_services(args: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = resolved_command("kubectl");
     cmd.args(["get", "services", "-o", "json"]);
     for arg in args {
         cmd.arg(arg);
@@ -365,7 +365,7 @@ fn kubectl_logs(args: &[String], _verbose: u8) -> Result<()> {
         return Ok(());
     }
 
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = resolved_command("kubectl");
     cmd.args(["logs", "--tail", "100", pod]);
     for arg in args.iter().skip(1) {
         cmd.arg(arg);
@@ -529,7 +529,7 @@ pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("docker passthrough: {:?}", args);
     }
-    let status = Command::new("docker")
+    let status = resolved_command("docker")
         .args(args)
         .status()
         .context("Failed to run docker")?;
@@ -551,7 +551,7 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Raw output for token tracking
-    let raw_output = Command::new("docker")
+    let raw_output = resolved_command("docker")
         .args(["compose", "ps"])
         .output()
         .context("Failed to run docker compose ps")?;
@@ -564,7 +564,7 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
     let raw = String::from_utf8_lossy(&raw_output.stdout).to_string();
 
     // Structured output for parsing (same pattern as docker_ps)
-    let output = Command::new("docker")
+    let output = resolved_command("docker")
         .args([
             "compose",
             "ps",
@@ -595,7 +595,7 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
 pub fn run_compose_logs(service: Option<&str>, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("docker");
+    let mut cmd = resolved_command("docker");
     cmd.args(["compose", "logs", "--tail", "100"]);
     if let Some(svc) = service {
         cmd.arg(svc);
@@ -633,7 +633,7 @@ pub fn run_compose_logs(service: Option<&str>, verbose: u8) -> Result<()> {
 pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("docker");
+    let mut cmd = resolved_command("docker");
     cmd.args(["compose", "build"]);
     if let Some(svc) = service {
         cmd.arg(svc);
@@ -674,7 +674,7 @@ pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("docker compose passthrough: {:?}", args);
     }
-    let status = Command::new("docker")
+    let status = resolved_command("docker")
         .arg("compose")
         .args(args)
         .status()
@@ -699,7 +699,7 @@ pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("kubectl passthrough: {:?}", args);
     }
-    let status = Command::new("kubectl")
+    let status = resolved_command("kubectl")
         .args(args)
         .status()
         .context("Failed to run kubectl")?;

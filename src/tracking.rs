@@ -925,6 +925,27 @@ impl Tracker {
             Ok(0.0)
         }
     }
+
+    /// Get total tokens saved across all tracked commands (for telemetry).
+    pub fn total_tokens_saved(&self) -> Result<i64> {
+        let saved: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(saved_tokens), 0) FROM commands",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(saved)
+    }
+
+    /// Get tokens saved in the last 24 hours (for telemetry).
+    pub fn tokens_saved_24h(&self, since: chrono::DateTime<chrono::Utc>) -> Result<i64> {
+        let ts = since.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let saved: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(saved_tokens), 0) FROM commands WHERE timestamp >= ?1",
+            params![ts],
+            |row| row.get(0),
+        )?;
+        Ok(saved)
+    }
 }
 
 fn get_db_path() -> Result<PathBuf> {

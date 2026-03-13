@@ -1,0 +1,45 @@
+[filters.biome]
+description = "Compact Biome lint/format output — strip blank lines, keep diagnostics"
+match_command = "^biome\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Checked \\d+ file",
+  "^Fixed \\d+ file",
+  "^The following command",
+  "^Run it with",
+]
+max_lines = 50
+on_empty = "biome: ok"
+
+[[tests.biome]]
+name = "lint strips noise, keeps diagnostics"
+input = """
+Checked 42 files in 0.5s
+
+src/app.tsx:5:3 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━
+  × Unexpected any. Specify a different type.
+  3 │ interface Props {
+  4 │   data: any;
+  5 │         ^^^
+
+src/utils.ts:12:1 lint/complexity/noForEach ━━━━━━━━━━━━━━━━━━━━
+  × Prefer for...of instead of forEach.
+ 12 │ items.forEach(item => process(item));
+    │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Found 2 errors.
+"""
+expected = "src/app.tsx:5:3 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━\n  × Unexpected any. Specify a different type.\n  3 │ interface Props {\n  4 │   data: any;\n  5 │         ^^^\nsrc/utils.ts:12:1 lint/complexity/noForEach ━━━━━━━━━━━━━━━━━━━━\n  × Prefer for...of instead of forEach.\n 12 │ items.forEach(item => process(item));\n    │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nFound 2 errors."
+
+[[tests.biome]]
+name = "clean check"
+input = """
+Checked 42 files in 0.3s
+"""
+expected = "biome: ok"
+
+[[tests.biome]]
+name = "empty input passes through"
+input = ""
+expected = ""

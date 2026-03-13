@@ -76,6 +76,26 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
+    if cmd_clean.starts_with("cat ")
+        || cmd_clean.starts_with("head ")
+        || cmd_clean.starts_with("tail ")
+    {
+        let has_redirect = cmd_clean
+            .split_whitespace()
+            .skip(1)
+            .any(|t| t.starts_with('>') || t == "<" || t.starts_with(">>"));
+        if has_redirect {
+            return Classification::Unsupported {
+                base_command: cmd_clean
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("cat")
+                    .to_string(),
+            };
+        }
+    }
+
     // Fast check with RegexSet — take the last (most specific) match
     let matches: Vec<usize> = REGEX_SET.matches(cmd_clean).into_iter().collect();
     if let Some(&idx) = matches.last() {
@@ -240,6 +260,25 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     }
 
     results
+}
+
+/// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
+pub fn has_rtk_disabled_prefix(cmd: &str) -> bool {
+    let trimmed = cmd.trim();
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    let prefix_len = trimmed.len() - stripped.len();
+    let prefix_part = &trimmed[..prefix_len];
+    prefix_part.contains("RTK_DISABLED=")
+}
+
+/// Strip RTK_DISABLED=X and other env prefixes, return the actual command.
+pub fn strip_disabled_prefix(cmd: &str) -> &str {
+    let trimmed = cmd.trim();
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    // stripped is a Cow<str> that borrows from trimmed when no replacement happens.
+    // We need to return a &str into the original, so compute the offset.
+    let prefix_len = trimmed.len() - stripped.len();
+    trimmed[prefix_len..].trim_start()
 }
 
 /// Rewrite a raw command to its RTK equivalent.
@@ -431,6 +470,36 @@ fn rewrite_head_numeric(cmd: &str) -> Option<String> {
     None
 }
 
+/// Rewrite `tail` numeric line forms to `rtk read ... --tail-lines N`.
+/// Returns `None` when the pattern is unsupported (caller falls through / skips rewrite).
+fn rewrite_tail_lines(cmd: &str) -> Option<String> {
+    lazy_static! {
+        static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(.+)$").expect("valid regex");
+        static ref TAIL_N_SPACE: Regex =
+            Regex::new(r"^tail\s+-n\s+(\d+)\s+(.+)$").expect("valid regex");
+        static ref TAIL_LINES_EQ: Regex =
+            Regex::new(r"^tail\s+--lines=(\d+)\s+(.+)$").expect("valid regex");
+        static ref TAIL_LINES_SPACE: Regex =
+            Regex::new(r"^tail\s+--lines\s+(\d+)\s+(.+)$").expect("valid regex");
+    }
+
+    for re in [
+        &*TAIL_N,
+        &*TAIL_N_SPACE,
+        &*TAIL_LINES_EQ,
+        &*TAIL_LINES_SPACE,
+    ] {
+        if let Some(caps) = re.captures(cmd) {
+            let n = caps.get(1)?.as_str();
+            let file = caps.get(2)?.as_str();
+            return Some(format!("rtk read {} --tail-lines {}", file, n));
+        }
+    }
+
+    // Unknown tail form: skip rewrite to preserve native behavior.
+    None
+}
+
 /// Rewrite a single (non-compound) command segment.
 /// Returns `Some(rewritten)` if matched (including already-RTK pass-through).
 /// Returns `None` if no match (caller uses original segment).
@@ -451,6 +520,12 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // through to the generic rewrite below and produces `rtk read file` as expected.
     if trimmed.starts_with("head -") {
         return rewrite_head_numeric(trimmed);
+    }
+
+    // tail has several forms that are not compatible with generic prefix replacement.
+    // Only rewrite recognized numeric line forms; otherwise skip rewrite.
+    if trimmed.starts_with("tail ") {
+        return rewrite_tail_lines(trimmed);
     }
 
     // Use classify_command for correct ignore/prefix handling
@@ -476,7 +551,7 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let cmd_clean = stripped_cow.trim();
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
-    if env_prefix.contains("RTK_DISABLED=") {
+    if has_rtk_disabled_prefix(trimmed) {
         return None;
     }
 
@@ -593,6 +668,27 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_cat_redirect_not_supported() {
+        // cat > file and cat >> file are writes, not reads — should not be classified as supported
+        let write_commands = [
+            "cat > /tmp/output.txt",
+            "cat >> /tmp/output.txt",
+            "cat file.txt > output.txt",
+            "cat -n file.txt >> log.txt",
+            "head -10 README.md > output.txt",
+            "tail -f app.log > /dev/null",
+        ];
+        for cmd in &write_commands {
+            match classify_command(cmd) {
+                Classification::Supported { .. } => {
+                    panic!("{} should NOT be classified as Supported", cmd)
+                }
+                _ => {} // Unsupported or Ignored is fine
+            }
+        }
+    }
+
+    #[test]
     fn test_classify_cd_ignored() {
         assert_eq!(classify_command("cd /tmp"), Classification::Ignored);
     }
@@ -611,10 +707,10 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_terraform_unsupported() {
-        match classify_command("terraform plan -var-file=prod.tfvars") {
+    fn test_classify_htop_unsupported() {
+        match classify_command("htop -d 10") {
             Classification::Unsupported { base_command } => {
-                assert_eq!(base_command, "terraform plan");
+                assert_eq!(base_command, "htop");
             }
             other => panic!("expected Unsupported, got {:?}", other),
         }
@@ -886,8 +982,8 @@ mod tests {
     #[test]
     fn test_rewrite_background_unsupported_right() {
         assert_eq!(
-            rewrite_command("cargo test & terraform plan", &[]),
-            Some("rtk cargo test & terraform plan".into())
+            rewrite_command("cargo test & htop", &[]),
+            Some("rtk cargo test & htop".into())
         );
     }
 
@@ -902,7 +998,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_unsupported_returns_none() {
-        assert_eq!(rewrite_command("terraform plan", &[]), None);
+        assert_eq!(rewrite_command("htop", &[]), None);
     }
 
     #[test]
@@ -1110,6 +1206,48 @@ mod tests {
     fn test_rewrite_head_other_flag_skipped() {
         // head -c 100 file: unsupported flag, skip rewriting
         assert_eq!(rewrite_command("head -c 100 src/main.rs", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_tail_numeric_flag() {
+        assert_eq!(
+            rewrite_command("tail -20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --tail-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_n_space_flag() {
+        assert_eq!(
+            rewrite_command("tail -n 12 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 12".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_lines_long_flag() {
+        assert_eq!(
+            rewrite_command("tail --lines=7 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 7".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_lines_space_flag() {
+        assert_eq!(
+            rewrite_command("tail --lines 7 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 7".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_other_flag_skipped() {
+        assert_eq!(rewrite_command("tail -c 100 src/main.rs", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_tail_plain_file_skipped() {
+        assert_eq!(rewrite_command("tail src/main.rs", &[]), None);
     }
 
     // --- New registry entries ---
@@ -1695,18 +1833,15 @@ mod tests {
     fn test_rewrite_compound_mixed_supported_unsupported() {
         // unsupported segments stay raw
         assert_eq!(
-            rewrite_command("cargo test && terraform plan", &[]),
-            Some("rtk cargo test && terraform plan".into())
+            rewrite_command("cargo test && htop", &[]),
+            Some("rtk cargo test && htop".into())
         );
     }
 
     #[test]
     fn test_rewrite_compound_all_unsupported_returns_none() {
         // No rewrite at all: returns None
-        assert_eq!(
-            rewrite_command("terraform plan && terraform apply", &[]),
-            None
-        );
+        assert_eq!(rewrite_command("htop && top", &[]), None);
     }
 
     // --- sudo / env prefix + rewrite ---
@@ -1856,5 +1991,32 @@ mod tests {
             rewrite_command("gh pr list", &[]),
             Some("rtk gh pr list".into())
         );
+    }
+
+    // --- #508: RTK_DISABLED detection helpers ---
+
+    #[test]
+    fn test_has_rtk_disabled_prefix() {
+        assert!(has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert!(has_rtk_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"));
+        assert!(has_rtk_disabled_prefix(
+            "RTK_DISABLED=true git log --oneline"
+        ));
+        assert!(!has_rtk_disabled_prefix("git status"));
+        assert!(!has_rtk_disabled_prefix("rtk git status"));
+        assert!(!has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+    }
+
+    #[test]
+    fn test_strip_disabled_prefix() {
+        assert_eq!(
+            strip_disabled_prefix("RTK_DISABLED=1 git status"),
+            "git status"
+        );
+        assert_eq!(
+            strip_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"),
+            "cargo test"
+        );
+        assert_eq!(strip_disabled_prefix("git status"), "git status");
     }
 }

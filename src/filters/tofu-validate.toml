@@ -1,0 +1,17 @@
+[filters.tofu-validate]
+description = "Compact OpenTofu validate output"
+match_command = "^tofu\\s+validate(\\s|$)"
+strip_ansi = true
+match_output = [
+  { pattern = "Success! The configuration is valid", message = "ok (valid)" },
+]
+
+[[tests.tofu-validate]]
+name = "success short-circuits to ok"
+input = "Success! The configuration is valid."
+expected = "ok (valid)"
+
+[[tests.tofu-validate]]
+name = "error passes through unchanged"
+input = "Error: Invalid resource type\n  on main.tf line 3: resource \"aws_instancee\" \"web\""
+expected = "Error: Invalid resource type\n  on main.tf line 3: resource \"aws_instancee\" \"web\""

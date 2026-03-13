@@ -1,0 +1,99 @@
+[filters.xcodebuild]
+description = "Compact xcodebuild output — strip build phases, keep errors/warnings/summary"
+match_command = "^xcodebuild\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^CompileC\\s",
+  "^CompileSwift\\s",
+  "^Ld\\s",
+  "^CreateBuildDirectory\\s",
+  "^MkDir\\s",
+  "^ProcessInfoPlistFile\\s",
+  "^CopySwiftLibs\\s",
+  "^CodeSign\\s",
+  "^Signing Identity:",
+  "^RegisterWithLaunchServices",
+  "^Validate\\s",
+  "^ProcessProductPackaging",
+  "^Touch\\s",
+  "^LinkStoryboards",
+  "^CompileStoryboard",
+  "^CompileAssetCatalog",
+  "^GenerateDSYMFile",
+  "^PhaseScriptExecution",
+  "^PBXCp\\s",
+  "^SetMode\\s",
+  "^SetOwnerAndGroup\\s",
+  "^Ditto\\s",
+  "^CpResource\\s",
+  "^CpHeader\\s",
+  "^\\s+cd\\s+/",
+  "^\\s+export\\s",
+  "^\\s+/Applications/Xcode",
+  "^\\s+/usr/bin/",
+  "^\\s+builtin-",
+  "^note: Using new build system",
+]
+max_lines = 60
+on_empty = "xcodebuild: ok"
+
+[[tests.xcodebuild]]
+name = "strips build phases, keeps errors and summary"
+input = """
+note: Using new build system
+CompileSwift normal arm64 /Users/dev/App/ViewController.swift
+    cd /Users/dev/App
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift-frontend -c
+CompileSwift normal arm64 /Users/dev/App/AppDelegate.swift
+    cd /Users/dev/App
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+Ld /Users/dev/Build/Products/Debug/App normal arm64
+    cd /Users/dev/App
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang
+CodeSign /Users/dev/Build/Products/Debug/App.app
+    cd /Users/dev/App
+    builtin-codesign --force --sign
+
+/Users/dev/App/ViewController.swift:42:9: error: use of unresolved identifier 'foo'
+/Users/dev/App/Model.swift:18:5: warning: variable 'x' was never used
+
+** BUILD FAILED **
+"""
+expected = "/Users/dev/App/ViewController.swift:42:9: error: use of unresolved identifier 'foo'\n/Users/dev/App/Model.swift:18:5: warning: variable 'x' was never used\n** BUILD FAILED **"
+
+[[tests.xcodebuild]]
+name = "clean build success"
+input = """
+note: Using new build system
+CompileSwift normal arm64 /Users/dev/App/Main.swift
+    cd /Users/dev/App
+Ld /Users/dev/Build/Products/Debug/App normal arm64
+    cd /Users/dev/App
+CodeSign /Users/dev/Build/Products/Debug/App.app
+    cd /Users/dev/App
+    builtin-codesign --force --sign
+
+** BUILD SUCCEEDED **
+"""
+expected = "** BUILD SUCCEEDED **"
+
+[[tests.xcodebuild]]
+name = "test output keeps test results"
+input = """
+note: Using new build system
+CompileSwift normal arm64 /Users/dev/AppTests/Tests.swift
+    cd /Users/dev/App
+Test Suite 'All tests' started at 2026-03-10 12:00:00
+Test Suite 'AppTests' started at 2026-03-10 12:00:00
+Test Case '-[AppTests testExample]' passed (0.001 seconds).
+Test Case '-[AppTests testFailing]' failed (0.002 seconds).
+Test Suite 'AppTests' passed at 2026-03-10 12:00:01
+Executed 2 tests, with 1 failure in 0.003 seconds
+"""
+expected = "Test Suite 'All tests' started at 2026-03-10 12:00:00\nTest Suite 'AppTests' started at 2026-03-10 12:00:00\nTest Case '-[AppTests testExample]' passed (0.001 seconds).\nTest Case '-[AppTests testFailing]' failed (0.002 seconds).\nTest Suite 'AppTests' passed at 2026-03-10 12:00:01\nExecuted 2 tests, with 1 failure in 0.003 seconds"
+
+[[tests.xcodebuild]]
+name = "empty input passes through"
+input = ""
+expected = ""

@@ -1,0 +1,39 @@
+[filters.trunk-build]
+description = "Compact trunk build output"
+match_command = "^trunk\\s+build"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*Compiling\\s",
+  "^\\s*Downloading\\s",
+  "^\\s*Fetching\\s",
+  "^\\s*Fresh\\s",
+  "^\\s*Checking\\s",
+]
+tail_lines = 10
+max_lines = 30
+on_empty = "trunk build: ok"
+
+[[tests.trunk-build]]
+name = "strips compile noise, keeps tail summary"
+input = """
+   Compiling tokio v1.35.0
+   Compiling hyper v0.14.28
+   Compiling my-crate v0.1.0
+   Downloading serde v1.0.195
+   Fresh regex v1.10.2
+
+   Finished release [optimized] target(s) in 45.23s
+   Binary: target/release/my-crate (5.2MB)
+"""
+expected = "   Finished release [optimized] target(s) in 45.23s\n   Binary: target/release/my-crate (5.2MB)"
+
+[[tests.trunk-build]]
+name = "on_empty when all noise stripped"
+input = """
+   Compiling my-crate v0.1.0
+   Fresh serde v1.0
+   Checking tokio v1.35.0
+
+"""
+expected = "trunk build: ok"

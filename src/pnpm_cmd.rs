@@ -1,9 +1,9 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::process::Command;
 
 use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, truncate_output, Dependency,
@@ -294,7 +294,7 @@ pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<()> {
 fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("pnpm");
+    let mut cmd = resolved_command("pnpm");
     cmd.arg("list");
     cmd.arg(format!("--depth={}", depth));
     cmd.arg("--json");
@@ -350,7 +350,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
 fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("pnpm");
+    let mut cmd = resolved_command("pnpm");
     cmd.arg("outdated");
     cmd.arg("--format");
     cmd.arg("json");
@@ -411,7 +411,7 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<()> 
         }
     }
 
-    let mut cmd = Command::new("pnpm");
+    let mut cmd = resolved_command("pnpm");
     cmd.arg("install");
 
     for pkg in packages {
@@ -495,7 +495,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("pnpm passthrough: {:?}", args);
     }
-    let status = Command::new("pnpm")
+    let status = resolved_command("pnpm")
         .args(args)
         .status()
         .context("Failed to run pnpm")?;
