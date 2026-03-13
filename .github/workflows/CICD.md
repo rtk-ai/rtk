@@ -22,9 +22,9 @@ Trigger: pull_request to develop or master
               ▼          ▼                   ▼          ▼
      ┌──────────────┐ ┌──────────────┐ ┌───────────┐ ┌──────────┐
      │ test         │ │Security Scan │ │ benchmark │ │ validate │
-     │ ubuntu       │ │ cargo audit  │ │ >=80%     │ │ docs     │
-     │ windows      │ │ (blocking)   │ │ savings   │ │ hooks    │
-     │ macos        │ │              │ │           │ │ modules  │
+     │ ubuntu       │ │ cargo audit  │ │ >=80%     │ │ ai agent │
+     │ windows      │ │ (advisory)   │ │ savings   │ │ doc      │
+     │ macos        │ │              │ │           │ │          │
      └──────┬───────┘ └──────┬───────┘ └─────┬─────┘ └────┬─────┘
             │                │               │             │
             └────────────────┴───────┬───────┴─────────────┘

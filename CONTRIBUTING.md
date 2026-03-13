@@ -52,6 +52,17 @@ chore(proxy): remove-deprecated-flags
 
 ## Pull Request Process
 
+### Scope Rules
+
+**Each PR must focus on a single feature, fix, or change.** The diff must stay in-scope with the description written by the author in the PR title and body. Out-of-scope changes (unrelated refactors, drive-by fixes, formatting of untouched files) must go in a separate PR.
+
+**For large features or refactors**, prefer multi-part PRs over one enormous PR. Split the work into logical, reviewable chunks that can each be merged independently. Examples:
+- Part 1: Add data model and tests
+- Part 2: Add CLI command and integration
+- Part 3: Update documentation and CHANGELOG
+
+**Why**: Small, focused PRs are easier to review, safer to merge, and faster to ship. Large PRs slow down review, hide bugs, and increase merge conflict risk.
+
 ### 1. Create Your Branch
 
 ```bash
