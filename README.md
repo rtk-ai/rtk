@@ -223,7 +223,8 @@ rtk gain                        # Summary stats
 rtk gain --graph                # ASCII graph (last 30 days)
 rtk gain --history              # Recent command history
 rtk gain --daily                # Day-by-day breakdown
-rtk gain --all --format json    # JSON export for dashboards
+rtk gain --json                 # JSON output (shorthand for --format json)
+rtk gain --all --format json    # JSON export with all breakdowns for dashboards
 
 rtk discover                    # Find missed savings opportunities
 rtk discover --all --since 7    # All projects, last 7 days

@@ -20,6 +20,7 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    json: bool,
     _verbose: u8,
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
@@ -30,7 +31,8 @@ pub fn run(
     }
 
     // Handle export formats
-    match format {
+    let effective_format = if json { "json" } else { format };
+    match effective_format {
         "json" => {
             return export_json(
                 &tracker,

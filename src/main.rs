@@ -407,6 +407,9 @@ enum Commands {
         /// Output format: text, json, csv
         #[arg(short, long, default_value = "text")]
         format: String,
+        /// Output as JSON (shorthand for --format json)
+        #[arg(short = 'j', long)]
+        json: bool,
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
@@ -1650,6 +1653,7 @@ fn main() -> Result<()> {
             monthly,
             all,
             format,
+            json,
             failures,
         } => {
             gain::run(
@@ -1664,6 +1668,7 @@ fn main() -> Result<()> {
                 all,
                 &format,
                 failures,
+                json,
                 cli.verbose,
             )?;
         }
@@ -2361,6 +2366,42 @@ mod tests {
         if let Ok(cli) = result {
             match cli.command {
                 Commands::Gain { failures, .. } => assert!(failures),
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_json_flag_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--json"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { json, .. } => assert!(json),
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_json_short_flag_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "-j"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { json, .. } => assert!(json),
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_json_default_is_false() {
+        let result = Cli::try_parse_from(["rtk", "gain"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { json, .. } => assert!(!json),
                 _ => panic!("Expected Gain command"),
             }
         }
