@@ -1,0 +1,138 @@
+# CI/CD Flows
+
+## PR Quality Gates (ci.yml)
+
+Trigger: pull_request to develop or master
+
+```
+                          ┌──────────────────┐
+                          │    PR opened      │
+                          └────────┬─────────┘
+                                   │
+                          ┌────────▼─────────┐
+                          │       fmt         │
+                          └────────┬─────────┘
+                                   │
+                          ┌────────▼─────────┐
+                          │     clippy        │
+                          └──┬───┬───┬───┬───┘
+                             │   │   │   │
+              ┌──────────────┘   │   │   └──────────────┐
+              │          ┌───────┘   └───────┐          │
+              ▼          ▼                   ▼          ▼
+     ┌──────────────┐ ┌──────────────┐ ┌───────────┐ ┌──────────┐
+     │ test         │ │Security Scan │ │ benchmark │ │ validate │
+     │ ubuntu       │ │ cargo audit  │ │ >=80%     │ │ docs     │
+     │ windows      │ │ (blocking)   │ │ savings   │ │ hooks    │
+     │ macos        │ │              │ │           │ │ modules  │
+     └──────┬───────┘ └──────┬───────┘ └─────┬─────┘ └────┬─────┘
+            │                │               │             │
+            └────────────────┴───────┬───────┴─────────────┘
+                                     │
+                          ┌──────────▼─────────┐
+                          │  All must pass     │
+                          │  to merge          │
+                          └────────────────────┘
+
+     + DCO check (independent, develop PRs only)
+```
+
+## Merge to develop — pre-release (cd.yml)
+
+Trigger: push to develop | Concurrency: cancel-in-progress
+
+```
+     ┌──────────────────┐
+     │ push to develop   │
+     └────────┬─────────┘
+              │
+     ┌────────▼──────────────────┐
+     │ pre-release                │
+     │ read Cargo.toml version   │
+     │ tag = v{ver}-rc.{run}     │
+     │ safety: fail if exists    │
+     └────────┬──────────────────┘
+              │
+     ┌────────▼──────────────────┐
+     │ release.yml               │
+     │ prerelease = true         │
+     └────────┬──────────────────┘
+              │
+     ┌────────▼──────────────────┐
+     │ Build                     │
+     │ 5 platforms + DEB + RPM   │
+     └────────┬──────────────────┘
+              │
+     ┌────────▼──────────────────┐
+     │ GitHub Release            │
+     │ (pre-release badge)       │
+     │                           │
+     │ Discord:  SKIPPED         │
+     │ Homebrew: SKIPPED         │
+     └──────────────────────────┘
+```
+
+## Merge to master — stable release (cd.yml)
+
+Trigger: push to master | Concurrency: never cancelled
+
+```
+     ┌──────────────────┐
+     │ push to master    │
+     └────────┬─────────┘
+              │
+     ┌────────▼──────────────────┐
+     │ release-please            │
+     │ analyze conventional      │
+     │ commits                   │
+     └────────┬──────────────────┘
+              │
+         ┌────┴────────────────┐
+         │                     │
+    no release           release created
+         │                     │
+         ▼                     ▼
+  ┌──────────────┐    ┌───────────────────────┐
+  │ create/update│    │ release.yml            │
+  │ release PR   │    │ prerelease = false     │
+  └──────────────┘    └───────────┬───────────┘
+                                  │
+                     ┌────────────▼────────────┐
+                     │ Build                   │
+                     │ 5 platforms + DEB + RPM  │
+                     └────────────┬────────────┘
+                                  │
+                     ┌────────────▼────────────┐
+                     │ GitHub Release           │
+                     │ (stable, "Latest" badge) │
+                     └──┬─────────┬─────────┬──┘
+                        │         │         │
+                        ▼         ▼         ▼
+                    Discord   Homebrew   latest
+                    notify    tap update  tag
+```
+
+## Manual release (release.yml)
+
+Trigger: workflow_dispatch
+
+```
+     ┌────────────────────────┐
+     │ workflow_dispatch       │
+     │ inputs: tag, prerelease │
+     └───────────┬────────────┘
+                 │
+     ┌───────────▼────────────┐
+     │ Full build pipeline     │
+     │ 5 platforms + DEB + RPM │
+     └───────────┬────────────┘
+                 │
+          ┌──────┴──────┐
+          │             │
+   prerelease=false  prerelease=true
+          │             │
+          ▼             ▼
+     Discord        pre-release
+     Homebrew       badge only
+     latest tag
+```

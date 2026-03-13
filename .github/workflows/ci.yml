@@ -1,0 +1,272 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, master]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─── Fast gates (fail early, save CI minutes) ───
+
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    needs: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  # ─── Parallel gates (all need code to compile) ───
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: clippy
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all
+
+  security:
+    name: Security Scan
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Cargo Audit (CVE check)
+        run: |
+          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Dependency Vulnerabilities" >> $GITHUB_STEP_SUMMARY
+          if cargo audit 2>&1 | tee audit.log; then
+            echo "No known vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Vulnerabilities found:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat audit.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "::error::Dependency vulnerabilities detected"
+            exit 1
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Critical files check
+        run: |
+          echo "### Critical Files Modified" >> $GITHUB_STEP_SUMMARY
+          CRITICAL=$(git diff --name-only origin/master...HEAD | grep -E "(runner|summary|tracking|init|pnpm_cmd|container)\.rs|Cargo\.toml|workflows/.*\.yml" || true)
+          if [ -n "$CRITICAL" ]; then
+            echo "**HIGH RISK**: The following critical files were modified:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$CRITICAL" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Required Actions:**" >> $GITHUB_STEP_SUMMARY
+            echo "- [ ] Manual security review by 2 maintainers" >> $GITHUB_STEP_SUMMARY
+            echo "- [ ] Verify no shell injection vectors" >> $GITHUB_STEP_SUMMARY
+            echo "- [ ] Check input validation remains intact" >> $GITHUB_STEP_SUMMARY
+            echo "::warning::Critical RTK files modified - enhanced review required"
+          else
+            echo "No critical files modified" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Dangerous patterns scan
+        run: |
+          echo "### Dangerous Code Patterns" >> $GITHUB_STEP_SUMMARY
+          PATTERNS=$(git diff origin/master...HEAD | grep -E "Command::new\(\"sh\"|Command::new\(\"bash\"|\.env\(\"LD_PRELOAD|\.env\(\"PATH|reqwest::|std::net::|TcpStream|UdpSocket|unsafe \{|\.unwrap\(\) |panic!\(|todo!\(|unimplemented!\(" || true)
+          if [ -n "$PATTERNS" ]; then
+            echo "**Potentially dangerous patterns detected:**" >> $GITHUB_STEP_SUMMARY
+            echo '```diff' >> $GITHUB_STEP_SUMMARY
+            echo "$PATTERNS" | head -30 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Security Concerns:**" >> $GITHUB_STEP_SUMMARY
+            echo "$PATTERNS" | grep -q "Command::new" && echo "- Shell command execution detected" >> $GITHUB_STEP_SUMMARY || true
+            echo "$PATTERNS" | grep -q "\.env\(\"" && echo "- Environment variable manipulation" >> $GITHUB_STEP_SUMMARY || true
+            echo "$PATTERNS" | grep -q "reqwest::\|std::net::\|TcpStream\|UdpSocket" && echo "- Network operations added" >> $GITHUB_STEP_SUMMARY || true
+            echo "$PATTERNS" | grep -q "unsafe" && echo "- Unsafe code blocks" >> $GITHUB_STEP_SUMMARY || true
+            echo "$PATTERNS" | grep -q "\.unwrap\(\)\|panic!\(" && echo "- Panic-inducing code" >> $GITHUB_STEP_SUMMARY || true
+            echo "::warning::Dangerous code patterns detected - manual review required"
+          else
+            echo "No dangerous patterns detected" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: New dependencies check
+        run: |
+          echo "### Dependencies Changes" >> $GITHUB_STEP_SUMMARY
+          if git diff origin/master...HEAD Cargo.toml | grep -E "^\+.*=" | grep -v "^\+\+\+" > new_deps.txt; then
+            echo "**New dependencies added:**" >> $GITHUB_STEP_SUMMARY
+            echo '```toml' >> $GITHUB_STEP_SUMMARY
+            cat new_deps.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Required Actions:**" >> $GITHUB_STEP_SUMMARY
+            echo "- [ ] Audit each new dependency on crates.io" >> $GITHUB_STEP_SUMMARY
+            echo "- [ ] Check maintainer reputation and download counts" >> $GITHUB_STEP_SUMMARY
+            echo "- [ ] Verify no typosquatting (e.g., 'reqwest' vs 'request')" >> $GITHUB_STEP_SUMMARY
+            echo "::warning::New dependencies require supply chain audit"
+          else
+            echo "No new dependencies added" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Clippy security lints
+        run: |
+          echo "### Clippy Security Lints" >> $GITHUB_STEP_SUMMARY
+          if cargo clippy --all-targets -- -W clippy::unwrap_used -W clippy::panic -W clippy::expect_used 2>&1 | tee clippy.log | grep -E "warning:|error:"; then
+            echo "Security-related lints triggered:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E "warning:|error:" clippy.log | head -20 >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "::warning::Clippy security lints failed"
+          else
+            echo "All security lints passed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Summary verdict
+        run: |
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Security Review Verdict" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**This is an automated security scan. A human maintainer must:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review all warnings above" >> $GITHUB_STEP_SUMMARY
+          echo "2. Verify PR intent matches actual code changes" >> $GITHUB_STEP_SUMMARY
+          echo "3. Check for subtle backdoors or logic bombs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**For high-risk PRs (critical files modified):**" >> $GITHUB_STEP_SUMMARY
+          echo "- Require approval from 2 maintainers" >> $GITHUB_STEP_SUMMARY
+          echo "- Test in isolated environment before merge" >> $GITHUB_STEP_SUMMARY
+
+  benchmark:
+    name: benchmark
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build rtk
+        run: cargo build --release
+
+      - name: Install Python tools
+        run: pip install ruff pytest
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install Go tools
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+      - name: Run benchmark
+        run: ./scripts/benchmark.sh
+
+  validate:
+    name: validate
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate documentation consistency
+        run: bash scripts/validate-docs.sh
+
+      - name: Check module count consistency
+        run: |
+          MAIN_MODULES=$(grep -c '^mod ' src/main.rs)
+
+          if [ -f "ARCHITECTURE.md" ]; then
+            ARCH_MODULES=$(grep 'Total:.*modules' ARCHITECTURE.md | grep -o '[0-9]\+' | head -1)
+            if [ -n "$ARCH_MODULES" ] && [ "$MAIN_MODULES" != "$ARCH_MODULES" ]; then
+              echo "Module count mismatch"
+              echo "main.rs: $MAIN_MODULES modules"
+              echo "ARCHITECTURE.md: $ARCH_MODULES modules"
+              exit 1
+            fi
+          fi
+
+          echo "Module count consistent: $MAIN_MODULES modules"
+
+      - name: Verify Python/Go commands documented
+        run: |
+          for cmd in ruff pytest pip go golangci; do
+            if ! grep -q "$cmd" README.md; then
+              echo "README.md missing Python/Go command: $cmd"
+              exit 1
+            fi
+            if ! grep -q "$cmd" CLAUDE.md; then
+              echo "CLAUDE.md missing Python/Go command: $cmd"
+              exit 1
+            fi
+          done
+          echo "All Python/Go commands documented"
+
+      - name: Verify hook coverage
+        run: |
+          HOOK_FILE=".claude/hooks/rtk-rewrite.sh"
+          if [ ! -f "$HOOK_FILE" ]; then
+            echo "Hook file not found: $HOOK_FILE"
+            exit 1
+          fi
+
+          if ! grep -q "rtk rewrite" "$HOOK_FILE"; then
+            echo "Hook does not delegate to 'rtk rewrite'"
+            exit 1
+          fi
+
+          for cmd in ruff pytest pip golangci; do
+            if ! grep -qr "\"$cmd\"" src/discover/; then
+              echo "Registry missing rewrite_prefixes for: $cmd"
+              exit 1
+            fi
+          done
+          echo "Hook delegates to rtk rewrite, registry covers all Python/Go commands"
+
+  # ─── DCO: develop PRs only ───
+
+  check:
+    name: check
+    if: github.base_ref == 'develop'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: KineticCafe/actions-dco@v1
