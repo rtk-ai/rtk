@@ -32,6 +32,8 @@ ureq = "2"
 hostname = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"
+tokf-filter = { version = "0.2.33", default-features = false }
+tokf-common = "0.2.33"
 
 [build-dependencies]
 toml = "0.8"
