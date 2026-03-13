@@ -7,8 +7,8 @@
 //! unless -a flag is present (respecting user intent).
 
 use crate::tracking;
+use crate::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
-use std::process::Command;
 
 /// Noise directories commonly excluded from LLM context
 const NOISE_DIRS: &[&str] = &[
@@ -44,7 +44,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Check if tree is installed
-    if !crate::utils::command_in_path("tree") {
+    if !tool_exists("tree") {
         anyhow::bail!(
             "tree command not found. Install it first:\n\
              - macOS: brew install tree\n\
@@ -54,7 +54,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         );
     }
 
-    let mut cmd = Command::new("tree");
+    let mut cmd = resolved_command("tree");
 
     // Determine if user wants all files or default behavior
     let show_all = args.iter().any(|a| a == "-a" || a == "--all");

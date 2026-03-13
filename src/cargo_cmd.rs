@@ -1,6 +1,6 @@
 use crate::stream::{FilterMode, StdinMode, StreamFilter};
 use crate::tracking;
-use crate::utils::truncate;
+use crate::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -69,7 +69,7 @@ where
 {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("cargo");
+    let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
     let restored_args = restore_double_dash(args);
@@ -1148,7 +1148,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("cargo passthrough: {:?}", args);
     }
-    let status = Command::new("cargo")
+    let status = resolved_command("cargo")
         .args(args)
         .status()
         .context("Failed to run cargo")?;

@@ -341,7 +341,7 @@ fn route_npx(cmd: &analysis::NativeCommand, raw: &str) -> String {
 /// ## Safety interaction
 /// `safety::check` runs BEFORE this function. Blocked commands (cat, head, sed)
 /// never reach here. The `cat` arm is defensive for when `RTK_BLOCK_TOKEN_WASTE=0`.
-
+///
 /// Subcommand-aware routing table for the binary hook.
 /// Returns (rtk_cmd_full, prefix_to_replace) when a command should be routed to an RTK subcommand.
 /// Conservative whitelist — excludes commands that are better handled by `rtk run -c`.

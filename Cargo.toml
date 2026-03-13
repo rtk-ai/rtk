@@ -26,7 +26,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 chrono = "0.4"
 thiserror = "1.0"
-which = "7"
+which = "8"
 tempfile = "3"
 sha2 = "0.10"
 ureq = "2"
