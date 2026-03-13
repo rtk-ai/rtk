@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **curl:** skip JSON schema replacement when schema is larger than original payload ([#297](https://github.com/rtk-ai/rtk/issues/297))
+* **init:** `rtk init -g --uninstall` now removes `<!-- rtk-instructions -->` block from CLAUDE.md ([#384](https://github.com/rtk-ai/rtk/issues/384))
 
 ## [0.25.0](https://github.com/rtk-ai/rtk/compare/v0.24.0...v0.25.0) (2026-03-05)
 
@@ -104,14 +105,6 @@ breakage, but future rule additions won't take effect until they migrate.
   - Supports compound commands (`&&`, `||`, `;`, `|`, `&`) and env prefixes
 * **discover**: extract rules/patterns into `src/discover/rules.rs` — adding a command now means editing one file only
 * **fix**: add `aws` and `psql` to rewrite registry (were missing despite modules existing since 0.24.0)
-
-### Bug Fixes
-
-* **init:** `rtk init -g --uninstall` now removes `<!-- rtk-instructions -->` block from CLAUDE.md ([#384](https://github.com/rtk-ai/rtk/issues/384))
-  - On Windows, `rtk init -g` falls back to `--claude-md` mode, which injects instructions directly into CLAUDE.md. Uninstall previously only looked for Unix-mode artifacts (hook, RTK.md, @RTK.md, settings.json), so it reported "nothing to remove" on Windows.
-  - Uninstall now prints checked paths when nothing is found, to help diagnose path issues
-  - Cross-platform error message: shows `%USERPROFILE%` on Windows, `$HOME` on Unix
-  - Extracted marker constants (`RTK_BLOCK_START`, `RTK_BLOCK_END`) to prevent string drift
 
 ### Tests
 

@@ -1006,7 +1006,7 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
         let after = content[end_pos..].trim_start();
 
         let result = if after.is_empty() {
-            before.to_string()
+            format!("{}\n", before)
         } else {
             format!("{}\n\n{}", before, after)
         };
@@ -1675,104 +1675,42 @@ mod tests {
 
     #[test]
     fn test_uninstall_integration_claude_md_only() {
-        let temp = TempDir::new().unwrap();
-        let claude_md = temp.path().join("CLAUDE.md");
-
-        // install
-        fs::write(&claude_md, RTK_INSTRUCTIONS).unwrap();
-
-        // uninstall
-        let content = fs::read_to_string(&claude_md).unwrap();
-        assert!(content.contains(RTK_BLOCK_START));
-        assert!(content.contains(RTK_BLOCK_END));
-        assert!(content.contains("rtk cargo test"));
-
-        let mut removed = Vec::new();
-        let mut claude_md_changed = false;
-        let mut working_content = content.clone();
-
-        if working_content.contains("@RTK.md") {
-            unreachable!("Windows/--claude-md install should not have @RTK.md");
-        }
-
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
-            assert!(did_remove, "remove_rtk_block must succeed for valid block");
-            working_content = cleaned;
-            claude_md_changed = true;
-            removed.push("CLAUDE.md: removed rtk-instructions block".to_string());
-        }
-
+        // When CLAUDE.md contains only RTK instructions, removal should leave it empty
+        let (cleaned, did_remove) = remove_rtk_block(RTK_INSTRUCTIONS);
+        assert!(did_remove, "remove_rtk_block must succeed for valid block");
         assert!(
-            claude_md_changed,
-            "uninstall must detect the rtk-instructions block"
+            cleaned.trim().is_empty(),
+            "CLAUDE.md with only RTK content should be empty after removal"
         );
-        assert!(!removed.is_empty(), "must have recorded removal");
-
-        let trimmed = working_content.trim();
-        if trimmed.is_empty() {
-            fs::remove_file(&claude_md).unwrap();
-            removed.retain(|r| !r.starts_with("CLAUDE.md:"));
-            removed.push("CLAUDE.md: removed (was empty after cleanup)".to_string());
-        } else {
-            fs::write(&claude_md, &working_content).unwrap();
-        }
-
-        assert!(
-            !claude_md.exists(),
-            "CLAUDE.md should be deleted when it only contained RTK instructions"
-        );
-        assert_eq!(removed.len(), 1);
-        assert!(removed[0].contains("was empty after cleanup"));
     }
 
     #[test]
     fn test_uninstall_integration_preserves_user_content() {
-        let temp = TempDir::new().unwrap();
-        let claude_md = temp.path().join("CLAUDE.md");
+        // Mixed content → user content survives, RTK block removed
+        let user_content = "# My Project Rules\n\nAlways use snake_case.";
+        let installed = format!("{}\n\n{}", user_content, RTK_INSTRUCTIONS);
 
-        // install
-        let user_content = "# My Project Rules\n\nAlways use snake_case.\n";
-        let installed = format!("{}\n{}", user_content, RTK_INSTRUCTIONS);
-        fs::write(&claude_md, &installed).unwrap();
-
-        // uninstall
-        let content = fs::read_to_string(&claude_md).unwrap();
-        let mut working_content = content.clone();
-        let mut claude_md_changed = false;
-
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
-            assert!(did_remove);
-            working_content = cleaned;
-            claude_md_changed = true;
-        }
-
-        assert!(claude_md_changed);
-        let trimmed = working_content.trim();
-        assert!(!trimmed.is_empty(), "user content should remain");
-        fs::write(&claude_md, &working_content).unwrap();
-
-        let final_content = fs::read_to_string(&claude_md).unwrap();
-        assert!(claude_md.exists(), "CLAUDE.md should still exist");
+        let (cleaned, did_remove) = remove_rtk_block(&installed);
+        assert!(did_remove);
+        assert!(!cleaned.trim().is_empty(), "user content should remain");
         assert!(
-            final_content.contains("My Project Rules"),
+            cleaned.contains("My Project Rules"),
             "user content must be preserved"
         );
         assert!(
-            final_content.contains("snake_case"),
+            cleaned.contains("snake_case"),
             "user content must be preserved"
         );
         assert!(
-            !final_content.contains(RTK_BLOCK_START),
+            !cleaned.contains(RTK_BLOCK_START),
             "RTK block must be fully removed"
         );
         assert!(
-            !final_content.contains(RTK_BLOCK_END),
+            !cleaned.contains(RTK_BLOCK_END),
             "RTK end marker must be removed"
         );
         assert!(
-            !final_content.contains("rtk cargo test"),
+            !cleaned.contains("rtk cargo test"),
             "RTK content must be removed"
         );
     }
