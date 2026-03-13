@@ -31,6 +31,7 @@ pub const PATTERNS: &[&str] = &[
     r"^(npx\s+|pnpm\s+)?playwright",
     r"^(npx\s+|pnpm\s+)?prisma",
     r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
+    r"^docker-compose\s+(ps|logs|build)",
     r"^kubectl\s+(get|logs|describe|apply)",
     r"^tree(\s|$)",
     r"^diff\s+",
@@ -237,6 +238,14 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         rtk_cmd: "rtk docker",
         rewrite_prefixes: &["docker"],
+        category: "Infra",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk docker compose",
+        rewrite_prefixes: &["docker-compose"],
         category: "Infra",
         savings_pct: 85.0,
         subcmd_savings: &[],

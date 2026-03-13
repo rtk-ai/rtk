@@ -1443,6 +1443,51 @@ mod tests {
         );
     }
 
+    // --- docker-compose (legacy hyphenated CLI) ---
+
+    #[test]
+    fn test_rewrite_docker_compose_legacy_ps() {
+        assert_eq!(
+            rewrite_command("docker-compose ps", &[]),
+            Some("rtk docker compose ps".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_legacy_logs() {
+        assert_eq!(
+            rewrite_command("docker-compose logs web", &[]),
+            Some("rtk docker compose logs web".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_legacy_logs_no_service() {
+        assert_eq!(
+            rewrite_command("docker-compose logs", &[]),
+            Some("rtk docker compose logs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_legacy_build() {
+        assert_eq!(
+            rewrite_command("docker-compose build", &[]),
+            Some("rtk docker compose build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_legacy_up_skipped() {
+        // unsupported subcommand — must not rewrite
+        assert_eq!(rewrite_command("docker-compose up -d", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_docker_compose_legacy_down_skipped() {
+        assert_eq!(rewrite_command("docker-compose down", &[]), None);
+    }
+
     // --- AWS / psql (PR #216) ---
 
     #[test]
