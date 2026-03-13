@@ -108,7 +108,9 @@ rtk init --global
 git status  # Automatically rewritten to rtk git status
 ```
 
-The hook transparently rewrites commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+
+**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
 ## How It Works
 
@@ -268,6 +270,8 @@ test utils::test_format ... ok              test_overflow: panic at utils.rs:18
 The most effective way to use rtk. The hook transparently intercepts Bash commands and rewrites them to rtk equivalents before execution.
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
+
+**Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
 
 ### Setup
 
