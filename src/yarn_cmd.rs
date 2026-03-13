@@ -1,4 +1,4 @@
-use crate::{tracking, tsc_cmd};
+use crate::tracking;
 use anyhow::{Context, Result};
 use std::process::Command;
 
@@ -45,8 +45,10 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
             })
         }
         "typecheck" | "type-check" | "tsc" | "check-types" => {
-            // TypeScript type checking — delegate to tsc_cmd
-            tsc_cmd::run(script_args, verbose)
+            // TypeScript type checking — run via yarn, filter with tsc filter
+            run_via_yarn_with_filter(effective_args, verbose, skip_env, "typecheck", |raw| {
+                crate::tsc_cmd::filter_tsc_output(raw)
+            })
         }
         _ => {
             // Generic passthrough with yarn boilerplate stripping

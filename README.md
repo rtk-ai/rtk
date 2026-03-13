@@ -191,6 +191,9 @@ rtk rubocop                     # Ruby linting (JSON, -60%+)
 
 ### Package Managers
 ```bash
+rtk yarn test                   # Intelligent script routing + filtering
+rtk yarn build                  # Next.js build compact via yarn
+rtk yarn typecheck              # TypeScript errors via yarn
 rtk pnpm list                   # Compact dependency tree
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
@@ -362,6 +365,7 @@ cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
+| `yarn test/build/lint/typecheck` | `rtk yarn ...` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
 
 Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
