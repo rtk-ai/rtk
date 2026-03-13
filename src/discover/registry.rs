@@ -2,6 +2,7 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, PATTERNS, RULES};
+use crate::cmd::lexer::{tokenize, TokenKind};
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -314,83 +315,79 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
     rewrite_compound(trimmed, excluded)
 }
 
-/// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
+/// Rewrite a compound command (with `&&`, `||`, `;`, `|`, `&`) by rewriting each segment.
+///
+/// Uses `cmd::lexer::tokenize()` for quote-aware operator detection, then extracts
+/// original substrings by byte offset for each segment. This handles edge cases the
+/// old byte scanner missed: escape sequences, `$()` / backtick detection, glob detection,
+/// and proper redirect parsing (e.g. `2>&1` not confused with `&&`).
 fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut result = String::with_capacity(len + 32);
+    let tokens = tokenize(cmd);
+    let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
-    let mut seg_start = 0;
-    let mut i = 0;
-    let mut in_single = false;
-    let mut in_double = false;
 
-    while i < len {
-        let b = bytes[i];
-        match b {
-            b'\'' if !in_double => {
-                in_single = !in_single;
-                i += 1;
-            }
-            b'"' if !in_single => {
-                in_double = !in_double;
-                i += 1;
-            }
-            b'|' if !in_single && !in_double => {
-                if i + 1 < len && bytes[i + 1] == b'|' {
-                    // `||` operator — rewrite left, continue
-                    let seg = cmd[seg_start..i].trim();
-                    let rewritten =
-                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
-                    if rewritten != seg {
-                        any_changed = true;
-                    }
-                    result.push_str(&rewritten);
-                    result.push_str(" || ");
-                    i += 2;
-                    while i < len && bytes[i] == b' ' {
-                        i += 1;
-                    }
-                    seg_start = i;
-                } else {
-                    // `|` pipe — rewrite first segment only, pass through the rest unchanged
-                    let seg = cmd[seg_start..i].trim();
-                    let rewritten =
-                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
-                    if rewritten != seg {
-                        any_changed = true;
-                    }
-                    result.push_str(&rewritten);
-                    // Preserve the space before the pipe that was lost by trim()
-                    result.push(' ');
-                    result.push_str(cmd[i..].trim_start());
-                    return if any_changed { Some(result) } else { None };
-                }
-            }
-            b'&' if !in_single && !in_double && i + 1 < len && bytes[i + 1] == b'&' => {
-                // `&&` operator — rewrite left, continue
-                let seg = cmd[seg_start..i].trim();
+    // Find operator/pipe/background split points using token offsets.
+    // For each split, extract the original substring from `cmd` to preserve
+    // exact spacing, quotes, and redirects that rewrite_segment expects.
+    let mut seg_start: usize = 0; // byte offset of current segment start
+    let mut prev_kind: Option<&TokenKind> = None;
+
+    for (idx, tok) in tokens.iter().enumerate() {
+        match tok.kind {
+            TokenKind::Operator => {
+                // &&, ||, ; — rewrite left segment, append operator, continue
+                let seg = cmd[seg_start..tok.offset].trim();
                 let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                result.push_str(" && ");
-                i += 2;
-                while i < len && bytes[i] == b' ' {
-                    i += 1;
-                }
-                seg_start = i;
-            }
-            b'&' if !in_single && !in_double => {
-                // #346: redirect detection — 2>&1 / >&2 (> before &) or &>file / &>>file (> after &)
-                let is_redirect =
-                    (i > 0 && bytes[i - 1] == b'>') || (i + 1 < len && bytes[i + 1] == b'>');
-                if is_redirect {
-                    i += 1;
+                // Normalize operator spacing
+                if tok.value == ";" {
+                    result.push(';');
+                    // Add space after semicolon if there's more content
+                    let after = tok.offset + tok.value.len();
+                    if after < cmd.len() {
+                        result.push(' ');
+                    }
                 } else {
-                    // single `&` background execution operator
-                    let seg = cmd[seg_start..i].trim();
+                    result.push(' ');
+                    result.push_str(&tok.value);
+                    result.push(' ');
+                }
+                // Advance past the operator and any trailing whitespace
+                seg_start = tok.offset + tok.value.len();
+                while seg_start < cmd.len()
+                    && cmd.as_bytes().get(seg_start).is_some_and(|&b| b == b' ')
+                {
+                    seg_start += 1;
+                }
+            }
+            TokenKind::Pipe => {
+                // | — rewrite first segment only, pass through the rest unchanged
+                let seg = cmd[seg_start..tok.offset].trim();
+                let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+                if rewritten != seg {
+                    any_changed = true;
+                }
+                result.push_str(&rewritten);
+                // Preserve the pipe and everything after it unchanged
+                result.push(' ');
+                result.push_str(cmd[tok.offset..].trim_start());
+                return if any_changed { Some(result) } else { None };
+            }
+            TokenKind::Shellism if tok.value == "&" => {
+                // Single `&` — distinguish background operator from redirect context.
+                // If preceded by a Redirect token (2>&1) or followed by a Redirect
+                // token (&>/dev/null, &>>file), this is part of redirect syntax.
+                let next_is_redirect = tokens
+                    .get(idx + 1)
+                    .is_some_and(|t| t.kind == TokenKind::Redirect);
+                if prev_kind == Some(&TokenKind::Redirect) || next_is_redirect {
+                    // Part of redirect (e.g. 2>&1 or &>/dev/null) — not a segment separator
+                } else {
+                    // Background operator — rewrite left segment, continue
+                    let seg = cmd[seg_start..tok.offset].trim();
                     let rewritten =
                         rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
                     if rewritten != seg {
@@ -398,39 +395,21 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
                     }
                     result.push_str(&rewritten);
                     result.push_str(" & ");
-                    i += 1;
-                    while i < len && bytes[i] == b' ' {
-                        i += 1;
+                    seg_start = tok.offset + tok.value.len();
+                    while seg_start < cmd.len()
+                        && cmd.as_bytes().get(seg_start).is_some_and(|&b| b == b' ')
+                    {
+                        seg_start += 1;
                     }
-                    seg_start = i;
                 }
             }
-            b';' if !in_single && !in_double => {
-                // `;` separator
-                let seg = cmd[seg_start..i].trim();
-                let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
-                if rewritten != seg {
-                    any_changed = true;
-                }
-                result.push_str(&rewritten);
-                result.push(';');
-                i += 1;
-                while i < len && bytes[i] == b' ' {
-                    i += 1;
-                }
-                if i < len {
-                    result.push(' ');
-                }
-                seg_start = i;
-            }
-            _ => {
-                i += 1;
-            }
+            _ => {}
         }
+        prev_kind = Some(&tok.kind);
     }
 
     // Last (or only) segment
-    let seg = cmd[seg_start..len].trim();
+    let seg = cmd[seg_start..].trim();
     let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
     if rewritten != seg {
         any_changed = true;
