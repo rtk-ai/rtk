@@ -32,117 +32,133 @@ pub struct NativeCommand {
 /// - `&`              — Shellism("&") at end, only when no other Shellism in core
 ///   (`cargo build &` → core `cargo build`, suffix `&`; `cargo build 2>&1 &` → no strip,
 ///   because the `&` in `2>&1` is already a Shellism in the core)
-pub fn split_safe_suffix(tokens: Vec<ParsedToken>) -> (Vec<ParsedToken>, String) {
-    let n = tokens.len();
+pub fn split_safe_suffix(mut tokens: Vec<ParsedToken>) -> (Vec<ParsedToken>, String) {
+    let mut suffixes: Vec<String> = Vec::new();
 
-    // 4-token: 2>&1
-    if n >= 5 {
-        // Need at least 1 core token + 4 suffix tokens
-        let t = &tokens[n - 4..];
-        if matches!(t[0].kind, TokenKind::Arg)
-            && t[0].value == "2"
-            && matches!(t[1].kind, TokenKind::Redirect)
-            && t[1].value == ">"
-            && matches!(t[2].kind, TokenKind::Shellism)
-            && t[2].value == "&"
-            && matches!(t[3].kind, TokenKind::Arg)
-            && t[3].value == "1"
-        {
-            return (tokens[..n - 4].to_vec(), "2>&1".to_string());
-        }
-    }
+    loop {
+        let n = tokens.len();
+        let mut matched_len: usize = 0;
+        let mut matched_suffix = String::new();
 
-    // 3-token: | tee <file>
-    if n >= 4 {
-        let t = &tokens[n - 3..];
-        if matches!(t[0].kind, TokenKind::Pipe)
-            && matches!(t[1].kind, TokenKind::Arg)
-            && t[1].value == "tee"
-            && matches!(t[2].kind, TokenKind::Arg)
-        {
-            let suffix = format!("| tee {}", t[2].value);
-            return (tokens[..n - 3].to_vec(), suffix);
-        }
-    }
-
-    // 3-token: | head <arg> or | tail <arg>
-    if n >= 4 {
-        let t = &tokens[n - 3..];
-        if matches!(t[0].kind, TokenKind::Pipe)
-            && matches!(t[1].kind, TokenKind::Arg)
-            && matches!(t[1].value.as_str(), "head" | "tail")
-            && matches!(t[2].kind, TokenKind::Arg)
-        {
-            let suffix = format!("| {} {}", t[1].value, t[2].value);
-            return (tokens[..n - 3].to_vec(), suffix);
-        }
-    }
-
-    // 3-token: 2>/dev/null
-    if n >= 4 {
-        let t = &tokens[n - 3..];
-        if matches!(t[0].kind, TokenKind::Arg)
-            && t[0].value == "2"
-            && matches!(t[1].kind, TokenKind::Redirect)
-            && t[1].value == ">"
-            && matches!(t[2].kind, TokenKind::Arg)
-            && t[2].value == "/dev/null"
-        {
-            return (tokens[..n - 3].to_vec(), "2>/dev/null".to_string());
-        }
-    }
-
-    // 2-token: | cat
-    if n >= 3 {
-        let t = &tokens[n - 2..];
-        if matches!(t[0].kind, TokenKind::Pipe)
-            && matches!(t[1].kind, TokenKind::Arg)
-            && t[1].value == "cat"
-        {
-            return (tokens[..n - 2].to_vec(), "| cat".to_string());
-        }
-    }
-
-    // 2-token: > /dev/null
-    if n >= 3 {
-        let t = &tokens[n - 2..];
-        if matches!(t[0].kind, TokenKind::Redirect)
-            && t[0].value == ">"
-            && matches!(t[1].kind, TokenKind::Arg)
-            && t[1].value == "/dev/null"
-        {
-            return (tokens[..n - 2].to_vec(), "> /dev/null".to_string());
-        }
-    }
-
-    // 2-token: >> <file>
-    if n >= 3 {
-        let t = &tokens[n - 2..];
-        if matches!(t[0].kind, TokenKind::Redirect)
-            && t[0].value == ">>"
-            && matches!(t[1].kind, TokenKind::Arg)
-        {
-            let suffix = format!(">> {}", t[1].value);
-            return (tokens[..n - 2].to_vec(), suffix);
-        }
-    }
-
-    // 1-token: & (trailing background job operator)
-    // Guard: strip only when no other Shellism exists in the core.
-    // `cargo build &`      → core=[cargo, build],          suffix="&"  ✅ RTK can rewrite
-    // `cargo build 2>&1 &` → core has Shellism from 2>&1   → NOT stripped ✅ shell handles
-    if n >= 2 {
-        let last = &tokens[n - 1];
-        if matches!(last.kind, TokenKind::Shellism) && last.value == "&" {
-            let core = &tokens[..n - 1];
-            if !core.iter().any(|t| matches!(t.kind, TokenKind::Shellism)) {
-                return (core.to_vec(), "&".to_string());
+        // 4-token: 2>&1
+        if n >= 5 {
+            let t = &tokens[n - 4..];
+            if matches!(t[0].kind, TokenKind::Arg)
+                && t[0].value == "2"
+                && matches!(t[1].kind, TokenKind::Redirect)
+                && t[1].value == ">"
+                && matches!(t[2].kind, TokenKind::Shellism)
+                && t[2].value == "&"
+                && matches!(t[3].kind, TokenKind::Arg)
+                && t[3].value == "1"
+            {
+                matched_suffix = "2>&1".to_string();
+                matched_len = 4;
             }
         }
+
+        // 3-token: | tee <file>
+        if matched_len == 0 && n >= 4 {
+            let t = &tokens[n - 3..];
+            if matches!(t[0].kind, TokenKind::Pipe)
+                && matches!(t[1].kind, TokenKind::Arg)
+                && t[1].value == "tee"
+                && matches!(t[2].kind, TokenKind::Arg)
+            {
+                matched_suffix = format!("| tee {}", t[2].value);
+                matched_len = 3;
+            }
+        }
+
+        // 3-token: | head <arg> or | tail <arg>
+        if matched_len == 0 && n >= 4 {
+            let t = &tokens[n - 3..];
+            if matches!(t[0].kind, TokenKind::Pipe)
+                && matches!(t[1].kind, TokenKind::Arg)
+                && matches!(t[1].value.as_str(), "head" | "tail")
+                && matches!(t[2].kind, TokenKind::Arg)
+            {
+                matched_suffix = format!("| {} {}", t[1].value, t[2].value);
+                matched_len = 3;
+            }
+        }
+
+        // 3-token: 2>/dev/null
+        if matched_len == 0 && n >= 4 {
+            let t = &tokens[n - 3..];
+            if matches!(t[0].kind, TokenKind::Arg)
+                && t[0].value == "2"
+                && matches!(t[1].kind, TokenKind::Redirect)
+                && t[1].value == ">"
+                && matches!(t[2].kind, TokenKind::Arg)
+                && t[2].value == "/dev/null"
+            {
+                matched_suffix = "2>/dev/null".to_string();
+                matched_len = 3;
+            }
+        }
+
+        // 2-token: | cat
+        if matched_len == 0 && n >= 3 {
+            let t = &tokens[n - 2..];
+            if matches!(t[0].kind, TokenKind::Pipe)
+                && matches!(t[1].kind, TokenKind::Arg)
+                && t[1].value == "cat"
+            {
+                matched_suffix = "| cat".to_string();
+                matched_len = 2;
+            }
+        }
+
+        // 2-token: > /dev/null
+        if matched_len == 0 && n >= 3 {
+            let t = &tokens[n - 2..];
+            if matches!(t[0].kind, TokenKind::Redirect)
+                && t[0].value == ">"
+                && matches!(t[1].kind, TokenKind::Arg)
+                && t[1].value == "/dev/null"
+            {
+                matched_suffix = "> /dev/null".to_string();
+                matched_len = 2;
+            }
+        }
+
+        // 2-token: >> <file>
+        if matched_len == 0 && n >= 3 {
+            let t = &tokens[n - 2..];
+            if matches!(t[0].kind, TokenKind::Redirect)
+                && t[0].value == ">>"
+                && matches!(t[1].kind, TokenKind::Arg)
+            {
+                matched_suffix = format!(">> {}", t[1].value);
+                matched_len = 2;
+            }
+        }
+
+        // 1-token: & (trailing background job operator)
+        // Guard: strip only when no other Shellism exists in the core.
+        if matched_len == 0 && n >= 2 {
+            let last = &tokens[n - 1];
+            if matches!(last.kind, TokenKind::Shellism) && last.value == "&" {
+                let core = &tokens[..n - 1];
+                if !core.iter().any(|t| matches!(t.kind, TokenKind::Shellism)) {
+                    matched_suffix = "&".to_string();
+                    matched_len = 1;
+                }
+            }
+        }
+
+        if matched_len == 0 {
+            break;
+        }
+
+        tokens.truncate(n - matched_len);
+        suffixes.push(matched_suffix);
     }
 
-    // No safe suffix found — return unchanged
-    (tokens, String::new())
+    suffixes.reverse();
+    let suffix = suffixes.join(" ");
+    (tokens, suffix)
 }
 
 /// Check if command needs real shell (has shellisms, pipes, redirects)
@@ -784,5 +800,69 @@ mod tests {
             !needs_shell(&core),
             "core with no Shellism must not require shell"
         );
+    }
+
+    // === COMPOUND SUFFIX TESTS (iterative stripping) ===
+
+    #[test]
+    fn test_split_suffix_compound_redirect_pipe_tail() {
+        // "cargo test 2>&1 | tail -50" — needs iterative stripping:
+        // iteration 1: strip "| tail -50" (3-token pipe+tail)
+        // iteration 2: strip "2>&1" (4-token redirect)
+        // result: core = [cargo, test], suffix = "2>&1 | tail -50"
+        let tokens = tokenize("cargo test 2>&1 | tail -50");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "2>&1 | tail -50");
+        assert!(!needs_shell(&core));
+        let cmds = parse_chain(core).expect("core must parse");
+        assert_eq!(cmds[0].binary, "cargo");
+        assert_eq!(cmds[0].args, vec!["test"]);
+    }
+
+    #[test]
+    fn test_split_suffix_compound_devnull_redirect() {
+        // "cmd > /dev/null 2>&1" — both should strip
+        let tokens = tokenize("cmd > /dev/null 2>&1");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "> /dev/null 2>&1");
+        assert!(!needs_shell(&core));
+        assert_eq!(core.len(), 1);
+    }
+
+    #[test]
+    fn test_split_suffix_compound_redirect_pipe_tee() {
+        // "cargo build 2>&1 | tee /tmp/log" — both should strip
+        let tokens = tokenize("cargo build 2>&1 | tee /tmp/log");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "2>&1 | tee /tmp/log");
+        assert!(!needs_shell(&core));
+    }
+
+    #[test]
+    fn test_split_suffix_triple_compound() {
+        // "cmd >> /tmp/log 2>&1 | tail -5" — three layers
+        let tokens = tokenize("cmd >> /tmp/log 2>&1 | tail -5");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, ">> /tmp/log 2>&1 | tail -5");
+        assert!(!needs_shell(&core));
+        assert_eq!(core.len(), 1);
+    }
+
+    #[test]
+    fn test_split_suffix_unsafe_pipe_with_redirect_not_stripped() {
+        // "cargo test | grep FAILED 2>&1" — only 2>&1 should strip, not | grep
+        let tokens = tokenize("cargo test | grep FAILED 2>&1");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "2>&1");
+        assert!(needs_shell(&core), "core has Pipe -> must need shell");
+    }
+
+    #[test]
+    fn test_split_suffix_devnull_background() {
+        // "cargo build > /dev/null &" — both should strip
+        let tokens = tokenize("cargo build > /dev/null &");
+        let (core, suffix) = split_safe_suffix(tokens);
+        assert_eq!(suffix, "> /dev/null &");
+        assert!(!needs_shell(&core));
     }
 }
