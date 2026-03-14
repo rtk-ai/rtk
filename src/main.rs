@@ -323,7 +323,22 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
-        /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
+        /// Lines after match (grep -A)
+        #[arg(short = 'A', long = "after-context")]
+        after_context: Option<usize>,
+        /// Lines before match (grep -B)
+        #[arg(short = 'B', long = "before-context")]
+        before_context: Option<usize>,
+        /// Lines around match (grep -C)
+        #[arg(short = 'C', long = "context")]
+        grep_context: Option<usize>,
+        /// Case insensitive (grep -i)
+        #[arg(short = 'i', long = "ignore-case")]
+        ignore_case: bool,
+        /// Word boundary (grep -w)
+        #[arg(short = 'w', long = "word-regexp")]
+        word_regexp: bool,
+        /// Extra ripgrep arguments (e.g., --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
     },
@@ -1625,8 +1640,33 @@ fn main() -> Result<()> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            after_context,
+            before_context,
+            grep_context,
+            ignore_case,
+            word_regexp,
             extra_args,
         } => {
+            let mut all_args = Vec::new();
+            if let Some(n) = after_context {
+                all_args.push("-A".into());
+                all_args.push(n.to_string());
+            }
+            if let Some(n) = before_context {
+                all_args.push("-B".into());
+                all_args.push(n.to_string());
+            }
+            if let Some(n) = grep_context {
+                all_args.push("-C".into());
+                all_args.push(n.to_string());
+            }
+            if ignore_case {
+                all_args.push("-i".into());
+            }
+            if word_regexp {
+                all_args.push("-w".into());
+            }
+            all_args.extend(extra_args);
             grep_cmd::run(
                 &pattern,
                 &path,
@@ -1634,7 +1674,7 @@ fn main() -> Result<()> {
                 max,
                 context_only,
                 file_type.as_deref(),
-                &extra_args,
+                &all_args,
                 cli.verbose,
             )?;
         }
@@ -2636,5 +2676,35 @@ mod tests {
                 _ => panic!("expected Rewrite command"),
             }
         }
+    }
+
+    #[test]
+    fn test_grep_after_context_flag_parsed() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-A", "5", "pattern", "."]);
+        assert!(
+            cli.is_ok(),
+            "grep -A 5 must parse without error: {:?}",
+            cli.err()
+        );
+    }
+
+    #[test]
+    fn test_grep_case_insensitive_and_word_flags_parsed() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-i", "-w", "pattern"]);
+        assert!(
+            cli.is_ok(),
+            "grep -i -w must parse without error: {:?}",
+            cli.err()
+        );
+    }
+
+    #[test]
+    fn test_grep_context_uppercase_c_parsed() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-C", "3", "pattern"]);
+        assert!(
+            cli.is_ok(),
+            "grep -C 3 must parse without error: {:?}",
+            cli.err()
+        );
     }
 }
