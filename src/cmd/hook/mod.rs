@@ -380,7 +380,7 @@ fn hook_lookup<'a>(binary: &'a str, sub: &str) -> Option<(&'static str, &'a str)
             // Only well-supported subcommands; others (checkout, rebase, cherry-pick) → rtk run
             match sub {
                 "status" | "log" | "diff" | "show" | "add" | "commit" | "push" | "pull"
-                | "fetch" | "stash" => Some(("rtk git", binary)),
+                | "fetch" | "stash" | "branch" | "worktree" => Some(("rtk git", binary)),
                 _ => None,
             }
         }
@@ -2002,5 +2002,27 @@ mod tests {
         // gh without structured output flags → still eligible for rewriting
         assert!(!should_passthrough("gh pr list"));
         assert!(!should_passthrough("gh issue list"));
+    }
+
+    // === HOOK_LOOKUP: git branch/worktree ===
+
+    #[test]
+    fn test_hook_lookup_git_branch() {
+        assert_eq!(hook_lookup("git", "branch"), Some(("rtk git", "git")));
+    }
+
+    #[test]
+    fn test_hook_lookup_git_worktree() {
+        assert_eq!(hook_lookup("git", "worktree"), Some(("rtk git", "git")));
+    }
+
+    #[test]
+    fn test_git_branch_routes_via_hook() {
+        assert_rewrite("git branch", "rtk git branch");
+    }
+
+    #[test]
+    fn test_git_worktree_list_routes_via_hook() {
+        assert_rewrite("git worktree list", "rtk git worktree");
     }
 }
