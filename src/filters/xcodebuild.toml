@@ -94,6 +94,6 @@ Executed 2 tests, with 1 failure in 0.003 seconds
 expected = "Test Suite 'All tests' started at 2026-03-10 12:00:00\nTest Suite 'AppTests' started at 2026-03-10 12:00:00\nTest Case '-[AppTests testExample]' passed (0.001 seconds).\nTest Case '-[AppTests testFailing]' failed (0.002 seconds).\nTest Suite 'AppTests' passed at 2026-03-10 12:00:01\nExecuted 2 tests, with 1 failure in 0.003 seconds"
 
 [[tests.xcodebuild]]
-name = "empty input passes through"
+name = "empty input returns on_empty message"
 input = ""
-expected = ""
+expected = "xcodebuild: ok"
