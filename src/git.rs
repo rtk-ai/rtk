@@ -1108,13 +1108,16 @@ fn filter_branch_output(output: &str) -> String {
 
         if let Some(branch) = line.strip_prefix("* ") {
             current = branch.to_string();
-        } else if line.starts_with("remotes/origin/") {
-            let branch = line.strip_prefix("remotes/origin/").unwrap_or(line);
-            // Skip HEAD pointer
-            if branch.starts_with("HEAD ") {
-                continue;
+        } else if let Some(rest) = line.strip_prefix("remotes/") {
+            // Match any remote: remotes/origin/*, remotes/upstream/*, etc.
+            if let Some(pos) = rest.find('/') {
+                let branch = &rest[pos + 1..];
+                // Skip HEAD pointers (e.g., "HEAD -> origin/main")
+                if branch.starts_with("HEAD ") {
+                    continue;
+                }
+                remote.push(branch.to_string());
             }
-            remote.push(branch.to_string());
         } else {
             local.push(line.to_string());
         }
@@ -1130,10 +1133,11 @@ fn filter_branch_output(output: &str) -> String {
     }
 
     if !remote.is_empty() {
-        // Filter out remotes that already exist locally
+        // Deduplicate remote branches and filter out ones that exist locally
+        let mut seen = std::collections::HashSet::new();
         let remote_only: Vec<&String> = remote
             .iter()
-            .filter(|r| *r != &current && !local.contains(r))
+            .filter(|r| *r != &current && !local.contains(r) && seen.insert(r.as_str().to_string()))
             .collect();
         if !remote_only.is_empty() {
             result.push(format!("  remote-only ({}):", remote_only.len()));
@@ -1586,6 +1590,95 @@ mod tests {
         // remote-only should show release/v2 but not main or feature/auth (already local)
         assert!(result.contains("remote-only"));
         assert!(result.contains("release/v2"));
+    }
+
+    #[test]
+    fn test_filter_branch_multi_remote() {
+        // Multi-remote repo: origin, upstream, fork — each with branches
+        let output = "* main\n  feature/auth\n  fix/bug-123\n  \
+            remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n  \
+            remotes/origin/feature/auth\n  remotes/origin/release/v2\n  \
+            remotes/upstream/main\n  remotes/upstream/develop\n  \
+            remotes/upstream/release/v1\n  remotes/upstream/release/v2\n  \
+            remotes/upstream/release/v3\n  \
+            remotes/fork/main\n  remotes/fork/feature/auth\n  \
+            remotes/fork/experiment/new-ui\n";
+        let result = filter_branch_output(output);
+        // Must recognize all remotes, not just origin
+        assert!(result.contains("* main"));
+        assert!(result.contains("feature/auth"));
+        // Remote-only branches should be grouped and deduped against local
+        assert!(
+            result.contains("remote-only"),
+            "must show remote-only section: {}",
+            result
+        );
+        // release/v2 is origin+upstream (both remote-only)
+        assert!(
+            result.contains("release/v2"),
+            "must show release/v2: {}",
+            result
+        );
+        // upstream-only branches like develop, release/v1, release/v3
+        assert!(
+            result.contains("develop"),
+            "must show upstream develop: {}",
+            result
+        );
+        // fork experiment is remote-only
+        assert!(
+            result.contains("experiment/new-ui"),
+            "must show fork experiment: {}",
+            result
+        );
+        // Branches that exist locally should NOT appear in remote-only
+        // (main is local+current, feature/auth is local)
+        let remote_section_start = result.find("remote-only").unwrap();
+        let remote_section = &result[remote_section_start..];
+        // main and feature/auth should not be in remote-only section
+        // (they may appear earlier as local branches)
+        assert!(
+            !remote_section.contains("\n    main\n"),
+            "main should not be in remote-only"
+        );
+    }
+
+    #[test]
+    fn test_filter_branch_multi_remote_savings() {
+        // Realistic multi-remote with many branches — must achieve meaningful savings
+        let mut lines = vec!["* main", "  develop", "  feature/auth"];
+        let mut remote_lines = Vec::new();
+        for remote in &["origin", "upstream", "fork"] {
+            for branch in &[
+                "main",
+                "develop",
+                "feature/auth",
+                "release/v1",
+                "release/v2",
+                "release/v3",
+                "hotfix/urgent",
+                "ci/pipeline",
+                "docs/update",
+            ] {
+                remote_lines.push(format!("  remotes/{}/{}", remote, branch));
+            }
+        }
+        let remote_strs: Vec<&str> = remote_lines.iter().map(|s| s.as_str()).collect();
+        lines.extend(remote_strs);
+        let output = lines.join("\n");
+        let result = filter_branch_output(&output);
+
+        fn count_tokens(s: &str) -> usize {
+            s.split_whitespace().count()
+        }
+        let input_tokens = count_tokens(&output);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 40.0,
+            "Multi-remote branch filter: expected ≥40% savings, got {:.1}% (in={}, out={})\nResult:\n{}",
+            savings, input_tokens, output_tokens, result
+        );
     }
 
     #[test]
