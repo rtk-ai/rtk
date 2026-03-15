@@ -36,7 +36,7 @@ Without `.claude/`, Claude Code operates with generic behavior: it reads files, 
 - Run diagnostic scripts via slash commands
 - Apply project-specific coding standards to every interaction
 
-**Key distinction from `CLAUDE.md`**: The `CLAUDE.md` file (at the repo root) provides textual instructions that Claude Code reads as context. The `.claude/` directory provides **executable configuration** — hooks that run code, agents that spawn processes, and commands that trigger workflows. `CLAUDE.md` tells Claude what to think; `.claude/` tells Claude what to do.
+**Key distinction from `CLAUDE.md`**: The `CLAUDE.md` file (at the repo root) provides textual instructions that Claude Code reads as context. The `.claude/` directory provides **executable configuration** — hooks that run code, agents that spawn processes, commands that trigger workflows, and skills that the LLM auto-activates based on context. `CLAUDE.md` tells Claude what to think; `.claude/` tells Claude what to do.
 
 ---
 
