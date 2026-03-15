@@ -186,7 +186,7 @@ impl TomlFilterRegistry {
 
     /// Load registry from disk + built-in. Emits warnings to stderr on parse
     /// errors but never panics — bad files are silently ignored.
-    pub fn load() -> Self {
+    fn load() -> Self {
         let mut filters = Vec::new();
 
         // Priority 1: project-local .rtk/filters.toml
@@ -219,7 +219,7 @@ impl TomlFilterRegistry {
     }
 
     /// Build a registry from TOML content without touching the filesystem.
-    pub fn from_toml_str(content: &str, source: &str) -> Result<Self, String> {
+    fn from_toml_str(content: &str, source: &str) -> Result<Self, String> {
         Ok(Self {
             filters: Self::parse_and_compile(content, source)?,
         })

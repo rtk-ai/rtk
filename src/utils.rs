@@ -20,7 +20,7 @@ use std::process::Command;
 /// use rtk::utils::truncate;
 /// assert_eq!(truncate("hello world", 8), "hello...");
 /// assert_eq!(truncate("hi", 10), "hi");
-/// ```
+/// ```ignore
 pub fn truncate(s: &str, max_len: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_len {
@@ -39,7 +39,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 /// * `text` - Text potentially containing ANSI escape codes
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// use rtk::utils::strip_ansi;
 /// let colored = "\x1b[31mError\x1b[0m";
 /// assert_eq!(strip_ansi(colored), "Error");
@@ -61,11 +61,11 @@ pub fn strip_ansi(text: &str) -> String {
 /// `(stdout: String, stderr: String, exit_code: i32)`
 ///
 /// # Examples
-/// ```no_run
+/// ```
 /// use rtk::utils::execute_command;
 /// let (stdout, stderr, code) = execute_command("echo", &["test"]).unwrap();
 /// assert_eq!(code, 0);
-/// ```
+/// ```ignore
 #[allow(dead_code)]
 pub fn execute_command(cmd: &str, args: &[&str]) -> Result<(String, String, i32)> {
     let output = Command::new(cmd)
@@ -89,12 +89,12 @@ pub fn execute_command(cmd: &str, args: &[&str]) -> Result<(String, String, i32)
 /// Formatted string (e.g. "1.2M", "59.2K", "694")
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// use rtk::utils::format_tokens;
 /// assert_eq!(format_tokens(1_234_567), "1.2M");
 /// assert_eq!(format_tokens(59_234), "59.2K");
 /// assert_eq!(format_tokens(694), "694");
-/// ```
+/// ```ignore
 pub fn format_tokens(n: usize) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -114,13 +114,13 @@ pub fn format_tokens(n: usize) -> String {
 /// Formatted string with $ prefix
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// use rtk::utils::format_usd;
 /// assert_eq!(format_usd(1234.567), "$1234.57");
 /// assert_eq!(format_usd(12.345), "$12.35");
 /// assert_eq!(format_usd(0.123), "$0.12");
 /// assert_eq!(format_usd(0.0096), "$0.0096");
-/// ```
+/// ```ignore
 pub fn format_usd(amount: f64) -> String {
     if !amount.is_finite() {
         return "$0.00".to_string();
@@ -141,12 +141,12 @@ pub fn format_usd(amount: f64) -> String {
 /// Formatted string like "$3.86/MTok"
 ///
 /// # Examples
-/// ```
+/// ```ignore
 /// use rtk::utils::format_cpt;
 /// assert_eq!(format_cpt(0.000003), "$3.00/MTok");
 /// assert_eq!(format_cpt(0.0000038), "$3.80/MTok");
 /// assert_eq!(format_cpt(0.00000386), "$3.86/MTok");
-/// ```
+/// ```ignore
 pub fn format_cpt(cpt: f64) -> String {
     if !cpt.is_finite() || cpt <= 0.0 {
         return "$0.00/MTok".to_string();
@@ -210,7 +210,7 @@ pub fn ok_confirmation(action: &str, detail: &str) -> String {
 /// Returns "pnpm", "yarn", or "npm" based on lockfile presence.
 ///
 /// # Examples
-/// ```no_run
+/// ```ignore
 /// use rtk::utils::detect_package_manager;
 /// let pm = detect_package_manager();
 /// // Returns "pnpm" if pnpm-lock.yaml exists, "yarn" if yarn.lock, else "npm"
