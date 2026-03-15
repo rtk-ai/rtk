@@ -478,31 +478,13 @@ LLM                          Claude Code                    Shell
 
 **Key insight: it is NOT an extra round-trip to the LLM.** The hook interception happens entirely inside Claude Code's tool execution pipeline, between the moment the LLM submits the tool call and the moment it receives the result. From the LLM's perspective, it sent one request and got one response — it never knows the command was rewritten.
 
-**What the hook does add:**
+**Tradeoff summary:**
 
-| Cost | Impact | Magnitude |
-|------|--------|-----------|
-| Hook process spawn | `rtk-rewrite.sh` is executed as a subprocess | ~2-5ms |
-| `rtk rewrite` subprocess | RTK binary called to compute the rewrite | ~3-5ms |
-| JSON parsing (jq) | Hook parses/builds JSON via `jq` | ~1-2ms |
-| **Total latency added** | Before the actual command runs | **~6-12ms** |
-
-**What the hook saves:**
-
-| Benefit | Impact | Magnitude |
-|---------|--------|-----------|
-| Token reduction | LLM processes fewer tokens in the result | 60-90% fewer |
-| Context window | Less context consumed per command | Extends conversation life |
-| API cost | Fewer tokens billed on input + output | Direct cost savings |
-| LLM reasoning | Smaller output = faster LLM processing | Reduced inference time |
-
-**The tradeoff is overwhelmingly positive:** ~10ms of local latency (imperceptible to the user) saves hundreds of tokens per command. Over a typical development session with dozens of shell commands, the cumulative savings in tokens, cost, and context window space far outweigh the milliseconds added by the hook.
-
-**When the tradeoff breaks down:**
-
-- If RTK's filter produces incorrect output (information loss), the LLM may make wrong decisions — correctness matters more than compression
-- If the hook subprocess hangs or crashes, it could delay command execution — mitigated by the silent-failure design (missing `rtk` or `jq` → exit 0, command runs unmodified)
-- Rapid-fire commands in tight loops (e.g., polling) pay the ~10ms tax repeatedly — but these are rare in LLM-driven workflows
+- **Latency cost:** ~6-12ms added per command (hook spawn + `rtk rewrite` subprocess + jq parsing) — imperceptible to users
+- **Token savings:** 60-90% fewer tokens per command, extending context window life and reducing API cost
+- **Net positive:** Over a session with dozens of commands, cumulative token savings far outweigh the milliseconds of local latency
+- **Silent degradation:** If `rtk` or `jq` is missing, the hook exits 0 — command runs unmodified, never blocks the user
+- **Correctness risk:** If a filter loses critical information, the LLM may make wrong decisions — correctness always trumps compression
 
 #### 3.4.2 `rtk-suggest.sh` — The Suggestion Hook
 
