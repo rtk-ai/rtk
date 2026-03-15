@@ -1470,12 +1470,13 @@ mod tests {
     fn test_git_cmd_no_global_args() {
         let cmd = git_cmd(&[]);
         let program = cmd.get_program().to_string_lossy().to_string();
-        // resolved_command may return absolute path (e.g. /usr/bin/git)
-        assert!(
-            program == "git" || program.ends_with("/git"),
-            "Expected program to be 'git', got '{}'",
-            program
-        );
+        // On Windows, resolved_command returns full path (e.g. "C:\Program Files\Git\bin\git.exe")
+        let basename = std::path::Path::new(&program)
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(basename, "git");
         let args: Vec<_> = cmd.get_args().collect();
         assert!(args.is_empty());
     }
