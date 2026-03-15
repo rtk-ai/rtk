@@ -268,6 +268,62 @@ User message → Claude decides to use Bash tool
               Tool executes (with possibly modified input)
 ```
 
+> **Important: Hook Registration**
+>
+> Hook scripts in `.claude/hooks/` are **not auto-discovered**. They must be explicitly registered in a settings file for Claude Code to execute them. There are two scopes:
+>
+> **Global** (`~/.claude/settings.json`) — applies to all projects:
+>
+> ```json
+> {
+>   "hooks": {
+>     "PreToolUse": [
+>       {
+>         "matcher": "Bash",
+>         "hooks": [
+>           {
+>             "type": "command",
+>             "command": "/absolute/path/to/.claude/hooks/rtk-rewrite.sh"
+>           }
+>         ]
+>       }
+>     ]
+>   }
+> }
+> ```
+>
+> **Project-level** (`.claude/settings.json` or `.claude/settings.local.json`) — applies only within this repository:
+>
+> ```json
+> {
+>   "permissions": {
+>     "allow": ["Read"]
+>   },
+>   "hooks": {
+>     "PreToolUse": [
+>       {
+>         "matcher": "Bash",
+>         "hooks": [
+>           {
+>             "type": "command",
+>             "command": "/absolute/path/to/project/.claude/hooks/rtk-rewrite.sh"
+>           }
+>         ]
+>       }
+>     ]
+>   }
+> }
+> ```
+>
+> **Key rules:**
+> - The `command` path **must be absolute** — no `~`, `./`, or relative paths
+> - `settings.json` (no `.local`) can be committed to the repo for team-wide hooks
+> - `settings.local.json` is gitignored and applies only to your machine
+> - Claude Code must be **restarted** after editing settings for hooks to take effect
+> - Multiple hooks can be registered on the same event — they execute in order
+>
+> **Automatic registration:** RTK provides `rtk init -g` which copies the hook script to `~/.claude/hooks/` and patches `~/.claude/settings.json` automatically (see `src/init.rs`). Use `rtk init --no-patch` to install the script without modifying settings.
+
 #### 3.4.1 `rtk-rewrite.sh` — The Auto-Rewriter
 
 **Event**: `PreToolUse:Bash`
