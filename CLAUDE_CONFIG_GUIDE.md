@@ -314,6 +314,140 @@ User message → Claude decides to use Bash tool
 - **Silent failure**: If `rtk` or `jq` is missing, the hook exits silently (exit 0). It never blocks the user's command.
 - **Idempotent**: If the command is already using RTK (`rtk git status`), the hook detects identical input/output and skips.
 
+#### Complete Flow: LLM calls `git status` → gets RTK-filtered result
+
+To understand the full lifecycle, trace a single command from the moment the LLM decides to run it to the moment it receives the result:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 1. LLM decides to run: git status                              │
+│    → Claude Code creates a Bash tool call:                      │
+│    { "tool": "Bash", "tool_input": { "command": "git status" } }│
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 2. Claude Code fires PreToolUse:Bash hook event                 │
+│    → Pipes JSON to rtk-rewrite.sh via stdin:                    │
+│    { "tool_input": { "command": "git status" }, ... }           │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 3. rtk-rewrite.sh executes                                      │
+│    → Reads JSON from stdin                                      │
+│    → Extracts command via jq: "git status"                      │
+│    → Skips heredocs, empty commands                              │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 4. Hook calls: rtk rewrite "git status" (subprocess)            │
+│    → RTK binary: src/rewrite_cmd.rs::run("git status")          │
+│      → Loads config for excluded commands                       │
+│      → Calls registry::rewrite_command("git status", &[])       │
+│        → Strips env prefixes (sudo, VAR=val)                    │
+│        → Matches against REGEX_SET (lazy_static compiled)       │
+│        → Finds git pattern → builds "rtk git status"            │
+│      → Prints "rtk git status" to stdout, exits 0               │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 5. Hook receives REWRITTEN="rtk git status"                     │
+│    → Confirms it differs from original ("git status")           │
+│    → Builds JSON response with updatedInput:                    │
+│    {                                                            │
+│      "hookSpecificOutput": {                                    │
+│        "permissionDecision": "allow",                           │
+│        "updatedInput": { "command": "rtk git status" }          │
+│      }                                                          │
+│    }                                                            │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 6. Claude Code receives hook response                           │
+│    → "permissionDecision": "allow" → auto-approves              │
+│    → "updatedInput" → REPLACES the original command             │
+│    → Executes: rtk git status (instead of git status)           │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 7. RTK binary runs: rtk git status                              │
+│    → main.rs parses CLI → routes to git.rs                      │
+│    → git.rs executes real `git status` under the hood           │
+│    → Filters output (compact format, token-optimized)           │
+│    → tracking.rs records savings to SQLite                      │
+│    → Returns filtered output (60-90% fewer tokens)              │
+└──────────────────────┬──────────────────────────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 8. Filtered output returned to LLM                              │
+│    → LLM sees compact git status (fewer tokens consumed)        │
+│    → LLM is unaware the rewrite happened                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Round-Trip Cost Analysis: Without Hook vs. With Hook
+
+A natural question is: does the hook add a round-trip between the LLM and Claude Code?
+
+**Without the hook (1 interaction, no savings):**
+
+```
+LLM                          Claude Code                    Shell
+ │                                │                           │
+ │── tool_call: "git status" ───→│                           │
+ │                                │── executes "git status" →│
+ │                                │←── raw output (500 tok) ──│
+ │←── tool_result (500 tok) ─────│                           │
+ │                                │                           │
+ Total: 1 LLM↔Claude Code exchange, 500 tokens consumed
+```
+
+**With the hook (still 1 interaction, but internal work added):**
+
+```
+LLM                          Claude Code                    Shell
+ │                                │                           │
+ │── tool_call: "git status" ───→│                           │
+ │                                │── hook stdin JSON ──→ rtk-rewrite.sh
+ │                                │                       │→ rtk rewrite "git status"
+ │                                │                       │← "rtk git status" (exit 0)
+ │                                │←── hook JSON response ──│
+ │                                │   (updatedInput: "rtk git status")
+ │                                │                           │
+ │                                │── executes "rtk git status" →│
+ │                                │←── filtered output (75 tok) ──│
+ │←── tool_result (75 tok) ──────│                           │
+ │                                │                           │
+ Total: 1 LLM↔Claude Code exchange, 75 tokens consumed
+```
+
+**Key insight: it is NOT an extra round-trip to the LLM.** The hook interception happens entirely inside Claude Code's tool execution pipeline, between the moment the LLM submits the tool call and the moment it receives the result. From the LLM's perspective, it sent one request and got one response — it never knows the command was rewritten.
+
+**What the hook does add:**
+
+| Cost | Impact | Magnitude |
+|------|--------|-----------|
+| Hook process spawn | `rtk-rewrite.sh` is executed as a subprocess | ~2-5ms |
+| `rtk rewrite` subprocess | RTK binary called to compute the rewrite | ~3-5ms |
+| JSON parsing (jq) | Hook parses/builds JSON via `jq` | ~1-2ms |
+| **Total latency added** | Before the actual command runs | **~6-12ms** |
+
+**What the hook saves:**
+
+| Benefit | Impact | Magnitude |
+|---------|--------|-----------|
+| Token reduction | LLM processes fewer tokens in the result | 60-90% fewer |
+| Context window | Less context consumed per command | Extends conversation life |
+| API cost | Fewer tokens billed on input + output | Direct cost savings |
+| LLM reasoning | Smaller output = faster LLM processing | Reduced inference time |
+
+**The tradeoff is overwhelmingly positive:** ~10ms of local latency (imperceptible to the user) saves hundreds of tokens per command. Over a typical development session with dozens of shell commands, the cumulative savings in tokens, cost, and context window space far outweigh the milliseconds added by the hook.
+
+**When the tradeoff breaks down:**
+
+- If RTK's filter produces incorrect output (information loss), the LLM may make wrong decisions — correctness matters more than compression
+- If the hook subprocess hangs or crashes, it could delay command execution — mitigated by the silent-failure design (missing `rtk` or `jq` → exit 0, command runs unmodified)
+- Rapid-fire commands in tight loops (e.g., polling) pay the ~10ms tax repeatedly — but these are rare in LLM-driven workflows
+
 #### 3.4.2 `rtk-suggest.sh` — The Suggestion Hook
 
 **Event**: `PreToolUse:Bash`
