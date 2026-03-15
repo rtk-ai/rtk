@@ -30,18 +30,59 @@ struct GolangciOutput {
     issues: Vec<Issue>,
 }
 
+/// Parse the major version number from `golangci-lint version` output text.
+/// Expected format: "golangci-lint has version 2.11.3 built with ..."
+/// or: "golangci-lint has version v1.64.8 built with ..."
+/// Returns 1 as fallback when parsing fails.
+fn parse_major_version(text: &str) -> u8 {
+    let words: Vec<&str> = text.split_whitespace().collect();
+
+    words
+        .windows(2)
+        .find(|pair| pair[0] == "version")
+        .and_then(|pair| pair[1].trim_start_matches('v').split('.').next())
+        .and_then(|major| major.parse::<u8>().ok())
+        .filter(|&v| v >= 1)
+        .unwrap_or(1)
+}
+
+/// Detect the installed golangci-lint major version by running `golangci-lint version`.
+/// Returns 2 for v2+, 1 for v1 or if detection fails.
+fn detect_major_version() -> u8 {
+    let output = resolved_command("golangci-lint").arg("version").output();
+
+    match output {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            parse_major_version(&text)
+        }
+        Err(_) => 1,
+    }
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = resolved_command("golangci-lint");
 
-    // Force JSON output
-    let has_format = args
-        .iter()
-        .any(|a| a == "--out-format" || a.starts_with("--out-format="));
+    let major = detect_major_version();
+
+    // Check if the user already supplied an output format flag
+    let has_format = args.iter().any(|a| {
+        a == "--out-format"
+            || a.starts_with("--out-format=")
+            || a.starts_with("--output.json.")
+            || a.starts_with("--output.text.")
+            || a.starts_with("--output.tab.")
+    });
 
     if !has_format {
-        cmd.arg("run").arg("--out-format=json");
+        cmd.arg("run");
+        if major >= 2 {
+            cmd.arg("--output.json.path=stdout");
+        } else {
+            cmd.arg("--out-format=json");
+        }
     } else {
         cmd.arg("run");
     }
@@ -51,7 +92,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: golangci-lint run --out-format=json");
+        let flag = if major >= 2 {
+            "--output.json.path=stdout"
+        } else {
+            "--out-format=json"
+        };
+        eprintln!("Running: golangci-lint run {}", flag);
     }
 
     let output = cmd.output().context(
@@ -249,5 +295,66 @@ mod tests {
             "internal/config/loader.go"
         );
         assert_eq!(compact_path("relative/file.go"), "file.go");
+    }
+
+    #[test]
+    fn test_parse_major_version_v2() {
+        let text = "golangci-lint has version 2.11.3 built with go1.26.1 from abc123 on 2026-03-10T10:25:44Z";
+        assert_eq!(parse_major_version(text), 2);
+    }
+
+    #[test]
+    fn test_parse_major_version_v1() {
+        let text = "golangci-lint has version v1.64.8 built with go1.23.0 from def456 on 2025-01-15T08:30:00Z";
+        assert_eq!(parse_major_version(text), 1);
+    }
+
+    #[test]
+    fn test_parse_major_version_empty() {
+        assert_eq!(parse_major_version(""), 1);
+    }
+
+    #[test]
+    fn test_parse_major_version_garbage() {
+        assert_eq!(parse_major_version("not a version string at all"), 1);
+    }
+
+    #[test]
+    fn test_has_format_detection_v1_flag() {
+        let args: Vec<String> = vec!["--out-format=json".into(), "./...".into()];
+        let has_format = args.iter().any(|a| {
+            a == "--out-format"
+                || a.starts_with("--out-format=")
+                || a.starts_with("--output.json.")
+                || a.starts_with("--output.text.")
+                || a.starts_with("--output.tab.")
+        });
+        assert!(has_format);
+    }
+
+    #[test]
+    fn test_has_format_detection_v2_flag() {
+        let args: Vec<String> = vec!["--output.json.path=stdout".into(), "./...".into()];
+        let has_format = args.iter().any(|a| {
+            a == "--out-format"
+                || a.starts_with("--out-format=")
+                || a.starts_with("--output.json.")
+                || a.starts_with("--output.text.")
+                || a.starts_with("--output.tab.")
+        });
+        assert!(has_format);
+    }
+
+    #[test]
+    fn test_has_format_detection_no_flag() {
+        let args: Vec<String> = vec!["./...".into()];
+        let has_format = args.iter().any(|a| {
+            a == "--out-format"
+                || a.starts_with("--out-format=")
+                || a.starts_with("--output.json.")
+                || a.starts_with("--output.text.")
+                || a.starts_with("--output.tab.")
+        });
+        assert!(!has_format);
     }
 }
