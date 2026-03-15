@@ -45,3 +45,4 @@ claudedocs
 
 # icm 
 .fastembed_cache/
+.claude/settings.local.json
