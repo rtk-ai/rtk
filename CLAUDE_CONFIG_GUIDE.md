@@ -569,13 +569,10 @@ description: RTK environment diagnostics - Checks installation, hooks, version, 
 |---------|-------|---------|
 | `/diagnose` | Haiku | Full environment health check — RTK installation, hook permissions, version compatibility, token analytics |
 | `/test-routing` | Haiku | Dry-run command routing — checks if a command has an RTK filter without executing anything |
-| `/rtk_repo_explainer` | (default) | Deep architecture walkthrough — 9-step codebase onboarding session |
 
 **Design insight — model selection for commands:**
 
 `/diagnose` and `/test-routing` use the `haiku` model — the fastest and cheapest Claude variant. This makes sense because these commands run scripted checks (bash commands, grep patterns) that don't require deep reasoning. The cost of using Opus or Sonnet for "check if a file exists and print a status" would be wasteful.
-
-In contrast, `/rtk_repo_explainer` uses the default model (typically the most capable one in the conversation) because it requires deep code analysis, architectural reasoning, and pedagogical explanation.
 
 **Design insight — the `/diagnose` command as self-healing:**
 
