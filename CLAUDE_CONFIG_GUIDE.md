@@ -594,7 +594,17 @@ This turns a diagnostic tool into a self-healing workflow. Claude Code can detec
 
 **Directory**: `.claude/skills/`
 
-Skills are prompt templates that can be invoked explicitly (via `/skill-name`) or auto-triggered when Claude Code detects a matching context. They are more structured than rules — a skill defines a complete workflow with steps, outputs, and triggers.
+Skills are prompt templates that can be invoked explicitly (via `/skill-name`) or activated automatically by the LLM model itself.
+
+**How skill activation works:**
+
+1. **At session start**, Claude Code loads only the `name` and `description` of each skill into the system message — not the full content. This keeps the context lightweight (typically 20-60 tokens per skill).
+2. **During the conversation**, the LLM reads these descriptions as part of its context and decides whether the current user request matches a skill's purpose.
+3. **When the LLM activates a skill**, Claude Code loads the full SKILL.md content and injects it into the conversation context. The model then follows the skill's complete workflow.
+
+This is fundamentally different from hooks: hooks are triggered mechanically by Claude Code on lifecycle events (PreToolUse, etc.), while skill activation is an **LLM-level decision** — the model itself chooses when a skill is relevant based on semantic understanding of the user's request.
+
+Skills are more structured than rules — a skill defines a complete workflow with steps, outputs, and triggers.
 
 **Anatomy of a skill:**
 
