@@ -3,6 +3,7 @@ mod binlog;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
+mod cdk_cmd;
 mod config;
 mod container;
 mod curl_cmd;
@@ -1906,6 +1907,9 @@ fn main() -> Result<()> {
                 }
                 "playwright" => {
                     playwright_cmd::run(&args[1..], cli.verbose)?;
+                }
+                "cdk" => {
+                    cdk_cmd::run(&args[1..], cli.verbose)?;
                 }
                 _ => {
                     // Generic passthrough with npm boilerplate filter

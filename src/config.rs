@@ -124,9 +124,7 @@ impl Default for LimitsConfig {
 
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
-    Config::load()
-        .map(|c| c.limits)
-        .unwrap_or_default()
+    Config::load().map(|c| c.limits).unwrap_or_default()
 }
 
 /// Check if telemetry is enabled in config. Returns None if config can't be loaded.
