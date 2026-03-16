@@ -1,5 +1,6 @@
 use crate::discover::registry;
 use crate::permissions::{check_command, PermissionVerdict};
+use std::io::Write;
 
 /// Run the `rtk rewrite` command.
 ///
@@ -17,25 +18,30 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
         .map(|c| c.hooks.exclude_commands)
         .unwrap_or_default();
 
+    // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
+    let verdict = check_command(cmd);
+
+    if verdict == PermissionVerdict::Deny {
+        std::process::exit(2);
+    }
+
     match registry::rewrite_command(cmd, &excluded) {
-        Some(rewritten) => {
-            // Check permissions on the ORIGINAL command so that deny/ask rules
-            // defined by the user are respected even after rewriting.
-            match check_command(cmd) {
-                PermissionVerdict::Allow => {
-                    print!("{}", rewritten);
-                    Ok(())
-                }
-                PermissionVerdict::Deny => {
-                    std::process::exit(2);
-                }
-                PermissionVerdict::Ask => {
-                    print!("{}", rewritten);
-                    std::process::exit(3);
-                }
+        Some(rewritten) => match verdict {
+            PermissionVerdict::Allow => {
+                print!("{}", rewritten);
+                let _ = std::io::stdout().flush();
+                Ok(())
             }
-        }
+            PermissionVerdict::Ask => {
+                print!("{}", rewritten);
+                let _ = std::io::stdout().flush();
+                std::process::exit(3);
+            }
+            PermissionVerdict::Deny => unreachable!(),
+        },
         None => {
+            // No RTK equivalent. Exit 1 = passthrough.
+            // Claude Code independently evaluates its own ask rules on the original cmd.
             std::process::exit(1);
         }
     }
