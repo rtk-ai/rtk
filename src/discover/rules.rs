@@ -81,6 +81,11 @@ pub const PATTERNS: &[&str] = &[
     r"^trunk\s+build",
     r"^uv\s+(sync|pip\s+install)\b",
     r"^yamllint\b",
+    // Ruby tooling
+    r"^bundle\s+(install|update)\b",
+    r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
+    r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
+    r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -602,6 +607,45 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         rtk_cmd: "rtk yamllint",
         rewrite_prefixes: &["yamllint"],
+        category: "Build",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Ruby tooling
+    RtkRule {
+        rtk_cmd: "rtk bundle",
+        rewrite_prefixes: &["bundle"],
+        category: "Ruby",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk rake",
+        rewrite_prefixes: &[
+            "bundle exec rails",
+            "bundle exec rake",
+            "bin/rails",
+            "rails",
+            "rake",
+        ],
+        category: "Ruby",
+        savings_pct: 85.0,
+        subcmd_savings: &[("test", 90.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk rspec",
+        rewrite_prefixes: &["bundle exec rspec", "bin/rspec", "rspec"],
+        category: "Tests",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk rubocop",
+        rewrite_prefixes: &["bundle exec rubocop", "rubocop"],
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[],
