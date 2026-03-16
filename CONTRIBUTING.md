@@ -33,9 +33,9 @@ Every branch **must** follow one of these prefixes to identify the level of chan
 
 | Prefix | Semver Impact | When to Use |
 |--------|---------------|-------------|
-| `fix(scope): ...` | Patch | Bug fixes, corrections, minor adjustments |
-| `feat(scope): ...` | Minor | New features, new filters, new command support |
-| `chore(scope): ...` | Major | Breaking changes, API changes, removed functionality |
+| `fix(scope)/...` | Patch | Bug fixes, corrections, minor adjustments |
+| `feat(scope)/...` | Minor | New features, new filters, new command support |
+| `chore(scope)/...` | Major | Breaking changes, API changes, removed functionality |
 
 The **scope** in parentheses indicates which part of the project is concerned (e.g. `git`, `kubectl`, `filter`, `tracking`, `config`).
 
@@ -43,9 +43,9 @@ The **scope** in parentheses indicates which part of the project is concerned (e
 
 Examples:
 ```
-fix(git): log-filter-drops-merge-commits
-feat(kubectl): add-pod-list-filter
-chore(proxy): remove-deprecated-flags
+fix(git)/log-filter-drops-merge-commits
+feat(kubectl)/add-pod-list-filter
+chore(proxy)/remove-deprecated-flags
 ```
 
 ---
@@ -55,9 +55,9 @@ chore(proxy): remove-deprecated-flags
 ### 1. Create Your Branch
 
 ```bash
-git checkout develop
-git pull origin develop
-git checkout -b "feat(scope): your-clear-description"
+git checkout master
+git pull origin master
+git checkout -b "feat(scope)/your-clear-description"
 ```
 
 ### 2. Make Your Changes
@@ -88,9 +88,9 @@ https://developercertificate.org/
 
 By signing off, you agree to the DCO.
 
-### 5. Merge into `develop`
+### 5. Merge into `master`
 
-Once your work is ready, open a Pull Request targeting the **`develop`** branch.
+Once your work is ready, open a Pull Request targeting the **`master`** branch.
 
 ### 6. Review Process
 
@@ -100,10 +100,10 @@ Once your work is ready, open a Pull Request targeting the **`develop`** branch.
 
 ### 7. Integration & Release
 
-Once merged, your changes are tested on the `develop` branch alongside other features. When the maintainer is satisfied with the state of `develop`, they release to `master` under a specific version.
+Once merged, your changes are tested on the `master` branch alongside other features. When the maintainer is satisfied with the state of `master`, they release to `master` under a specific version.
 
 ```
-your branch --> develop (review + CI + integration testing) --> version branch --> master (versioned release)
+your branch --> master (review + CI + integration testing) --> version branch --> master (versioned release)
 ```
 
 ---
