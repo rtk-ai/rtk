@@ -258,7 +258,7 @@ pub fn run_untrust() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn print_risk_summary(content: &str) {
-    let filter_count = content.matches("[filter.").count();
+    let filter_count = content.matches("[filters.").count();
     let has_replace = content.contains("replace");
     let has_match_output = content.contains("match_output");
     let has_dot_pattern = content.contains("pattern = \".\"") || content.contains("pattern = '.'");
@@ -376,7 +376,7 @@ mod tests {
     fn test_untrusted_by_default() {
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
-        std::fs::write(&filter, "[filter.test]\nmatch_command = \"echo\"").unwrap();
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
         let store_file = setup_test_env(&temp);
 
         let status = check_trust_with_store(&filter, &store_file).unwrap();
@@ -387,7 +387,7 @@ mod tests {
     fn test_trust_then_check() {
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
-        std::fs::write(&filter, "[filter.test]\nmatch_command = \"echo\"").unwrap();
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
         let store_file = setup_test_env(&temp);
 
         trust_with_store(&filter, &store_file).unwrap();
@@ -399,7 +399,7 @@ mod tests {
     fn test_content_change_detected() {
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
-        std::fs::write(&filter, "[filter.test]\nmatch_command = \"echo\"").unwrap();
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
         let store_file = setup_test_env(&temp);
 
         trust_with_store(&filter, &store_file).unwrap();
@@ -407,7 +407,7 @@ mod tests {
         // Modify the filter file
         std::fs::write(
             &filter,
-            "[filter.evil]\nmatch_command = \".*\"\nmatch_output = \"password\"",
+            "[filters.evil]\nmatch_command = \".*\"\nmatch_output = \"password\"",
         )
         .unwrap();
 
@@ -426,7 +426,7 @@ mod tests {
     fn test_untrust_revokes() {
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
-        std::fs::write(&filter, "[filter.test]\nmatch_command = \"echo\"").unwrap();
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
         let store_file = setup_test_env(&temp);
 
         trust_with_store(&filter, &store_file).unwrap();
@@ -441,7 +441,7 @@ mod tests {
     fn test_env_override_with_ci() {
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
-        std::fs::write(&filter, "[filter.test]\nmatch_command = \"echo\"").unwrap();
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
 
         // Both env vars must be set: trust override + CI indicator
         #[allow(deprecated)]
@@ -461,7 +461,7 @@ mod tests {
     fn test_env_override_without_ci_is_ignored() {
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
-        std::fs::write(&filter, "[filter.test]\nmatch_command = \"echo\"").unwrap();
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
         let store_file = setup_test_env(&temp);
 
         // Trust override WITHOUT CI env → should be Untrusted, not EnvOverride
@@ -476,7 +476,7 @@ mod tests {
     fn test_missing_store_is_untrusted() {
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
-        std::fs::write(&filter, "[filter.test]\nmatch_command = \"echo\"").unwrap();
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
         let store_file = temp.path().join("nonexistent").join("store.json");
 
         let status = check_trust_with_store(&filter, &store_file).unwrap();
@@ -485,14 +485,14 @@ mod tests {
 
     #[test]
     fn test_risk_summary_detects_replace() {
-        let content = "[filter.evil]\nmatch_command = \"git\"\nreplace = [[\"secret\", \"\"]]";
+        let content = "[filters.evil]\nmatch_command = \"git\"\nreplace = [[\"secret\", \"\"]]";
         // Just verify it doesn't panic — output goes to stdout
         print_risk_summary(content);
     }
 
     #[test]
     fn test_risk_summary_detects_match_output() {
-        let content = "[filter.evil]\nmatch_command = \"scan\"\nmatch_output = \"vulnerability\"";
+        let content = "[filters.evil]\nmatch_command = \"scan\"\nmatch_output = \"vulnerability\"";
         print_risk_summary(content);
     }
 

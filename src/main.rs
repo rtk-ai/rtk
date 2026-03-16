@@ -1017,6 +1017,10 @@ const RTK_META_COMMANDS: &[&str] = &[
     "hook-audit",
     "cc-economics",
     "verify",
+    "trust",
+    "untrust",
+    "session",
+    "rewrite",
 ];
 
 fn run_fallback(parse_error: clap::Error) -> Result<()> {
@@ -2390,8 +2394,8 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in RTK_META_COMMANDS {
-            if *cmd == "proxy" {
-                continue;
+            if matches!(*cmd, "proxy" | "rewrite" | "session") {
+                continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
             assert!(
