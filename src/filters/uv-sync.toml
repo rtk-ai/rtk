@@ -1,0 +1,37 @@
+[filters.uv-sync]
+description = "Compact uv sync/pip install output — strip downloads, short-circuit when up-to-date"
+match_command = "^uv\\s+(sync|pip\\s+install)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s+Downloading ",
+  "^\\s+Using cached ",
+  "^\\s+Preparing ",
+]
+match_output = [
+  { pattern = "Audited \\d+ package", message = "ok (up to date)" },
+]
+max_lines = 20
+
+[[tests.uv-sync]]
+name = "audited packages short-circuits to ok"
+input = """
+Resolved 42 packages in 123ms
+Audited 42 packages in 0.05ms
+"""
+expected = "ok (up to date)"
+
+[[tests.uv-sync]]
+name = "install strips download and cached lines"
+input = """
+  Downloading requests-2.31.0-py3-none-any.whl (62.6 kB)
+  Using cached certifi-2023.11.17-py3-none-any.whl (162 kB)
+  Preparing packages...
+Installed 5 packages in 23ms
+ + certifi==2023.11.17
+ + charset-normalizer==3.3.2
+ + idna==3.6
+ + requests==2.31.0
+ + urllib3==2.1.0
+"""
+expected = "Installed 5 packages in 23ms\n + certifi==2023.11.17\n + charset-normalizer==3.3.2\n + idna==3.6\n + requests==2.31.0\n + urllib3==2.1.0"

@@ -10,7 +10,7 @@
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://discord.gg/gFwRPEKq4p"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
+  <a href="https://discord.gg/pvHdzAec"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
 
@@ -19,7 +19,7 @@
   <a href="#installation">Install</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> &bull;
   <a href="ARCHITECTURE.md">Architecture</a> &bull;
-  <a href="https://discord.gg/gFwRPEKq4p">Discord</a>
+  <a href="https://discord.gg/pvHdzAec">Discord</a>
 </p>
 
 <p align="center">
@@ -90,7 +90,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.27.1"
+rtk --version   # Should show "rtk 0.28.0"
 rtk gain        # Should show token savings stats
 ```
 
@@ -102,6 +102,7 @@ rtk gain        # Should show token savings stats
 # 1. Install hook for Claude Code (recommended)
 rtk init --global
 # Follow instructions to register in ~/.claude/settings.json
+# Claude Code only by default (use --opencode for OpenCode)
 
 # 2. Restart Claude Code, then test
 git status  # Automatically rewritten to rtk git status
@@ -272,12 +273,35 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 ```bash
 rtk init -g                 # Install hook + RTK.md (recommended)
+rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
 ```
 
 After install, **restart Claude Code**.
+
+## OpenCode Plugin (Global)
+
+OpenCode supports plugins that can intercept tool execution. RTK provides a global plugin that mirrors the Claude auto-rewrite behavior by rewriting Bash tool commands to `rtk ...` before they execute. This plugin is **not** installed by default.
+
+> **Note**: This plugin uses OpenCode's `tool.execute.before` hook. Known limitation: plugin hooks do not intercept subagent tool calls ([upstream issue](https://github.com/sst/opencode/issues/5894)). See [OpenCode plugin docs](https://open-code.ai/en/docs/plugins) for API details.
+
+**Install OpenCode plugin:**
+```bash
+rtk init -g --opencode
+```
+
+**What it creates:**
+- `~/.config/opencode/plugins/rtk.ts`
+
+**Restart Required**: Restart OpenCode, then test with `git status` in a session.
+
+**Manual install (fallback):**
+```bash
+mkdir -p ~/.config/opencode/plugins
+cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
+```
 
 ### Commands Rewritten
 
@@ -351,19 +375,12 @@ brew uninstall rtk           # If installed via Homebrew
 - **[SECURITY.md](SECURITY.md)** - Security policy and PR review process
 - **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
 
-
 ## Contributing
 
-Contributions welcome! See the **[Contributing Guide](CONTRIBUTING.md)** for branch naming, PR process, testing requirements, and coding practices.
+Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/rtk-ai/rtk).
 
 Join the community on [Discord](https://discord.gg/pvHdzAec).
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-
-## Contact
-
-- Website: https://www.rtk-ai.app
-- Email: contact@rtk-ai.app
-- Issues: https://github.com/rtk-ai/rtk/issues
