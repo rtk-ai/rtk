@@ -167,6 +167,39 @@ Then add to `~/.claude/settings.json` (replace `~` with full path):
 
 ---
 
+## Problem: RTK not working in OpenCode
+
+### Symptom
+OpenCode runs commands without rtk, outputs are verbose.
+
+### Checklist
+
+**1. Verify rtk is installed and correct:**
+```bash
+rtk --version
+rtk gain  # Must show stats
+```
+
+**2. Install the OpenCode plugin (global only):**
+```bash
+rtk init -g --opencode
+```
+
+**3. Verify plugin file exists:**
+```bash
+ls -la ~/.config/opencode/plugins/rtk.ts
+```
+
+**4. Restart OpenCode**
+OpenCode must be restarted to load the plugin.
+
+**5. Verify status:**
+```bash
+rtk init --show  # Should show "OpenCode: plugin installed"
+```
+
+---
+
 ## Problem: "command not found: rtk" after installation
 
 ### Symptom
