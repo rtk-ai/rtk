@@ -227,6 +227,51 @@ pub fn detect_package_manager() -> &'static str {
     }
 }
 
+/// Extract exit code from a process output. Returns the actual exit code, or
+/// `128 + signal` per Unix convention when terminated by a signal (no exit code
+/// available). Falls back to 1 on non-Unix platforms.
+pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 {
+    match output.status.code() {
+        Some(code) => code,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = output.status.signal() {
+                    eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
+                    return 128 + sig;
+                }
+            }
+            eprintln!("[rtk] {}: process terminated by signal", label);
+            1
+        }
+    }
+}
+
+/// Return the last `n` lines of output with a label, for use as a fallback
+/// when filter parsing fails. Logs a diagnostic to stderr.
+pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
+    eprintln!(
+        "[rtk] {}: output format not recognized, showing last {} lines",
+        label, n
+    );
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// Build a Command for Ruby tools, auto-detecting bundle exec.
+/// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
+/// won't appear in the Gemfile but still need bundler for version isolation).
+pub fn ruby_exec(tool: &str) -> Command {
+    if std::path::Path::new("Gemfile").exists() {
+        let mut c = Command::new("bundle");
+        c.arg("exec").arg(tool);
+        return c;
+    }
+    Command::new(tool)
+}
+
 /// Build a Command using the detected package manager's exec mechanism.
 /// Returns a Command ready to have tool-specific args appended.
 pub fn package_manager_exec(tool: &str) -> Command {
@@ -314,6 +359,13 @@ pub fn resolved_command(name: &str) -> Command {
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
 pub fn tool_exists(name: &str) -> bool {
     which::which(name).is_ok()
+}
+
+/// Count whitespace-delimited tokens in text. Used by filter tests to verify
+/// token savings claims.
+#[cfg(test)]
+pub fn count_tokens(text: &str) -> usize {
+    text.split_whitespace().count()
 }
 
 #[cfg(test)]
@@ -491,7 +543,6 @@ mod tests {
 
     #[test]
     fn test_resolve_binary_finds_known_command() {
-        // "cargo" must be on PATH in any Rust dev environment
         let result = resolve_binary("cargo");
         assert!(
             result.is_ok(),
@@ -526,7 +577,6 @@ mod tests {
             .file_name()
             .expect("should have filename")
             .to_string_lossy();
-        // On Windows this could be "cargo.exe", on Unix just "cargo"
         assert!(
             filename.starts_with("cargo"),
             "resolved path filename should start with 'cargo', got: {}",
@@ -578,7 +628,6 @@ mod tests {
         use super::super::*;
         use std::fs;
 
-        /// Create a temporary .cmd wrapper to simulate Node.js tool installation
         fn create_temp_cmd_wrapper(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
             let cmd_path = dir.join(format!("{}.cmd", name));
             fs::write(&cmd_path, "@echo off\r\necho fake-tool-output\r\n")
@@ -586,7 +635,6 @@ mod tests {
             cmd_path
         }
 
-        /// Build a PATH string that includes the temp dir
         fn path_with_dir(dir: &std::path::Path) -> std::ffi::OsString {
             let original = std::env::var_os("PATH").unwrap_or_default();
             let mut new_path = std::ffi::OsString::from(dir.as_os_str());
@@ -600,7 +648,6 @@ mod tests {
             let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
             create_temp_cmd_wrapper(temp_dir.path(), "fake-tool-test");
 
-            // Use which::which_in to avoid mutating global PATH (thread-safe)
             let search_path = path_with_dir(temp_dir.path());
             let result = which::which_in(
                 "fake-tool-test",
@@ -653,7 +700,6 @@ mod tests {
             let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
             create_temp_cmd_wrapper(temp_dir.path(), "fake-exec-test");
 
-            // Resolve the full path, then execute it directly (no PATH mutation)
             let search_path = path_with_dir(temp_dir.path());
             let resolved = which::which_in(
                 "fake-exec-test",
@@ -679,13 +725,7 @@ mod tests {
 
         #[test]
         fn test_resolved_command_fallback_on_unknown_binary() {
-            // When resolve_binary fails, resolved_command should fall back to
-            // Command::new(name) instead of panicking.  On Windows this also
-            // prints a warning to stderr.
             let mut cmd = resolved_command("nonexistent_binary_xyz_99999");
-            // The Command should be created (not panic).  Attempting to run it
-            // will fail, but that's expected — we just verify the fallback path
-            // produces a usable Command.
             let result = cmd.output();
             assert!(
                 result.is_err() || !result.unwrap().status.success(),
@@ -710,5 +750,31 @@ mod tests {
                 "which_in should find .cmd wrapper on Windows"
             );
         }
+    }
+
+    // ===== Ruby utilities tests =====
+
+    #[test]
+    fn test_ruby_exec_without_gemfile() {
+        let cmd = ruby_exec("rspec");
+        assert_eq!(cmd.get_program(), "rspec");
+    }
+
+    #[test]
+    fn test_fallback_tail_returns_last_n_lines() {
+        let input = "line1\nline2\nline3\nline4\nline5\nline6\nline7";
+        let result = fallback_tail(input, "test", 3);
+        assert!(result.contains("line5"));
+        assert!(result.contains("line6"));
+        assert!(result.contains("line7"));
+        assert!(!result.contains("line4"));
+    }
+
+    #[test]
+    fn test_fallback_tail_short_input() {
+        let input = "only\ntwo";
+        let result = fallback_tail(input, "test", 5);
+        assert!(result.contains("only"));
+        assert!(result.contains("two"));
     }
 }
