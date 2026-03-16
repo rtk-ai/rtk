@@ -1,10 +1,9 @@
 use crate::tracking;
-use crate::utils::{ok_confirmation, strip_ansi, truncate};
+use crate::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::ffi::OsString;
-use std::process::Command;
 
 lazy_static! {
     static ref EMAIL_RE: Regex =
@@ -27,7 +26,7 @@ fn run_gt_filtered(
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gt");
+    let mut cmd = resolved_command("gt");
     for part in subcmd {
         cmd.arg(part);
     }
@@ -171,7 +170,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
 fn passthrough_gt(subcommand: &str, args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("gt");
+    let mut cmd = resolved_command("gt");
     cmd.arg(subcommand);
     for arg in args {
         cmd.arg(arg);

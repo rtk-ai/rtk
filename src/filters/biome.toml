@@ -40,6 +40,6 @@ Checked 42 files in 0.3s
 expected = "biome: ok"
 
 [[tests.biome]]
-name = "empty input passes through"
+name = "empty input returns on_empty message"
 input = ""
-expected = ""
+expected = "biome: ok"

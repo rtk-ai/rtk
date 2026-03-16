@@ -1,7 +1,7 @@
 use crate::tracking;
+use crate::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 struct Package {
@@ -15,7 +15,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Auto-detect uv vs pip
-    let use_uv = which_command("uv").is_some();
+    let use_uv = tool_exists("uv");
     let base_cmd = if use_uv { "uv" } else { "pip" };
 
     if verbose > 0 && use_uv {
@@ -51,7 +51,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 }
 
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
-    let mut cmd = Command::new(base_cmd);
+    let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -86,7 +86,7 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
 }
 
 fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
-    let mut cmd = Command::new(base_cmd);
+    let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -121,7 +121,7 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
 }
 
 fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
-    let mut cmd = Command::new(base_cmd);
+    let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -151,18 +151,6 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
     }
 
     Ok((raw.clone(), raw))
-}
-
-/// Check if a command exists in PATH
-fn which_command(cmd: &str) -> Option<String> {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 /// Filter pip list JSON output

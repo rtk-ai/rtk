@@ -2,11 +2,10 @@ use crate::binlog;
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
 use crate::tracking;
-use crate::utils::truncate;
+use crate::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,7 +28,7 @@ pub fn run_restore(args: &[String], verbose: u8) -> Result<()> {
 pub fn run_format(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
     let (report_path, cleanup_report_path) = resolve_format_report_path(args);
-    let mut cmd = Command::new("dotnet");
+    let mut cmd = resolved_command("dotnet");
     cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
     cmd.arg("format");
 
@@ -80,7 +79,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
     let subcommand = args[0].to_string_lossy().to_string();
 
-    let mut cmd = Command::new("dotnet");
+    let mut cmd = resolved_command("dotnet");
     cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
     cmd.arg(&subcommand);
     for arg in &args[1..] {
@@ -124,7 +123,7 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     // For test commands, prefer user-provided results directory; otherwise create isolated one.
     let (trx_results_dir, cleanup_trx_results_dir) = resolve_trx_results_dir(subcommand, args);
 
-    let mut cmd = Command::new("dotnet");
+    let mut cmd = resolved_command("dotnet");
     cmd.env(DOTNET_CLI_UI_LANGUAGE, DOTNET_CLI_UI_LANGUAGE_VALUE);
     cmd.arg(subcommand);
 

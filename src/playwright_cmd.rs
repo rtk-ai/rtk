@@ -1,5 +1,5 @@
 use crate::tracking;
-use crate::utils::{detect_package_manager, strip_ansi};
+use crate::utils::{detect_package_manager, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
@@ -246,17 +246,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let pm = detect_package_manager();
     let mut cmd = match pm {
         "pnpm" => {
-            let mut c = std::process::Command::new("pnpm");
+            let mut c = resolved_command("pnpm");
             c.arg("exec").arg("--").arg("playwright");
             c
         }
         "yarn" => {
-            let mut c = std::process::Command::new("yarn");
+            let mut c = resolved_command("yarn");
             c.arg("exec").arg("--").arg("playwright");
             c
         }
         _ => {
-            let mut c = std::process::Command::new("npx");
+            let mut c = resolved_command("npx");
             c.arg("--no-install").arg("--").arg("playwright");
             c
         }

@@ -1,4 +1,5 @@
 use crate::tracking;
+use crate::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use std::process::Command;
 
@@ -26,16 +27,10 @@ pub fn run(cmd: PrismaCommand, args: &[String], verbose: u8) -> Result<()> {
 
 /// Create a Command that will run prisma (tries global first, then npx)
 fn create_prisma_command() -> Command {
-    let prisma_exists = Command::new("which")
-        .arg("prisma")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if prisma_exists {
-        Command::new("prisma")
+    if tool_exists("prisma") {
+        resolved_command("prisma")
     } else {
-        let mut c = Command::new("npx");
+        let mut c = resolved_command("npx");
         c.arg("prisma");
         c
     }
@@ -59,18 +54,24 @@ fn run_generate(args: &[String], verbose: u8) -> Result<()> {
         .output()
         .context("Failed to run prisma generate (try: npm install -g prisma)")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("prisma generate failed: {}", stderr);
-    }
-
+    let exit_code = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
+
+    if !output.status.success() {
+        if !stdout.trim().is_empty() {
+            eprint!("{}", stdout);
+        }
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track("prisma generate", "rtk prisma generate", &raw, &raw);
+        std::process::exit(exit_code);
+    }
+
     let filtered = filter_prisma_generate(&raw);
-
     println!("{}", filtered);
-
     timer.track("prisma generate", "rtk prisma generate", &raw, &filtered);
 
     Ok(())
@@ -110,14 +111,21 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
 
     let output = cmd.output().context("Failed to run prisma migrate")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("prisma migrate failed: {}", stderr);
-    }
-
+    let exit_code = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
+
+    if !output.status.success() {
+        if !stdout.trim().is_empty() {
+            eprint!("{}", stdout);
+        }
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, &raw);
+        std::process::exit(exit_code);
+    }
 
     let filtered = match subcommand {
         MigrateSubcommand::Dev { .. } => filter_migrate_dev(&raw),
@@ -126,7 +134,6 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
     };
 
     println!("{}", filtered);
-
     timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, &filtered);
 
     Ok(())
@@ -148,18 +155,24 @@ fn run_db_push(args: &[String], verbose: u8) -> Result<()> {
 
     let output = cmd.output().context("Failed to run prisma db push")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("prisma db push failed: {}", stderr);
-    }
-
+    let exit_code = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
+
+    if !output.status.success() {
+        if !stdout.trim().is_empty() {
+            eprint!("{}", stdout);
+        }
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track("prisma db push", "rtk prisma db push", &raw, &raw);
+        std::process::exit(exit_code);
+    }
+
     let filtered = filter_db_push(&raw);
-
     println!("{}", filtered);
-
     timer.track("prisma db push", "rtk prisma db push", &raw, &filtered);
 
     Ok(())
