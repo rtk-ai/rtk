@@ -56,6 +56,7 @@ mod telemetry;
 mod toml_filter;
 mod tracking;
 mod tree;
+mod trust;
 mod tsc_cmd;
 mod utils;
 mod verify_cmd;
@@ -572,6 +573,16 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
+
+    /// Trust project-local TOML filters in current directory
+    Trust {
+        /// List all trusted projects
+        #[arg(long)]
+        list: bool,
+    },
+
+    /// Revoke trust for project-local TOML filters
+    Untrust,
 
     /// Verify hook integrity and run TOML filter inline tests
     Verify {
@@ -2086,6 +2097,14 @@ fn main() -> Result<()> {
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
+        }
+
+        Commands::Trust { list } => {
+            trust::run_trust(list)?;
+        }
+
+        Commands::Untrust => {
+            trust::run_untrust()?;
         }
 
         Commands::Verify {
