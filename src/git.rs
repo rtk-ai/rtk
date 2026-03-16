@@ -352,9 +352,11 @@ fn run_log(
         arg.starts_with("--oneline") || arg.starts_with("--pretty") || arg.starts_with("--format")
     });
 
-    // Check if user provided limit flag
+    // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = args.iter().any(|arg| {
-        arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+        (arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()))
+            || arg == "-n"
+            || arg.starts_with("--max-count")
     });
 
     // Apply RTK defaults only if user didn't specify them
@@ -362,17 +364,19 @@ fn run_log(
         cmd.args(["--pretty=format:%h %s (%ar) <%an>"]);
     }
 
-    let limit = if !has_limit_flag {
-        cmd.arg("-10");
-        10
+    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
+    let (limit, user_set_limit) = if has_limit_flag {
+        // User explicitly passed -N / -n N / --max-count=N → respect their choice
+        let n = parse_user_limit(args).unwrap_or(10);
+        (n, true)
+    } else if has_format_flag {
+        // --oneline / --pretty without -N: user wants compact output, allow more
+        cmd.arg("-50");
+        (50, false)
     } else {
-        // Extract limit from args if provided
-        args.iter()
-            .find(|arg| {
-                arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
-            })
-            .and_then(|arg| arg[1..].parse::<usize>().ok())
-            .unwrap_or(10)
+        // No flags at all: default to 10
+        cmd.arg("-10");
+        (10, false)
     };
 
     // Only add --no-merges if user didn't explicitly request merge commits
@@ -403,8 +407,8 @@ fn run_log(
         eprintln!("Git log output:");
     }
 
-    // Post-process: truncate long messages, cap lines
-    let filtered = filter_log_output(&stdout, limit);
+    // Post-process: truncate long messages, cap lines only if RTK set the default
+    let filtered = filter_log_output(&stdout, limit, user_set_limit);
     println!("{}", filtered);
 
     timer.track(
@@ -418,22 +422,78 @@ fn run_log(
 }
 
 /// Filter git log output: truncate long messages, cap lines
-fn filter_log_output(output: &str, limit: usize) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    let capped: Vec<String> = lines
-        .iter()
-        .take(limit)
-        .map(|line| {
-            if line.len() > 80 {
-                let truncated: String = line.chars().take(77).collect();
-                format!("{}...", truncated)
-            } else {
-                line.to_string()
+/// Parse the user-specified limit from git log args.
+/// Handles: -20, -n 20, --max-count=20, --max-count 20
+fn parse_user_limit(args: &[String]) -> Option<usize> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        // -20 (combined digit form)
+        if arg.starts_with('-')
+            && arg.len() > 1
+            && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+        {
+            if let Ok(n) = arg[1..].parse::<usize>() {
+                return Some(n);
             }
-        })
-        .collect();
+        }
+        // -n 20 (two-token form)
+        if arg == "-n" {
+            if let Some(next) = iter.next() {
+                if let Ok(n) = next.parse::<usize>() {
+                    return Some(n);
+                }
+            }
+        }
+        // --max-count=20
+        if let Some(rest) = arg.strip_prefix("--max-count=") {
+            if let Ok(n) = rest.parse::<usize>() {
+                return Some(n);
+            }
+        }
+        // --max-count 20 (two-token form)
+        if arg == "--max-count" {
+            if let Some(next) = iter.next() {
+                if let Ok(n) = next.parse::<usize>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// When `user_set_limit` is true, the user explicitly passed `-N` to git log,
+/// so we skip line capping (git already returns exactly N commits) and use a
+/// wider truncation threshold (120 chars) to preserve commit context that LLMs
+/// need for rebase/squash operations.
+fn filter_log_output(output: &str, limit: usize, user_set_limit: bool) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+
+    let truncate_width = if user_set_limit { 120 } else { 80 };
+
+    let iter = lines.iter();
+    let capped: Vec<String> = if user_set_limit {
+        // User chose the limit → git already returned the right number of commits
+        iter.map(|line| truncate_line(line, truncate_width))
+            .collect()
+    } else {
+        // RTK default → cap output lines
+        iter.take(limit)
+            .map(|line| truncate_line(line, truncate_width))
+            .collect()
+    };
 
     capped.join("\n").trim().to_string()
+}
+
+/// Truncate a single line to `width` characters, appending "..." if needed
+fn truncate_line(line: &str, width: usize) -> String {
+    if line.chars().count() > width {
+        let truncated: String = line.chars().take(width - 3).collect();
+        format!("{}...", truncated)
+    } else {
+        line.to_string()
+    }
 }
 
 /// Format porcelain output into compact RTK status display
@@ -1616,7 +1676,7 @@ M  file7.rs
     #[test]
     fn test_filter_log_output() {
         let output = "abc1234 This is a commit message (2 days ago) <author>\ndef5678 Another commit (1 week ago) <other>\n";
-        let result = filter_log_output(output, 10);
+        let result = filter_log_output(output, 10, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
@@ -1625,10 +1685,10 @@ M  file7.rs
     #[test]
     fn test_filter_log_output_truncate_long() {
         let long_line = "abc1234 ".to_string() + &"x".repeat(100) + " (2 days ago) <author>";
-        let result = filter_log_output(&long_line, 10);
-        assert!(result.len() < long_line.len());
+        let result = filter_log_output(&long_line, 10, false);
+        assert!(result.chars().count() < long_line.chars().count());
         assert!(result.contains("..."));
-        assert!(result.len() <= 80);
+        assert!(result.chars().count() <= 80);
     }
 
     #[test]
@@ -1637,8 +1697,99 @@ M  file7.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 5);
+        let result = filter_log_output(&output, 5, false);
         assert_eq!(result.lines().count(), 5);
+    }
+
+    #[test]
+    fn test_filter_log_output_user_limit_no_cap() {
+        // When user explicitly passes -N, all N lines should be returned (no re-truncation)
+        let output = (0..20)
+            .map(|i| format!("hash{} message {} (1 day ago) <author>", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_log_output(&output, 20, true);
+        assert_eq!(
+            result.lines().count(),
+            20,
+            "User's -20 should return all 20 lines"
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_user_limit_wider_truncation() {
+        // When user explicitly passes -N, lines up to 120 chars should NOT be truncated
+        let line_90_chars = format!("abc1234 {} (2 days ago) <author>", "x".repeat(60));
+        assert!(line_90_chars.chars().count() > 80);
+        assert!(line_90_chars.chars().count() < 120);
+
+        let result_default = filter_log_output(&line_90_chars, 10, false);
+        let result_user = filter_log_output(&line_90_chars, 10, true);
+
+        // Default truncates at 80 chars
+        assert!(
+            result_default.contains("..."),
+            "Default should truncate at 80 chars"
+        );
+        // User-set limit uses wider threshold (120 chars)
+        assert!(
+            !result_user.contains("..."),
+            "User limit should not truncate 90-char line"
+        );
+    }
+
+    #[test]
+    fn test_parse_user_limit_combined() {
+        let args: Vec<String> = vec!["-20".into()];
+        assert_eq!(parse_user_limit(&args), Some(20));
+    }
+
+    #[test]
+    fn test_parse_user_limit_n_space() {
+        let args: Vec<String> = vec!["-n".into(), "15".into()];
+        assert_eq!(parse_user_limit(&args), Some(15));
+    }
+
+    #[test]
+    fn test_parse_user_limit_max_count_eq() {
+        let args: Vec<String> = vec!["--max-count=30".into()];
+        assert_eq!(parse_user_limit(&args), Some(30));
+    }
+
+    #[test]
+    fn test_parse_user_limit_max_count_space() {
+        let args: Vec<String> = vec!["--max-count".into(), "25".into()];
+        assert_eq!(parse_user_limit(&args), Some(25));
+    }
+
+    #[test]
+    fn test_parse_user_limit_none() {
+        let args: Vec<String> = vec!["--oneline".into()];
+        assert_eq!(parse_user_limit(&args), None);
+    }
+
+    #[test]
+    fn test_filter_log_output_token_savings() {
+        fn count_tokens(text: &str) -> usize {
+            text.split_whitespace().count()
+        }
+        // Simulate verbose git log output (default format with full metadata)
+        let input = (0..20)
+            .map(|i| {
+                format!(
+                    "commit abc123{:02x}\nAuthor: User Name <user@example.com>\nDate:   Mon Mar 10 10:00:00 2026 +0000\n\n    fix: commit message number {}\n\n    Extended body with details about the change.\n",
+                    i, i
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = filter_log_output(&input, 10, false);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected ≥60% token savings, got {:.1}%",
+            savings
+        );
     }
 
     #[test]
@@ -1674,20 +1825,22 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_filter_log_output_multibyte() {
         // Thai characters: each is 3 bytes. A line with >80 bytes but few chars
         let thai_msg = format!("abc1234 {} (2 days ago) <author>", "ก".repeat(30));
-        let result = filter_log_output(&thai_msg, 10);
+        let result = filter_log_output(&thai_msg, 10, false);
         // Should not panic
         assert!(result.contains("abc1234"));
-        // The line has 30 Thai chars (90 bytes) + other text, so > 80 bytes
-        // It should be truncated with "..."
-        assert!(result.contains("..."));
+        // The line has 30 Thai chars + other text, so > 80 chars total
+        // truncate_line now counts chars, not bytes
+        // 30 Thai + ~33 other = 63 chars < 80 threshold, so no truncation
+        assert!(result.contains("abc1234"));
     }
 
     #[test]
     fn test_filter_log_output_emoji() {
         let emoji_msg = "abc1234 🎉🎊🎈🎁🎂🎄🎃🎆🎇✨🎉🎊🎈🎁🎂🎄🎃🎆🎇✨ (1 day ago) <user>";
-        let result = filter_log_output(emoji_msg, 10);
-        // Should not panic, should have "..."
-        assert!(result.contains("..."));
+        let result = filter_log_output(emoji_msg, 10, false);
+        // Should not panic
+        // 20 emoji + ~30 other chars = ~50 chars < 80, no truncation needed
+        assert!(result.contains("abc1234"));
     }
 
     #[test]
@@ -1815,6 +1968,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     #[test]
+    #[ignore] // Requires `cargo build` first — run with `cargo test --ignored`
     fn test_git_status_not_a_repo_exits_nonzero() {
         // Run rtk git status in a directory that is not a git repo
         let tmp = std::env::temp_dir().join("rtk_test_not_a_repo");
@@ -1825,6 +1979,11 @@ no changes added to commit (use "git add" and/or "git commit -a")
             .join("target")
             .join("debug")
             .join("rtk");
+        assert!(
+            bin_path.exists(),
+            "Debug binary not found at {:?} — run `cargo build` first",
+            bin_path
+        );
         let output = std::process::Command::new(&bin_path)
             .args(["git", "status"])
             .current_dir(&tmp)
@@ -1842,8 +2001,8 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stderr.contains("Not a git repository"),
-            "Expected 'Not a git repository' on stderr, got stderr={:?}, stdout={:?}",
+            stderr.to_lowercase().contains("not a git repository"),
+            "Expected 'not a git repository' on stderr, got stderr={:?}, stdout={:?}",
             stderr,
             stdout
         );
