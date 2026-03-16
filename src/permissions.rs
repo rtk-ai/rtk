@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 /// Verdict from checking a command against Claude Code's permission rules.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum PermissionVerdict {
     /// No deny/ask rules matched — safe to auto-allow.
     Allow,
@@ -168,23 +168,80 @@ pub(crate) fn extract_bash_pattern(rule: &str) -> &str {
 ///
 /// Pattern forms:
 /// - `*` → matches everything
-/// - `prefix:*` or `prefix *` (trailing `*`) → prefix match after stripping `:` and whitespace
+/// - `prefix:*` or `prefix *` (trailing `*`, no other wildcards) → prefix match with word boundary
+/// - `* suffix`, `pre * suf` → glob matching where `*` matches any sequence of characters
 /// - `pattern` → exact match or prefix match (cmd must equal pattern or start with `{pattern} `)
 pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
+    // 1. Global wildcard
     if pattern == "*" {
         return true;
     }
 
+    // 2. Trailing-only wildcard: fast path with word-boundary preservation
+    //    Handles: "git push*", "git push *", "sudo:*"
     if let Some(p) = pattern.strip_suffix('*') {
         let prefix = p.trim_end_matches(':').trim_end();
-        if prefix.is_empty() {
+        // Bug 2 fix: after stripping, if prefix is empty or just wildcards, match everything
+        if prefix.is_empty() || prefix == "*" {
             return true;
         }
-        return cmd == prefix || cmd.starts_with(&format!("{} ", prefix));
+        // No other wildcards in prefix -> use word-boundary fast path
+        if !prefix.contains('*') {
+            return cmd == prefix || cmd.starts_with(&format!("{} ", prefix));
+        }
+        // Prefix still contains '*' -> fall through to glob matching
     }
 
-    // Exact match or prefix with word boundary.
+    // 3. Complex wildcards (leading, middle, multiple): glob matching
+    if pattern.contains('*') {
+        return glob_matches(cmd, pattern);
+    }
+
+    // 4. No wildcard: exact match or prefix with word boundary
     cmd == pattern || cmd.starts_with(&format!("{} ", pattern))
+}
+
+/// Glob-style matching where `*` matches any character sequence (including empty).
+///
+/// Colon syntax normalized: `sudo:*` treated as `sudo *` for word separation.
+fn glob_matches(cmd: &str, pattern: &str) -> bool {
+    // Normalize colon-wildcard syntax: "sudo:*" -> "sudo *", "*:rm" -> "* rm"
+    let normalized = pattern.replace(":*", " *").replace("*:", "* ");
+    let parts: Vec<&str> = normalized.split('*').collect();
+
+    // All-stars pattern (e.g. "***") matches everything
+    if parts.iter().all(|p| p.is_empty()) {
+        return true;
+    }
+
+    let mut search_from = 0;
+
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+
+        if i == 0 {
+            // First segment: must be prefix (pattern doesn't start with *)
+            if !cmd.starts_with(part) {
+                return false;
+            }
+            search_from = part.len();
+        } else if i == parts.len() - 1 {
+            // Last segment: must be suffix (pattern doesn't end with *)
+            if !cmd[search_from..].ends_with(*part) {
+                return false;
+            }
+        } else {
+            // Middle segment: find next occurrence
+            match cmd[search_from..].find(*part) {
+                Some(pos) => search_from += pos + part.len(),
+                None => return false,
+            }
+        }
+    }
+
+    true
 }
 
 /// Split a compound shell command into individual segments.
@@ -328,5 +385,77 @@ mod tests {
     fn test_sudo_wildcard_no_false_positive() {
         // "sudoedit" must NOT match "sudo:*" (word boundary respected).
         assert!(!command_matches_pattern("sudoedit /etc/hosts", "sudo:*"));
+    }
+
+    // Bug 2: *:* catch-all must match everything
+    #[test]
+    fn test_star_colon_star_matches_everything() {
+        assert!(command_matches_pattern("rm -rf /", "*:*"));
+        assert!(command_matches_pattern("git push --force", "*:*"));
+        assert!(command_matches_pattern("anything", "*:*"));
+    }
+
+    // Bug 3: leading wildcard — positive
+    #[test]
+    fn test_leading_wildcard() {
+        assert!(command_matches_pattern("git push --force", "* --force"));
+        assert!(command_matches_pattern("npm run --force", "* --force"));
+    }
+
+    // Bug 3: leading wildcard — negative (suffix anchoring)
+    #[test]
+    fn test_leading_wildcard_no_partial() {
+        assert!(!command_matches_pattern("git push --forceful", "* --force"));
+        assert!(!command_matches_pattern("git push", "* --force"));
+    }
+
+    // Bug 3: middle wildcard — positive
+    #[test]
+    fn test_middle_wildcard() {
+        assert!(command_matches_pattern("git push main", "git * main"));
+        assert!(command_matches_pattern("git rebase main", "git * main"));
+    }
+
+    // Bug 3: middle wildcard — negative
+    #[test]
+    fn test_middle_wildcard_no_match() {
+        assert!(!command_matches_pattern("git push develop", "git * main"));
+    }
+
+    // Bug 3: multiple wildcards
+    #[test]
+    fn test_multiple_wildcards() {
+        assert!(command_matches_pattern(
+            "git push --force origin main",
+            "git * --force *"
+        ));
+        assert!(!command_matches_pattern(
+            "git pull origin main",
+            "git * --force *"
+        ));
+    }
+
+    // Integration: deny with leading wildcard
+    #[test]
+    fn test_deny_with_leading_wildcard() {
+        let deny = vec!["* --force".to_string()];
+        assert_eq!(
+            check_command_with_rules("git push --force", &deny, &[]),
+            PermissionVerdict::Deny
+        );
+        assert_eq!(
+            check_command_with_rules("git push", &deny, &[]),
+            PermissionVerdict::Allow
+        );
+    }
+
+    // Integration: deny *:* blocks everything
+    #[test]
+    fn test_deny_star_colon_star() {
+        let deny = vec!["*:*".to_string()];
+        assert_eq!(
+            check_command_with_rules("rm -rf /", &deny, &[]),
+            PermissionVerdict::Deny
+        );
     }
 }
