@@ -230,8 +230,11 @@ rtk gain --history | grep proxy
 | pip_cmd.rs | pip/uv package manager | JSON parsing, auto-detect uv (70-85% reduction) |
 | go_cmd.rs | Go commands | NDJSON for test, text for build/vet (80-90% reduction) |
 | golangci_cmd.rs | golangci-lint | JSON parsing, group by rule (85% reduction) |
+| rake_cmd.rs | Minitest via rake/rails test | Failures only, summary line (85-90% reduction) |
+| rspec_cmd.rs | RSpec test runner | JSON parsing, failures only (60%+ JSON, 30%+ text fallback) |
+| rubocop_cmd.rs | RuboCop linter | JSON parsing, group by cop name (60%+ reduction) |
 | tee.rs | Full output recovery | Save raw output to file on failure, print hint for LLM re-read |
-| utils.rs | Shared utilities | Package manager detection, common formatting |
+| utils.rs | Shared utilities | Package manager detection, ruby_exec, common formatting |
 | discover/ | Claude Code history analysis | Scan JSONL sessions, classify commands, report missed savings |
 
 ## Performance Constraints
@@ -391,6 +394,15 @@ pub fn execute_with_filter(cmd: &str, args: &[&str]) -> Result<()> {
   - `rtk golangci-lint`: JSON parsing grouped by rule (85% reduction)
 - **Architecture**: Standalone Python commands (mirror lint/prettier), Go sub-enum (mirror git/cargo)
 - **Patterns**: JSON for structured output (ruff check, golangci-lint, pip), NDJSON streaming (go test), text state machine (pytest), text filters (go build/vet, ruff format)
+
+### Ruby on Rails Support (2026-03-15)
+- **Ruby Commands**: 3 modules for Ruby/Rails development
+  - `rtk rake test`: Minitest filter via rake/rails test, state machine parser (85-90% reduction)
+  - `rtk rspec`: RSpec test runner with JSON parsing, text fallback (60%+ reduction)
+  - `rtk rubocop`: RuboCop linter with JSON parsing, group by cop/severity (60%+ reduction)
+- **TOML Filter**: `bundle-install.toml` for bundle install/update (strips Using lines, 70% reduction)
+- **Shared Infrastructure**: `ruby_exec()` in utils.rs auto-detects `bundle exec` when Gemfile exists
+- **Hook Integration**: Rewrites `rake test`, `rails test`, `bundle exec` variants, `bin/rails test`
 
 ## Testing Strategy
 

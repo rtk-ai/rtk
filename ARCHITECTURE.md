@@ -272,6 +272,10 @@ PYTHON            ruff_cmd.rs       ruff check/format      80%+       ✓
 GO                go_cmd.rs         go test/build/vet      75-90%     ✓
                   golangci_cmd.rs   golangci-lint          85%        ✓
 
+RUBY              rake_cmd.rs       rake/rails test        85-90%     ✓
+                  rspec_cmd.rs      rspec                  60%+       ✓
+                  rubocop_cmd.rs    rubocop                60%+       ✓
+
 NETWORK           wget_cmd.rs       wget                   85-95%     ✓
                   curl_cmd.rs       curl                   70%        ✓
 
@@ -303,6 +307,7 @@ SHARED            utils.rs          Helpers                N/A        ✓
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
 - **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
+- **Ruby Tooling**: 3 modules (rake/minitest, rspec, rubocop) + 1 TOML filter (bundle install)
 
 ---
 
@@ -604,6 +609,86 @@ pub fn run(command: &GoCommand, verbose: u8) -> Result<()> {
 - Third-party tool (not core Go toolchain)
 - Different output format (JSON API vs text)
 - Distinct use case (comprehensive linting vs single-tool diagnostics)
+
+### Ruby Module Architecture
+
+#### Design Rationale
+
+**Added**: 2026-03-15
+**Motivation**: Ruby on Rails development support (minitest, RSpec, RuboCop, Bundler)
+
+Ruby modules follow the standalone command pattern (like Python) with a shared `ruby_exec()` utility for auto-detecting `bundle exec`.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Ruby Commands (3 modules + 1 TOML)               │
+└────────────────────────────────────────────────────────────────────────┘
+
+Module            Strategy              Output Format      Savings
+─────────────────────────────────────────────────────────────────────────
+
+rake_cmd.rs       STATE MACHINE         Text parser       85-90%
+
+  Minitest output (rake test / rails test):
+    # Running:
+    ..F..E..
+    Finished in 0.123456s
+    1) Failure: TestSomething#test_that_fails [path:15]
+
+  → State machine: Header → Running → Failures → Summary
+  → All pass: "ok rake test: 8 runs, 0 failures"
+  → Failures: summary + numbered failure details
+  → Handles both standard Minitest and minitest-reporters formats
+
+rspec_cmd.rs      JSON/TEXT DUAL        • JSON → 60%+    60%+
+                                        • text fallback
+
+  rspec --format json: Structured test results
+  → Extract failures with file:line, assertion message
+  → Fallback to text parsing when JSON unavailable
+
+rubocop_cmd.rs    JSON PARSING          JSON API          60%+
+
+  rubocop --format json:
+    {"files": [{"path": "x.rb", "offenses": [...]}]}
+  → Group by cop name and severity
+  → Format: "Layout/LineLength: 12 offenses, Style/HashSyntax: 5"
+
+bundle-install.toml  TOML FILTER       Text rules        70%
+
+  bundle install/update:
+  → Strip "Using" lines (cached gems), metadata, blank lines
+  → Short-circuit: "ok bundle: complete" on success
+```
+
+#### Shared Infrastructure: `ruby_exec()`
+
+```rust
+// utils.rs — auto-detect bundle exec
+pub fn ruby_exec(tool: &str) -> Vec<String> {
+    if Path::new("Gemfile").exists() {
+        vec!["bundle".into(), "exec".into(), tool.into()]
+    } else {
+        vec![tool.into()]
+    }
+}
+```
+
+Used by: rake_cmd, rspec_cmd, rubocop_cmd. Ensures `bundle exec` is always used in Bundler-managed projects (handles transitive dependencies correctly).
+
+#### Discover/Rewrite Rules
+
+```
+rake test           → rtk rake test
+bundle exec rake    → rtk rake test
+rails test          → rtk rake test
+bin/rails test      → rtk rake test
+bundle exec rspec   → rtk rspec
+bundle exec rubocop → rtk rubocop
+bundle install      → rtk bundle install
+```
+
+ENV_PREFIX auto-strips `RAILS_ENV`, `WITH_COVERAGE`, `BUNDLE_GEMFILE` and re-prepends to the rewritten command.
 
 ### Format Strategy Decision Tree
 
