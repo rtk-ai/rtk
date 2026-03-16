@@ -948,6 +948,12 @@ enum CargoCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Lambda build/invoke with compact output
+    Lambda {
+        /// Additional cargo lambda arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported cargo subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1788,6 +1794,9 @@ fn main() -> Result<()> {
             }
             CargoCommands::Nextest { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Nextest, &args, cli.verbose)?;
+            }
+            CargoCommands::Lambda { args } => {
+                cargo_cmd::run(cargo_cmd::CargoCommand::Lambda, &args, cli.verbose)?;
             }
             CargoCommands::Other(args) => {
                 cargo_cmd::run_passthrough(&args, cli.verbose)?;
