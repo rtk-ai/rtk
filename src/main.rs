@@ -56,6 +56,7 @@ mod toml_filter;
 mod tracking;
 mod tree;
 mod tsc_cmd;
+mod update_cmd;
 mod utils;
 mod verify_cmd;
 mod vitest_cmd;
@@ -354,6 +355,9 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
     },
+
+    #[command(about = "Update RTK")]
+    Update,
 
     /// Download with compact output (strips progress bars)
     Wget {
@@ -997,6 +1001,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "discover",
     "learn",
     "init",
+    "update",
     "config",
     "proxy",
     "hook-audit",
@@ -1621,6 +1626,10 @@ fn main() -> Result<()> {
                     cli.verbose,
                 )?;
             }
+        }
+
+        Commands::Update => {
+            update_cmd::run(cli.verbose)?;
         }
 
         Commands::Wget { url, stdout, args } => {
@@ -2383,6 +2392,7 @@ mod tests {
             vec!["rtk", "discover"],
             vec!["rtk", "learn"],
             vec!["rtk", "init"],
+            vec!["rtk", "update"],
             vec!["rtk", "config"],
             vec!["rtk", "proxy", "echo", "hi"],
             vec!["rtk", "hook-audit"],

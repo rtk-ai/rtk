@@ -45,8 +45,12 @@ detect_arch() {
     esac
 }
 
-# Get latest release version
-get_latest_version() {
+get_version() {
+    if [ -n "$RTK_VERSION" ]; then
+        VERSION="$RTK_VERSION"
+        return
+    fi
+
     VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [ -z "$VERSION" ]; then
         error "Failed to get latest version"
@@ -113,7 +117,7 @@ main() {
     detect_os
     detect_arch
     get_target
-    get_latest_version
+    get_version
     install
     verify
 
