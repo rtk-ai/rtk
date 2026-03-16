@@ -13,6 +13,7 @@ pub enum CargoCommand {
     Check,
     Install,
     Nextest,
+    Lambda,
 }
 
 pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
@@ -23,6 +24,7 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
         CargoCommand::Check => run_check(args, verbose),
         CargoCommand::Install => run_install(args, verbose),
         CargoCommand::Nextest => run_nextest(args, verbose),
+        CargoCommand::Lambda => run_lambda(args, verbose),
     }
 }
 
@@ -981,6 +983,267 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// --- Cargo Lambda ---
+
+fn run_lambda(args: &[String], verbose: u8) -> Result<()> {
+    if args.is_empty() {
+        // No subcommand — passthrough
+        return run_lambda_passthrough(args, verbose);
+    }
+
+    match args[0].as_str() {
+        "build" => run_lambda_build(&args[1..], verbose),
+        "invoke" => run_lambda_invoke(&args[1..], verbose),
+        "watch" | "start" => run_lambda_passthrough(args, verbose),
+        _ => run_lambda_passthrough(args, verbose),
+    }
+}
+
+fn run_lambda_build(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = resolved_command("cargo");
+    cmd.args(["lambda", "build"]);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: cargo lambda build {}", args.join(" "));
+    }
+
+    let output = cmd.output().context("Failed to run cargo lambda build")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    let filtered = filter_lambda_build(&combined);
+
+    if !filtered.is_empty() {
+        println!("{}", filtered);
+    }
+
+    timer.track(
+        "cargo lambda build",
+        "rtk cargo lambda build",
+        &combined,
+        &filtered,
+    );
+
+    if !output.status.success() {
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+fn filter_lambda_build(output: &str) -> String {
+    let mut errors: Vec<String> = Vec::new();
+    let mut finished_line: Option<&str> = None;
+    let mut artifact_lines: Vec<&str> = Vec::new();
+    let mut in_error = false;
+    let mut current_error: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        // Skip compilation noise
+        if trimmed.starts_with("Compiling")
+            || trimmed.starts_with("Checking")
+            || trimmed.starts_with("Downloading")
+            || trimmed.starts_with("Downloaded")
+            || trimmed.starts_with("Blocking")
+            || trimmed.starts_with("Unpacking")
+        {
+            in_error = false;
+            if !current_error.is_empty() {
+                errors.push(current_error.join("\n"));
+                current_error.clear();
+            }
+            continue;
+        }
+
+        // Skip zig/musl cross-compilation noise
+        if trimmed.starts_with("zig")
+            || trimmed.contains("zig cc")
+            || trimmed.contains("musl")
+            || trimmed.contains("cross-compiling")
+            || trimmed.starts_with("info:")
+        {
+            continue;
+        }
+
+        if trimmed.starts_with("Finished") {
+            finished_line = Some(line);
+            in_error = false;
+            continue;
+        }
+
+        // Artifact paths
+        if trimmed.starts_with("Produced") || trimmed.contains("target/lambda/") {
+            artifact_lines.push(line);
+            continue;
+        }
+
+        // Error blocks
+        if trimmed.starts_with("error[") || trimmed.starts_with("error:") {
+            if trimmed.contains("aborting due to") || trimmed.contains("could not compile") {
+                continue;
+            }
+            if in_error && !current_error.is_empty() {
+                errors.push(current_error.join("\n"));
+                current_error.clear();
+            }
+            in_error = true;
+            current_error.push(line.to_string());
+        } else if in_error {
+            if trimmed.is_empty() {
+                errors.push(current_error.join("\n"));
+                current_error.clear();
+                in_error = false;
+            } else {
+                current_error.push(line.to_string());
+            }
+        }
+    }
+
+    if !current_error.is_empty() {
+        errors.push(current_error.join("\n"));
+    }
+
+    let mut result = Vec::new();
+    for err in &errors {
+        result.push(err.as_str());
+    }
+    if let Some(line) = finished_line {
+        result.push(line.trim());
+    }
+    for line in &artifact_lines {
+        result.push(line.trim());
+    }
+
+    if result.is_empty() {
+        "ok ✓".to_string()
+    } else {
+        result.join("\n")
+    }
+}
+
+fn run_lambda_invoke(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = resolved_command("cargo");
+    cmd.args(["lambda", "invoke"]);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: cargo lambda invoke {}", args.join(" "));
+    }
+
+    let output = cmd.output().context("Failed to run cargo lambda invoke")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    let filtered = filter_lambda_invoke(&combined);
+    println!("{}", filtered);
+
+    timer.track(
+        "cargo lambda invoke",
+        "rtk cargo lambda invoke",
+        &combined,
+        &filtered,
+    );
+
+    if !output.status.success() {
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+fn filter_lambda_invoke(output: &str) -> String {
+    // cargo lambda invoke outputs the response body to stdout
+    // and execution metadata to stderr (RequestId, Duration, etc.)
+    let mut body_lines: Vec<&str> = Vec::new();
+    let mut error_msg: Option<&str> = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Skip Lambda execution metadata
+        if trimmed.starts_with("START RequestId:")
+            || trimmed.starts_with("END RequestId:")
+            || trimmed.starts_with("REPORT RequestId:")
+            || trimmed.starts_with("RequestId:")
+            || trimmed.starts_with("Duration:")
+            || trimmed.starts_with("Billed Duration:")
+            || trimmed.starts_with("Init Duration:")
+            || trimmed.contains("Memory Size:")
+            || trimmed.contains("Max Memory Used:")
+        {
+            continue;
+        }
+
+        // Detect errors
+        if trimmed.contains("\"errorMessage\"") || trimmed.contains("\"errorType\"") {
+            error_msg = Some(trimmed);
+        }
+
+        body_lines.push(trimmed);
+    }
+
+    if body_lines.is_empty() {
+        return "ok ✓".to_string();
+    }
+
+    let body = body_lines.join("\n");
+
+    // Try to compact JSON response body
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+        let compact = serde_json::to_string(&v).unwrap_or(body);
+        if let Some(err) = error_msg {
+            return format!("ERROR: {}\n{}", err, compact);
+        }
+        return compact;
+    }
+
+    if let Some(err) = error_msg {
+        return format!("ERROR: {}\n{}", err, body);
+    }
+
+    body
+}
+
+fn run_lambda_passthrough(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = resolved_command("cargo");
+    cmd.arg("lambda");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: cargo lambda {}", args.join(" "));
+    }
+
+    let status = cmd.status().context("Failed to run cargo lambda")?;
+    let args_str = args.join(" ");
+    timer.track_passthrough(
+        &format!("cargo lambda {}", args_str),
+        &format!("rtk cargo lambda {} (passthrough)", args_str),
+    );
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1721,6 +1984,96 @@ error: test run failed
             result.contains("Summary MALFORMED"),
             "should fall back to raw summary: {}",
             result
+        );
+    }
+
+    // --- Cargo Lambda tests ---
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_filter_lambda_build() {
+        let output = r#"  Compiling serde v1.0.197
+  Compiling lambda_runtime v0.11.0
+  Compiling my-lambda v0.1.0
+  Downloading aws-sdk-dynamodb v1.3.0
+  Downloaded aws-sdk-dynamodb v1.3.0
+info: using zig for cross-compilation
+zig cc -target x86_64-linux-musl
+  Finished release [optimized] target(s) in 45.23s
+Produced target/lambda/my-lambda/bootstrap
+"#;
+        let result = filter_lambda_build(output);
+        assert!(result.contains("Finished"));
+        assert!(result.contains("target/lambda/"));
+        assert!(!result.contains("Compiling"));
+        assert!(!result.contains("Downloading"));
+        assert!(!result.contains("zig"));
+    }
+
+    #[test]
+    fn test_filter_lambda_build_errors() {
+        let output = r#"  Compiling my-lambda v0.1.0
+error[E0308]: mismatched types
+ --> src/main.rs:10:5
+  |
+  = note: expected type `i32`
+error: aborting due to previous error
+error: could not compile `my-lambda`
+"#;
+        let result = filter_lambda_build(output);
+        assert!(result.contains("error[E0308]"));
+        assert!(!result.contains("Compiling"));
+        assert!(!result.contains("aborting due to"));
+    }
+
+    #[test]
+    fn test_filter_lambda_invoke_success() {
+        let output = r#"{"statusCode":200,"body":"Hello, World!"}
+START RequestId: abc-123-def Version: $LATEST
+END RequestId: abc-123-def
+REPORT RequestId: abc-123-def Duration: 15.50 ms Billed Duration: 16 ms Memory Size: 128 MB Max Memory Used: 32 MB Init Duration: 120.00 ms
+"#;
+        let result = filter_lambda_invoke(output);
+        assert!(result.contains("statusCode"));
+        assert!(result.contains("Hello, World!"));
+        assert!(!result.contains("RequestId"));
+        assert!(!result.contains("REPORT"));
+        assert!(!result.contains("Duration"));
+    }
+
+    #[test]
+    fn test_filter_lambda_invoke_error() {
+        let output = r#"{"errorMessage":"Task timed out after 3.00 seconds","errorType":"Runtime.DeadlineExceeded"}
+START RequestId: abc-123-def Version: $LATEST
+END RequestId: abc-123-def
+REPORT RequestId: abc-123-def Duration: 3000.00 ms Billed Duration: 3000 ms Memory Size: 128 MB Max Memory Used: 64 MB
+"#;
+        let result = filter_lambda_invoke(output);
+        assert!(result.contains("errorMessage"));
+        assert!(result.contains("timed out"));
+        assert!(!result.contains("REPORT"));
+    }
+
+    #[test]
+    fn test_lambda_build_token_savings() {
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..30 {
+            lines.push(format!("  Compiling dep-{} v1.0.{}", i, i));
+        }
+        lines.push("  Finished release [optimized] target(s) in 45.23s".to_string());
+        lines.push("Produced target/lambda/my-func/bootstrap".to_string());
+        let output = lines.join("\n");
+        let result = filter_lambda_build(&output);
+        let input_tokens = count_tokens(&output);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Cargo lambda build filter: expected >=60% savings, got {:.1}%",
+            savings
         );
     }
 }
