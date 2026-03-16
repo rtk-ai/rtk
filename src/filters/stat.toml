@@ -1,0 +1,34 @@
+[filters.stat]
+description = "Compact stat output — strip blank lines"
+match_command = "^stat\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 30
+
+[[tests.stat]]
+name = "macOS stat output kept"
+input = """
+16777234 8690244974 -rw-r--r-- 1 patrick staff 0 12345 "Mar 10 12:00:00 2026" "Mar 10 11:00:00 2026" "Mar 10 11:00:00 2026" "Mar  9 10:00:00 2026" 4096 24 0 file.txt
+"""
+expected = "16777234 8690244974 -rw-r--r-- 1 patrick staff 0 12345 \"Mar 10 12:00:00 2026\" \"Mar 10 11:00:00 2026\" \"Mar 10 11:00:00 2026\" \"Mar  9 10:00:00 2026\" 4096 24 0 file.txt"
+
+[[tests.stat]]
+name = "linux stat output kept"
+input = """
+  File: main.rs
+  Size: 12345           Blocks: 24         IO Block: 4096   regular file
+Device: 801h/2049d      Inode: 1234567     Links: 1
+Access: (0644/-rw-r--r--)  Uid: ( 1000/ patrick)   Gid: ( 1000/ patrick)
+Access: 2026-03-10 12:00:00.000000000 +0100
+Modify: 2026-03-10 11:00:00.000000000 +0100
+Change: 2026-03-10 11:00:00.000000000 +0100
+ Birth: 2026-03-09 10:00:00.000000000 +0100
+"""
+expected = "  File: main.rs\n  Size: 12345           Blocks: 24         IO Block: 4096   regular file\nDevice: 801h/2049d      Inode: 1234567     Links: 1\nAccess: (0644/-rw-r--r--)  Uid: ( 1000/ patrick)   Gid: ( 1000/ patrick)\nAccess: 2026-03-10 12:00:00.000000000 +0100\nModify: 2026-03-10 11:00:00.000000000 +0100\nChange: 2026-03-10 11:00:00.000000000 +0100\n Birth: 2026-03-09 10:00:00.000000000 +0100"
+
+[[tests.stat]]
+name = "empty input passes through"
+input = ""
+expected = ""
