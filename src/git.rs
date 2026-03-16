@@ -411,7 +411,7 @@ fn run_log(
     }
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
-    let filtered = filter_log_output(&stdout, limit, user_set_limit);
+    let filtered = filter_log_output(&stdout, limit, user_set_limit, has_format_flag);
     println!("{}", filtered);
 
     timer.track(
@@ -469,10 +469,28 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
 /// need for rebase/squash operations.
-fn filter_log_output(output: &str, limit: usize, user_set_limit: bool) -> String {
+fn filter_log_output(
+    output: &str,
+    limit: usize,
+    user_set_limit: bool,
+    user_format: bool,
+) -> String {
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
-    // Split output into commit blocks separated by ---END---
+    // When user specified their own format (--oneline, --pretty, --format),
+    // RTK did not inject ---END--- markers. Use simple line-based truncation.
+    if user_format {
+        let lines: Vec<&str> = output.lines().collect();
+        let max_lines = if user_set_limit { lines.len() } else { limit };
+        return lines
+            .iter()
+            .take(max_lines)
+            .map(|l| truncate_line(l, truncate_width))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    // RTK injected format: split output into commit blocks separated by ---END---
     let commits: Vec<&str> = output.split("---END---").collect();
     let max_commits = if user_set_limit { commits.len() } else { limit };
 
@@ -1701,7 +1719,7 @@ M  file7.rs
     #[test]
     fn test_filter_log_output() {
         let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false);
+        let result = filter_log_output(output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
@@ -1711,7 +1729,7 @@ M  file7.rs
     fn test_filter_log_output_with_body() {
         // Commit with body: first non-trailer body line should appear indented
         let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---END---\ndef5678 fix: typo (1 day ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false);
+        let result = filter_log_output(output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("BREAKING CHANGE: removed old API"));
         assert!(!result.contains("Signed-off-by:"));
@@ -1725,7 +1743,7 @@ M  file7.rs
     fn test_filter_log_output_skips_trailers() {
         // Body with only trailers should not produce a body line
         let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---END---\n";
-        let result = filter_log_output(output, 10, false);
+        let result = filter_log_output(output, 10, false, false);
         assert!(result.contains("abc1234"));
         assert!(!result.contains("Signed-off-by:"));
         assert!(!result.contains("Co-authored-by:"));
@@ -1735,7 +1753,7 @@ M  file7.rs
     #[test]
     fn test_filter_log_output_truncate_long() {
         let long_line = "abc1234 ".to_string() + &"x".repeat(100) + " (2 days ago) <author>";
-        let result = filter_log_output(&long_line, 10, false);
+        let result = filter_log_output(&long_line, 10, false, false);
         assert!(result.chars().count() < long_line.chars().count());
         assert!(result.contains("..."));
         assert!(result.chars().count() <= 80);
@@ -1747,7 +1765,7 @@ M  file7.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 5, false);
+        let result = filter_log_output(&output, 5, false, false);
         assert_eq!(result.lines().count(), 5);
     }
 
@@ -1758,7 +1776,7 @@ M  file7.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 20, true);
+        let result = filter_log_output(&output, 20, true, false);
         assert_eq!(
             result.lines().count(),
             20,
@@ -1773,8 +1791,8 @@ M  file7.rs
         assert!(line_90_chars.chars().count() > 80);
         assert!(line_90_chars.chars().count() < 120);
 
-        let result_default = filter_log_output(&line_90_chars, 10, false);
-        let result_user = filter_log_output(&line_90_chars, 10, true);
+        let result_default = filter_log_output(&line_90_chars, 10, false, false);
+        let result_user = filter_log_output(&line_90_chars, 10, true, false);
 
         // Default truncates at 80 chars
         assert!(
@@ -1833,7 +1851,7 @@ M  file7.rs
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let output = filter_log_output(&input, 10, false);
+        let output = filter_log_output(&input, 10, false, false);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
             savings >= 60.0,
@@ -1875,7 +1893,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_filter_log_output_multibyte() {
         // Thai characters: each is 3 bytes. A line with >80 bytes but few chars
         let thai_msg = format!("abc1234 {} (2 days ago) <author>", "ก".repeat(30));
-        let result = filter_log_output(&thai_msg, 10, false);
+        let result = filter_log_output(&thai_msg, 10, false, false);
         // Should not panic
         assert!(result.contains("abc1234"));
         // The line has 30 Thai chars + other text, so > 80 chars total
@@ -1887,7 +1905,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_filter_log_output_emoji() {
         let emoji_msg = "abc1234 🎉🎊🎈🎁🎂🎄🎃🎆🎇✨🎉🎊🎈🎁🎂🎄🎃🎆🎇✨ (1 day ago) <user>";
-        let result = filter_log_output(emoji_msg, 10, false);
+        let result = filter_log_output(emoji_msg, 10, false, false);
         // Should not panic
         // 20 emoji + ~30 other chars = ~50 chars < 80, no truncation needed
         assert!(result.contains("abc1234"));
@@ -1908,6 +1926,41 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let porcelain = "## main\nA  🎉-party.txt\n M 日本語ファイル.rs\n";
         let result = format_status_output(porcelain);
         assert!(result.contains("📌 main"));
+    }
+
+    /// Regression test: --oneline and other user format flags must preserve all commits.
+    /// Before fix, filter_log_output split on ---END--- which doesn't exist when
+    /// the user specifies their own format, resulting in only 2 commits surviving.
+    #[test]
+    fn test_filter_log_output_user_format_oneline() {
+        let oneline_output = "abc1234 feat: add feature\n\
+                              def5678 fix: typo\n\
+                              ghi9012 chore: bump deps\n\
+                              jkl3456 docs: update readme\n\
+                              mno7890 test: add tests\n";
+
+        let result = filter_log_output(oneline_output, 10, false, true);
+        // All 5 lines must survive — no ---END--- splitting
+        assert_eq!(result.lines().count(), 5);
+        assert!(result.contains("abc1234"));
+        assert!(result.contains("mno7890"));
+    }
+
+    #[test]
+    fn test_filter_log_output_user_format_with_limit() {
+        let oneline_output = "abc1234 feat: add feature\n\
+                              def5678 fix: typo\n\
+                              ghi9012 chore: bump deps\n\
+                              jkl3456 docs: update readme\n\
+                              mno7890 test: add tests\n";
+
+        // user_set_limit=true means respect all lines (no cap)
+        let result = filter_log_output(oneline_output, 3, true, true);
+        assert_eq!(result.lines().count(), 5);
+
+        // user_set_limit=false means cap at limit
+        let result = filter_log_output(oneline_output, 3, false, true);
+        assert_eq!(result.lines().count(), 3);
     }
 
     /// Regression test: `git branch <name>` must create, not list.
