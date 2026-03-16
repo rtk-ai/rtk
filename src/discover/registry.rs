@@ -353,15 +353,12 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
                     }
                     seg_start = i;
                 } else {
-                    // `|` pipe — rewrite first segment only, pass through the rest unchanged
+                    // `|` pipe — do NOT rewrite the segment before the pipe.
+                    // RTK filters change output format, which breaks downstream
+                    // programs that expect the original format (e.g., `aws ... | python -c 'json.load()'`).
                     let seg = cmd[seg_start..i].trim();
-                    let rewritten =
-                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
-                    if rewritten != seg {
-                        any_changed = true;
-                    }
-                    result.push_str(&rewritten);
-                    // Preserve the space before the pipe that was lost by trim()
+                    result.push_str(seg);
+                    // Preserve the rest of the pipeline unchanged
                     result.push(' ');
                     result.push_str(cmd[i..].trim_start());
                     return if any_changed { Some(result) } else { None };
@@ -1105,12 +1102,9 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_pipe_first_only() {
-        // After a pipe, the filter command stays raw
-        assert_eq!(
-            rewrite_command("git log -10 | grep feat", &[]),
-            Some("rtk git log -10 | grep feat".into())
-        );
+    fn test_rewrite_pipe_skips_rewrite() {
+        // Piped commands should NOT be rewritten — downstream programs expect original format
+        assert_eq!(rewrite_command("git log -10 | grep feat", &[]), None);
     }
 
     #[test]
@@ -1168,10 +1162,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_redirect_2_gt_amp_1_with_pipe() {
-        assert_eq!(
-            rewrite_command("cargo test 2>&1 | head", &[]),
-            Some("rtk cargo test 2>&1 | head".into())
-        );
+        // Piped commands not rewritten — downstream expects original format
+        assert_eq!(rewrite_command("cargo test 2>&1 | head", &[]), None);
     }
 
     #[test]
@@ -1841,19 +1833,36 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_compound_pipe_raw_filter() {
-        // Pipe: rewrite first segment only, pass through rest unchanged
+    fn test_rewrite_compound_pipe_no_rewrite() {
+        // Piped commands not rewritten — downstream expects original format
+        assert_eq!(rewrite_command("cargo test | grep FAILED", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_compound_pipe_git_grep_no_rewrite() {
+        // Piped commands not rewritten
+        assert_eq!(rewrite_command("git log -10 | grep feat", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_pipe_aws_to_python() {
+        // Regression test: aws piped to python must NOT be rewritten
+        // RTK's compressed JSON would break json.load()
         assert_eq!(
-            rewrite_command("cargo test | grep FAILED", &[]),
-            Some("rtk cargo test | grep FAILED".into())
+            rewrite_command(
+                "aws dynamodb scan --table-name foo | python -c 'import json; json.load(sys.stdin)'",
+                &[]
+            ),
+            None
         );
     }
 
     #[test]
-    fn test_rewrite_compound_pipe_git_grep() {
+    fn test_rewrite_compound_and_then_pipe_rewrites_non_piped() {
+        // `&&` segments before a pipe should still be rewritten
         assert_eq!(
-            rewrite_command("git log -10 | grep feat", &[]),
-            Some("rtk git log -10 | grep feat".into())
+            rewrite_command("git status && aws s3 ls | python parse.py", &[]),
+            Some("rtk git status && aws s3 ls | python parse.py".into())
         );
     }
 
