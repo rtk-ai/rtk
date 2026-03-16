@@ -7,7 +7,14 @@ use crate::json_cmd;
 use crate::tracking;
 use crate::utils::{join_with_overflow, resolved_command, truncate_iso_date};
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde_json::Value;
+
+lazy_static! {
+    static ref TIMESTAMP_RE: Regex = Regex::new(r"\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})").unwrap();
+    static ref S3_OP_RE: Regex = Regex::new(r"^(upload|download|delete|copy|move):").unwrap();
+}
 
 const MAX_ITEMS: usize = 20;
 const JSON_COMPRESS_DEPTH: usize = 4;
@@ -44,6 +51,35 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<()> {
         }
         "cloudformation" if !args.is_empty() && args[0] == "describe-stacks" => {
             run_cfn_describe_stacks(&args[1..], verbose)
+        }
+        // DynamoDB
+        "dynamodb" if !args.is_empty() && args[0] == "scan" => {
+            run_dynamodb_read("scan", &args[1..], verbose)
+        }
+        "dynamodb" if !args.is_empty() && args[0] == "query" => {
+            run_dynamodb_read("query", &args[1..], verbose)
+        }
+        "dynamodb" if !args.is_empty() && args[0] == "get-item" => {
+            run_dynamodb_get_item(&args[1..], verbose)
+        }
+        // CloudWatch Logs
+        "logs" if !args.is_empty() && args[0] == "filter-log-events" => {
+            run_logs_filter_events(&args[1..], verbose)
+        }
+        "logs" if !args.is_empty() && args[0] == "get-query-results" => {
+            run_logs_query_results(&args[1..], verbose)
+        }
+        // Lambda
+        "lambda" if !args.is_empty() && args[0] == "invoke" => {
+            run_lambda_invoke(&args[1..], verbose)
+        }
+        // S3 transfer operations
+        "s3" if !args.is_empty() && (args[0] == "sync" || args[0] == "cp") => {
+            run_s3_transfer(&args[0], &args[1..], verbose)
+        }
+        // Secrets Manager
+        "secretsmanager" if !args.is_empty() && args[0] == "get-secret-value" => {
+            run_secrets_get(&args[1..], verbose)
         }
         _ => run_generic(subcommand, args, verbose, &full_sub),
     }
@@ -576,6 +612,570 @@ fn filter_cfn_describe_stacks(json_str: &str) -> Option<String> {
     Some(join_with_overflow(&result, total, MAX_ITEMS, "stacks"))
 }
 
+// --- DynamoDB type flattening ---
+
+/// Recursively flatten DynamoDB typed wrappers into plain JSON values.
+/// `{"S": "hello"}` → `"hello"`, `{"N": "42"}` → `42`, `{"BOOL": true}` → `true`,
+/// `{"NULL": true}` → `null`, `{"L": [...]}` → `[...]`, `{"M": {...}}` → `{...}`,
+/// `{"SS": [...]}` / `{"NS": [...]}` / `{"BS": [...]}` → `[...]`.
+fn flatten_dynamodb_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) if map.len() == 1 => {
+            let (key, inner) = map.iter().next().unwrap();
+            match key.as_str() {
+                "S" | "B" => inner.clone(),
+                "N" => {
+                    // Convert numeric string to JSON number
+                    if let Some(s) = inner.as_str() {
+                        if let Ok(n) = s.parse::<i64>() {
+                            return Value::Number(n.into());
+                        }
+                        if let Ok(f) = s.parse::<f64>() {
+                            if let Some(n) = serde_json::Number::from_f64(f) {
+                                return Value::Number(n);
+                            }
+                        }
+                        // Fallback: keep as string if unparseable
+                        Value::String(s.to_string())
+                    } else {
+                        inner.clone()
+                    }
+                }
+                "BOOL" => inner.clone(),
+                "NULL" => Value::Null,
+                "L" => {
+                    if let Some(arr) = inner.as_array() {
+                        Value::Array(arr.iter().map(flatten_dynamodb_value).collect())
+                    } else {
+                        inner.clone()
+                    }
+                }
+                "M" => {
+                    if let Some(obj) = inner.as_object() {
+                        Value::Object(
+                            obj.iter()
+                                .map(|(k, v)| (k.clone(), flatten_dynamodb_value(v)))
+                                .collect(),
+                        )
+                    } else {
+                        inner.clone()
+                    }
+                }
+                "SS" | "NS" | "BS" => {
+                    if key == "NS" {
+                        if let Some(arr) = inner.as_array() {
+                            return Value::Array(
+                                arr.iter()
+                                    .map(|v| {
+                                        if let Some(s) = v.as_str() {
+                                            if let Ok(n) = s.parse::<i64>() {
+                                                return Value::Number(n.into());
+                                            }
+                                            if let Ok(f) = s.parse::<f64>() {
+                                                if let Some(n) = serde_json::Number::from_f64(f) {
+                                                    return Value::Number(n);
+                                                }
+                                            }
+                                        }
+                                        v.clone()
+                                    })
+                                    .collect(),
+                            );
+                        }
+                    }
+                    inner.clone()
+                }
+                _ => {
+                    // Not a DynamoDB type descriptor — recurse into the object
+                    Value::Object(
+                        map.iter()
+                            .map(|(k, v)| (k.clone(), flatten_dynamodb_value(v)))
+                            .collect(),
+                    )
+                }
+            }
+        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), flatten_dynamodb_value(v)))
+                .collect(),
+        ),
+        Value::Array(arr) => Value::Array(arr.iter().map(flatten_dynamodb_value).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn run_dynamodb_read(op: &str, extra_args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+    let cmd_name = format!("dynamodb {}", op);
+    let (raw, stderr, status) = run_aws_json(&["dynamodb", op], extra_args, verbose)?;
+
+    if !status.success() {
+        timer.track(
+            &format!("aws {}", cmd_name),
+            &format!("rtk aws {}", cmd_name),
+            &stderr,
+            &stderr,
+        );
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    let filtered = match filter_dynamodb_scan_query(&raw, op) {
+        Some(f) => f,
+        None => raw.clone(),
+    };
+    println!("{}", filtered);
+
+    timer.track(
+        &format!("aws {}", cmd_name),
+        &format!("rtk aws {}", cmd_name),
+        &raw,
+        &filtered,
+    );
+    Ok(())
+}
+
+fn filter_dynamodb_scan_query(json_str: &str, op: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let items = v.get("Items").and_then(|i| i.as_array())?;
+    let count = v
+        .get("Count")
+        .and_then(|c| c.as_u64())
+        .unwrap_or(items.len() as u64);
+    let scanned = v
+        .get("ScannedCount")
+        .and_then(|c| c.as_u64())
+        .unwrap_or(count);
+
+    let flattened: Vec<Value> = items.iter().map(flatten_dynamodb_value).collect();
+
+    let mut result = format!("DynamoDB {}: {} items, scanned: {}\n", op, count, scanned);
+
+    const MAX_DISPLAY: usize = 50;
+    let display_items: Vec<&Value> = flattened.iter().take(MAX_DISPLAY).collect();
+    let display_arr = Value::Array(display_items.into_iter().cloned().collect());
+    result.push_str(&serde_json::to_string(&display_arr).unwrap_or_default());
+
+    if flattened.len() > MAX_DISPLAY {
+        result.push_str(&format!(
+            "\n... +{} more items",
+            flattened.len() - MAX_DISPLAY
+        ));
+    }
+
+    Some(result)
+}
+
+fn run_dynamodb_get_item(extra_args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+    let (raw, stderr, status) = run_aws_json(&["dynamodb", "get-item"], extra_args, verbose)?;
+
+    if !status.success() {
+        timer.track(
+            "aws dynamodb get-item",
+            "rtk aws dynamodb get-item",
+            &stderr,
+            &stderr,
+        );
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    let filtered = match filter_dynamodb_get_item(&raw) {
+        Some(f) => f,
+        None => raw.clone(),
+    };
+    println!("{}", filtered);
+
+    timer.track(
+        "aws dynamodb get-item",
+        "rtk aws dynamodb get-item",
+        &raw,
+        &filtered,
+    );
+    Ok(())
+}
+
+fn filter_dynamodb_get_item(json_str: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let item = v.get("Item")?;
+    let flattened = flatten_dynamodb_value(item);
+    let mut result = String::from("DynamoDB item:\n");
+    result.push_str(&serde_json::to_string(&flattened).unwrap_or_default());
+    Some(result)
+}
+
+// --- CloudWatch Logs ---
+
+fn run_logs_filter_events(extra_args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+    let (raw, stderr, status) = run_aws_json(&["logs", "filter-log-events"], extra_args, verbose)?;
+
+    if !status.success() {
+        timer.track(
+            "aws logs filter-log-events",
+            "rtk aws logs filter-log-events",
+            &stderr,
+            &stderr,
+        );
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    let filtered = match filter_log_events(&raw) {
+        Some(f) => f,
+        None => raw.clone(),
+    };
+    println!("{}", filtered);
+
+    timer.track(
+        "aws logs filter-log-events",
+        "rtk aws logs filter-log-events",
+        &raw,
+        &filtered,
+    );
+    Ok(())
+}
+
+fn filter_log_events(json_str: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let events = v.get("events").and_then(|e| e.as_array())?;
+
+    if events.is_empty() {
+        return Some("CloudWatch: 0 events".to_string());
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut last_msg: Option<String> = None;
+    let mut dup_count: usize = 0;
+
+    for event in events {
+        let ts = event
+            .get("timestamp")
+            .and_then(|t| t.as_i64())
+            .map(format_epoch_ms)
+            .or_else(|| {
+                event
+                    .get("ingestionTime")
+                    .and_then(|t| t.as_i64())
+                    .map(format_epoch_ms)
+            })
+            .unwrap_or_else(|| "?".to_string());
+
+        let msg = event
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .trim_end();
+
+        if let Some(ref last) = last_msg {
+            if last == msg {
+                dup_count += 1;
+                continue;
+            }
+            if dup_count > 0 {
+                lines.push(format!("  [x{}]", dup_count + 1));
+                dup_count = 0;
+            }
+        }
+        last_msg = Some(msg.to_string());
+        lines.push(format!("{} {}", ts, msg));
+    }
+
+    // Flush trailing dups
+    if dup_count > 0 {
+        lines.push(format!("  [x{}]", dup_count + 1));
+    }
+
+    let header = format!("CloudWatch: {} events", events.len());
+    Some(format!("{}\n{}", header, lines.join("\n")))
+}
+
+/// Format epoch milliseconds to HH:MM:SS
+fn format_epoch_ms(ms: i64) -> String {
+    let secs = ms / 1000;
+    let h = (secs / 3600) % 24;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
+}
+
+fn run_logs_query_results(extra_args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+    let (raw, stderr, status) = run_aws_json(&["logs", "get-query-results"], extra_args, verbose)?;
+
+    if !status.success() {
+        timer.track(
+            "aws logs get-query-results",
+            "rtk aws logs get-query-results",
+            &stderr,
+            &stderr,
+        );
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    let filtered = match filter_logs_query_results(&raw) {
+        Some(f) => f,
+        None => raw.clone(),
+    };
+    println!("{}", filtered);
+
+    timer.track(
+        "aws logs get-query-results",
+        "rtk aws logs get-query-results",
+        &raw,
+        &filtered,
+    );
+    Ok(())
+}
+
+fn filter_logs_query_results(json_str: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let results = v.get("results").and_then(|r| r.as_array())?;
+    let status = v
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("Unknown");
+
+    if results.is_empty() {
+        return Some(format!("CloudWatch query ({}): 0 rows", status));
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for row in results {
+        if let Some(fields) = row.as_array() {
+            let pairs: Vec<String> = fields
+                .iter()
+                .filter_map(|f| {
+                    let field = f.get("field").and_then(|v| v.as_str())?;
+                    let value = f.get("value").and_then(|v| v.as_str())?;
+                    // Skip the @ptr field (internal pointer, no user value)
+                    if field == "@ptr" {
+                        return None;
+                    }
+                    Some(format!("{}={}", field, value))
+                })
+                .collect();
+            lines.push(pairs.join(" "));
+        }
+    }
+
+    let header = format!("CloudWatch query ({}): {} rows", status, results.len());
+    Some(format!("{}\n{}", header, lines.join("\n")))
+}
+
+// --- Lambda invoke ---
+
+fn run_lambda_invoke(extra_args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+    // Lambda invoke writes the response payload to a file (last positional arg),
+    // but the stdout JSON metadata contains StatusCode, FunctionError, etc.
+    let (raw, stderr, status) = run_aws_json(&["lambda", "invoke"], extra_args, verbose)?;
+
+    if !status.success() {
+        timer.track(
+            "aws lambda invoke",
+            "rtk aws lambda invoke",
+            &stderr,
+            &stderr,
+        );
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    let filtered = match filter_lambda_invoke(&raw) {
+        Some(f) => f,
+        None => raw.clone(),
+    };
+    println!("{}", filtered);
+
+    timer.track(
+        "aws lambda invoke",
+        "rtk aws lambda invoke",
+        &raw,
+        &filtered,
+    );
+    Ok(())
+}
+
+fn filter_lambda_invoke(json_str: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let status_code = v.get("StatusCode").and_then(|s| s.as_i64()).unwrap_or(0);
+    let function_error = v.get("FunctionError").and_then(|e| e.as_str());
+
+    let mut result = format!("Lambda: {}", status_code);
+    if let Some(err) = function_error {
+        result.push_str(&format!(" ERROR: {}", err));
+    }
+    Some(result)
+}
+
+// --- S3 transfer (sync/cp) ---
+
+fn run_s3_transfer(op: &str, extra_args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+    let cmd_name = format!("s3 {}", op);
+
+    // s3 sync/cp produce text output, not JSON
+    let mut cmd = resolved_command("aws");
+    cmd.args(["s3", op]);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: aws {} {}", cmd_name, extra_args.join(" "));
+    }
+
+    let output = cmd
+        .output()
+        .context(format!("Failed to run aws {}", cmd_name))?;
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        timer.track(
+            &format!("aws {}", cmd_name),
+            &format!("rtk aws {}", cmd_name),
+            &stderr,
+            &stderr,
+        );
+        eprint!("{}", stderr);
+        print!("{}", raw);
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
+    let combined = if stderr.is_empty() {
+        raw.clone()
+    } else {
+        format!("{}\n{}", raw, stderr)
+    };
+
+    let filtered = filter_s3_transfer(&combined, op);
+    println!("{}", filtered);
+
+    timer.track(
+        &format!("aws {}", cmd_name),
+        &format!("rtk aws {}", cmd_name),
+        &combined,
+        &filtered,
+    );
+    Ok(())
+}
+
+fn filter_s3_transfer(output: &str, op: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+
+    // Pass through unchanged if short output
+    if lines.len() < 10 {
+        return output.to_string();
+    }
+
+    let mut uploads = 0usize;
+    let mut downloads = 0usize;
+    let mut deletes = 0usize;
+    let mut copies = 0usize;
+    let mut errors: Vec<&str> = Vec::new();
+    let mut warnings: Vec<&str> = Vec::new();
+
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("upload:")
+            || trimmed.starts_with("Completed") && trimmed.contains("upload")
+        {
+            uploads += 1;
+        } else if trimmed.starts_with("download:") {
+            downloads += 1;
+        } else if trimmed.starts_with("delete:") {
+            deletes += 1;
+        } else if trimmed.starts_with("copy:") || trimmed.starts_with("move:") {
+            copies += 1;
+        } else if trimmed.starts_with("warning:") || trimmed.starts_with("WARN") {
+            warnings.push(line);
+        } else if trimmed.starts_with("error:")
+            || trimmed.starts_with("ERROR")
+            || trimmed.starts_with("fatal")
+        {
+            errors.push(line);
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if uploads > 0 {
+        parts.push(format!("{} uploaded", uploads));
+    }
+    if downloads > 0 {
+        parts.push(format!("{} downloaded", downloads));
+    }
+    if deletes > 0 {
+        parts.push(format!("{} deleted", deletes));
+    }
+    if copies > 0 {
+        parts.push(format!("{} copied", copies));
+    }
+
+    let mut result = format!("S3 {}: {}", op, parts.join(", "));
+
+    if !errors.is_empty() {
+        result.push_str(&format!(", {} errors", errors.len()));
+    } else {
+        result.push_str(", 0 errors");
+    }
+
+    for warn in &warnings {
+        result.push_str(&format!("\n{}", warn));
+    }
+    for err in &errors {
+        result.push_str(&format!("\n{}", err));
+    }
+
+    result
+}
+
+// --- Secrets Manager ---
+
+fn run_secrets_get(extra_args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+    let (raw, stderr, status) =
+        run_aws_json(&["secretsmanager", "get-secret-value"], extra_args, verbose)?;
+
+    if !status.success() {
+        timer.track(
+            "aws secretsmanager get-secret-value",
+            "rtk aws secretsmanager get-secret-value",
+            &stderr,
+            &stderr,
+        );
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    let filtered = match filter_secret_value(&raw) {
+        Some(f) => f,
+        None => raw.clone(),
+    };
+    println!("{}", filtered);
+
+    timer.track(
+        "aws secretsmanager get-secret-value",
+        "rtk aws secretsmanager get-secret-value",
+        &raw,
+        &filtered,
+    );
+    Ok(())
+}
+
+fn filter_secret_value(json_str: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json_str).ok()?;
+    let name = v.get("Name").and_then(|n| n.as_str()).unwrap_or("?");
+    let secret_string = v.get("SecretString").and_then(|s| s.as_str())?;
+
+    // Try to parse SecretString as JSON for compact display
+    let display = if let Ok(parsed) = serde_json::from_str::<Value>(secret_string) {
+        serde_json::to_string(&parsed).unwrap_or_else(|_| secret_string.to_string())
+    } else {
+        secret_string.to_string()
+    };
+
+    Some(format!("{}: {}", name, display))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,5 +1475,405 @@ mod tests {
         let json = format!(r#"{{"DBInstances": [{}]}}"#, dbs.join(","));
         let result = filter_rds_instances(&json).unwrap();
         assert!(result.contains("... +5 more instances"));
+    }
+
+    // --- DynamoDB tests ---
+
+    #[test]
+    fn test_flatten_dynamodb_string() {
+        let v: Value = serde_json::from_str(r#"{"S": "hello"}"#).unwrap();
+        assert_eq!(flatten_dynamodb_value(&v), Value::String("hello".into()));
+    }
+
+    #[test]
+    fn test_flatten_dynamodb_number() {
+        let v: Value = serde_json::from_str(r#"{"N": "42"}"#).unwrap();
+        assert_eq!(flatten_dynamodb_value(&v), serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_flatten_dynamodb_bool() {
+        let v: Value = serde_json::from_str(r#"{"BOOL": true}"#).unwrap();
+        assert_eq!(flatten_dynamodb_value(&v), Value::Bool(true));
+    }
+
+    #[test]
+    fn test_flatten_dynamodb_null() {
+        let v: Value = serde_json::from_str(r#"{"NULL": true}"#).unwrap();
+        assert_eq!(flatten_dynamodb_value(&v), Value::Null);
+    }
+
+    #[test]
+    fn test_flatten_dynamodb_list() {
+        let v: Value = serde_json::from_str(r#"{"L": [{"S": "a"}, {"N": "1"}]}"#).unwrap();
+        let expected = serde_json::json!(["a", 1]);
+        assert_eq!(flatten_dynamodb_value(&v), expected);
+    }
+
+    #[test]
+    fn test_flatten_dynamodb_map() {
+        let v: Value =
+            serde_json::from_str(r#"{"M": {"name": {"S": "Alice"}, "age": {"N": "30"}}}"#).unwrap();
+        let expected = serde_json::json!({"name": "Alice", "age": 30});
+        assert_eq!(flatten_dynamodb_value(&v), expected);
+    }
+
+    #[test]
+    fn test_flatten_dynamodb_string_set() {
+        let v: Value = serde_json::from_str(r#"{"SS": ["a", "b", "c"]}"#).unwrap();
+        let expected = serde_json::json!(["a", "b", "c"]);
+        assert_eq!(flatten_dynamodb_value(&v), expected);
+    }
+
+    #[test]
+    fn test_flatten_dynamodb_number_set() {
+        let v: Value = serde_json::from_str(r#"{"NS": ["1", "2", "3"]}"#).unwrap();
+        let expected = serde_json::json!([1, 2, 3]);
+        assert_eq!(flatten_dynamodb_value(&v), expected);
+    }
+
+    #[test]
+    fn test_flatten_dynamodb_nested() {
+        let v: Value = serde_json::from_str(
+            r#"{"M": {"items": {"L": [{"M": {"id": {"N": "1"}, "name": {"S": "foo"}}}]}}}"#,
+        )
+        .unwrap();
+        let expected = serde_json::json!({"items": [{"id": 1, "name": "foo"}]});
+        assert_eq!(flatten_dynamodb_value(&v), expected);
+    }
+
+    #[test]
+    fn test_flatten_non_dynamodb_passthrough() {
+        let v: Value = serde_json::from_str(r#"{"name": "Alice", "age": 30}"#).unwrap();
+        let expected = serde_json::json!({"name": "Alice", "age": 30});
+        assert_eq!(flatten_dynamodb_value(&v), expected);
+    }
+
+    #[test]
+    fn test_dynamodb_scan_filter() {
+        let json = r#"{
+            "Items": [
+                {"id": {"N": "1"}, "name": {"S": "Alice"}, "active": {"BOOL": true}},
+                {"id": {"N": "2"}, "name": {"S": "Bob"}, "active": {"BOOL": false}}
+            ],
+            "Count": 2,
+            "ScannedCount": 100,
+            "ConsumedCapacity": {"TableName": "users", "CapacityUnits": 5.0}
+        }"#;
+        let result = filter_dynamodb_scan_query(json, "scan").unwrap();
+        assert!(result.contains("DynamoDB scan: 2 items, scanned: 100"));
+        assert!(result.contains("\"Alice\""));
+        assert!(result.contains("\"Bob\""));
+        // Type wrappers should be stripped
+        assert!(!result.contains(r#""S""#));
+        assert!(!result.contains(r#""N""#));
+        assert!(!result.contains(r#""BOOL""#));
+    }
+
+    #[test]
+    fn test_dynamodb_scan_empty() {
+        let json = r#"{"Items": [], "Count": 0, "ScannedCount": 0}"#;
+        let result = filter_dynamodb_scan_query(json, "scan").unwrap();
+        assert!(result.contains("DynamoDB scan: 0 items"));
+    }
+
+    #[test]
+    fn test_dynamodb_get_item_filter() {
+        let json = r#"{
+            "Item": {
+                "userId": {"S": "user-123"},
+                "email": {"S": "alice@example.com"},
+                "loginCount": {"N": "42"},
+                "tags": {"SS": ["admin", "user"]}
+            }
+        }"#;
+        let result = filter_dynamodb_get_item(json).unwrap();
+        assert!(result.contains("DynamoDB item:"));
+        assert!(result.contains("\"user-123\""));
+        assert!(result.contains("42"));
+        assert!(!result.contains(r#""S""#));
+    }
+
+    #[test]
+    fn test_dynamodb_token_savings() {
+        let json = r#"{
+            "Items": [
+                {"id": {"N": "1"}, "name": {"S": "Alice"}, "email": {"S": "alice@example.com"}, "active": {"BOOL": true}, "metadata": {"M": {"role": {"S": "admin"}, "loginCount": {"N": "42"}}}},
+                {"id": {"N": "2"}, "name": {"S": "Bob"}, "email": {"S": "bob@example.com"}, "active": {"BOOL": false}, "metadata": {"M": {"role": {"S": "user"}, "loginCount": {"N": "7"}}}},
+                {"id": {"N": "3"}, "name": {"S": "Charlie"}, "email": {"S": "charlie@example.com"}, "active": {"BOOL": true}, "metadata": {"M": {"role": {"S": "viewer"}, "loginCount": {"N": "0"}}}}
+            ],
+            "Count": 3,
+            "ScannedCount": 3,
+            "ConsumedCapacity": {"TableName": "users", "CapacityUnits": 15.0}
+        }"#;
+        let result = filter_dynamodb_scan_query(json, "scan").unwrap();
+        let input_tokens = count_tokens(json);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 40.0,
+            "DynamoDB scan filter: expected >=40% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    // --- CloudWatch Logs tests ---
+
+    #[test]
+    fn test_filter_log_events_basic() {
+        let json = r#"{
+            "events": [
+                {"timestamp": 1700000000000, "message": "START RequestId: abc-123\n"},
+                {"timestamp": 1700000001000, "message": "Processing item 1\n"},
+                {"timestamp": 1700000002000, "message": "END RequestId: abc-123\n"}
+            ],
+            "searchedLogStreams": [{"logStreamName": "stream-1", "searchedCompletely": true}]
+        }"#;
+        let result = filter_log_events(json).unwrap();
+        assert!(result.contains("CloudWatch: 3 events"));
+        assert!(result.contains("START RequestId"));
+        assert!(result.contains("Processing item"));
+        // Should not contain searchedLogStreams
+        assert!(!result.contains("searchedCompletely"));
+    }
+
+    #[test]
+    fn test_filter_log_events_dedup() {
+        let json = r#"{
+            "events": [
+                {"timestamp": 1700000000000, "message": "heartbeat"},
+                {"timestamp": 1700000001000, "message": "heartbeat"},
+                {"timestamp": 1700000002000, "message": "heartbeat"},
+                {"timestamp": 1700000003000, "message": "done"}
+            ]
+        }"#;
+        let result = filter_log_events(json).unwrap();
+        assert!(result.contains("[x3]"));
+        assert!(result.contains("done"));
+    }
+
+    #[test]
+    fn test_filter_log_events_empty() {
+        let json = r#"{"events": []}"#;
+        let result = filter_log_events(json).unwrap();
+        assert_eq!(result, "CloudWatch: 0 events");
+    }
+
+    #[test]
+    fn test_filter_logs_query_results() {
+        let json = r#"{
+            "results": [
+                [{"field": "@timestamp", "value": "2024-01-15 10:30:00"}, {"field": "@message", "value": "Error occurred"}, {"field": "@ptr", "value": "abc123"}],
+                [{"field": "@timestamp", "value": "2024-01-15 10:31:00"}, {"field": "@message", "value": "Retry succeeded"}, {"field": "@ptr", "value": "def456"}]
+            ],
+            "status": "Complete",
+            "statistics": {"recordsMatched": 2, "recordsScanned": 1000, "bytesScanned": 50000}
+        }"#;
+        let result = filter_logs_query_results(json).unwrap();
+        assert!(result.contains("CloudWatch query (Complete): 2 rows"));
+        assert!(result.contains("@timestamp=2024-01-15 10:30:00"));
+        assert!(result.contains("@message=Error occurred"));
+        // @ptr should be filtered out
+        assert!(!result.contains("@ptr"));
+        // statistics should be stripped
+        assert!(!result.contains("recordsScanned"));
+    }
+
+    #[test]
+    fn test_filter_log_events_token_savings() {
+        let json = r#"{
+            "events": [
+                {"timestamp": 1700000000000, "message": "START RequestId: abc-123 Version: $LATEST\n", "ingestionTime": 1700000000500, "eventId": "37134513644831132873138850000000000000000000000001", "logStreamName": "2024/01/15/[$LATEST]abc123"},
+                {"timestamp": 1700000001000, "message": "INFO Processing request\n", "ingestionTime": 1700000001500, "eventId": "37134513644831132873138850000000000000000000000002", "logStreamName": "2024/01/15/[$LATEST]abc123"},
+                {"timestamp": 1700000002000, "message": "INFO Processing request\n", "ingestionTime": 1700000002500, "eventId": "37134513644831132873138850000000000000000000000003", "logStreamName": "2024/01/15/[$LATEST]abc123"},
+                {"timestamp": 1700000003000, "message": "END RequestId: abc-123\n", "ingestionTime": 1700000003500, "eventId": "37134513644831132873138850000000000000000000000004", "logStreamName": "2024/01/15/[$LATEST]abc123"},
+                {"timestamp": 1700000004000, "message": "REPORT RequestId: abc-123 Duration: 150.50 ms Billed Duration: 200 ms Memory Size: 128 MB Max Memory Used: 64 MB\n", "ingestionTime": 1700000004500, "eventId": "37134513644831132873138850000000000000000000000005", "logStreamName": "2024/01/15/[$LATEST]abc123"}
+            ],
+            "searchedLogStreams": [{"logStreamName": "2024/01/15/[$LATEST]abc123", "searchedCompletely": true}]
+        }"#;
+        let result = filter_log_events(json).unwrap();
+        let input_tokens = count_tokens(json);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 50.0,
+            "CloudWatch filter: expected >=50% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    // --- Lambda invoke tests ---
+
+    #[test]
+    fn test_filter_lambda_invoke_success() {
+        let json = r#"{
+            "StatusCode": 200,
+            "ExecutedVersion": "$LATEST",
+            "LogResult": "U1RBUlQgUmVxdWVzdElkOiBhYmMtMTIz...",
+            "ResponseMetadata": {"RequestId": "abc-123", "HTTPStatusCode": 200}
+        }"#;
+        let result = filter_lambda_invoke(json).unwrap();
+        assert_eq!(result, "Lambda: 200");
+        assert!(!result.contains("LogResult"));
+    }
+
+    #[test]
+    fn test_filter_lambda_invoke_error() {
+        let json = r#"{
+            "StatusCode": 200,
+            "FunctionError": "Unhandled",
+            "ExecutedVersion": "$LATEST",
+            "LogResult": "U1RBUlQgUmVxdWVzdElkOiBhYmMtMTIz...",
+            "ResponseMetadata": {"RequestId": "abc-123", "HTTPStatusCode": 200}
+        }"#;
+        let result = filter_lambda_invoke(json).unwrap();
+        assert!(result.contains("Lambda: 200 ERROR: Unhandled"));
+    }
+
+    #[test]
+    fn test_lambda_invoke_token_savings() {
+        let json = r#"{
+            "StatusCode": 200,
+            "ExecutedVersion": "$LATEST",
+            "LogResult": "U1RBUlQgUmVxdWVzdElkOiBhYmMtMTIzIFZlcnNpb246ICRMQVRFU1QKMjAyNC0wMS0xNVQxMDozMDowMC4wMDBaIGFiYy0xMjMgSU5GTyBQcm9jZXNzaW5nIHJlcXVlc3QKRU5EIFJlcXVlc3RJZDogYWJjLTEyMwpSRVBPUlQgUmVxdWVzdElkOiBhYmMtMTIzCUR1cmF0aW9uOiAxNTAuNTAgbXMJQmlsbGVkIER1cmF0aW9uOiAyMDAgbXMJTWVtb3J5IFNpemU6IDEyOCBNQglNYXggTWVtb3J5IFVzZWQ6IDY0IE1CCg==",
+            "ResponseMetadata": {
+                "RequestId": "abc-123-def-456",
+                "HTTPStatusCode": 200,
+                "HTTPHeaders": {
+                    "date": "Mon, 15 Jan 2024 10:30:00 GMT",
+                    "content-type": "application/json",
+                    "content-length": "42",
+                    "connection": "keep-alive",
+                    "x-amzn-requestid": "abc-123-def-456"
+                },
+                "RetryAttempts": 0
+            }
+        }"#;
+        let result = filter_lambda_invoke(json).unwrap();
+        let input_tokens = count_tokens(json);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Lambda invoke filter: expected >=60% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    // --- S3 transfer tests ---
+
+    #[test]
+    fn test_filter_s3_sync_summary() {
+        let output = (0..15)
+            .map(|i| format!("upload: ./file{}.txt to s3://bucket/file{}.txt", i, i))
+            .chain(std::iter::once("delete: s3://bucket/old1.txt".to_string()))
+            .chain(std::iter::once("delete: s3://bucket/old2.txt".to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_s3_transfer(&output, "sync");
+        assert!(result.contains("S3 sync: 15 uploaded, 2 deleted, 0 errors"));
+    }
+
+    #[test]
+    fn test_filter_s3_cp_short_passthrough() {
+        let output = "upload: ./file.txt to s3://bucket/file.txt";
+        let result = filter_s3_transfer(output, "cp");
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_filter_s3_transfer_errors_preserved() {
+        let mut lines: Vec<String> = (0..12)
+            .map(|i| format!("upload: ./file{}.txt to s3://bucket/file{}.txt", i, i))
+            .collect();
+        lines.push("error: Unable to upload ./bad.txt: Access Denied".to_string());
+        lines.push("warning: Skipping symlink ./link.txt".to_string());
+        let output = lines.join("\n");
+        let result = filter_s3_transfer(&output, "sync");
+        assert!(result.contains("error: Unable to upload"));
+        assert!(result.contains("warning: Skipping symlink"));
+        assert!(result.contains("1 errors"));
+    }
+
+    #[test]
+    fn test_s3_transfer_token_savings() {
+        let output = (0..50)
+            .map(|i| format!("upload: ./path/to/some/long/directory/structure/file{}.txt to s3://my-very-long-bucket-name/prefix/path/to/file{}.txt", i, i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = filter_s3_transfer(&output, "sync");
+        let input_tokens = count_tokens(&output);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "S3 sync filter: expected >=60% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    // --- Secrets Manager tests ---
+
+    #[test]
+    fn test_filter_secret_value_string() {
+        let json = r#"{
+            "ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:MySecret-abc123",
+            "Name": "MySecret",
+            "VersionId": "a1b2c3d4-5678-90ab-cdef-EXAMPLE11111",
+            "SecretString": "my-plain-secret-value",
+            "VersionStages": ["AWSCURRENT"],
+            "CreatedDate": "2024-01-15T10:30:00Z"
+        }"#;
+        let result = filter_secret_value(json).unwrap();
+        assert_eq!(result, "MySecret: my-plain-secret-value");
+        assert!(!result.contains("ARN"));
+        assert!(!result.contains("VersionId"));
+    }
+
+    #[test]
+    fn test_filter_secret_value_json() {
+        let json = r#"{
+            "ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:DbCreds-xyz",
+            "Name": "DbCreds",
+            "VersionId": "a1b2c3d4",
+            "SecretString": "{\"username\":\"admin\",\"password\":\"hunter2\",\"host\":\"db.example.com\",\"port\":5432}",
+            "VersionStages": ["AWSCURRENT"],
+            "CreatedDate": "2024-01-15T10:30:00Z"
+        }"#;
+        let result = filter_secret_value(json).unwrap();
+        assert!(result.starts_with("DbCreds: "));
+        assert!(result.contains("\"username\":\"admin\""));
+        assert!(!result.contains("VersionStages"));
+    }
+
+    #[test]
+    fn test_secret_value_token_savings() {
+        let json = r#"{
+            "ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:MySecret-abc123def456",
+            "Name": "MyDatabaseCredentials",
+            "VersionId": "a1b2c3d4-5678-90ab-cdef-EXAMPLE11111",
+            "SecretString": "{\"username\":\"admin\",\"password\":\"s3cret!\"}",
+            "VersionStages": ["AWSCURRENT"],
+            "CreatedDate": "2024-01-15T10:30:00.000Z",
+            "ResponseMetadata": {"RequestId": "abc-123", "HTTPStatusCode": 200}
+        }"#;
+        let result = filter_secret_value(json).unwrap();
+        let input_tokens = count_tokens(json);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Secrets Manager filter: expected >=60% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    // --- format_epoch_ms test ---
+
+    #[test]
+    fn test_format_epoch_ms() {
+        // 1700000000000 ms = 2023-11-14T22:13:20Z
+        assert_eq!(format_epoch_ms(1700000000000), "22:13:20");
+        assert_eq!(format_epoch_ms(0), "00:00:00");
     }
 }
