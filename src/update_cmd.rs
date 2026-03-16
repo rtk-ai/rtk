@@ -122,7 +122,10 @@ fn build_script_update_plan(
             install_dir.display()
         ),
         program: "sh".to_string(),
-        args: vec!["-c".to_string(), format!("curl -fsSL {} | sh", INSTALL_SCRIPT_URL)],
+        args: vec![
+            "-c".to_string(),
+            format!("curl -fsSL {} | sh", INSTALL_SCRIPT_URL),
+        ],
         envs: vec![
             ("RTK_VERSION".to_string(), format!("v{}", latest_version)),
             (
@@ -308,11 +311,8 @@ mod tests {
 
     #[test]
     fn test_build_update_plan_for_script_sets_exact_release() {
-        let plan = build_script_update_plan(
-            PathBuf::from("/home/user/.local/bin"),
-            "0.29.0",
-            "0.30.0",
-        );
+        let plan =
+            build_script_update_plan(PathBuf::from("/home/user/.local/bin"), "0.29.0", "0.30.0");
 
         match plan {
             UpdatePlan::Run { envs, .. } => {
