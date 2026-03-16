@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
+use toml_edit::{value, DocumentMut, Item, Table};
 
 use crate::integrity;
 
@@ -14,6 +16,19 @@ const OPENCODE_PLUGIN: &str = include_str!("../hooks/opencode-rtk.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
+const CODEX_HOST: &str = "codex";
+const CODEX_MANIFEST: &str = "codex-adapter.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct CodexInstallManifest {
+    config_path: String,
+    shim_dir: String,
+    injected_path: String,
+    path_snapshot: String,
+    previous_set_path: Option<String>,
+    previous_rtk_host: Option<String>,
+    env_keys: Vec<String>,
+}
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -223,6 +238,34 @@ pub fn run(
             anyhow::bail!("at least one of install_claude or install_opencode must be true")
         }
     }
+}
+
+pub fn run_codex(global: bool, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Codex adapter is global-only. Use: rtk init -g --codex");
+    }
+    let codex_dir = resolve_codex_dir()?;
+    let current_exe = std::env::current_exe().context("Failed to resolve current rtk binary")?;
+    let path_snapshot = std::env::var("PATH").unwrap_or_default();
+    install_codex_adapter(&codex_dir, &current_exe, &path_snapshot, verbose)
+}
+
+pub fn refresh_codex_path(global: bool, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Codex adapter is global-only. Use: rtk init -g --codex --refresh-path");
+    }
+    let codex_dir = resolve_codex_dir()?;
+    let current_exe = std::env::current_exe().context("Failed to resolve current rtk binary")?;
+    let path_snapshot = std::env::var("PATH").unwrap_or_default();
+    refresh_codex_adapter_path(&codex_dir, &current_exe, &path_snapshot, verbose)
+}
+
+pub fn uninstall_codex(global: bool, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Codex adapter is global-only. Use: rtk init -g --codex --uninstall");
+    }
+    let codex_dir = resolve_codex_dir()?;
+    uninstall_codex_adapter(&codex_dir, verbose)
 }
 
 /// Prepare hook directory and return paths (hook_dir, hook_path)
@@ -637,7 +680,6 @@ fn clean_double_blanks(content: &str) -> String {
         if line.trim().is_empty() {
             // Count consecutive blank lines
             let mut blank_count = 0;
-            let start = i;
             while i < lines.len() && lines[i].trim().is_empty() {
                 blank_count += 1;
                 i += 1;
@@ -1181,6 +1223,31 @@ fn resolve_claude_dir() -> Result<PathBuf> {
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
+fn resolve_codex_dir() -> Result<PathBuf> {
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
+        return Ok(PathBuf::from(codex_home));
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".codex"))
+        .context("Cannot determine home directory. Is $HOME set?")
+}
+
+fn resolve_rtk_state_dir() -> Result<PathBuf> {
+    let base = dirs::data_local_dir()
+        .or_else(dirs::config_dir)
+        .or_else(dirs::home_dir)
+        .context("Cannot determine RTK state directory")?;
+    Ok(base.join("rtk"))
+}
+
+fn codex_manifest_path() -> Result<PathBuf> {
+    Ok(resolve_rtk_state_dir()?.join(CODEX_MANIFEST))
+}
+
+fn codex_shim_dir() -> Result<PathBuf> {
+    Ok(resolve_rtk_state_dir()?.join("codex-shims"))
+}
+
 /// Resolve OpenCode config directory (~/.config/opencode)
 /// OpenCode uses ~/.config/opencode on all platforms (XDG convention),
 /// NOT the macOS-native ~/Library/Application Support/.
@@ -1231,6 +1298,332 @@ fn remove_opencode_plugin(verbose: u8) -> Result<Vec<PathBuf>> {
     }
 
     Ok(removed)
+}
+
+fn install_codex_adapter(
+    codex_dir: &Path,
+    rtk_binary: &Path,
+    path_snapshot: &str,
+    verbose: u8,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (codex_dir, rtk_binary, path_snapshot, verbose);
+        anyhow::bail!("Codex adapter currently requires Unix (macOS/Linux)");
+    }
+
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(codex_dir)
+            .with_context(|| format!("Failed to create Codex home: {}", codex_dir.display()))?;
+
+        let config_path = codex_dir.join("config.toml");
+        let manifest_path = codex_manifest_path()?;
+        let shim_dir = codex_shim_dir()?;
+        fs::create_dir_all(&shim_dir)
+            .with_context(|| format!("Failed to create shim dir: {}", shim_dir.display()))?;
+
+        let mut doc = load_codex_document(&config_path)?;
+        let previous_set_path = get_shell_policy_value(&doc, "PATH");
+        let previous_rtk_host = get_shell_policy_value(&doc, "RTK_HOST");
+        let base_path = previous_set_path
+            .clone()
+            .unwrap_or_else(|| path_snapshot.to_string());
+        let injected_path = build_shimmed_path(&shim_dir, &base_path);
+
+        set_shell_policy_value(&mut doc, "PATH", &injected_path)?;
+        set_shell_policy_value(&mut doc, "RTK_HOST", CODEX_HOST)?;
+
+        atomic_write(&config_path, &doc.to_string())?;
+        ensure_codex_shims_installed(&shim_dir, rtk_binary, verbose)?;
+
+        let manifest = CodexInstallManifest {
+            config_path: config_path.display().to_string(),
+            shim_dir: shim_dir.display().to_string(),
+            injected_path,
+            path_snapshot: path_snapshot.to_string(),
+            previous_set_path,
+            previous_rtk_host,
+            env_keys: vec!["PATH".to_string(), "RTK_HOST".to_string()],
+        };
+        store_codex_manifest(&manifest_path, &manifest)?;
+
+        println!("\nCodex adapter installed (experimental).\n");
+        println!("  Config:  {}", config_path.display());
+        println!("  Shims:   {}", shim_dir.display());
+        println!("  Test in Codex with: git status");
+        Ok(())
+    }
+}
+
+fn refresh_codex_adapter_path(
+    codex_dir: &Path,
+    rtk_binary: &Path,
+    path_snapshot: &str,
+    verbose: u8,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (codex_dir, rtk_binary, path_snapshot, verbose);
+        anyhow::bail!("Codex adapter currently requires Unix (macOS/Linux)");
+    }
+
+    #[cfg(unix)]
+    {
+        let config_path = codex_dir.join("config.toml");
+        let manifest_path = codex_manifest_path()?;
+        let shim_dir = codex_shim_dir()?;
+        fs::create_dir_all(&shim_dir)
+            .with_context(|| format!("Failed to create shim dir: {}", shim_dir.display()))?;
+
+        let mut doc = load_codex_document(&config_path)?;
+        let previous_set_path = get_shell_policy_value(&doc, "PATH");
+        let previous_rtk_host = get_shell_policy_value(&doc, "RTK_HOST");
+        let injected_path = build_shimmed_path(&shim_dir, path_snapshot);
+
+        set_shell_policy_value(&mut doc, "PATH", &injected_path)?;
+        set_shell_policy_value(&mut doc, "RTK_HOST", CODEX_HOST)?;
+
+        atomic_write(&config_path, &doc.to_string())?;
+        ensure_codex_shims_installed(&shim_dir, rtk_binary, verbose)?;
+
+        let manifest = CodexInstallManifest {
+            config_path: config_path.display().to_string(),
+            shim_dir: shim_dir.display().to_string(),
+            injected_path,
+            path_snapshot: path_snapshot.to_string(),
+            previous_set_path,
+            previous_rtk_host,
+            env_keys: vec!["PATH".to_string(), "RTK_HOST".to_string()],
+        };
+        store_codex_manifest(&manifest_path, &manifest)?;
+
+        println!(
+            "\nCodex PATH snapshot refreshed.\n\n  Config:  {}\n  Shims:   {}",
+            config_path.display(),
+            shim_dir.display()
+        );
+        Ok(())
+    }
+}
+
+fn uninstall_codex_adapter(codex_dir: &Path, verbose: u8) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (codex_dir, verbose);
+        anyhow::bail!("Codex adapter currently requires Unix (macOS/Linux)");
+    }
+
+    #[cfg(unix)]
+    {
+        let config_path = codex_dir.join("config.toml");
+        let manifest_path = codex_manifest_path()?;
+        let shim_dir = codex_shim_dir()?;
+
+        if config_path.exists() && manifest_path.exists() {
+            let manifest = load_codex_manifest(&manifest_path)?;
+            let mut doc = load_codex_document(&config_path)?;
+            let current_path = get_shell_policy_value(&doc, "PATH");
+            let current_host = get_shell_policy_value(&doc, "RTK_HOST");
+
+            if current_path.as_deref() == Some(manifest.injected_path.as_str()) {
+                restore_shell_policy_value(
+                    &mut doc,
+                    "PATH",
+                    manifest.previous_set_path.as_deref(),
+                )?;
+            } else if current_path.is_some() {
+                println!("⚠️  PATH changed since install; leaving it unchanged");
+            }
+
+            if current_host.as_deref() == Some(CODEX_HOST) {
+                restore_shell_policy_value(
+                    &mut doc,
+                    "RTK_HOST",
+                    manifest.previous_rtk_host.as_deref(),
+                )?;
+            }
+
+            atomic_write(&config_path, &doc.to_string())?;
+            fs::remove_file(&manifest_path).ok();
+        }
+
+        remove_codex_shims(&shim_dir, verbose)?;
+        println!("\nCodex adapter removed.\n");
+        Ok(())
+    }
+}
+
+fn build_shimmed_path(shim_dir: &Path, base_path: &str) -> String {
+    if base_path.is_empty() {
+        shim_dir.display().to_string()
+    } else {
+        format!("{}:{base_path}", shim_dir.display())
+    }
+}
+
+fn load_codex_document(path: &Path) -> Result<DocumentMut> {
+    if !path.exists() {
+        return Ok(DocumentMut::new());
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read Codex config: {}", path.display()))?;
+    if content.trim().is_empty() {
+        Ok(DocumentMut::new())
+    } else {
+        content
+            .parse::<DocumentMut>()
+            .with_context(|| format!("Failed to parse {}", path.display()))
+    }
+}
+
+fn get_shell_policy_value(doc: &DocumentMut, key: &str) -> Option<String> {
+    let policy = doc.get("shell_environment_policy")?;
+    let set = policy.get("set")?;
+    if let Some(table) = set.as_table() {
+        table.get(key)?.as_str().map(ToOwned::to_owned)
+    } else if let Some(inline) = set.as_inline_table() {
+        inline.get(key)?.as_str().map(ToOwned::to_owned)
+    } else {
+        None
+    }
+}
+
+fn set_shell_policy_value(doc: &mut DocumentMut, key: &str, value_str: &str) -> Result<()> {
+    let policy = doc
+        .entry("shell_environment_policy")
+        .or_insert(Item::Table(Table::new()));
+    if !policy.is_table() {
+        anyhow::bail!("shell_environment_policy must be a table");
+    }
+
+    let policy_table = policy
+        .as_table_mut()
+        .context("shell_environment_policy must be mutable table")?;
+
+    if !policy_table.contains_key("set") {
+        policy_table["set"] = Item::Table(Table::new());
+    } else if policy_table["set"].is_inline_table() {
+        let inline = policy_table["set"]
+            .as_inline_table()
+            .cloned()
+            .context("Failed to read shell_environment_policy.set")?;
+        let mut table = Table::new();
+        for (name, item) in inline.iter() {
+            table[name] = Item::Value(item.clone());
+        }
+        policy_table["set"] = Item::Table(table);
+    } else if !policy_table["set"].is_table() {
+        anyhow::bail!("shell_environment_policy.set must be a table or inline table");
+    }
+
+    let set_table = policy_table["set"]
+        .as_table_mut()
+        .context("shell_environment_policy.set must be mutable table")?;
+    set_table[key] = value(value_str);
+    Ok(())
+}
+
+fn restore_shell_policy_value(
+    doc: &mut DocumentMut,
+    key: &str,
+    value_str: Option<&str>,
+) -> Result<()> {
+    let policy = match doc.get_mut("shell_environment_policy") {
+        Some(item) => item,
+        None => return Ok(()),
+    };
+
+    let set = match policy.get_mut("set") {
+        Some(item) => item,
+        None => return Ok(()),
+    };
+
+    if let Some(table) = set.as_table_mut() {
+        match value_str {
+            Some(v) => {
+                table[key] = value(v);
+            }
+            None => {
+                table.remove(key);
+            }
+        }
+    } else if let Some(inline) = set.as_inline_table_mut() {
+        match value_str {
+            Some(v) => {
+                inline.insert(key, toml_edit::Value::from(v));
+            }
+            None => {
+                inline.remove(key);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn store_codex_manifest(path: &Path, manifest: &CodexInstallManifest) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create manifest dir: {}", parent.display()))?;
+    }
+    let content = serde_json::to_string_pretty(manifest)?;
+    atomic_write(path, &content)
+}
+
+fn load_codex_manifest(path: &Path) -> Result<CodexInstallManifest> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read manifest: {}", path.display()))?;
+    serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+#[cfg(unix)]
+fn ensure_codex_shims_installed(shim_dir: &Path, rtk_binary: &Path, verbose: u8) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    for entrypoint in crate::discover::registry::entrypoints() {
+        let link = shim_dir.join(&entrypoint);
+        if link.exists() || link.symlink_metadata().is_ok() {
+            let target = fs::read_link(&link).ok();
+            if target.as_deref() == Some(rtk_binary) {
+                continue;
+            }
+            fs::remove_file(&link)
+                .with_context(|| format!("Failed to replace shim: {}", link.display()))?;
+        }
+        symlink(rtk_binary, &link)
+            .with_context(|| format!("Failed to create shim: {}", link.display()))?;
+        if verbose > 0 {
+            eprintln!("Created Codex shim: {}", link.display());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_codex_shims(shim_dir: &Path, verbose: u8) -> Result<()> {
+    if !shim_dir.exists() {
+        return Ok(());
+    }
+
+    for entrypoint in crate::discover::registry::entrypoints() {
+        let link = shim_dir.join(&entrypoint);
+        if link.exists() || link.symlink_metadata().is_ok() {
+            fs::remove_file(&link)
+                .with_context(|| format!("Failed to remove shim: {}", link.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed Codex shim: {}", link.display());
+            }
+        }
+    }
+
+    if shim_dir.read_dir()?.next().is_none() {
+        fs::remove_dir(shim_dir).ok();
+    }
+
+    Ok(())
 }
 
 /// Show current rtk configuration
@@ -1389,6 +1782,70 @@ pub fn show_config() -> Result<()> {
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
+    println!("  rtk init -g --codex         # Codex adapter via PATH shims");
+    println!("  rtk init --show --codex     # Show Codex adapter status");
+
+    Ok(())
+}
+
+pub fn show_codex_config() -> Result<()> {
+    let codex_dir = resolve_codex_dir()?;
+    let config_path = codex_dir.join("config.toml");
+    let manifest_path = codex_manifest_path()?;
+    let shim_dir = codex_shim_dir()?;
+    let current_path = std::env::var("PATH").unwrap_or_default();
+
+    println!("📋 rtk Codex adapter:\n");
+    println!("  Codex home: {}", codex_dir.display());
+
+    if config_path.exists() {
+        println!("✅ config.toml: {}", config_path.display());
+    } else {
+        println!("⚪ config.toml: not found");
+    }
+
+    let doc = load_codex_document(&config_path)?;
+    let configured_path = get_shell_policy_value(&doc, "PATH");
+    let configured_host = get_shell_policy_value(&doc, "RTK_HOST");
+
+    match configured_host.as_deref() {
+        Some(CODEX_HOST) => println!("✅ RTK_HOST: {}", CODEX_HOST),
+        Some(other) => println!("⚠️  RTK_HOST: {other}"),
+        None => println!("⚪ RTK_HOST: not set"),
+    }
+
+    match &configured_path {
+        Some(path) if path.starts_with(&format!("{}:", shim_dir.display())) => {
+            println!("✅ PATH: shim dir prepended");
+        }
+        Some(_) => println!("⚠️  PATH: present but shim dir not prepended"),
+        None => println!("⚪ PATH: not set in shell_environment_policy"),
+    }
+
+    if shim_dir.exists() {
+        println!("✅ shims: {}", shim_dir.display());
+    } else {
+        println!("⚪ shims: not found");
+    }
+
+    if manifest_path.exists() {
+        let manifest = load_codex_manifest(&manifest_path)?;
+        let stale = manifest.path_snapshot != current_path
+            && configured_path.as_deref() == Some(manifest.injected_path.as_str());
+        println!("✅ manifest: {}", manifest_path.display());
+        if stale {
+            println!("⚠️  PATH snapshot: stale (run: rtk init -g --codex --refresh-path)");
+        } else {
+            println!("✅ PATH snapshot: current");
+        }
+    } else {
+        println!("⚪ manifest: not found");
+    }
+
+    println!("\nUsage:");
+    println!("  rtk init -g --codex                # Install Codex adapter");
+    println!("  rtk init -g --codex --refresh-path # Refresh PATH snapshot");
+    println!("  rtk init -g --codex --uninstall    # Remove Codex adapter");
 
     Ok(())
 }
@@ -1774,10 +2231,6 @@ More notes
         let serialized = serde_json::to_string(&parsed).unwrap();
 
         // Keys should appear in same order
-        let original_keys: Vec<&str> = original.split("\"").filter(|s| s.contains(":")).collect();
-        let serialized_keys: Vec<&str> =
-            serialized.split("\"").filter(|s| s.contains(":")).collect();
-
         // Just check that keys exist (preserve_order doesn't guarantee exact order in nested objects)
         assert!(serialized.contains("\"env\""));
         assert!(serialized.contains("\"permissions\""));
@@ -1855,5 +2308,46 @@ More notes
 
         let removed = remove_hook_from_json(&mut json_content);
         assert!(!removed);
+    }
+
+    #[test]
+    fn test_build_shimmed_path() {
+        let shim_dir = Path::new("/tmp/rtk/codex-shims");
+        assert_eq!(
+            build_shimmed_path(shim_dir, "/usr/bin:/bin"),
+            "/tmp/rtk/codex-shims:/usr/bin:/bin"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_codex_install_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex_dir = temp.path().join("codex-home");
+        let binary = temp.path().join("rtk");
+        fs::write(&binary, "rtk").unwrap();
+        let previous_xdg = std::env::var_os("XDG_DATA_HOME");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("XDG_DATA_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+
+        install_codex_adapter(&codex_dir, &binary, "/usr/bin:/bin", 0).unwrap();
+
+        let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+        assert!(config.contains("RTK_HOST = \"codex\""));
+        assert!(config.contains("PATH = "));
+
+        uninstall_codex_adapter(&codex_dir, 0).unwrap();
+        let config_after = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+        assert!(!config_after.contains("RTK_HOST = \"codex\""));
+
+        match previous_xdg {
+            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }

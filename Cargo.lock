@@ -912,6 +912,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "toml_edit",
  "ureq",
  "walkdir",
  "which",

@@ -1,5 +1,7 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, PATTERNS, RULES};
 
@@ -314,6 +316,66 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
     rewrite_compound(trimmed, excluded)
 }
 
+pub fn entrypoints() -> BTreeSet<String> {
+    RULES
+        .iter()
+        .flat_map(|rule| rule.rewrite_prefixes.iter())
+        .filter_map(|prefix| prefix.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+pub fn rewrite_argv(
+    invoked_as: &str,
+    args: &[OsString],
+    excluded: &[String],
+) -> Option<Vec<OsString>> {
+    if excluded.iter().any(|entry| entry == invoked_as) {
+        return None;
+    }
+
+    let mut command: Vec<String> = Vec::with_capacity(args.len() + 1);
+    command.push(invoked_as.to_string());
+    command.extend(args.iter().map(|arg| arg.to_string_lossy().into_owned()));
+
+    if invoked_as == "head" {
+        return rewrite_head_argv(&command);
+    }
+    if invoked_as == "tail" {
+        return rewrite_tail_argv(&command);
+    }
+
+    for rule in RULES {
+        if rule.rtk_cmd == "rtk gh"
+            && command.iter().skip(1).any(|arg| {
+                arg == "--json"
+                    || arg == "--jq"
+                    || arg == "--template"
+                    || arg.starts_with("--json=")
+                    || arg.starts_with("--jq=")
+                    || arg.starts_with("--template=")
+            })
+        {
+            return None;
+        }
+
+        for &prefix in rule.rewrite_prefixes {
+            let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
+            if matches_prefix(&command, &prefix_tokens) {
+                let mut rewritten: Vec<OsString> = rule
+                    .rtk_cmd
+                    .split_whitespace()
+                    .map(OsString::from)
+                    .collect();
+                rewritten.extend(command[prefix_tokens.len()..].iter().map(OsString::from));
+                return Some(rewritten);
+            }
+        }
+    }
+
+    None
+}
+
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
 fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
     let bytes = cmd.as_bytes();
@@ -498,6 +560,82 @@ fn rewrite_tail_lines(cmd: &str) -> Option<String> {
 
     // Unknown tail form: skip rewrite to preserve native behavior.
     None
+}
+
+fn rewrite_head_argv(command: &[String]) -> Option<Vec<OsString>> {
+    if command.len() < 3 {
+        return None;
+    }
+
+    let parsed = if let Some(stripped) = command[1].strip_prefix('-') {
+        if stripped.chars().all(|ch| ch.is_ascii_digit()) && command.len() == 3 {
+            Some((stripped, command[2].as_str()))
+        } else {
+            None
+        }
+    } else if let Some(stripped) = command[1].strip_prefix("--lines=") {
+        if stripped.chars().all(|ch| ch.is_ascii_digit()) && command.len() == 3 {
+            Some((stripped, command[2].as_str()))
+        } else {
+            None
+        }
+    } else {
+        None
+    }?;
+
+    Some(vec![
+        OsString::from("rtk"),
+        OsString::from("read"),
+        OsString::from(parsed.1),
+        OsString::from("--max-lines"),
+        OsString::from(parsed.0),
+    ])
+}
+
+fn rewrite_tail_argv(command: &[String]) -> Option<Vec<OsString>> {
+    if command.len() < 3 {
+        return None;
+    }
+
+    let parsed = if let Some(stripped) = command[1].strip_prefix('-') {
+        if stripped.chars().all(|ch| ch.is_ascii_digit()) && command.len() == 3 {
+            Some((stripped, command[2].as_str()))
+        } else {
+            None
+        }
+    } else if command[1] == "-n" && command.len() == 4 {
+        Some((command[2].as_str(), command[3].as_str()))
+    } else if let Some(stripped) = command[1].strip_prefix("--lines=") {
+        if command.len() == 3 {
+            Some((stripped, command[2].as_str()))
+        } else {
+            None
+        }
+    } else if command[1] == "--lines" && command.len() == 4 {
+        Some((command[2].as_str(), command[3].as_str()))
+    } else {
+        None
+    }?;
+
+    if !parsed.0.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(vec![
+        OsString::from("rtk"),
+        OsString::from("read"),
+        OsString::from(parsed.1),
+        OsString::from("--tail-lines"),
+        OsString::from(parsed.0),
+    ])
+}
+
+fn matches_prefix(command: &[String], prefix_tokens: &[&str]) -> bool {
+    command.len() >= prefix_tokens.len()
+        && command
+            .iter()
+            .zip(prefix_tokens.iter())
+            .all(|(left, right)| left == right)
 }
 
 /// Rewrite a single (non-compound) command segment.

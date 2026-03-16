@@ -119,6 +119,49 @@ Zero context overhead               Minimal context overhead
 Best for: production                Best for: learning / auditing
 ```
 
+### Codex Adapter Architecture (experimental)
+
+Codex does not currently expose the same documented pre-exec rewrite hook surface that RTK uses for Claude Code and OpenCode. The Codex integration therefore uses an adapter model instead of a host-native hook.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Codex Adapter Execution Path                      │
+└────────────────────────────────────────────────────────────────────────┘
+
+Codex config.toml          Codex subprocess            PATH shim           RTK binary
+      │                           │                       │                    │
+      │ shell_environment_policy  │                       │                    │
+      │ set.PATH=<shim>:<path>    │                       │                    │
+      │ set.RTK_HOST=codex        │                       │                    │
+      │──────────────────────────►│                       │                    │
+      │                           │ exec: git status      │                    │
+      │                           │──────────────────────►│                    │
+      │                           │                       │ argv[0]=git        │
+      │                           │                       │ symlink -> rtk     │
+      │                           │                       │───────────────────►│
+      │                           │                       │                    │ shim mode
+      │                           │                       │                    │ rewrite registry
+      │                           │                       │                    │ or passthrough
+      │                           │◄───────────────────────────────────────────│
+```
+
+Core properties:
+
+1. **Subprocess-local scope**: `rtk init -g --codex` patches `~/.codex/config.toml` so only Codex-started subprocesses see the injected `PATH` and `RTK_HOST=codex`.
+2. **Single binary, multiple entrypoints**: the shim directory contains symlinks such as `git`, `rg`, `python`, and `npx` that all point back to the `rtk` binary. `main.rs` detects `argv[0] != "rtk"` and enters shim mode.
+3. **Single source of truth**: shim mode does not maintain a second rewrite table. It reuses the shared rewrite registry through argv-aware APIs.
+4. **Approval semantics preserved**: Codex still originates commands such as `git status`; the adapter only changes executable resolution through `PATH`, not the command tokens Codex reasons about.
+5. **Recursion guard**: passthrough and rewritten execution paths set `RTK_BYPASS=1` and resolve binaries from a PATH with the shim directory removed.
+
+Codex adapter lifecycle:
+
+- `rtk init -g --codex`: patch config, create shim directory, write install manifest
+- `rtk init --show --codex`: inspect config, shim state, and PATH snapshot freshness
+- `rtk init -g --codex --refresh-path`: refresh the stored PATH snapshot
+- `rtk init -g --codex --uninstall`: remove RTK-managed config entries and shims
+
+This adapter intentionally does **not** rely on AGENTS.md, Skills, or `.rules` for rewriting, and it does **not** change Codex's own model-visible UnifiedExec transcript formatting.
+
 ---
 
 ## Command Lifecycle

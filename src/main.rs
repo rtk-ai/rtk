@@ -3,6 +3,7 @@ mod binlog;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
+mod codex;
 mod config;
 mod container;
 mod curl_cmd;
@@ -332,6 +333,10 @@ enum Commands {
         #[arg(long)]
         opencode: bool,
 
+        /// Install Codex adapter (global only)
+        #[arg(long)]
+        codex: bool,
+
         /// Show current configuration
         #[arg(long)]
         show: bool,
@@ -355,6 +360,10 @@ enum Commands {
         /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
         #[arg(long)]
         uninstall: bool,
+
+        /// Refresh the Codex PATH snapshot
+        #[arg(long)]
+        refresh_path: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -1205,6 +1214,13 @@ fn main() -> Result<()> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     telemetry::maybe_ping();
 
+    let mut raw_args = std::env::args_os();
+    let argv0 = raw_args.next().unwrap_or_else(|| OsString::from("rtk"));
+    let passthrough_args: Vec<OsString> = raw_args.collect();
+    if let Some(exit_code) = codex::maybe_run_as_codex_shim(&argv0, &passthrough_args)? {
+        std::process::exit(exit_code);
+    }
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -1608,17 +1624,40 @@ fn main() -> Result<()> {
         Commands::Init {
             global,
             opencode,
+            codex,
             show,
             claude_md,
             hook_only,
             auto_patch,
             no_patch,
             uninstall,
+            refresh_path,
         } => {
+            if codex && (opencode || claude_md || hook_only || auto_patch || no_patch) {
+                anyhow::bail!(
+                    "--codex cannot be combined with --opencode, --claude-md, --hook-only, --auto-patch, or --no-patch"
+                );
+            }
+
             if show {
-                init::show_config()?;
+                if codex {
+                    init::show_codex_config()?;
+                } else {
+                    init::show_config()?;
+                }
+            } else if refresh_path {
+                if !codex {
+                    anyhow::bail!("--refresh-path is only supported with --codex");
+                }
+                init::refresh_codex_path(global, cli.verbose)?;
             } else if uninstall {
-                init::uninstall(global, cli.verbose)?;
+                if codex {
+                    init::uninstall_codex(global, cli.verbose)?;
+                } else {
+                    init::uninstall(global, cli.verbose)?;
+                }
+            } else if codex {
+                init::run_codex(global, cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
