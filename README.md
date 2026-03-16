@@ -66,7 +66,7 @@ brew install rtk
 ### Quick Install (Linux/macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
 ```
 
 > Installs to `~/.local/bin`. Add to PATH if needed:
@@ -95,6 +95,16 @@ rtk gain        # Should show token savings stats
 ```
 
 > **Name collision warning**: Another project named "rtk" (Rust Type Kit) exists on crates.io. If `rtk gain` fails, you have the wrong package. Use `cargo install --git` above instead.
+
+### Update
+
+```bash
+rtk update                                              # Homebrew + default Quick Install path
+brew upgrade rtk                                        # Homebrew installs
+cargo install --git https://github.com/rtk-ai/rtk --tag <release-tag> --force
+```
+
+`rtk update` runs Homebrew upgrades automatically and refreshes the default Quick Install location (`~/.local/bin/rtk`) to the latest GitHub release. Cargo installs get a pinned Cargo command, while Nix, custom install directories, and other manual layouts get guidance instead of a guessed auto-update.
 
 ## Quick Start
 

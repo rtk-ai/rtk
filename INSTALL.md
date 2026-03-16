@@ -148,7 +148,22 @@ rtk init  # Creates ./CLAUDE.md with full RTK instructions (137 lines)
 
 **Token savings**: Instructions loaded only for this project
 
-### Upgrading from Previous Version
+### Updating the RTK Binary
+
+```bash
+rtk update
+```
+
+`rtk update` uses an update path that matches the installed binary:
+
+- Homebrew installs -> runs `brew upgrade rtk`
+- Default Quick Install path (`~/.local/bin/rtk`) -> installs the latest tagged GitHub release in place
+- Cargo installs -> prints a pinned Cargo command
+- Nix, custom install directories, and other manual layouts -> prints safe manual guidance instead of guessing
+
+If RTK cannot safely determine how it was installed, it prints safe manual guidance instead of guessing.
+
+### Updating from Previous Integration Styles
 
 #### From old 137-line CLAUDE.md injection (pre-0.22)
 
