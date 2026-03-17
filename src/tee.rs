@@ -110,6 +110,17 @@ fn write_tee_file(
 ) -> Option<PathBuf> {
     std::fs::create_dir_all(tee_dir).ok()?;
 
+    // Restrict tee directory to owner-only (rwx------)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(tee_dir) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o700);
+            let _ = std::fs::set_permissions(tee_dir, perms);
+        }
+    }
+
     let slug = sanitize_slug(command_slug);
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -130,6 +141,18 @@ fn write_tee_file(
     };
 
     std::fs::write(&filepath, content).ok()?;
+
+    // Restrict tee file to owner-read/write only (rw-------)
+    // These files may contain sensitive command output (tokens, credentials in errors).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&filepath) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&filepath, perms);
+        }
+    }
 
     // Rotate old files
     cleanup_old_files(tee_dir, max_files);
@@ -171,7 +194,7 @@ fn format_hint(path: &std::path::Path) -> String {
         path.display().to_string()
     };
 
-    format!("[full output: {}]", display)
+    format!("[full output: {} — may contain sensitive data]", display)
 }
 
 /// Convenience: tee + format hint in one call.
@@ -355,6 +378,46 @@ mod tests {
         assert!(hint.starts_with("[full output: "));
         assert!(hint.ends_with(']'));
         assert!(hint.contains("123_cargo_test.log"));
+        assert!(hint.contains("may contain sensitive data"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_tee_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let content = "error: secret token = abc123\n".repeat(30);
+        let result = write_tee_file(
+            &content,
+            "aws_sts",
+            tmpdir.path(),
+            DEFAULT_MAX_FILE_SIZE,
+            20,
+        );
+        assert!(result.is_some());
+
+        let path = result.unwrap();
+
+        // File must be 0600 (owner rw only)
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "tee file must be 0600, got {:o}",
+            file_mode
+        );
+
+        // Directory must be 0700 (owner rwx only)
+        let dir_mode = std::fs::metadata(tmpdir.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "tee directory must be 0700, got {:o}",
+            dir_mode
+        );
     }
 
     #[test]
