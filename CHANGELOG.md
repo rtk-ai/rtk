@@ -5,6 +5,12 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+* **learn:** sanitize sensitive data (AWS IDs, account numbers, paths, org names) in `rtk learn` output by default. Disable with `--no-sanitize`. User-defined patterns supported via `[learn].sanitize_patterns` in config.toml. ([#651](https://github.com/rtk-ai/rtk/issues/651))
+
 ## [0.30.1](https://github.com/rtk-ai/rtk/compare/v0.30.0...v0.30.1) (2026-03-18)
 
 

@@ -18,6 +18,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub learn: LearnConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -120,6 +122,15 @@ impl Default for LimitsConfig {
             passthrough_max_chars: 2000,
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct LearnConfig {
+    /// Extra regex patterns to sanitize from `rtk learn` output.
+    /// Each entry is a regex string. Matches are replaced with `<REDACTED>`.
+    /// These are applied in addition to the built-in sanitization patterns.
+    #[serde(default)]
+    pub sanitize_patterns: Vec<String>,
 }
 
 /// Get limits config. Falls back to defaults if config can't be loaded.

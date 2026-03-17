@@ -591,6 +591,9 @@ enum Commands {
         /// Minimum occurrences to include in report
         #[arg(long, default_value = "1")]
         min_occurrences: usize,
+        /// Disable sanitization of sensitive data (IDs, paths, accounts) in output
+        #[arg(long)]
+        no_sanitize: bool,
     },
 
     /// Execute command without filtering but track usage
@@ -1884,6 +1887,7 @@ fn main() -> Result<()> {
             write_rules,
             min_confidence,
             min_occurrences,
+            no_sanitize,
         } => {
             learn::run(
                 project,
@@ -1893,6 +1897,7 @@ fn main() -> Result<()> {
                 write_rules,
                 min_confidence,
                 min_occurrences,
+                !no_sanitize,
             )?;
         }
 
