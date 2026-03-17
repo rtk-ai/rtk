@@ -603,7 +603,10 @@ fn format_status_output(porcelain: &str) -> String {
             output.push_str(&format!("   {}\n", f));
         }
         if staged_files.len() > max_files {
-            output.push_str(&format!("   ... +{} more\n", staged_files.len() - max_files));
+            output.push_str(&format!(
+                "   ... +{} more\n",
+                staged_files.len() - max_files
+            ));
         }
     }
 
@@ -613,7 +616,10 @@ fn format_status_output(porcelain: &str) -> String {
             output.push_str(&format!("   {}\n", f));
         }
         if modified_files.len() > max_files {
-            output.push_str(&format!("   ... +{} more\n", modified_files.len() - max_files));
+            output.push_str(&format!(
+                "   ... +{} more\n",
+                modified_files.len() - max_files
+            ));
         }
     }
 
@@ -623,7 +629,10 @@ fn format_status_output(porcelain: &str) -> String {
             output.push_str(&format!("   {}\n", f));
         }
         if untracked_files.len() > max_untracked {
-            output.push_str(&format!("   ... +{} more\n", untracked_files.len() - max_untracked));
+            output.push_str(&format!(
+                "   ... +{} more\n",
+                untracked_files.len() - max_untracked
+            ));
         }
     }
 

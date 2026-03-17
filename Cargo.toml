@@ -33,6 +33,7 @@ hostname = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"
 which = "8"
+toml_edit = "0.22"
 
 [build-dependencies]
 toml = "0.8"

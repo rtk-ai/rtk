@@ -105,6 +105,7 @@ rtk init -g --no-patch      # Print manual instructions instead
 
 # Verify installation
 rtk init --show  # Check hook is installed and executable
+rtk init --show --codex  # Check Codex adapter status
 ```
 
 **Token savings**: ~99.5% reduction (2000 tokens → 10 tokens in context)
@@ -253,6 +254,28 @@ rtk init -g --uninstall
 #   - Registration: RTK hook entry from settings.json
 
 # Restart Claude Code after uninstall
+
+## Codex Adapter (Experimental)
+
+```bash
+rtk init -g --codex
+
+# What gets created:
+#   - Codex config patch: ~/.codex/config.toml
+#   - RTK shim dir:       platform-specific RTK state dir / codex-shims
+#   - RTK manifest:       platform-specific RTK state dir / codex-adapter.json
+
+# Verify installation
+rtk init --show --codex
+
+# Refresh the PATH snapshot after local PATH changes
+rtk init -g --codex --refresh-path
+
+# Remove the adapter
+rtk init -g --codex --uninstall
+```
+
+The Codex adapter works by injecting `RTK_HOST=codex` and a shim-prefixed `PATH` through Codex's `shell_environment_policy.set`. It only affects subprocesses started by Codex.
 ```
 
 **For Local Projects**: Manually remove RTK block from `./CLAUDE.md`

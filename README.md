@@ -280,9 +280,11 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 ```bash
 rtk init -g                 # Install hook + RTK.md (recommended)
 rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
+rtk init -g --codex         # Codex adapter via PATH shims (experimental)
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
+rtk init --show --codex     # Verify Codex adapter status
 ```
 
 After install, **restart Claude Code**.
@@ -302,6 +304,32 @@ rtk init -g --opencode
 - `~/.config/opencode/plugins/rtk.ts`
 
 **Restart Required**: Restart OpenCode, then test with `git status` in a session.
+
+## Codex Adapter (Experimental)
+
+Codex does not currently expose the same documented pre-exec hook surface that RTK uses for Claude Code and OpenCode. RTK's Codex support is therefore an adapter, not a host-native integration.
+
+**How it works:**
+- patches `~/.codex/config.toml`
+- injects `RTK_HOST=codex` and a Codex-only shim `PATH`
+- installs symlink entrypoints that point back to the `rtk` binary
+- uses RTK's shared rewrite registry in `argv[0]` shim mode
+
+**Install:**
+```bash
+rtk init -g --codex
+rtk init --show --codex
+```
+
+**Refresh after PATH changes:**
+```bash
+rtk init -g --codex --refresh-path
+```
+
+**Notes:**
+- This adapter applies only to Codex-started subprocesses.
+- It does not use AGENTS.md, Skills, or `.rules` for command rewriting.
+- It does not change Codex's own UnifiedExec transcript formatting.
 
 **Manual install (fallback):**
 ```bash
@@ -369,6 +397,7 @@ FAILED: 2/15 tests
 
 ```bash
 rtk init -g --uninstall     # Remove hook, RTK.md, settings.json entry
+rtk init -g --codex --uninstall  # Remove Codex adapter
 cargo uninstall rtk          # Remove binary
 brew uninstall rtk           # If installed via Homebrew
 ```
