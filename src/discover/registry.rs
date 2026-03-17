@@ -353,15 +353,22 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
                     }
                     seg_start = i;
                 } else {
-                    // `|` pipe — rewrite first segment only, pass through the rest unchanged
+                    // `|` pipe — rewrite first segment only if the command's
+                    // output format is pipe-safe (text-based). Commands that
+                    // transform structured output (JSON → compressed text)
+                    // must NOT be rewritten, as downstream programs (jq,
+                    // python json.load, etc.) expect the original format.
                     let seg = cmd[seg_start..i].trim();
-                    let rewritten =
-                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
-                    if rewritten != seg {
-                        any_changed = true;
+                    if is_pipe_safe(seg) {
+                        let rewritten = rewrite_segment(seg, excluded)
+                            .unwrap_or_else(|| seg.to_string());
+                        if rewritten != seg {
+                            any_changed = true;
+                        }
+                        result.push_str(&rewritten);
+                    } else {
+                        result.push_str(seg);
                     }
-                    result.push_str(&rewritten);
-                    // Preserve the space before the pipe that was lost by trim()
                     result.push(' ');
                     result.push_str(cmd[i..].trim_start());
                     return if any_changed { Some(result) } else { None };
@@ -498,6 +505,23 @@ fn rewrite_tail_lines(cmd: &str) -> Option<String> {
 
     // Unknown tail form: skip rewrite to preserve native behavior.
     None
+}
+
+/// Commands whose RTK-filtered output changes the format in ways that break
+/// downstream pipe consumers (e.g., `aws ... | jq` expects JSON, but RTK
+/// compresses it to summary text). These must NOT be rewritten before a pipe.
+const PIPE_UNSAFE_PREFIXES: &[&str] = &["aws ", "aws\t"];
+
+/// Returns true if a command segment is safe to rewrite before a pipe.
+/// Most RTK filters produce text output compatible with grep/head/tail.
+/// Commands that transform structured output (JSON → compressed text) are not.
+fn is_pipe_safe(seg: &str) -> bool {
+    let trimmed = seg.trim();
+    // Strip env prefixes (sudo, env VAR=val) to get the actual command
+    let stripped = ENV_PREFIX.replace(trimmed, "");
+    let cmd = stripped.trim();
+    !PIPE_UNSAFE_PREFIXES.iter().any(|p| cmd.starts_with(p))
+        && cmd != "aws"
 }
 
 /// Rewrite a single (non-compound) command segment.
@@ -1854,6 +1878,29 @@ mod tests {
         assert_eq!(
             rewrite_command("git log -10 | grep feat", &[]),
             Some("rtk git log -10 | grep feat".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_aws_skips_rewrite() {
+        // AWS piped to jq/python must NOT be rewritten — RTK's compressed
+        // output would break downstream JSON consumers
+        assert_eq!(
+            rewrite_command(
+                "aws dynamodb scan --table-name foo | python -c 'import json; json.load(sys.stdin)'",
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_aws_in_compound() {
+        // `&&` segments before a pipe should still be rewritten, but the
+        // aws segment before the pipe should NOT
+        assert_eq!(
+            rewrite_command("git status && aws s3 ls | python parse.py", &[]),
+            Some("rtk git status && aws s3 ls | python parse.py".into())
         );
     }
 
