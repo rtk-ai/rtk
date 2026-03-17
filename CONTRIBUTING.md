@@ -33,9 +33,9 @@ Every branch **must** follow one of these prefixes to identify the level of chan
 
 | Prefix | Semver Impact | When to Use |
 |--------|---------------|-------------|
-| `fix(scope): ...` | Patch | Bug fixes, corrections, minor adjustments |
-| `feat(scope): ...` | Minor | New features, new filters, new command support |
-| `chore(scope): ...` | Major | Breaking changes, API changes, removed functionality |
+| `fix(scope)/...` | Patch | Bug fixes, corrections, minor adjustments |
+| `feat(scope)/...` | Minor | New features, new filters, new command support |
+| `chore(scope)/...` | Major | Breaking changes, API changes, removed functionality |
 
 The **scope** in parentheses indicates which part of the project is concerned (e.g. `git`, `kubectl`, `filter`, `tracking`, `config`).
 
@@ -43,9 +43,9 @@ The **scope** in parentheses indicates which part of the project is concerned (e
 
 Examples:
 ```
-fix(git): log-filter-drops-merge-commits
-feat(kubectl): add-pod-list-filter
-chore(proxy): remove-deprecated-flags
+fix(git)/log-filter-drops-merge-commits
+feat(kubectl)/add-pod-list-filter
+chore(proxy)/remove-deprecated-flags
 ```
 
 ---
@@ -68,7 +68,7 @@ chore(proxy): remove-deprecated-flags
 ```bash
 git checkout develop
 git pull origin develop
-git checkout -b "feat(scope): your-clear-description"
+git checkout -b "feat(scope)/your-clear-description"
 ```
 
 ### 2. Make Your Changes
