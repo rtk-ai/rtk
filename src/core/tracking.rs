@@ -398,6 +398,12 @@ impl Tracker {
         Ok(())
     }
 
+    pub fn clear_all(&self) -> Result<usize> {
+        let deleted: usize = self.conn.execute("DELETE FROM commands", [])?;
+        let _ = self.conn.execute("DELETE FROM parse_failures", []);
+        Ok(deleted)
+    }
+
     /// Record a parse failure for analytics.
     pub fn record_parse_failure(
         &self,
