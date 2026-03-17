@@ -55,8 +55,8 @@ chore(proxy)/remove-deprecated-flags
 ### 1. Create Your Branch
 
 ```bash
-git checkout master
-git pull origin master
+git checkout develop
+git pull origin develop
 git checkout -b "feat(scope)/your-clear-description"
 ```
 
@@ -88,9 +88,9 @@ https://developercertificate.org/
 
 By signing off, you agree to the DCO.
 
-### 5. Merge into `master`
+### 5. Merge into `develop`
 
-Once your work is ready, open a Pull Request targeting the **`master`** branch.
+Once your work is ready, open a Pull Request targeting the **`develop`** branch.
 
 ### 6. Review Process
 
@@ -100,10 +100,10 @@ Once your work is ready, open a Pull Request targeting the **`master`** branch.
 
 ### 7. Integration & Release
 
-Once merged, your changes are tested on the `master` branch alongside other features. When the maintainer is satisfied with the state of `master`, they release to `master` under a specific version.
+Once merged, your changes are tested on the `develop` branch alongside other features. When the maintainer is satisfied with the state of `develop`, they release to `master` under a specific version.
 
 ```
-your branch --> master (review + CI + integration testing) --> version branch --> master (versioned release)
+your branch --> develop (review + CI + integration testing) --> version branch --> master (versioned release)
 ```
 
 ---
