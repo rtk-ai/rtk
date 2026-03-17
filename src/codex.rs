@@ -37,14 +37,14 @@ pub fn maybe_run_as_codex_shim(argv0: &OsStr, args: &[OsString]) -> Result<Optio
 }
 
 fn exec_rewritten(argv: &[OsString]) -> Result<i32> {
-    let current_exe = env::current_exe().context("Failed to resolve current rtk binary")?;
+    let current_exe = resolve_current_rtk_binary()?;
     let mut command = Command::new(&current_exe);
     command.args(argv.iter().skip(1)).env(RTK_BYPASS_ENV, "1");
     run_command(command)
 }
 
 fn exec_real_binary(invoked_as: &str, args: &[OsString]) -> Result<i32> {
-    let current_exe = env::current_exe().context("Failed to resolve current rtk binary")?;
+    let current_exe = resolve_current_rtk_binary()?;
     let clean_path = clean_path_without_shims(invoked_as, &current_exe)?;
     let cwd = env::current_dir().context("Failed to resolve current working directory")?;
     let resolved = which::which_in(invoked_as, Some(&clean_path), cwd)
@@ -61,6 +61,15 @@ fn exec_real_binary(invoked_as: &str, args: &[OsString]) -> Result<i32> {
 fn run_command(mut command: Command) -> Result<i32> {
     let status = command.status().context("Failed to spawn child process")?;
     Ok(exit_status_code(status))
+}
+
+fn resolve_current_rtk_binary() -> Result<PathBuf> {
+    let current_exe = env::current_exe().context("Failed to resolve current rtk binary")?;
+    Ok(canonical_binary_path(&current_exe))
+}
+
+fn canonical_binary_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn clean_path_without_shims(invoked_as: &str, current_exe: &Path) -> Result<OsString> {
@@ -178,6 +187,19 @@ mod tests {
 
         assert!(!parts.contains(&shim_dir));
         assert!(parts.contains(&PathBuf::from("/usr/bin")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_canonical_binary_path_resolves_symlink_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("rtk");
+        let shim = temp.path().join("git");
+
+        fs::write(&target, "rtk").unwrap();
+        std::os::unix::fs::symlink(&target, &shim).unwrap();
+
+        assert_eq!(canonical_binary_path(&shim), target.canonicalize().unwrap());
     }
 
     mod temp_env {

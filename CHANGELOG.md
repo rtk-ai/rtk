@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * add experimental Codex adapter via `rtk init -g --codex`, subprocess-local PATH shims, and argv0 dispatch
 
+### Bug Fixes
+
+* resolve Codex shim symlinks before re-exec so rewritten commands like `git status` route back through `rtk`
+
 ## [0.29.0](https://github.com/rtk-ai/rtk/compare/v0.28.2...v0.29.0) (2026-03-12)
 
 
