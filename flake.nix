@@ -17,5 +17,7 @@
       overlays.default = final: prev: {
         rtk = final.callPackage ./nix/package.nix {};
       };
+
+      homeManagerModules.default = import ./nix/homeManagerModule.nix self.packages;
     };
 }
