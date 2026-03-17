@@ -1,0 +1,6 @@
+00:00 +0: loading D:/dev/project/test/file_test.dart
+00:01 +0: loading D:/dev/project/test/file_test.dart
+00:01 +0: TsIconSize — constants compact is 20
+00:01 +1: TsIconSize — constants compact is 20
+00:01 +1: TsIconSize — constants standard is 24
+00:02 +20: All tests passed!

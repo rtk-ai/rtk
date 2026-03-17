@@ -1,0 +1,8 @@
+Resolving dependencies...
+Downloading packages...
+  _fe_analyzer_shared 85.0.0 (98.0.0 available)
+  flutter_riverpod 2.6.1 (3.3.1 available)
+  riverpod 2.6.1 (3.3.1 available)
+  riverpod_annotation 2.6.1 (3.3.1 available)
+Got dependencies!
+36 packages have newer versions incompatible with dependency constraints.

@@ -16,6 +16,7 @@ mod dotnet_trx;
 mod env_cmd;
 mod filter;
 mod find_cmd;
+mod flutter_cmd;
 mod format_cmd;
 mod gain;
 mod gh_cmd;
@@ -493,6 +494,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Flutter commands with compact output (test, analyze, build, pub)
+    Flutter {
+        #[command(subcommand)]
+        command: FlutterCommands,
+    },
+
     /// Cargo commands with compact output
     Cargo {
         #[command(subcommand)]
@@ -905,6 +912,34 @@ enum PrismaMigrateCommands {
     /// Deploy migrations to production
     Deploy {
         /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FlutterCommands {
+    /// Test with failures-only output
+    Test {
+        /// Additional flutter test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Analyze with warnings and errors only (suppress info lines)
+    Analyze {
+        /// Additional flutter analyze arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Build with compact output (final result or errors)
+    Build {
+        /// Additional flutter build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Pub get/upgrade with compact output (strip download noise)
+    Pub {
+        /// Additional flutter pub arguments (e.g. get, upgrade)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1770,6 +1805,21 @@ fn main() -> Result<()> {
             playwright_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Flutter { command } => match command {
+            FlutterCommands::Test { args } => {
+                flutter_cmd::run(flutter_cmd::FlutterCommand::Test, &args, cli.verbose)?;
+            }
+            FlutterCommands::Analyze { args } => {
+                flutter_cmd::run(flutter_cmd::FlutterCommand::Analyze, &args, cli.verbose)?;
+            }
+            FlutterCommands::Build { args } => {
+                flutter_cmd::run(flutter_cmd::FlutterCommand::Build, &args, cli.verbose)?;
+            }
+            FlutterCommands::Pub { args } => {
+                flutter_cmd::run(flutter_cmd::FlutterCommand::Pub, &args, cli.verbose)?;
+            }
+        },
+
         Commands::Cargo { command } => match command {
             CargoCommands::Build { args } => {
                 cargo_cmd::run(cargo_cmd::CargoCommand::Build, &args, cli.verbose)?;
@@ -2170,6 +2220,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Lint { .. }
             | Commands::Prettier { .. }
             | Commands::Playwright { .. }
+            | Commands::Flutter { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }

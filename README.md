@@ -171,6 +171,7 @@ rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
+rtk flutter test                # Flutter tests (-90%)
 ```
 
 ### Build & Lint
@@ -184,6 +185,8 @@ rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
+rtk flutter analyze             # Flutter analyze (warnings+errors, -80%)
+rtk flutter build apk           # Flutter build (result only, -85%)
 ```
 
 ### Package Managers
@@ -329,6 +332,7 @@ cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
 | `pytest` | `rtk pytest` |
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
+| `flutter test/analyze/build/pub` | `rtk flutter ...` |
 | `golangci-lint` | `rtk golangci-lint` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
