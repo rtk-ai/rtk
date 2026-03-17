@@ -432,6 +432,9 @@ enum Commands {
         format: String,
     },
 
+    /// Clear all token tracking history (resets rtk gain)
+    Clean,
+
     /// Show or create configuration file
     Config {
         /// Create default config file
@@ -1691,6 +1694,14 @@ fn main() -> Result<()> {
             format,
         } => {
             cc_economics::run(daily, weekly, monthly, all, &format, cli.verbose)?;
+        }
+
+        Commands::Clean => {
+            let tracker = tracking::Tracker::new().context("Failed to open tracking database")?;
+            let deleted = tracker
+                .clear_all()
+                .context("Failed to clear tracking history")?;
+            println!("Cleared {} records from tracking history.", deleted);
         }
 
         Commands::Config { create } => {
