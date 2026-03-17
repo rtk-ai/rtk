@@ -5,6 +5,12 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+* **security(telemetry):** switch from opt-out to opt-in consent model — `TelemetryConfig.enabled` changed from `bool` (default `true`) to `Option<bool>` (`None` = not asked, `Some(true)` = consented, `Some(false)` = declined); telemetry is now skipped until the user explicitly consents during `rtk init`; non-interactive/CI environments automatically decline without prompting
+
 ## [0.29.0](https://github.com/rtk-ai/rtk/compare/v0.28.2...v0.29.0) (2026-03-12)
 
 
