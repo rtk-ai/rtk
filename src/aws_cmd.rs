@@ -69,10 +69,6 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<()> {
         "logs" if !args.is_empty() && args[0] == "get-query-results" => {
             run_logs_query_results(&args[1..], verbose)
         }
-        // Lambda
-        "lambda" if !args.is_empty() && args[0] == "invoke" => {
-            run_lambda_invoke(&args[1..], verbose)
-        }
         // S3 transfer operations
         "s3" if !args.is_empty() && (args[0] == "sync" || args[0] == "cp") => {
             run_s3_transfer(&args[0], &args[1..], verbose)
@@ -749,7 +745,25 @@ fn filter_dynamodb_scan_query(json_str: &str, op: &str) -> Option<String> {
 
     let flattened: Vec<Value> = items.iter().map(flatten_dynamodb_value).collect();
 
-    let mut result = format!("DynamoDB {}: {} items, scanned: {}\n", op, count, scanned);
+    let mut result = format!("DynamoDB {}: {} items, scanned: {}", op, count, scanned);
+
+    // Preserve pagination token so LLMs know results are truncated
+    if let Some(last_key) = v.get("LastEvaluatedKey") {
+        let flat_key = flatten_dynamodb_value(last_key);
+        result.push_str(&format!(
+            ", LastEvaluatedKey: {}",
+            serde_json::to_string(&flat_key).unwrap_or_default()
+        ));
+    }
+
+    // Preserve capacity info for cost debugging
+    if let Some(cap) = v.get("ConsumedCapacity") {
+        if let Some(units) = cap.get("CapacityUnits").and_then(|u| u.as_f64()) {
+            result.push_str(&format!(", capacity: {} RCU", units));
+        }
+    }
+
+    result.push('\n');
 
     const MAX_DISPLAY: usize = 50;
     let display_items: Vec<&Value> = flattened.iter().take(MAX_DISPLAY).collect();
@@ -866,6 +880,11 @@ fn filter_log_events(json_str: &str) -> Option<String> {
             .unwrap_or("")
             .trim_end();
 
+        let stream = event
+            .get("logStreamName")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+
         if let Some(ref last) = last_msg {
             if last == msg {
                 dup_count += 1;
@@ -877,7 +896,11 @@ fn filter_log_events(json_str: &str) -> Option<String> {
             }
         }
         last_msg = Some(msg.to_string());
-        lines.push(format!("{} {}", ts, msg));
+        if stream.is_empty() {
+            lines.push(format!("{} {}", ts, msg));
+        } else {
+            lines.push(format!("{} [{}] {}", ts, stream, msg));
+        }
     }
 
     // Flush trailing dups
@@ -889,13 +912,35 @@ fn filter_log_events(json_str: &str) -> Option<String> {
     Some(format!("{}\n{}", header, lines.join("\n")))
 }
 
-/// Format epoch milliseconds to HH:MM:SS
+/// Format epoch milliseconds to MM-DD HH:MM:SS (short ISO without year)
 fn format_epoch_ms(ms: i64) -> String {
     let secs = ms / 1000;
-    let h = (secs / 3600) % 24;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
+    // Days since epoch
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let h = time_of_day / 3600;
+    let m = (time_of_day % 3600) / 60;
+    let s = time_of_day % 60;
+
+    // Convert days since epoch to month-day (simplified: use a standard algorithm)
+    let (_, month, day) = days_to_date(days);
+    format!("{:02}-{:02} {:02}:{:02}:{:02}", month, day, h, m, s)
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_date(days: i64) -> (i64, u32, u32) {
+    // Civil calendar algorithm from Howard Hinnant
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as u32, d as u32)
 }
 
 fn run_logs_query_results(extra_args: &[String], verbose: u8) -> Result<()> {
@@ -960,51 +1005,6 @@ fn filter_logs_query_results(json_str: &str) -> Option<String> {
 
     let header = format!("CloudWatch query ({}): {} rows", status, results.len());
     Some(format!("{}\n{}", header, lines.join("\n")))
-}
-
-// --- Lambda invoke ---
-
-fn run_lambda_invoke(extra_args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-    // Lambda invoke writes the response payload to a file (last positional arg),
-    // but the stdout JSON metadata contains StatusCode, FunctionError, etc.
-    let (raw, stderr, status) = run_aws_json(&["lambda", "invoke"], extra_args, verbose)?;
-
-    if !status.success() {
-        timer.track(
-            "aws lambda invoke",
-            "rtk aws lambda invoke",
-            &stderr,
-            &stderr,
-        );
-        std::process::exit(status.code().unwrap_or(1));
-    }
-
-    let filtered = match filter_lambda_invoke(&raw) {
-        Some(f) => f,
-        None => raw.clone(),
-    };
-    println!("{}", filtered);
-
-    timer.track(
-        "aws lambda invoke",
-        "rtk aws lambda invoke",
-        &raw,
-        &filtered,
-    );
-    Ok(())
-}
-
-fn filter_lambda_invoke(json_str: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(json_str).ok()?;
-    let status_code = v.get("StatusCode").and_then(|s| s.as_i64()).unwrap_or(0);
-    let function_error = v.get("FunctionError").and_then(|e| e.as_str());
-
-    let mut result = format!("Lambda: {}", status_code);
-    if let Some(err) = function_error {
-        result.push_str(&format!(" ERROR: {}", err));
-    }
-    Some(result)
 }
 
 // --- S3 transfer (sync/cp) ---
@@ -1568,6 +1568,8 @@ mod tests {
         assert!(!result.contains(r#""S""#));
         assert!(!result.contains(r#""N""#));
         assert!(!result.contains(r#""BOOL""#));
+        // ConsumedCapacity should be preserved
+        assert!(result.contains("capacity: 5 RCU"));
     }
 
     #[test]
@@ -1623,9 +1625,9 @@ mod tests {
     fn test_filter_log_events_basic() {
         let json = r#"{
             "events": [
-                {"timestamp": 1700000000000, "message": "START RequestId: abc-123\n"},
-                {"timestamp": 1700000001000, "message": "Processing item 1\n"},
-                {"timestamp": 1700000002000, "message": "END RequestId: abc-123\n"}
+                {"timestamp": 1700000000000, "message": "START RequestId: abc-123\n", "logStreamName": "2024/01/15/[$LATEST]abc123"},
+                {"timestamp": 1700000001000, "message": "Processing item 1\n", "logStreamName": "2024/01/15/[$LATEST]abc123"},
+                {"timestamp": 1700000002000, "message": "END RequestId: abc-123\n", "logStreamName": "2024/01/15/[$LATEST]abc123"}
             ],
             "searchedLogStreams": [{"logStreamName": "stream-1", "searchedCompletely": true}]
         }"#;
@@ -1633,7 +1635,11 @@ mod tests {
         assert!(result.contains("CloudWatch: 3 events"));
         assert!(result.contains("START RequestId"));
         assert!(result.contains("Processing item"));
-        // Should not contain searchedLogStreams
+        // logStreamName should be included in output
+        assert!(result.contains("[$LATEST]abc123"));
+        // Timestamps should include date
+        assert!(result.contains("11-14"));
+        // Should not contain searchedLogStreams metadata
         assert!(!result.contains("searchedCompletely"));
     }
 
@@ -1696,66 +1702,8 @@ mod tests {
         let output_tokens = count_tokens(&result);
         let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
         assert!(
-            savings >= 50.0,
-            "CloudWatch filter: expected >=50% savings, got {:.1}%",
-            savings
-        );
-    }
-
-    // --- Lambda invoke tests ---
-
-    #[test]
-    fn test_filter_lambda_invoke_success() {
-        let json = r#"{
-            "StatusCode": 200,
-            "ExecutedVersion": "$LATEST",
-            "LogResult": "U1RBUlQgUmVxdWVzdElkOiBhYmMtMTIz...",
-            "ResponseMetadata": {"RequestId": "abc-123", "HTTPStatusCode": 200}
-        }"#;
-        let result = filter_lambda_invoke(json).unwrap();
-        assert_eq!(result, "Lambda: 200");
-        assert!(!result.contains("LogResult"));
-    }
-
-    #[test]
-    fn test_filter_lambda_invoke_error() {
-        let json = r#"{
-            "StatusCode": 200,
-            "FunctionError": "Unhandled",
-            "ExecutedVersion": "$LATEST",
-            "LogResult": "U1RBUlQgUmVxdWVzdElkOiBhYmMtMTIz...",
-            "ResponseMetadata": {"RequestId": "abc-123", "HTTPStatusCode": 200}
-        }"#;
-        let result = filter_lambda_invoke(json).unwrap();
-        assert!(result.contains("Lambda: 200 ERROR: Unhandled"));
-    }
-
-    #[test]
-    fn test_lambda_invoke_token_savings() {
-        let json = r#"{
-            "StatusCode": 200,
-            "ExecutedVersion": "$LATEST",
-            "LogResult": "U1RBUlQgUmVxdWVzdElkOiBhYmMtMTIzIFZlcnNpb246ICRMQVRFU1QKMjAyNC0wMS0xNVQxMDozMDowMC4wMDBaIGFiYy0xMjMgSU5GTyBQcm9jZXNzaW5nIHJlcXVlc3QKRU5EIFJlcXVlc3RJZDogYWJjLTEyMwpSRVBPUlQgUmVxdWVzdElkOiBhYmMtMTIzCUR1cmF0aW9uOiAxNTAuNTAgbXMJQmlsbGVkIER1cmF0aW9uOiAyMDAgbXMJTWVtb3J5IFNpemU6IDEyOCBNQglNYXggTWVtb3J5IFVzZWQ6IDY0IE1CCg==",
-            "ResponseMetadata": {
-                "RequestId": "abc-123-def-456",
-                "HTTPStatusCode": 200,
-                "HTTPHeaders": {
-                    "date": "Mon, 15 Jan 2024 10:30:00 GMT",
-                    "content-type": "application/json",
-                    "content-length": "42",
-                    "connection": "keep-alive",
-                    "x-amzn-requestid": "abc-123-def-456"
-                },
-                "RetryAttempts": 0
-            }
-        }"#;
-        let result = filter_lambda_invoke(json).unwrap();
-        let input_tokens = count_tokens(json);
-        let output_tokens = count_tokens(&result);
-        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
-        assert!(
-            savings >= 60.0,
-            "Lambda invoke filter: expected >=60% savings, got {:.1}%",
+            savings >= 40.0,
+            "CloudWatch filter: expected >=40% savings, got {:.1}%",
             savings
         );
     }
@@ -1873,7 +1821,7 @@ mod tests {
     #[test]
     fn test_format_epoch_ms() {
         // 1700000000000 ms = 2023-11-14T22:13:20Z
-        assert_eq!(format_epoch_ms(1700000000000), "22:13:20");
-        assert_eq!(format_epoch_ms(0), "00:00:00");
+        assert_eq!(format_epoch_ms(1700000000000), "11-14 22:13:20");
+        assert_eq!(format_epoch_ms(0), "01-01 00:00:00");
     }
 }
