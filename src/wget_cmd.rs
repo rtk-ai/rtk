@@ -1,6 +1,6 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
-use std::process::Command;
 
 /// Compact wget - strips progress bars, shows only result
 pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
@@ -19,7 +19,7 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
     }
     cmd_args.push(url);
 
-    let output = Command::new("wget")
+    let output = resolved_command("wget")
         .args(&cmd_args)
         .output()
         .context("Failed to run wget")?;
@@ -64,7 +64,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
     }
     cmd_args.push(url);
 
-    let output = Command::new("wget")
+    let output = resolved_command("wget")
         .args(&cmd_args)
         .output()
         .context("Failed to run wget")?;

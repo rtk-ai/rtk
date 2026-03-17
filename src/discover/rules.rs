@@ -13,7 +13,7 @@ pub struct RtkRule {
 
 // Patterns ordered to match RULES indices exactly.
 pub const PATTERNS: &[&str] = &[
-    r"^git\s+(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+    r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
     r"^gh\s+(pr|issue|run|repo|api|release)",
     r"^cargo\s+(build|test|clippy|check|fmt|install)",
     r"^pnpm\s+(list|ls|outdated|install)",
