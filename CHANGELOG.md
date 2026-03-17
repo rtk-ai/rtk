@@ -5,6 +5,32 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.3-algolia.1](https://github.com/algolia/rtk/compare/v0.22.2...v0.22.3-algolia.1) (2026-03-17)
+
+This is the first release from the `algolia/rtk` fork. All upstream features are welcome;
+telemetry is permanently excluded.
+
+### Security
+
+* **no-telemetry policy**: Codified and CI-enforced — `src/telemetry.rs`, `ureq`, `sha2`,
+  `hostname` deps, and phone-home patterns are blocked by the `telemetry-guard` CI job.
+  RTK is a CLI filter; it has no business making network calls.
+* **CI**: Added `ci.yml` with build/test/clippy/fmt on ubuntu + macOS, plus dedicated
+  telemetry guard job that fails on any phone-home code or forbidden dependencies.
+
+### Fork Maintenance
+
+* **install.sh**: Now points to `algolia/rtk` with pinned version `v0.22.2`
+  (overridable via `RTK_VERSION` env var). Previously fetched latest from upstream,
+  which could pull telemetry-enabled releases.
+* **Cargo.toml**: Repository field updated to `algolia/rtk`.
+* **All docs/scripts**: Install URLs, clone URLs, release download URLs, CI workflows,
+  and issue tracker links updated to `algolia/rtk`. Historical CHANGELOG links to
+  upstream preserved for attribution.
+* **CLAUDE.md**: Added fork maintenance strategy documenting sync policy (selective
+  cherry-pick), telemetry exclusion rules, and version pinning approach.
+* **security-check.yml**: Updated to target `main` branch (not `master`).
+
 ## [0.22.2](https://github.com/rtk-ai/rtk/compare/v0.22.1...v0.22.2) (2026-02-20)
 
 

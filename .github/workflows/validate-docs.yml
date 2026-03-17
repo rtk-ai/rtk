@@ -9,7 +9,7 @@ on:
       - '.claude/hooks/*.sh'
   push:
     branches:
-      - master
+      - main
       - feat/**
 
 jobs:

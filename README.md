@@ -4,7 +4,7 @@
 
 **High-performance CLI proxy to minimize LLM token consumption.**
 
-[Website](https://www.rtk-ai.app) | [GitHub](https://github.com/rtk-ai/rtk) | [Install](INSTALL.md)
+[Website](https://www.rtk-ai.app) | [GitHub](https://github.com/algolia/rtk) | [Install](INSTALL.md) | Forked from [rtk-ai/rtk](https://github.com/rtk-ai/rtk)
 
 rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens on common operations.
 
@@ -13,7 +13,7 @@ rtk filters and compresses command outputs before they reach your LLM context, s
 **There are TWO different projects named "rtk":**
 
 1. ✅ **This project (Rust Token Killer)** - LLM token optimizer
-   - Repos: `rtk-ai/rtk`
+   - Repos: `algolia/rtk` (fork of `rtk-ai/rtk`)
    - Purpose: Reduce Claude Code token consumption
 
 2. ❌ **reachingforthejack/rtk** - Rust Type Kit (DIFFERENT PROJECT)
@@ -74,7 +74,7 @@ brew install rtk
 ### Quick Install (Linux/macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/algolia/rtk/main/install.sh | sh
 ```
 
 > **Note**: rtk installs to `~/.local/bin` by default. If this directory is not in your PATH, add it:
@@ -91,7 +91,7 @@ rtk gain  # Must show token savings stats (not "command not found")
 
 ```bash
 # From rtk-ai upstream (maintained by pszymkowiak)
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/algolia/rtk
 
 # OR if published to crates.io
 cargo install rtk
@@ -101,7 +101,7 @@ cargo install rtk
 
 ### Alternative: Pre-built Binaries
 
-Download from [rtk-ai/releases](https://github.com/rtk-ai/rtk/releases):
+Download from [algolia/rtk releases](https://github.com/algolia/rtk/releases):
 - macOS: `rtk-x86_64-apple-darwin.tar.gz` / `rtk-aarch64-apple-darwin.tar.gz`
 - Linux: `rtk-x86_64-unknown-linux-gnu.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
@@ -240,7 +240,7 @@ Command              Count    Example
 git checkout            84    git checkout feature/my-branch
 cargo run               32    cargo run -- gain --help
 ----------------------------------------------------
--> github.com/rtk-ai/rtk/issues
+-> github.com/algolia/rtk/issues
 ```
 
 ### Containers
@@ -855,4 +855,4 @@ Contributions welcome! Please open an issue or PR on GitHub.
 
 - Website: https://www.rtk-ai.app
 - Email: contact@rtk-ai.app
-- Issues: https://github.com/rtk-ai/rtk/issues
+- Issues: https://github.com/algolia/rtk/issues

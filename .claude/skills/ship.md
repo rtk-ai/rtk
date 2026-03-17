@@ -187,7 +187,7 @@ gh release view v0.17.0
 ### 3. Installation Verification
 ```bash
 # Test installation from release
-curl -sSL https://github.com/rtk-ai/rtk/releases/download/v0.17.0/rtk-macos-latest -o rtk
+curl -sSL https://github.com/algolia/rtk/releases/download/v0.17.0/rtk-macos-latest -o rtk
 chmod +x rtk
 ./rtk --version
 # Should show v0.17.0

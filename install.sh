@@ -1,11 +1,12 @@
 #!/bin/sh
-# rtk installer - https://github.com/rtk-ai/rtk
-# Usage: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+# rtk installer - https://github.com/algolia/rtk
+# Usage: curl -fsSL https://raw.githubusercontent.com/algolia/rtk/main/install.sh | sh
 
 set -e
 
-REPO="rtk-ai/rtk"
+REPO="algolia/rtk"
 BINARY_NAME="rtk"
+PINNED_VERSION="v0.22.2"
 INSTALL_DIR="${RTK_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors
@@ -45,12 +46,10 @@ detect_arch() {
     esac
 }
 
-# Get latest release version
-get_latest_version() {
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    if [ -z "$VERSION" ]; then
-        error "Failed to get latest version"
-    fi
+# Get version: use RTK_VERSION env var, or fall back to pinned version
+get_version() {
+    VERSION="${RTK_VERSION:-$PINNED_VERSION}"
+    info "Using version: $VERSION (override with RTK_VERSION=vX.Y.Z)"
 }
 
 # Build target triple
@@ -110,7 +109,7 @@ main() {
     detect_os
     detect_arch
     get_target
-    get_latest_version
+    get_version
     install
     verify
 

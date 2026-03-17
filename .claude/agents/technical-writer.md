@@ -115,7 +115,7 @@ rtk --version  # Should show rtk X.Y.Z
 
 **Option 2: From Source**
 ```bash
-git clone https://github.com/rtk-ai/rtk.git
+git clone https://github.com/algolia/rtk.git
 cd rtk
 cargo install --path .
 rtk --version  # Verify installation
@@ -130,7 +130,7 @@ rtk gain  # Should show token savings analytics
 
 **From Source** (Cargo required):
 ```bash
-git clone https://github.com/rtk-ai/rtk.git
+git clone https://github.com/algolia/rtk.git
 cd rtk
 cargo install --path .
 
@@ -141,7 +141,7 @@ rtk --version
 
 **Binary Download** (faster):
 ```bash
-curl -sSL https://github.com/rtk-ai/rtk/releases/download/v0.16.0/rtk-linux-x86_64 -o rtk
+curl -sSL https://github.com/algolia/rtk/releases/download/v0.16.0/rtk-linux-x86_64 -o rtk
 chmod +x rtk
 sudo mv rtk /usr/local/bin/
 rtk --version
@@ -172,7 +172,7 @@ rtk --version
 - **Fix**: Uninstall and reinstall correct RTK
   ```bash
   cargo uninstall rtk
-  cargo install --path .  # From rtk-ai/rtk repo
+  cargo install --path .  # From algolia/rtk repo (fork of rtk-ai/rtk)
   rtk gain --help  # Should work
   ```
 ```

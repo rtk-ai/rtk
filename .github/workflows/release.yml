@@ -204,7 +204,7 @@ jobs:
       - name: Download checksums
         run: |
           gh release download "${{ steps.version.outputs.tag }}" \
-            --repo rtk-ai/rtk \
+            --repo algolia/rtk \
             --pattern checksums.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -227,16 +227,16 @@ jobs:
             license "MIT"
 
             if OS.mac? && Hardware::CPU.arm?
-              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-apple-darwin.tar.gz"
+              url "https://github.com/algolia/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-apple-darwin.tar.gz"
               sha256 "SHA_MAC_ARM_PLACEHOLDER"
             elsif OS.mac? && Hardware::CPU.intel?
-              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-apple-darwin.tar.gz"
+              url "https://github.com/algolia/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-apple-darwin.tar.gz"
               sha256 "SHA_MAC_INTEL_PLACEHOLDER"
             elsif OS.linux? && Hardware::CPU.arm?
-              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-unknown-linux-gnu.tar.gz"
+              url "https://github.com/algolia/rtk/releases/download/TAG_PLACEHOLDER/rtk-aarch64-unknown-linux-gnu.tar.gz"
               sha256 "SHA_LINUX_ARM_PLACEHOLDER"
             elsif OS.linux? && Hardware::CPU.intel?
-              url "https://github.com/rtk-ai/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-unknown-linux-gnu.tar.gz"
+              url "https://github.com/algolia/rtk/releases/download/TAG_PLACEHOLDER/rtk-x86_64-unknown-linux-gnu.tar.gz"
               sha256 "SHA_LINUX_INTEL_PLACEHOLDER"
             end
 

@@ -2,7 +2,7 @@ name: Security Check
 
 on:
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
 
 permissions:
   contents: read
@@ -46,7 +46,7 @@ jobs:
       - name: Critical files check
         run: |
           echo "### 🎯 Critical Files Modified" >> $GITHUB_STEP_SUMMARY
-          CRITICAL=$(git diff --name-only origin/master...HEAD | grep -E "(runner|summary|tracking|init|pnpm_cmd|container)\.rs|Cargo\.toml|workflows/.*\.yml" || true)
+          CRITICAL=$(git diff --name-only origin/main...HEAD | grep -E "(runner|summary|tracking|init|pnpm_cmd|container)\.rs|Cargo\.toml|workflows/.*\.yml" || true)
           if [ -n "$CRITICAL" ]; then
             echo "⚠️ **HIGH RISK**: The following critical files were modified:" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
@@ -66,7 +66,7 @@ jobs:
       - name: Dangerous patterns scan
         run: |
           echo "### 🚨 Dangerous Code Patterns" >> $GITHUB_STEP_SUMMARY
-          PATTERNS=$(git diff origin/master...HEAD | grep -E "Command::new\(\"sh\"|Command::new\(\"bash\"|\.env\(\"LD_PRELOAD|\.env\(\"PATH|reqwest::|std::net::|TcpStream|UdpSocket|unsafe \{|\.unwrap\(\) |panic!\(|todo!\(|unimplemented!\(" || true)
+          PATTERNS=$(git diff origin/main...HEAD | grep -E "Command::new\(\"sh\"|Command::new\(\"bash\"|\.env\(\"LD_PRELOAD|\.env\(\"PATH|reqwest::|std::net::|TcpStream|UdpSocket|unsafe \{|\.unwrap\(\) |panic!\(|todo!\(|unimplemented!\(" || true)
           if [ -n "$PATTERNS" ]; then
             echo "⚠️ **Potentially dangerous patterns detected:**" >> $GITHUB_STEP_SUMMARY
             echo '```diff' >> $GITHUB_STEP_SUMMARY
@@ -88,7 +88,7 @@ jobs:
       - name: New dependencies check
         run: |
           echo "### 📚 Dependencies Changes" >> $GITHUB_STEP_SUMMARY
-          if git diff origin/master...HEAD Cargo.toml | grep -E "^\+.*=" | grep -v "^\+\+\+" > new_deps.txt; then
+          if git diff origin/main...HEAD Cargo.toml | grep -E "^\+.*=" | grep -v "^\+\+\+" > new_deps.txt; then
             echo "⚠️ **New dependencies added:**" >> $GITHUB_STEP_SUMMARY
             echo '```toml' >> $GITHUB_STEP_SUMMARY
             cat new_deps.txt >> $GITHUB_STEP_SUMMARY

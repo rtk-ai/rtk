@@ -2,7 +2,7 @@ name: Benchmark Token Savings
 
 on:
   push:
-    branches: [master, main]
+    branches: [main]
   pull_request:
 
 jobs:

@@ -12,7 +12,7 @@ rtk: 'gain' is not a rtk command. See 'rtk --help'.
 ```
 
 ### Root Cause
-You installed the **wrong rtk package**. You have **Rust Type Kit** (reachingforthejack/rtk) instead of **Rust Token Killer** (rtk-ai/rtk).
+You installed the **wrong rtk package**. You have **Rust Type Kit** (reachingforthejack/rtk) instead of **Rust Token Killer** (algolia/rtk, fork of rtk-ai/rtk).
 
 ### Solution
 
@@ -25,12 +25,12 @@ cargo uninstall rtk
 
 #### Quick Install (Linux/macOS)
 ```bash
-curl -fsSL https://github.com/rtk-ai/rtk/blob/master/install.sh | sh
+curl -fsSL https://github.com/algolia/rtk/blob/main/install.sh | sh
 ```
 
 #### Alternative: Manual Installation
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/algolia/rtk
 ```
 
 **3. Verify installation:**
@@ -49,7 +49,7 @@ If `rtk gain` now works, installation is correct.
 
 | Project | Repository | Purpose | Key Command |
 |---------|-----------|---------|-------------|
-| **Rust Token Killer** ✅ | rtk-ai/rtk | LLM token optimizer for Claude Code | `rtk gain` |
+| **Rust Token Killer** ✅ | algolia/rtk (fork of rtk-ai/rtk) | LLM token optimizer for Claude Code | `rtk gain` |
 | **Rust Type Kit** ❌ | reachingforthejack/rtk | Rust codebase query and type generator | `rtk query` |
 
 ### How to Identify Which One You Have
@@ -76,11 +76,11 @@ If **Rust Type Kit** is published to crates.io under the name `rtk`, running `ca
 
 ```bash
 # CORRECT - Token Killer
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/algolia/rtk
 
-# OR install from fork
-git clone https://github.com/rtk-ai/rtk.git
-cd rtk && git checkout feat/all-features
+# OR install from clone
+git clone https://github.com/algolia/rtk.git
+cd rtk
 cargo install --path . --force
 ```
 
@@ -250,14 +250,14 @@ rustc --version  # Should be 1.70+ for most features
 ```
 
 **4. If still fails, report issue:**
-- GitHub: https://github.com/rtk-ai/rtk/issues
+- GitHub: https://github.com/algolia/rtk/issues
 
 ---
 
 ## Need More Help?
 
 **Report issues:**
-- Fork-specific: https://github.com/rtk-ai/rtk/issues
+- Fork-specific: https://github.com/algolia/rtk/issues
 - Upstream: https://github.com/rtk-ai/rtk/issues
 
 **Run the diagnostic script:**

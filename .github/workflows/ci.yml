@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all
+
+      - name: Build release
+        run: cargo build --release
+
+  telemetry-guard:
+    name: Telemetry Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Block telemetry code
+        run: |
+          echo "## Telemetry Guard" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          FAILED=0
+
+          # Check for telemetry module
+          if [ -f src/telemetry.rs ]; then
+            echo "::error::src/telemetry.rs exists — this fork does not permit telemetry"
+            echo "- src/telemetry.rs detected" >> $GITHUB_STEP_SUMMARY
+            FAILED=1
+          fi
+
+          # Check for telemetry dependencies
+          for dep in ureq reqwest hyper sha2 hostname; do
+            if grep -q "^${dep} " Cargo.toml 2>/dev/null || grep -q "\"${dep}\"" Cargo.toml 2>/dev/null; then
+              echo "::error::Forbidden dependency '${dep}' found in Cargo.toml"
+              echo "- Forbidden dep: ${dep}" >> $GITHUB_STEP_SUMMARY
+              FAILED=1
+            fi
+          done
+
+          # Check for phone-home patterns in Rust source
+          if grep -rE "telemetry|phone.?home|TELEMETRY_URL|TELEMETRY_TOKEN|send_ping|maybe_ping" src/ --include="*.rs" | grep -v "// *no.telemetry\|tracking.rs\|SECURITY.md"; then
+            echo "::error::Telemetry-related code patterns found in src/"
+            echo "- Telemetry patterns in source" >> $GITHUB_STEP_SUMMARY
+            FAILED=1
+          fi
+
+          # Check for HTTP client usage (ureq/reqwest) in source
+          if grep -rE "ureq::|reqwest::" src/ --include="*.rs"; then
+            echo "::error::HTTP client usage found in source — RTK should not make network calls"
+            echo "- HTTP client usage in source" >> $GITHUB_STEP_SUMMARY
+            FAILED=1
+          fi
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "This fork maintains a strict no-telemetry policy." >> $GITHUB_STEP_SUMMARY
+            echo "See CLAUDE.md 'Telemetry Exclusion Policy' for details." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          echo "No telemetry code detected." >> $GITHUB_STEP_SUMMARY

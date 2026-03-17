@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **rtk (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption by filtering and compressing command outputs. It achieves 60-90% token savings on common development operations through smart filtering, grouping, truncation, and deduplication.
 
-This is a fork with critical fixes for git argument parsing and modern JavaScript stack support (pnpm, vitest, Next.js, TypeScript, Playwright, Prisma).
+**This is `algolia/rtk`** — Algolia's maintained fork of [rtk-ai/rtk](https://github.com/rtk-ai/rtk) (upstream). The fork was created before upstream added telemetry and is maintained independently with selective cherry-picks.
 
 ### ⚠️ Name Collision Warning
 
 **Two different "rtk" projects exist:**
-- ✅ **This project**: Rust Token Killer (rtk-ai/rtk)
+- ✅ **This project**: Rust Token Killer (`algolia/rtk`, forked from `rtk-ai/rtk`)
 - ❌ **reachingforthejack/rtk**: Rust Type Kit (DIFFERENT - generates Rust types)
 
 **Verify correct installation:**
@@ -21,6 +21,52 @@ rtk gain       # Should show token savings stats (NOT "command not found")
 ```
 
 If `rtk gain` fails, you have the wrong package installed.
+
+## Fork Maintenance Strategy
+
+### Identity
+
+- **Our repo**: `algolia/rtk` (origin)
+- **Upstream**: `rtk-ai/rtk` (upstream remote)
+- All install scripts, docs, and Cargo.toml point to `algolia/rtk`
+- Upstream attribution preserved in CHANGELOG and commit history
+
+### Sync Policy: Selective Cherry-Pick
+
+We do **not** merge upstream wholesale. Instead:
+
+1. **Watch**: Upstream commits surface as GitHub issues (via watch bot)
+2. **Triage**: Each issue is reviewed — accept, skip, or defer
+3. **Cherry-pick**: Accepted commits are cherry-picked onto our main branch
+4. **Close**: Issue closed with rationale (cherry-picked, skipped, or N/A)
+
+**What we want from upstream:**
+- Bug fixes (exit codes, regressions, platform compat)
+- New command filters (dotnet, AWS, psql, etc.)
+- Security hardening (trust boundaries, input validation)
+- Performance improvements
+- Hook system and rewrite engine improvements
+
+**What we always reject:**
+- `src/telemetry.rs` and any phone-home code
+- Dependencies serving only telemetry: `ureq`, `sha2`, `hostname`
+- Opt-out telemetry config fields (`TelemetryConfig`, `telemetry_enabled()`)
+- Any code that sends data to external servers
+
+### Telemetry Exclusion Policy
+
+**Hard rule: zero network telemetry.** RTK is a CLI proxy — it reads command output and prints filtered text. It has no business phoning home.
+
+- `src/telemetry.rs` must never exist in this fork
+- No HTTP client deps (`ureq`, `reqwest`, `hyper`) unless for a user-facing feature
+- `tracking.rs` is local-only SQLite — that's fine and encouraged
+- If upstream adds telemetry hooks in existing modules, strip them during cherry-pick
+
+### Version Pinning
+
+- `install.sh` pins to a specific release tag (e.g., `v0.22.2`)
+- Pin is updated manually after testing a new upstream sync
+- `Cargo.toml` version reflects our fork's release, not upstream's
 
 ## Development Commands
 
