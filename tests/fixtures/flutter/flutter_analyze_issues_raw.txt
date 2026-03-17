@@ -1,0 +1,5 @@
+Analyzing tradesmen...
+
+warning - Dead code - libeaturesuth\presentation\screens\dashboard_placeholder_screen.dart:60:50 - dead_code
+warning - The left operand can't be null - libeaturesuth\presentation\screens\dashboard_placeholder_screen.dart:60:53 - dead_null_aware_expression
+   info - Unnecessary use of multiple underscores - testeaturesuth\presentation\screens\dashboard_placeholder_screen_test.dart:113:11 - unnecessary_underscores

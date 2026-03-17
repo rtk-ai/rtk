@@ -44,6 +44,8 @@ pub const PATTERNS: &[&str] = &[
     // Go tooling
     r"^go\s+(test|build|vet)",
     r"^golangci-lint(\s|$)",
+    // Flutter tooling
+    r"^flutter\s+(test|analyze|build|pub)",
     // AWS CLI
     r"^aws\s+",
     // PostgreSQL
@@ -330,6 +332,20 @@ pub const RULES: &[RtkRule] = &[
         category: "Go",
         savings_pct: 85.0,
         subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Flutter tooling
+    RtkRule {
+        rtk_cmd: "rtk flutter",
+        rewrite_prefixes: &["flutter"],
+        category: "Flutter",
+        savings_pct: 85.0,
+        subcmd_savings: &[
+            ("test", 90.0),
+            ("analyze", 80.0),
+            ("build", 85.0),
+            ("pub", 70.0),
+        ],
         subcmd_status: &[],
     },
     // AWS CLI

@@ -36,6 +36,10 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         "Network" => 150,
         "GitHub" => 200,
         "PackageManager" => 150,
+        "Flutter" => match subcmd {
+            "test" => 500,
+            _ => 200,
+        },
         _ => 150,
     }
 }

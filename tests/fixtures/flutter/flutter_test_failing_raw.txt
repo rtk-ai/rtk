@@ -1,0 +1,10 @@
+00:00 +0: loading D:/dev/project/test/file_test.dart
+00:01 +0: TsIconSize — constants compact is 20
+00:01 +1: TsIconSize — constants compact is 20
+00:02 +2 -1: failing test name [E]
+  Expected: 'foo'
+    Actual: 'bar'
+  package:test/src/...
+  dart:...
+00:02 +2 -1: Some tests failed.
+To run this test again: dart.exe test path/to/test.dart -p vm --plain-name "test name"
