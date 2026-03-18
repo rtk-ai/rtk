@@ -459,13 +459,29 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
 }
 
 /// Full uninstall: remove hook, RTK.md, @RTK.md reference, settings.json entry
-pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
+pub fn uninstall(global: bool, gemini: bool, verbose: u8) -> Result<()> {
     if !global {
         anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
     }
 
     let claude_dir = resolve_claude_dir()?;
     let mut removed = Vec::new();
+
+    // Also uninstall Gemini artifacts if --gemini or always (clean everything)
+    if gemini {
+        let gemini_removed = uninstall_gemini(verbose)?;
+        removed.extend(gemini_removed);
+        if !removed.is_empty() {
+            println!("RTK uninstalled (Gemini):");
+            for item in &removed {
+                println!("  - {}", item);
+            }
+            println!("\nRestart Gemini CLI to apply changes.");
+        } else {
+            println!("RTK Gemini support was not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
 
     // 1. Remove hook file
     let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
@@ -1400,6 +1416,218 @@ fn run_opencode_only_mode(verbose: u8) -> Result<()> {
     println!("  OpenCode: {}", opencode_plugin_path.display());
     println!("  Restart OpenCode. Test with: git status\n");
     Ok(())
+}
+
+// ─── Gemini CLI support ───────────────────────────────────────────
+
+/// Gemini hook wrapper script — delegates to `rtk hook gemini`
+const GEMINI_HOOK_SCRIPT: &str = r#"#!/bin/bash
+exec rtk hook gemini
+"#;
+
+/// Resolve the Gemini config directory (~/.gemini)
+fn resolve_gemini_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Cannot determine home directory")?;
+    Ok(home.join(".gemini"))
+}
+
+/// Entry point for `rtk init --gemini`
+pub fn run_gemini(global: bool, hook_only: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Gemini support is global-only. Use: rtk init -g --gemini");
+    }
+
+    let gemini_dir = resolve_gemini_dir()?;
+    fs::create_dir_all(&gemini_dir).with_context(|| {
+        format!(
+            "Failed to create Gemini config dir: {}",
+            gemini_dir.display()
+        )
+    })?;
+
+    // 1. Install hook script
+    let hook_dir = gemini_dir.join("hooks");
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("Failed to create hook dir: {}", hook_dir.display()))?;
+    let hook_path = hook_dir.join("rtk-hook-gemini.sh");
+    write_if_changed(&hook_path, GEMINI_HOOK_SCRIPT, "Gemini hook", verbose)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
+
+    // 2. Install GEMINI.md (RTK awareness for Gemini)
+    if !hook_only {
+        let gemini_md_path = gemini_dir.join("GEMINI.md");
+        // Reuse the same slim RTK awareness content
+        write_if_changed(&gemini_md_path, RTK_SLIM, "GEMINI.md", verbose)?;
+    }
+
+    // 3. Patch ~/.gemini/settings.json
+    patch_gemini_settings(&gemini_dir, &hook_path, patch_mode, verbose)?;
+
+    println!("\nGemini CLI hook installed (global).\n");
+    println!("  Hook: {}", hook_path.display());
+    if !hook_only {
+        println!("  GEMINI.md: {}", gemini_dir.join("GEMINI.md").display());
+    }
+    println!("  Restart Gemini CLI. Test with: git status\n");
+    Ok(())
+}
+
+/// Patch ~/.gemini/settings.json with the BeforeTool hook
+fn patch_gemini_settings(
+    gemini_dir: &Path,
+    hook_path: &Path,
+    patch_mode: PatchMode,
+    verbose: u8,
+) -> Result<()> {
+    let settings_path = gemini_dir.join("settings.json");
+    let hook_cmd = hook_path.to_string_lossy().to_string();
+
+    // Read or create settings.json
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Check if hook already registered
+    if let Some(hooks) = settings.pointer("/hooks/BeforeTool") {
+        if let Some(arr) = hooks.as_array() {
+            if arr.iter().any(|h| {
+                h.pointer("/hooks/0/command")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |c| c.contains("rtk"))
+            }) {
+                if verbose > 0 {
+                    eprintln!("Gemini settings.json already has RTK hook");
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    // Ask user before patching
+    if patch_mode == PatchMode::Skip {
+        println!(
+            "\nManual setup needed: add RTK hook to {}\n\
+             See: https://github.com/rtk-ai/rtk#gemini-cli",
+            settings_path.display()
+        );
+        return Ok(());
+    }
+
+    if patch_mode == PatchMode::Ask {
+        print!("Patch {} with RTK hook? [y/N] ", settings_path.display());
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Skipped. Add hook manually later.");
+            return Ok(());
+        }
+    }
+
+    // Build hook entry matching Gemini CLI format
+    let hook_entry = serde_json::json!({
+        "matcher": "run_shell_command",
+        "hooks": [{
+            "type": "command",
+            "command": hook_cmd
+        }]
+    });
+
+    // Insert into settings
+    let hooks = settings
+        .as_object_mut()
+        .context("settings.json is not an object")?
+        .entry("hooks")
+        .or_insert(serde_json::json!({}));
+
+    let before_tool = hooks
+        .as_object_mut()
+        .context("hooks is not an object")?
+        .entry("BeforeTool")
+        .or_insert(serde_json::json!([]));
+
+    before_tool
+        .as_array_mut()
+        .context("BeforeTool is not an array")?
+        .push(hook_entry);
+
+    // Write atomically
+    let content = serde_json::to_string_pretty(&settings)?;
+    let tmp = NamedTempFile::new_in(gemini_dir)?;
+    fs::write(tmp.path(), &content)?;
+    tmp.persist(&settings_path)
+        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Patched {}", settings_path.display());
+    }
+
+    Ok(())
+}
+
+/// Remove Gemini artifacts during uninstall
+fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    let gemini_dir = match resolve_gemini_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(removed),
+    };
+
+    // Remove hook
+    let hook_path = gemini_dir.join("hooks").join("rtk-hook-gemini.sh");
+    if hook_path.exists() {
+        fs::remove_file(&hook_path)
+            .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
+        removed.push(format!("Gemini hook: {}", hook_path.display()));
+    }
+
+    // Remove GEMINI.md
+    let gemini_md = gemini_dir.join("GEMINI.md");
+    if gemini_md.exists() {
+        fs::remove_file(&gemini_md)
+            .with_context(|| format!("Failed to remove {}", gemini_md.display()))?;
+        removed.push(format!("GEMINI.md: {}", gemini_md.display()));
+    }
+
+    // Remove hook from settings.json
+    let settings_path = gemini_dir.join("settings.json");
+    if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)?;
+        if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(arr) = settings
+                .pointer_mut("/hooks/BeforeTool")
+                .and_then(|v| v.as_array_mut())
+            {
+                let before = arr.len();
+                arr.retain(|h| {
+                    !h.pointer("/hooks/0/command")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |c| c.contains("rtk"))
+                });
+                if arr.len() < before {
+                    let new_content = serde_json::to_string_pretty(&settings)?;
+                    fs::write(&settings_path, new_content)?;
+                    removed.push("Gemini settings.json: removed RTK hook entry".to_string());
+                }
+            }
+        }
+    }
+
+    if verbose > 0 && !removed.is_empty() {
+        eprintln!("Gemini artifacts removed");
+    }
+
+    Ok(removed)
 }
 
 #[cfg(test)]
