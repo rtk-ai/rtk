@@ -268,13 +268,13 @@ fn print_risk_summary(content: &str) {
     println!("  Filters: {}", filter_count);
 
     if has_replace {
-        println!("  ⚠ Contains 'replace' rules (can rewrite output)");
+        println!("  [!] Contains 'replace' rules (can rewrite output)");
     }
     if has_match_output {
-        println!("  ⚠ Contains 'match_output' rules (can replace entire output)");
+        println!("  [!] Contains 'match_output' rules (can replace entire output)");
     }
     if has_dot_pattern {
-        println!("  ⚠ Contains catch-all pattern '.' (matches everything)");
+        println!("  [!] Contains catch-all pattern '.' (matches everything)");
     }
     if !has_replace && !has_match_output && !has_dot_pattern {
         println!("  No high-risk patterns detected.");

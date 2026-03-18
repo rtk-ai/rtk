@@ -182,7 +182,7 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
 
     while i < lines.len() {
         let line = lines[i];
-        if line.contains('✗') || line.contains("FAIL") {
+        if line.contains("[x]") || line.contains("FAIL") {
             let mut error_lines = vec![line.to_string()];
             i += 1;
 

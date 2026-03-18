@@ -348,7 +348,7 @@ fn filter_go_test_json(output: &str) -> String {
 
     if !has_failures {
         return format!(
-            "✓ Go test: {} passed in {} packages",
+            "Go test: {} passed in {} packages",
             total_pass, total_packages
         );
     }
@@ -372,7 +372,7 @@ fn filter_go_test_json(output: &str) -> String {
         }
 
         result.push_str(&format!(
-            "\n📦 {} [build failed]\n",
+            "\n{} [build failed]\n",
             compact_package_name(package)
         ));
 
@@ -392,14 +392,14 @@ fn filter_go_test_json(output: &str) -> String {
         }
 
         result.push_str(&format!(
-            "\n📦 {} ({} passed, {} failed)\n",
+            "\n{} ({} passed, {} failed)\n",
             compact_package_name(package),
             pkg_result.pass,
             pkg_result.fail
         ));
 
         for (test, outputs) in &pkg_result.failed_tests {
-            result.push_str(&format!("  ❌ {}\n", test));
+            result.push_str(&format!("  [FAIL] {}\n", test));
 
             // Show failure output (limit to key lines)
             let relevant_lines: Vec<&String> = outputs
@@ -452,7 +452,7 @@ fn filter_go_build(output: &str) -> String {
     }
 
     if errors.is_empty() {
-        return "✓ Go build: Success".to_string();
+        return "Go build: Success".to_string();
     }
 
     let mut result = String::new();
@@ -484,7 +484,7 @@ fn filter_go_vet(output: &str) -> String {
     }
 
     if issues.is_empty() {
-        return "✓ Go vet: No issues found".to_string();
+        return "Go vet: No issues found".to_string();
     }
 
     let mut result = String::new();
@@ -524,7 +524,7 @@ mod tests {
 {"Time":"2024-01-01T10:00:02Z","Action":"pass","Package":"example.com/foo","Elapsed":0.5}"#;
 
         let result = filter_go_test_json(output);
-        assert!(result.contains("✓ Go test"));
+        assert!(result.contains("Go test"));
         assert!(result.contains("1 passed"));
         assert!(result.contains("1 packages"));
     }
@@ -547,7 +547,7 @@ mod tests {
     fn test_filter_go_build_success() {
         let output = "";
         let result = filter_go_build(output);
-        assert!(result.contains("✓ Go build"));
+        assert!(result.contains("Go build"));
         assert!(result.contains("Success"));
     }
 
@@ -567,7 +567,7 @@ main.go:15:2: cannot use x (type int) as type string"#;
     fn test_filter_go_vet_no_issues() {
         let output = "";
         let result = filter_go_vet(output);
-        assert!(result.contains("✓ Go vet"));
+        assert!(result.contains("Go vet"));
         assert!(result.contains("No issues found"));
     }
 

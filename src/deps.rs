@@ -26,7 +26,7 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
     if cargo_path.exists() {
         found = true;
         raw.push_str(&fs::read_to_string(&cargo_path).unwrap_or_default());
-        rtk.push_str("📦 Rust (Cargo.toml):\n");
+        rtk.push_str("Rust (Cargo.toml):\n");
         rtk.push_str(&summarize_cargo_str(&cargo_path)?);
     }
 
@@ -34,7 +34,7 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
     if package_path.exists() {
         found = true;
         raw.push_str(&fs::read_to_string(&package_path).unwrap_or_default());
-        rtk.push_str("📦 Node.js (package.json):\n");
+        rtk.push_str("Node.js (package.json):\n");
         rtk.push_str(&summarize_package_json_str(&package_path)?);
     }
 
@@ -42,7 +42,7 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
     if requirements_path.exists() {
         found = true;
         raw.push_str(&fs::read_to_string(&requirements_path).unwrap_or_default());
-        rtk.push_str("📦 Python (requirements.txt):\n");
+        rtk.push_str("Python (requirements.txt):\n");
         rtk.push_str(&summarize_requirements_str(&requirements_path)?);
     }
 
@@ -50,7 +50,7 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
     if pyproject_path.exists() {
         found = true;
         raw.push_str(&fs::read_to_string(&pyproject_path).unwrap_or_default());
-        rtk.push_str("📦 Python (pyproject.toml):\n");
+        rtk.push_str("Python (pyproject.toml):\n");
         rtk.push_str(&summarize_pyproject_str(&pyproject_path)?);
     }
 
@@ -58,7 +58,7 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
     if gomod_path.exists() {
         found = true;
         raw.push_str(&fs::read_to_string(&gomod_path).unwrap_or_default());
-        rtk.push_str("📦 Go (go.mod):\n");
+        rtk.push_str("Go (go.mod):\n");
         rtk.push_str(&summarize_gomod_str(&gomod_path)?);
     }
 

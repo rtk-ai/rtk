@@ -62,7 +62,7 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
 
     // Print categorized
     if !path_vars.is_empty() {
-        println!("📂 PATH Variables:");
+        println!("PATH Variables:");
         for (k, v) in &path_vars {
             if k == "PATH" {
                 // Split PATH for readability
@@ -81,28 +81,28 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
     }
 
     if !lang_vars.is_empty() {
-        println!("\n🔧 Language/Runtime:");
+        println!("\nLanguage/Runtime:");
         for (k, v) in &lang_vars {
             println!("  {}={}", k, v);
         }
     }
 
     if !cloud_vars.is_empty() {
-        println!("\n☁️  Cloud/Services:");
+        println!("\nCloud/Services:");
         for (k, v) in &cloud_vars {
             println!("  {}={}", k, v);
         }
     }
 
     if !tool_vars.is_empty() {
-        println!("\n🛠️  Tools:");
+        println!("\nTools:");
         for (k, v) in &tool_vars {
             println!("  {}={}", k, v);
         }
     }
 
     if !other_vars.is_empty() {
-        println!("\n📋 Other:");
+        println!("\nOther:");
         for (k, v) in other_vars.iter().take(20) {
             println!("  {}={}", k, v);
         }
@@ -118,7 +118,7 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         + tool_vars.len()
         + other_vars.len().min(20);
     if filter.is_none() {
-        println!("\n📊 Total: {} vars (showing {} relevant)", total, shown);
+        println!("\nTotal: {} vars (showing {} relevant)", total, shown);
     }
 
     let raw: String = vars.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();

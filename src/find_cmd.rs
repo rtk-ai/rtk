@@ -305,7 +305,7 @@ pub fn run(
     let dirs_count = dirs.len();
     let total_files = files.len();
 
-    println!("📁 {}F {}D:", total_files, dirs_count);
+    println!("{}F {}D:", total_files, dirs_count);
     println!();
 
     // Display with proper --max limiting (count individual files)
