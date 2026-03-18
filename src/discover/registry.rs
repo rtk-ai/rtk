@@ -2675,6 +2675,22 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_pnpm_lint_routes_to_pnpm() {
+        assert_eq!(
+            rewrite_command("pnpm lint", &[]),
+            Some("rtk pnpm lint".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_lint_with_args_routes_to_pnpm() {
+        assert_eq!(
+            rewrite_command("pnpm lint --fix", &[]),
+            Some("rtk pnpm lint --fix".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_npx() {
         assert_eq!(
             rewrite_command("npx svgo", &[]),
