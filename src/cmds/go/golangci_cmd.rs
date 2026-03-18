@@ -46,7 +46,7 @@ struct GolangciOutput {
 
 /// Parse major version number from `golangci-lint --version` output.
 /// Returns 1 on any failure (safe fallback — v1 behaviour).
-fn parse_major_version(version_output: &str) -> u32 {
+pub(crate) fn parse_major_version(version_output: &str) -> u32 {
     // Handles:
     //   "golangci-lint version 1.59.1"
     //   "golangci-lint has version 2.10.0 built with ..."
@@ -62,7 +62,7 @@ fn parse_major_version(version_output: &str) -> u32 {
 
 /// Run `golangci-lint --version` and return the major version number.
 /// Returns 1 on any failure.
-fn detect_major_version() -> u32 {
+pub(crate) fn detect_major_version() -> u32 {
     let output = resolved_command("golangci-lint").arg("--version").output();
 
     match output {
@@ -163,7 +163,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 }
 
 /// Filter golangci-lint JSON output - group by linter and file
-fn filter_golangci_json(output: &str, version: u32) -> String {
+pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     let result: Result<GolangciOutput, _> = serde_json::from_str(output);
 
     let golangci_output = match result {
