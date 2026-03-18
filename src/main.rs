@@ -323,9 +323,9 @@ enum Commands {
         extra_args: Vec<String>,
     },
 
-    /// Initialize rtk instructions in CLAUDE.md
+    /// Initialize rtk instructions for assistant CLI usage
     Init {
-        /// Add to global ~/.claude/CLAUDE.md instead of local
+        /// Add to global assistant config directory instead of local project file
         #[arg(short, long)]
         global: bool,
 
@@ -357,9 +357,13 @@ enum Commands {
         #[arg(long = "no-patch", group = "patch")]
         no_patch: bool,
 
-        /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
+        /// Remove RTK artifacts for the selected assistant mode
         #[arg(long)]
         uninstall: bool,
+
+        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        #[arg(long)]
+        codex: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -1632,11 +1636,12 @@ fn main() -> Result<()> {
             auto_patch,
             no_patch,
             uninstall,
+            codex,
         } => {
             if show {
-                init::show_config()?;
+                init::show_config(codex)?;
             } else if uninstall {
-                init::uninstall(global, gemini, cli.verbose)?;
+                init::uninstall(global, gemini, codex, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1663,6 +1668,7 @@ fn main() -> Result<()> {
                     install_opencode,
                     claude_md,
                     hook_only,
+                    codex,
                     patch_mode,
                     cli.verbose,
                 )?;
