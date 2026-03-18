@@ -215,13 +215,58 @@ pub fn run(
 
     // Mode selection
     match (install_claude, install_opencode, claude_md, hook_only) {
-        (false, true, _, _) => run_opencode_only_mode(verbose),
-        (true, opencode, true, _) => run_claude_md_mode(global, verbose, opencode),
-        (true, opencode, false, true) => run_hook_only_mode(global, patch_mode, verbose, opencode),
-        (true, opencode, false, false) => run_default_mode(global, patch_mode, verbose, opencode),
+        (false, true, _, _) => run_opencode_only_mode(verbose)?,
+        (true, opencode, true, _) => run_claude_md_mode(global, verbose, opencode)?,
+        (true, opencode, false, true) => run_hook_only_mode(global, patch_mode, verbose, opencode)?,
+        (true, opencode, false, false) => run_default_mode(global, patch_mode, verbose, opencode)?,
         (false, false, _, _) => {
             anyhow::bail!("at least one of install_claude or install_opencode must be true")
         }
+    }
+
+    maybe_prompt_telemetry_consent();
+    Ok(())
+}
+
+/// Prompt for telemetry consent once, during `rtk init`.
+/// Skipped if telemetry is not compiled in, or if the user already answered.
+fn maybe_prompt_telemetry_consent() {
+    use std::io::{self, BufRead, IsTerminal, Write};
+
+    // No telemetry endpoint compiled in → nothing to ask
+    if !crate::telemetry::is_configured() {
+        return;
+    }
+
+    // Already answered → don't ask again
+    if crate::config::telemetry_enabled().is_some() {
+        return;
+    }
+
+    // Non-interactive / CI: auto-decline without prompting
+    if !io::stdin().is_terminal() {
+        let _ = crate::telemetry::record_consent(false);
+        return;
+    }
+
+    eprintln!();
+    eprintln!("  Telemetry: RTK can send anonymous usage stats (version, OS, token");
+    eprintln!("  savings). No personal data, no command arguments, no file content.");
+    eprint!("  Share anonymous stats? [y/N] ");
+    let _ = io::stderr().flush();
+
+    let mut line = String::new();
+    let consented = io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map(|_| matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+        .unwrap_or(false);
+
+    let _ = crate::telemetry::record_consent(consented);
+    if consented {
+        eprintln!("  Thanks! You can opt out anytime: RTK_TELEMETRY_DISABLED=1");
+    } else {
+        eprintln!("  Telemetry disabled. Re-run `rtk init` to change your answer.");
     }
 }
 

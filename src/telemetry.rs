@@ -15,14 +15,17 @@ pub fn maybe_ping() {
         return;
     }
 
-    // Check opt-out: env var
+    // Respect explicit env-var opt-out
     if std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1" {
         return;
     }
 
-    // Check opt-out: config.toml
-    if let Some(false) = config::telemetry_enabled() {
-        return;
+    // Opt-in model: only send if user explicitly consented (Some(true)).
+    // None = not yet asked → skip silently.
+    // Some(false) = declined → skip.
+    match config::telemetry_enabled() {
+        Some(true) => {}
+        _ => return,
     }
 
     // Check last ping time
@@ -163,6 +166,20 @@ fn telemetry_marker_path() -> PathBuf {
 
 fn touch_marker(path: &PathBuf) {
     let _ = std::fs::write(path, b"");
+}
+
+/// Whether a telemetry endpoint is compiled into this binary.
+/// Returns false for builds that didn't set RTK_TELEMETRY_URL at compile time.
+pub fn is_configured() -> bool {
+    TELEMETRY_URL.is_some()
+}
+
+/// Persist the user's consent decision to ~/.config/rtk/config.toml.
+/// Called by `rtk init` after prompting the user.
+pub fn record_consent(opted_in: bool) -> anyhow::Result<()> {
+    let mut cfg = crate::config::Config::load().unwrap_or_default();
+    cfg.telemetry.enabled = Some(opted_in);
+    cfg.save()
 }
 
 #[cfg(test)]
