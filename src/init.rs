@@ -209,6 +209,7 @@ pub fn run(
     install_claude: bool,
     install_opencode: bool,
     install_cursor: bool,
+    install_windsurf: bool,
     claude_md: bool,
     hook_only: bool,
     codex: bool,
@@ -244,21 +245,24 @@ pub fn run(
         anyhow::bail!("Cursor hooks are global-only. Use: rtk init -g --agent cursor");
     }
 
+    if install_windsurf && !global {
+        anyhow::bail!("Windsurf support is global-only. Use: rtk init -g --agent windsurf");
+    }
+
+    // Windsurf-only mode
+    if install_windsurf {
+        return run_windsurf_mode(verbose);
+    }
+
     // Mode selection (Claude Code / OpenCode)
     match (install_claude, install_opencode, claude_md, hook_only) {
         (false, true, _, _) => run_opencode_only_mode(verbose)?,
         (true, opencode, true, _) => run_claude_md_mode(global, verbose, opencode)?,
-        (true, opencode, false, true) => {
-            run_hook_only_mode(global, patch_mode, verbose, opencode)?
-        }
-        (true, opencode, false, false) => {
-            run_default_mode(global, patch_mode, verbose, opencode)?
-        }
+        (true, opencode, false, true) => run_hook_only_mode(global, patch_mode, verbose, opencode)?,
+        (true, opencode, false, false) => run_default_mode(global, patch_mode, verbose, opencode)?,
         (false, false, _, _) => {
             if !install_cursor {
-                anyhow::bail!(
-                    "at least one of install_claude or install_opencode must be true"
-                )
+                anyhow::bail!("at least one of install_claude or install_opencode must be true")
             }
         }
     }
@@ -514,8 +518,8 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         if !global {
             anyhow::bail!("Cursor uninstall only works with --global flag");
         }
-        let cursor_removed = remove_cursor_hooks(verbose)
-            .context("Failed to remove Cursor hooks")?;
+        let cursor_removed =
+            remove_cursor_hooks(verbose).context("Failed to remove Cursor hooks")?;
         if !cursor_removed.is_empty() {
             println!("RTK uninstalled (Cursor):");
             for item in &cursor_removed {
@@ -1153,6 +1157,48 @@ fn run_claude_md_mode(global: bool, verbose: u8, install_opencode: bool) -> Resu
 }
 
 /// Codex mode: slim RTK.md + @RTK.md reference in AGENTS.md
+// ─── Windsurf support ─────────────────────────────────────────
+
+/// Embedded Windsurf RTK rules
+const WINDSURF_RULES: &str = include_str!("../hooks/windsurf-rtk-rules.md");
+
+/// Resolve Windsurf user config directory (~/.codeium/windsurf)
+fn resolve_windsurf_dir() -> Result<PathBuf> {
+    dirs::home_dir()
+        .map(|h| h.join(".codeium").join("windsurf"))
+        .context("Cannot determine home directory")
+}
+
+fn run_windsurf_mode(verbose: u8) -> Result<()> {
+    // Windsurf reads .windsurfrules from the project root (workspace-scoped).
+    // Global rules (~/.codeium/windsurf/memories/global_rules.md) are unreliable.
+    let rules_path = PathBuf::from(".windsurfrules");
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        println!("\nRTK already configured for Windsurf in this project.\n");
+        println!("  Rules: .windsurfrules (already present)");
+    } else {
+        let new_content = if existing.trim().is_empty() {
+            WINDSURF_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), WINDSURF_RULES)
+        };
+        fs::write(&rules_path, &new_content).context("Failed to write .windsurfrules")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote .windsurfrules");
+        }
+
+        println!("\nRTK configured for Windsurf Cascade.\n");
+        println!("  Rules: .windsurfrules (installed)");
+    }
+    println!("  Cascade will now use rtk commands for token savings.");
+    println!("  Restart Windsurf. Test with: git status\n");
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -1502,8 +1548,12 @@ fn resolve_cursor_dir() -> Result<PathBuf> {
 fn install_cursor_hooks(verbose: u8) -> Result<()> {
     let cursor_dir = resolve_cursor_dir()?;
     let hooks_dir = cursor_dir.join("hooks");
-    fs::create_dir_all(&hooks_dir)
-        .with_context(|| format!("Failed to create Cursor hooks directory: {}", hooks_dir.display()))?;
+    fs::create_dir_all(&hooks_dir).with_context(|| {
+        format!(
+            "Failed to create Cursor hooks directory: {}",
+            hooks_dir.display()
+        )
+    })?;
 
     // 1. Write hook script
     let hook_path = hooks_dir.join("rtk-rewrite.sh");
@@ -1512,8 +1562,12 @@ fn install_cursor_hooks(verbose: u8) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("Failed to set Cursor hook permissions: {}", hook_path.display()))?;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).with_context(|| {
+            format!(
+                "Failed to set Cursor hook permissions: {}",
+                hook_path.display()
+            )
+        })?;
     }
 
     // 2. Create or patch hooks.json
@@ -1521,7 +1575,11 @@ fn install_cursor_hooks(verbose: u8) -> Result<()> {
     let patched = patch_cursor_hooks_json(&hooks_json_path, verbose)?;
 
     // Report
-    let hook_status = if hook_changed { "installed/updated" } else { "already up to date" };
+    let hook_status = if hook_changed {
+        "installed/updated"
+    } else {
+        "already up to date"
+    };
     println!("\nCursor hook {} (global).\n", hook_status);
     println!("  Hook:       {}", hook_path.display());
     println!("  hooks.json: {}", hooks_json_path.display());
@@ -1584,7 +1642,10 @@ fn patch_cursor_hooks_json(path: &Path, verbose: u8) -> Result<bool> {
 
 /// Check if RTK preToolUse hook is already present in Cursor hooks.json
 fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
-    let hooks = match root.get("hooks").and_then(|h| h.get("preToolUse")).and_then(|p| p.as_array())
+    let hooks = match root
+        .get("hooks")
+        .and_then(|h| h.get("preToolUse"))
+        .and_then(|p| p.as_array())
     {
         Some(arr) => arr,
         None => return false,
@@ -1610,9 +1671,7 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value) {
     };
 
     // Ensure version key
-    root_obj
-        .entry("version")
-        .or_insert(serde_json::json!(1));
+    root_obj.entry("version").or_insert(serde_json::json!(1));
 
     let hooks = root_obj
         .entry("hooks")
@@ -2427,7 +2486,19 @@ More notes
 
     #[test]
     fn test_codex_mode_rejects_auto_patch() {
-        let err = run(false, false, false, false, false, false, true, PatchMode::Auto, 0).unwrap_err();
+        let err = run(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            PatchMode::Auto,
+            0,
+        )
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "--codex cannot be combined with --auto-patch"
@@ -2436,7 +2507,19 @@ More notes
 
     #[test]
     fn test_codex_mode_rejects_no_patch() {
-        let err = run(false, false, false, false, false, false, true, PatchMode::Skip, 0).unwrap_err();
+        let err = run(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            PatchMode::Skip,
+            0,
+        )
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "--codex cannot be combined with --no-patch"
