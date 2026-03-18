@@ -6,7 +6,9 @@ This is the OpenClaw equivalent of the Claude Code hooks in `hooks/rtk-rewrite.s
 
 ## How it works
 
-The plugin registers a `before_tool_call` hook that intercepts `exec` tool calls. When the agent runs a command like `git status`, the plugin rewrites it to `rtk git status` before execution. The compressed output enters the agent's context window, saving tokens.
+The plugin registers a `before_tool_call` hook that intercepts `exec` tool calls. When the agent runs a command like `git status`, the plugin delegates to `rtk rewrite` which returns the optimized command (e.g. `rtk git status`). The compressed output enters the agent's context window, saving tokens.
+
+All rewrite logic lives in RTK itself (`rtk rewrite`). This plugin is a thin delegate -- when new filters are added to RTK, the plugin picks them up automatically with zero changes.
 
 ## Installation
 
@@ -15,7 +17,7 @@ The plugin registers a `before_tool_call` hook that intercepts `exec` tool calls
 RTK must be installed and available in `$PATH`:
 
 ```bash
-brew install rtk-ai/tap/rtk
+brew install rtk
 # or
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 ```
@@ -26,9 +28,6 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 # Copy the plugin to OpenClaw's extensions directory
 mkdir -p ~/.openclaw/extensions/rtk-rewrite
 cp openclaw/index.ts openclaw/openclaw.plugin.json ~/.openclaw/extensions/rtk-rewrite/
-
-# Enable in OpenClaw config
-openclaw config set plugins.entries.rtk-rewrite.enabled true
 
 # Restart the gateway
 openclaw gateway restart
@@ -62,24 +61,15 @@ In `openclaw.json`:
 
 ## What gets rewritten
 
-| Command | Rewritten to |
-|---------|-------------|
-| `git status/diff/log/...` | `rtk git status/diff/log/...` |
-| `gh pr/issue/run` | `rtk gh pr/issue/run` |
-| `grep/rg` | `rtk grep` |
-| `find` | `rtk find` |
-| `ls` | `rtk ls` |
-| `tsc/eslint/prettier` | `rtk tsc/lint/prettier` |
-| `vitest/pytest/go test` | `rtk vitest/pytest/go test` |
-| `docker ps/images/logs` | `rtk docker ps/images/logs` |
-| `kubectl get/logs` | `rtk kubectl get/logs` |
+Everything that `rtk rewrite` supports (30+ commands). See the [full command list](https://github.com/rtk-ai/rtk#commands).
 
-## What's NOT rewritten (guards)
+## What's NOT rewritten
 
+Handled by `rtk rewrite` guards:
 - Commands already using `rtk`
 - Piped commands (`|`, `&&`, `;`)
 - Heredocs (`<<`)
-- Commands not in the rewrite table (e.g., `cat`, `echo`, `curl`)
+- Commands without an RTK filter
 
 ## Measured savings
 
@@ -91,16 +81,6 @@ In `openclaw.json`:
 | `grep` (single file) | 52% |
 | `find -name` | 48% |
 
-## How it compares to Claude Code hooks
-
-| Feature | CC Hook (`hooks/rtk-rewrite.sh`) | OpenClaw Plugin |
-|---------|----------------------------------|-----------------|
-| Hook type | Shell script (PreToolUse) | TypeScript (before_tool_call) |
-| Rewrite approach | Bash regex | JS regex |
-| Installation | `rtk init --global` | Copy to extensions dir |
-| Configuration | `.claude/settings.json` | `openclaw.json` |
-| Scope | Claude Code sessions | All OpenClaw agents |
-
 ## License
 
-MIT — same as RTK.
+MIT -- same as RTK.

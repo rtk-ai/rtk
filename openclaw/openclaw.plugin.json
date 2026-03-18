@@ -1,9 +1,9 @@
 {
   "id": "rtk-rewrite",
   "name": "RTK Token Optimizer",
-  "version": "0.15.1",
+  "version": "1.0.0",
   "description": "Transparently rewrites shell commands to their RTK equivalents for 60-90% LLM token savings",
-  "homepage": "https://github.com/aimagist/openrtklaw",
+  "homepage": "https://github.com/rtk-ai/rtk",
   "license": "MIT",
   "configSchema": {
     "type": "object",
