@@ -204,12 +204,14 @@ Overall average: **60-90% token reduction** on common development operations.
 "##;
 
 /// Main entry point for `rtk init`
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     global: bool,
     install_claude: bool,
     install_opencode: bool,
     install_cursor: bool,
     install_windsurf: bool,
+    install_cline: bool,
     claude_md: bool,
     hook_only: bool,
     codex: bool,
@@ -252,6 +254,11 @@ pub fn run(
     // Windsurf-only mode
     if install_windsurf {
         return run_windsurf_mode(verbose);
+    }
+
+    // Cline-only mode
+    if install_cline {
+        return run_cline_mode(verbose);
     }
 
     // Mode selection (Claude Code / OpenCode)
@@ -1156,17 +1163,43 @@ fn run_claude_md_mode(global: bool, verbose: u8, install_opencode: bool) -> Resu
     Ok(())
 }
 
-/// Codex mode: slim RTK.md + @RTK.md reference in AGENTS.md
 // ─── Windsurf support ─────────────────────────────────────────
 
 /// Embedded Windsurf RTK rules
 const WINDSURF_RULES: &str = include_str!("../hooks/windsurf-rtk-rules.md");
 
-/// Resolve Windsurf user config directory (~/.codeium/windsurf)
-fn resolve_windsurf_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".codeium").join("windsurf"))
-        .context("Cannot determine home directory")
+/// Embedded Cline RTK rules
+const CLINE_RULES: &str = include_str!("../hooks/cline-rtk-rules.md");
+
+// ─── Cline / Roo Code support ─────────────────────────────────
+
+fn run_cline_mode(verbose: u8) -> Result<()> {
+    // Cline reads .clinerules from the project root (workspace-scoped)
+    let rules_path = PathBuf::from(".clinerules");
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        println!("\nRTK already configured for Cline in this project.\n");
+        println!("  Rules: .clinerules (already present)");
+    } else {
+        let new_content = if existing.trim().is_empty() {
+            CLINE_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), CLINE_RULES)
+        };
+        fs::write(&rules_path, &new_content).context("Failed to write .clinerules")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote .clinerules");
+        }
+
+        println!("\nRTK configured for Cline.\n");
+        println!("  Rules: .clinerules (installed)");
+    }
+    println!("  Cline will now use rtk commands for token savings.");
+    println!("  Test with: git status\n");
+
+    Ok(())
 }
 
 fn run_windsurf_mode(verbose: u8) -> Result<()> {
@@ -1655,7 +1688,7 @@ fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
         entry
             .get("command")
             .and_then(|c| c.as_str())
-            .map_or(false, |cmd| cmd.contains("rtk-rewrite.sh"))
+            .is_some_and(|cmd| cmd.contains("rtk-rewrite.sh"))
     })
 }
 
@@ -1750,7 +1783,7 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
         !entry
             .get("command")
             .and_then(|c| c.as_str())
-            .map_or(false, |cmd| cmd.contains("rtk-rewrite.sh"))
+            .is_some_and(|cmd| cmd.contains("rtk-rewrite.sh"))
     });
 
     pre_tool_use.len() < original_len
@@ -2139,7 +2172,7 @@ fn patch_gemini_settings(
             if arr.iter().any(|h| {
                 h.pointer("/hooks/0/command")
                     .and_then(|v| v.as_str())
-                    .map_or(false, |c| c.contains("rtk"))
+                    .is_some_and(|c| c.contains("rtk"))
             }) {
                 if verbose > 0 {
                     eprintln!("Gemini settings.json already has RTK hook");
@@ -2248,7 +2281,7 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
                 arr.retain(|h| {
                     !h.pointer("/hooks/0/command")
                         .and_then(|v| v.as_str())
-                        .map_or(false, |c| c.contains("rtk"))
+                        .is_some_and(|c| c.contains("rtk"))
                 });
                 if arr.len() < before {
                     let new_content = serde_json::to_string_pretty(&settings)?;
@@ -2494,6 +2527,7 @@ More notes
             false,
             false,
             false,
+            false,
             true,
             PatchMode::Auto,
             0,
@@ -2508,6 +2542,7 @@ More notes
     #[test]
     fn test_codex_mode_rejects_no_patch() {
         let err = run(
+            false,
             false,
             false,
             false,

@@ -80,6 +80,8 @@ pub enum AgentTarget {
     Cursor,
     /// Windsurf IDE (Cascade)
     Windsurf,
+    /// Cline / Roo Code (VS Code)
+    Cline,
 }
 
 #[derive(Parser)]
@@ -1659,7 +1661,7 @@ fn main() -> Result<()> {
             if show {
                 init::show_config(codex)?;
             } else if uninstall {
-                let cursor = agent.map_or(false, |a| a == AgentTarget::Cursor);
+                let cursor = agent == Some(AgentTarget::Cursor);
                 init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
@@ -1673,8 +1675,9 @@ fn main() -> Result<()> {
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
-                let install_cursor = agent.map_or(false, |a| a == AgentTarget::Cursor);
-                let install_windsurf = agent.map_or(false, |a| a == AgentTarget::Windsurf);
+                let install_cursor = agent == Some(AgentTarget::Cursor);
+                let install_windsurf = agent == Some(AgentTarget::Windsurf);
+                let install_cline = agent == Some(AgentTarget::Cline);
 
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1689,6 +1692,7 @@ fn main() -> Result<()> {
                     install_opencode,
                     install_cursor,
                     install_windsurf,
+                    install_cline,
                     claude_md,
                     hook_only,
                     codex,
