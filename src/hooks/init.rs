@@ -504,7 +504,11 @@ fn prompt_telemetry_consent() -> Result<()> {
 }
 
 fn print_manual_instructions(hook_path: &Path, include_opencode: bool) {
-    println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
+    let settings_path = resolve_claude_dir()
+        .map(|dir| dir.join("settings.json"))
+        .unwrap_or_else(|_| PathBuf::from("~/.claude/settings.json"));
+
+    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
@@ -1718,6 +1722,13 @@ fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
 }
 
 fn resolve_claude_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        let path = PathBuf::from(dir);
+        if path.as_os_str().is_empty() {
+            anyhow::bail!("CLAUDE_CONFIG_DIR is set but empty");
+        }
+        return Ok(path);
+    }
     resolve_home_subdir(CLAUDE_DIR)
 }
 
@@ -3395,5 +3406,33 @@ More notes
         assert!(CURSOR_REWRITE_HOOK.contains("\"permission\": \"allow\""));
         assert!(CURSOR_REWRITE_HOOK.contains("\"updated_input\""));
         assert!(!CURSOR_REWRITE_HOOK.contains("hookSpecificOutput"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_uses_env_override() {
+        let result = resolve_claude_dir_with(
+            Some(PathBuf::from("/home/test")),
+            Some(std::ffi::OsString::from("/tmp/custom-claude")),
+        )
+        .unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/custom-claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_falls_back_to_home() {
+        let result = resolve_claude_dir_with(Some(PathBuf::from("/home/test")), None).unwrap();
+        assert_eq!(result, PathBuf::from("/home/test/.claude"));
+    }
+
+    #[test]
+    fn test_resolve_claude_dir_rejects_empty_env_override() {
+        let err = resolve_claude_dir_with(
+            Some(PathBuf::from("/home/test")),
+            Some(std::ffi::OsString::from("")),
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("CLAUDE_CONFIG_DIR is set but empty"));
     }
 }
