@@ -1,3 +1,4 @@
+use crate::config;
 use crate::tracking;
 use crate::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
@@ -6,7 +7,9 @@ use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 struct RuffLocation {
+    #[allow(dead_code)]
     row: usize,
+    #[allow(dead_code)]
     column: usize,
 }
 
@@ -19,7 +22,9 @@ struct RuffFix {
 #[derive(Debug, Deserialize)]
 struct RuffDiagnostic {
     code: String,
+    #[allow(dead_code)]
     message: String,
+    #[allow(dead_code)]
     location: RuffLocation,
     #[allow(dead_code)]
     end_location: Option<RuffLocation>,
@@ -121,7 +126,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
             return format!(
                 "Ruff check (JSON parse failed: {})\n{}",
                 e,
-                truncate(output, 500)
+                truncate(output, config::limits().passthrough_max_chars)
             );
         }
     };
@@ -237,7 +242,7 @@ pub fn filter_ruff_format(output: &str) -> String {
             for part in parts {
                 let part_lower = part.to_lowercase();
                 if part_lower.contains("left unchanged") {
-                    let words: Vec<&str> = part.trim().split_whitespace().collect();
+                    let words: Vec<&str> = part.split_whitespace().collect();
                     // Look for number before "file" or "files"
                     for (i, word) in words.iter().enumerate() {
                         if (word == &"file" || word == &"files") && i > 0 {

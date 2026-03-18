@@ -14,6 +14,7 @@ use crate::utils::{format_cpt, format_tokens, format_usd};
 
 // ── Constants ──
 
+#[allow(dead_code)]
 const BILLION: f64 = 1e9;
 
 // API pricing ratios (verified Feb 2026, consistent across Claude models <=200K context)

@@ -1,3 +1,4 @@
+use crate::config;
 use crate::tracking;
 use crate::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
@@ -9,8 +10,10 @@ struct Position {
     #[serde(rename = "Filename")]
     filename: String,
     #[serde(rename = "Line")]
+    #[allow(dead_code)]
     line: usize,
     #[serde(rename = "Column")]
+    #[allow(dead_code)]
     column: usize,
 }
 
@@ -19,6 +22,7 @@ struct Issue {
     #[serde(rename = "FromLinter")]
     from_linter: String,
     #[serde(rename = "Text")]
+    #[allow(dead_code)]
     text: String,
     #[serde(rename = "Pos")]
     pos: Position,
@@ -106,7 +110,7 @@ fn filter_golangci_json(output: &str) -> String {
             return format!(
                 "golangci-lint (JSON parse failed: {})\n{}",
                 e,
-                truncate(output, 500)
+                truncate(output, config::limits().passthrough_max_chars)
             );
         }
     };

@@ -33,10 +33,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
             run_passthrough(base_cmd, args, verbose)?
         }
         _ => {
-            anyhow::bail!(
-                "rtk pip: unsupported subcommand '{}'\nSupported: list, outdated, install, uninstall, show",
-                subcommand
-            );
+            // Unknown subcommand: passthrough to pip/uv
+            run_passthrough(base_cmd, args, verbose)?
         }
     };
 
@@ -216,11 +214,7 @@ fn filter_pip_outdated(output: &str) -> String {
     result.push_str("═══════════════════════════════════════\n");
 
     for (i, pkg) in packages.iter().take(20).enumerate() {
-        let latest = pkg
-            .latest_version
-            .as_ref()
-            .map(|v| v.as_str())
-            .unwrap_or("unknown");
+        let latest = pkg.latest_version.as_deref().unwrap_or("unknown");
         result.push_str(&format!(
             "{}. {} ({} → {})\n",
             i + 1,

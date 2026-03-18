@@ -67,7 +67,12 @@ fn docker_ps(_verbose: u8) -> Result<()> {
         if parts.len() >= 4 {
             let id = &parts[0][..12.min(parts[0].len())];
             let name = parts[1];
-            let short_image = parts.get(3).unwrap_or(&"").split('/').last().unwrap_or("");
+            let short_image = parts
+                .get(3)
+                .unwrap_or(&"")
+                .split('/')
+                .next_back()
+                .unwrap_or("");
             let ports = compact_ports(parts.get(4).unwrap_or(&""));
             if ports == "-" {
                 rtk.push_str(&format!("  {} {} ({})\n", id, name, short_image));
@@ -183,6 +188,19 @@ fn docker_logs(args: &[String], _verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
+    if !output.status.success() {
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track(
+            &format!("docker logs {}", container),
+            "rtk docker logs",
+            &raw,
+            &raw,
+        );
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
     let analyzed = crate::log_cmd::run_stdin_str(&raw);
     let rtk = format!("🐳 Logs for {}:\n{}", container, analyzed);
     println!("{}", rtk);
@@ -207,6 +225,15 @@ fn kubectl_pods(args: &[String], _verbose: u8) -> Result<()> {
     let output = cmd.output().context("Failed to run kubectl get pods")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
     let mut rtk = String::new();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track("kubectl get pods", "rtk kubectl pods", &raw, &raw);
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
 
     let json: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
@@ -306,6 +333,15 @@ fn kubectl_services(args: &[String], _verbose: u8) -> Result<()> {
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
     let mut rtk = String::new();
 
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track("kubectl get svc", "rtk kubectl svc", &raw, &raw);
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
     let json: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(_) => {
@@ -381,6 +417,21 @@ fn kubectl_logs(args: &[String], _verbose: u8) -> Result<()> {
 
     let output = cmd.output().context("Failed to run kubectl logs")?;
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track(
+            &format!("kubectl logs {}", pod),
+            "rtk kubectl logs",
+            &raw,
+            &raw,
+        );
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
     let analyzed = crate::log_cmd::run_stdin_str(&raw);
     let rtk = format!("☸️  Logs for {}:\n{}", pod, analyzed);
     println!("{}", rtk);
@@ -516,7 +567,7 @@ fn compact_ports(ports: &str) -> String {
     // Extract just the port numbers
     let port_nums: Vec<&str> = ports
         .split(',')
-        .filter_map(|p| p.split("->").next().and_then(|s| s.split(':').last()))
+        .filter_map(|p| p.split("->").next().and_then(|s| s.split(':').next_back()))
         .collect();
 
     if port_nums.len() <= 3 {

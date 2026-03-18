@@ -40,6 +40,11 @@ fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<Str
         return args.to_vec();
     }
 
+    // If args already contain `--` (Clap preserved it), no restoration needed
+    if args.iter().any(|a| a == "--") {
+        return args.to_vec();
+    }
+
     // Find `--` in the original command line
     let sep_pos = match raw_args.iter().position(|a| a == "--") {
         Some(pos) => pos,
@@ -1052,6 +1057,42 @@ mod tests {
         ];
         let result = restore_double_dash_with_raw(&args, &raw);
         assert_eq!(result, vec!["--", "-D", "warnings"]);
+    }
+
+    #[test]
+    fn test_restore_double_dash_clippy_with_package_flags() {
+        // rtk cargo clippy -p my-service -p my-crate -- -D warnings
+        // Clap with trailing_var_arg preserves "--" when args precede it
+        // → clap gives ["-p", "my-service", "-p", "my-crate", "--", "-D", "warnings"]
+        let args: Vec<String> = vec![
+            "-p".into(),
+            "my-service".into(),
+            "-p".into(),
+            "my-crate".into(),
+            "--".into(),
+            "-D".into(),
+            "warnings".into(),
+        ];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "clippy".into(),
+            "-p".into(),
+            "my-service".into(),
+            "-p".into(),
+            "my-crate".into(),
+            "--".into(),
+            "-D".into(),
+            "warnings".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        // Should NOT double the "--"
+        assert_eq!(
+            result,
+            vec!["-p", "my-service", "-p", "my-crate", "--", "-D", "warnings"]
+        );
+        // Verify only one "--" exists
+        assert_eq!(result.iter().filter(|a| *a == "--").count(), 1);
     }
 
     #[test]

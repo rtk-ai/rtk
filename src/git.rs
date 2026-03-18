@@ -1,3 +1,4 @@
+use crate::config;
 use crate::tracking;
 use crate::utils::resolved_command;
 use anyhow::{Context, Result};
@@ -76,6 +77,9 @@ fn run_diff(
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
         for arg in args {
+            if arg == "--no-compact" {
+                continue; // RTK flag, not a git flag
+            }
             cmd.arg(arg);
         }
 
@@ -110,6 +114,21 @@ fn run_diff(
 
     let output = cmd.output().context("Failed to run git diff")?;
     let stat_stdout = String::from_utf8_lossy(&output.stdout);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        let raw = stat_stdout.to_string();
+        timer.track(
+            &format!("git diff {}", args.join(" ")),
+            &format!("rtk git diff {}", args.join(" ")),
+            &raw,
+            &raw,
+        );
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
 
     if verbose > 0 {
         eprintln!("Git diff summary:");
@@ -279,6 +298,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut in_hunk = false;
     let mut hunk_lines = 0;
     let max_hunk_lines = 30;
+    let mut was_truncated = false;
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
@@ -287,7 +307,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                 result.push(format!("  +{} -{}", added, removed));
             }
             current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
-            result.push(format!("\n📄 {}", current_file));
+            result.push(format!("\n{}", current_file));
             added = 0;
             removed = 0;
             in_hunk = false;
@@ -321,17 +341,23 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             if hunk_lines == max_hunk_lines {
                 result.push("  ... (truncated)".to_string());
                 hunk_lines += 1;
+                was_truncated = true;
             }
         }
 
         if result.len() >= max_lines {
             result.push("\n... (more changes truncated)".to_string());
+            was_truncated = true;
             break;
         }
     }
 
     if !current_file.is_empty() && (added > 0 || removed > 0) {
         result.push(format!("  +{} -{}", added, removed));
+    }
+
+    if was_truncated {
+        result.push("[full diff: rtk git diff --no-compact]".to_string());
     }
 
     result.join("\n")
@@ -355,7 +381,7 @@ fn run_log(
 
     // Check if user provided limit flag (-N, -n N, --max-count=N, --max-count N)
     let has_limit_flag = args.iter().any(|arg| {
-        (arg.starts_with('-') && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit()))
+        (arg.starts_with('-') && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit()))
             || arg == "-n"
             || arg.starts_with("--max-count")
     });
@@ -433,7 +459,7 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
         // -20 (combined digit form)
         if arg.starts_with('-')
             && arg.len() > 1
-            && arg.chars().nth(1).map_or(false, |c| c.is_ascii_digit())
+            && arg.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
         {
             if let Ok(n) = arg[1..].parse::<usize>() {
                 return Some(n);
@@ -547,7 +573,7 @@ fn format_status_output(porcelain: &str) -> String {
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
-            output.push_str(&format!("📌 {}\n", branch));
+            output.push_str(&format!("branch: {}\n", branch));
         }
     }
 
@@ -592,38 +618,56 @@ fn format_status_output(porcelain: &str) -> String {
     }
 
     // Build summary
+    let limits = config::limits();
+    let max_files = limits.status_max_files;
+    let max_untracked = limits.status_max_untracked;
+
     if staged > 0 {
-        output.push_str(&format!("✅ Staged: {} files\n", staged));
-        for f in staged_files.iter().take(5) {
+        output.push_str(&format!("staged: {} files\n", staged));
+        for f in staged_files.iter().take(max_files) {
             output.push_str(&format!("   {}\n", f));
         }
-        if staged_files.len() > 5 {
-            output.push_str(&format!("   ... +{} more\n", staged_files.len() - 5));
+        if staged_files.len() > max_files {
+            output.push_str(&format!(
+                "   ... +{} more\n",
+                staged_files.len() - max_files
+            ));
         }
     }
 
     if modified > 0 {
-        output.push_str(&format!("📝 Modified: {} files\n", modified));
-        for f in modified_files.iter().take(5) {
+        output.push_str(&format!("modified: {} files\n", modified));
+        for f in modified_files.iter().take(max_files) {
             output.push_str(&format!("   {}\n", f));
         }
-        if modified_files.len() > 5 {
-            output.push_str(&format!("   ... +{} more\n", modified_files.len() - 5));
+        if modified_files.len() > max_files {
+            output.push_str(&format!(
+                "   ... +{} more\n",
+                modified_files.len() - max_files
+            ));
         }
     }
 
     if untracked > 0 {
-        output.push_str(&format!("❓ Untracked: {} files\n", untracked));
-        for f in untracked_files.iter().take(3) {
+        output.push_str(&format!("untracked: {} files\n", untracked));
+        for f in untracked_files.iter().take(max_untracked) {
             output.push_str(&format!("   {}\n", f));
         }
-        if untracked_files.len() > 3 {
-            output.push_str(&format!("   ... +{} more\n", untracked_files.len() - 3));
+        if untracked_files.len() > max_untracked {
+            output.push_str(&format!(
+                "   ... +{} more\n",
+                untracked_files.len() - max_untracked
+            ));
         }
     }
 
     if conflicts > 0 {
-        output.push_str(&format!("⚠️  Conflicts: {} files\n", conflicts));
+        output.push_str(&format!("conflicts: {} files\n", conflicts));
+    }
+
+    // When working tree is clean (only branch line, no changes)
+    if staged == 0 && modified == 0 && untracked == 0 && conflicts == 0 {
+        output.push_str("clean — nothing to commit\n");
     }
 
     output.trim_end().to_string()
@@ -679,6 +723,20 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            if !stderr.trim().is_empty() {
+                eprint!("{}", stderr);
+            }
+            let raw = stdout.to_string();
+            timer.track(
+                &format!("git status {}", args.join(" ")),
+                &format!("rtk git status {}", args.join(" ")),
+                &raw,
+                &raw,
+            );
+            std::process::exit(output.status.code().unwrap_or(1));
+        }
 
         if verbose > 0 || !stderr.is_empty() {
             eprint!("{}", stderr);
@@ -833,7 +891,7 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
         // Extract commit hash from output like "[main abc1234] message"
         let compact = if let Some(line) = stdout.lines().next() {
             if let Some(hash_start) = line.find(' ') {
-                let hash = line[1..hash_start].split(' ').last().unwrap_or("");
+                let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
                 if !hash.is_empty() && hash.len() >= 7 {
                     format!("ok ✓ {}", &hash[..7.min(hash.len())])
                 } else {
@@ -859,13 +917,14 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
                 "ok (nothing to commit)",
             );
         } else {
-            eprintln!("FAILED: git commit");
             if !stderr.trim().is_empty() {
-                eprintln!("{}", stderr);
+                eprint!("{}", stderr);
             }
             if !stdout.trim().is_empty() {
-                eprintln!("{}", stdout);
+                eprint!("{}", stdout);
             }
+            timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
+            std::process::exit(output.status.code().unwrap_or(1));
         }
     }
 
@@ -1027,10 +1086,23 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
         eprintln!("git branch");
     }
 
-    // Detect write operations: delete, rename, copy
-    let has_action_flag = args
-        .iter()
-        .any(|a| a == "-d" || a == "-D" || a == "-m" || a == "-M" || a == "-c" || a == "-C");
+    // Detect write operations: delete, rename, copy, upstream tracking
+    let has_action_flag = args.iter().any(|a| {
+        a == "-d"
+            || a == "-D"
+            || a == "-m"
+            || a == "-M"
+            || a == "-c"
+            || a == "-C"
+            || a == "--set-upstream-to"
+            || a.starts_with("--set-upstream-to=")
+            || a == "-u"
+            || a == "--unset-upstream"
+            || a == "--edit-description"
+    });
+
+    // Detect flags that produce specific output (not a branch list)
+    let has_show_flag = args.iter().any(|a| a == "--show-current");
 
     // Detect list-mode flags
     let has_list_flag = args.iter().any(|a| {
@@ -1043,10 +1115,48 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
             || a == "--no-merged"
             || a == "--contains"
             || a == "--no-contains"
+            || a == "--format"
+            || a.starts_with("--format=")
+            || a == "--sort"
+            || a.starts_with("--sort=")
+            || a == "--points-at"
+            || a.starts_with("--points-at=")
     });
 
     // Detect positional arguments (not flags) — indicates branch creation
     let has_positional_arg = args.iter().any(|a| !a.starts_with('-'));
+
+    // --show-current: passthrough with raw stdout (not "ok ✓")
+    if has_show_flag {
+        let mut cmd = git_cmd(global_args);
+        cmd.arg("branch");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        let output = cmd.output().context("Failed to run git branch")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}{}", stdout, stderr);
+
+        let trimmed = stdout.trim();
+        timer.track(
+            &format!("git branch {}", args.join(" ")),
+            &format!("rtk git branch {}", args.join(" ")),
+            &combined,
+            trimmed,
+        );
+
+        if output.status.success() {
+            println!("{}", trimmed);
+        } else {
+            eprintln!("FAILED: git branch {}", args.join(" "));
+            if !stderr.trim().is_empty() {
+                eprintln!("{}", stderr);
+            }
+            std::process::exit(output.status.code().unwrap_or(1));
+        }
+        return Ok(());
+    }
 
     // Write operation: action flags, or positional args without list flags (= branch creation)
     if has_action_flag || (has_positional_arg && !has_list_flag) {
@@ -1102,6 +1212,20 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
     let output = cmd.output().context("Failed to run git branch")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let raw = stdout.to_string();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track(
+            &format!("git branch {}", args.join(" ")),
+            &format!("rtk git branch {}", args.join(" ")),
+            &raw,
+            &raw,
+        );
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
 
     let filtered = filter_branch_output(&stdout);
     println!("{}", filtered);
@@ -1303,7 +1427,42 @@ fn run_stash(
                 std::process::exit(output.status.code().unwrap_or(1));
             }
         }
-        _ => {
+        Some(sub) => {
+            // Unrecognized subcommand: passthrough to git stash <sub> [args]
+            let mut cmd = git_cmd(global_args);
+            cmd.args(["stash", sub]);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            let output = cmd.output().context("Failed to run git stash")?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{}{}", stdout, stderr);
+
+            let msg = if output.status.success() {
+                let msg = format!("ok stash {}", sub);
+                println!("{}", msg);
+                msg
+            } else {
+                eprintln!("FAILED: git stash {}", sub);
+                if !stderr.trim().is_empty() {
+                    eprintln!("{}", stderr);
+                }
+                combined.clone()
+            };
+
+            timer.track(
+                &format!("git stash {}", sub),
+                &format!("rtk git stash {}", sub),
+                &combined,
+                &msg,
+            );
+
+            if !output.status.success() {
+                std::process::exit(output.status.code().unwrap_or(1));
+            }
+        }
+        None => {
             // Default: git stash (push)
             let mut cmd = git_cmd(global_args);
             cmd.arg("stash");
@@ -1649,8 +1808,8 @@ mod tests {
     fn test_format_status_output_modified_files() {
         let porcelain = "## main...origin/main\n M src/main.rs\n M src/lib.rs\n";
         let result = format_status_output(porcelain);
-        assert!(result.contains("📌 main...origin/main"));
-        assert!(result.contains("📝 Modified: 2 files"));
+        assert!(result.contains("branch: main...origin/main"));
+        assert!(result.contains("modified: 2 files"));
         assert!(result.contains("src/main.rs"));
         assert!(result.contains("src/lib.rs"));
         assert!(!result.contains("Staged"));
@@ -1661,8 +1820,8 @@ mod tests {
     fn test_format_status_output_untracked_files() {
         let porcelain = "## feature/new\n?? temp.txt\n?? debug.log\n?? test.sh\n";
         let result = format_status_output(porcelain);
-        assert!(result.contains("📌 feature/new"));
-        assert!(result.contains("❓ Untracked: 3 files"));
+        assert!(result.contains("branch: feature/new"));
+        assert!(result.contains("untracked: 3 files"));
         assert!(result.contains("temp.txt"));
         assert!(result.contains("debug.log"));
         assert!(result.contains("test.sh"));
@@ -1678,35 +1837,60 @@ A  added.rs
 ?? untracked.txt
 "#;
         let result = format_status_output(porcelain);
-        assert!(result.contains("📌 main"));
-        assert!(result.contains("✅ Staged: 2 files"));
+        assert!(result.contains("branch: main"));
+        assert!(result.contains("staged: 2 files"));
         assert!(result.contains("staged.rs"));
         assert!(result.contains("added.rs"));
-        assert!(result.contains("📝 Modified: 1 files"));
+        assert!(result.contains("modified: 1 files"));
         assert!(result.contains("modified.rs"));
-        assert!(result.contains("❓ Untracked: 1 files"));
+        assert!(result.contains("untracked: 1 files"));
         assert!(result.contains("untracked.txt"));
     }
 
     #[test]
     fn test_format_status_output_truncation() {
-        // Test that >5 staged files show "... +N more"
-        let porcelain = r#"## main
-M  file1.rs
-M  file2.rs
-M  file3.rs
-M  file4.rs
-M  file5.rs
-M  file6.rs
-M  file7.rs
-"#;
-        let result = format_status_output(porcelain);
-        assert!(result.contains("✅ Staged: 7 files"));
+        // Test that >15 staged files show "... +N more"
+        let mut porcelain = String::from("## main\n");
+        for i in 1..=20 {
+            porcelain.push_str(&format!("M  file{}.rs\n", i));
+        }
+        let result = format_status_output(&porcelain);
+        assert!(result.contains("staged: 20 files"));
         assert!(result.contains("file1.rs"));
-        assert!(result.contains("file5.rs"));
-        assert!(result.contains("... +2 more"));
-        assert!(!result.contains("file6.rs"));
-        assert!(!result.contains("file7.rs"));
+        assert!(result.contains("file15.rs"));
+        assert!(result.contains("... +5 more"));
+        assert!(!result.contains("file16.rs"));
+        assert!(!result.contains("file20.rs"));
+    }
+
+    #[test]
+    fn test_format_status_modified_truncation() {
+        // Test that >15 modified files show "... +N more"
+        let mut porcelain = String::from("## main\n");
+        for i in 1..=20 {
+            porcelain.push_str(&format!(" M file{}.rs\n", i));
+        }
+        let result = format_status_output(&porcelain);
+        assert!(result.contains("modified: 20 files"));
+        assert!(result.contains("file1.rs"));
+        assert!(result.contains("file15.rs"));
+        assert!(result.contains("... +5 more"));
+        assert!(!result.contains("file16.rs"));
+    }
+
+    #[test]
+    fn test_format_status_untracked_truncation() {
+        // Test that >10 untracked files show "... +N more"
+        let mut porcelain = String::from("## main\n");
+        for i in 1..=15 {
+            porcelain.push_str(&format!("?? file{}.rs\n", i));
+        }
+        let result = format_status_output(&porcelain);
+        assert!(result.contains("untracked: 15 files"));
+        assert!(result.contains("file1.rs"));
+        assert!(result.contains("file10.rs"));
+        assert!(result.contains("... +5 more"));
+        assert!(!result.contains("file11.rs"));
     }
 
     #[test]
@@ -1916,7 +2100,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let porcelain = "## main\n M สวัสดี.txt\n?? ทดสอบ.rs\n";
         let result = format_status_output(porcelain);
         // Should not panic
-        assert!(result.contains("📌 main"));
+        assert!(result.contains("branch: main"));
         assert!(result.contains("สวัสดี.txt"));
         assert!(result.contains("ทดสอบ.rs"));
     }
@@ -1925,7 +2109,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_format_status_output_emoji_filename() {
         let porcelain = "## main\nA  🎉-party.txt\n M 日本語ファイル.rs\n";
         let result = format_status_output(porcelain);
-        assert!(result.contains("📌 main"));
+        assert!(result.contains("branch: main"));
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.

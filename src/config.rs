@@ -16,6 +16,8 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub hooks: HooksConfig,
+    #[serde(default)]
+    pub limits: LimitsConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -92,6 +94,37 @@ impl Default for TelemetryConfig {
     fn default() -> Self {
         Self { enabled: true }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    /// Max total grep results to show (default: 200)
+    pub grep_max_results: usize,
+    /// Max matches per file in grep output (default: 25)
+    pub grep_max_per_file: usize,
+    /// Max staged/modified files shown in git status (default: 15)
+    pub status_max_files: usize,
+    /// Max untracked files shown in git status (default: 10)
+    pub status_max_untracked: usize,
+    /// Max chars for parser passthrough fallback (default: 2000)
+    pub passthrough_max_chars: usize,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            grep_max_results: 200,
+            grep_max_per_file: 25,
+            status_max_files: 15,
+            status_max_untracked: 10,
+            passthrough_max_chars: 2000,
+        }
+    }
+}
+
+/// Get limits config. Falls back to defaults if config can't be loaded.
+pub fn limits() -> LimitsConfig {
+    Config::load().map(|c| c.limits).unwrap_or_default()
 }
 
 /// Check if telemetry is enabled in config. Returns None if config can't be loaded.

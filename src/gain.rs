@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     project: bool, // added: per-project scope flag
     graph: bool,
