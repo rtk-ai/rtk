@@ -88,6 +88,7 @@ pub const PATTERNS: &[&str] = &[
     r"^trunk\s+build",
     r"^uv\s+(sync|pip\s+install)\b",
     r"^yamllint\b",
+    r"^ollama\s+run\b",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -650,6 +651,14 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["yamllint"],
         category: "Build",
         savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk ollama",
+        rewrite_prefixes: &["ollama"],
+        category: "Data",
+        savings_pct: 80.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

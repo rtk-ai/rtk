@@ -1980,6 +1980,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_ollama_run() {
+        assert_eq!(
+            rewrite_command("ollama run phi4:14b \"hello\"", &[]),
+            Some("rtk ollama run phi4:14b \"hello\"".into())
+        );
+    }
+
     // --- Compound operator edge cases ---
 
     #[test]
