@@ -297,7 +297,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut removed = 0;
     let mut in_hunk = false;
     let mut hunk_lines = 0;
-    let max_hunk_lines = 30;
+    let max_hunk_lines = 100;
     let mut was_truncated = false;
 
     for line in diff.lines() {
@@ -532,17 +532,25 @@ fn filter_log_output(
             Some(h) => truncate_line(h.trim(), truncate_width),
             None => continue,
         };
-        // Remaining lines are the body — keep first non-empty line only
-        let body_line = lines.map(|l| l.trim()).find(|l| {
-            !l.is_empty() && !l.starts_with("Signed-off-by:") && !l.starts_with("Co-authored-by:")
-        });
+        // Remaining lines are the body — keep up to 3 non-empty, non-trailer lines
+        let body_lines: Vec<&str> = lines
+            .map(|l| l.trim())
+            .filter(|l| {
+                !l.is_empty()
+                    && !l.starts_with("Signed-off-by:")
+                    && !l.starts_with("Co-authored-by:")
+            })
+            .take(3)
+            .collect();
 
-        match body_line {
-            Some(body) => {
-                let truncated_body = truncate_line(body, truncate_width);
-                result.push(format!("{}\n  {}", header, truncated_body));
+        if body_lines.is_empty() {
+            result.push(header);
+        } else {
+            let mut entry = header;
+            for body in &body_lines {
+                entry.push_str(&format!("\n  {}", truncate_line(body, truncate_width)));
             }
-            None => result.push(header),
+            result.push(entry);
         }
     }
 
