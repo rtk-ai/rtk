@@ -1841,13 +1841,46 @@ pub(crate) fn patch_plugin_caches(verbose: u8) -> Result<usize> {
                 Err(_) => continue,
             };
 
-            for version_entry in versions.flatten() {
-                let version_path = version_entry.path();
-                if !version_path.is_dir() {
-                    continue;
+            // Collect version directories and sort by semver (descending).
+            // Claude Code loads the highest version; RTK should only process
+            // that one. Old versions stay on disk for rollback but don't get
+            // manifest entries (avoids double-execution via direct + fallthrough).
+            let mut version_dirs: Vec<PathBuf> = versions
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            version_dirs.sort_by(|a, b| {
+                let va = parse_semver(a.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+                let vb = parse_semver(b.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+                vb.cmp(&va) // Descending: highest version first
+            });
+
+            // Only process the highest (active) version.
+            // Remove manifest entries for older versions of this plugin
+            // (they'd cause double-execution if the active version changed).
+            // Trailing separator ensures we don't match "ar2" when looking for "ar".
+            let plugin_prefix = format!("{}/", plugin_path.to_string_lossy());
+            if let Some(active_version) = version_dirs.first() {
+                let active_prefix = format!("{}/", active_version.to_string_lossy());
+
+                // Remove entries for NON-active versions of this plugin
+                let before_retain = manifest.entries.len();
+                manifest.entries.retain(|e| {
+                    !e.cache_path.starts_with(&plugin_prefix)
+                        || e.cache_path.starts_with(&active_prefix)
+                });
+                if manifest.entries.len() < before_retain && verbose > 0 {
+                    eprintln!(
+                        "Removed {} stale manifest entries for {}/{} (not active version)",
+                        before_retain - manifest.entries.len(),
+                        vendor_name,
+                        plugin_name
+                    );
                 }
 
-                let hooks_dir = version_path.join("hooks");
+                // Process the active version's hook files
+                let hooks_dir = active_version.join("hooks");
                 if !hooks_dir.exists() {
                     continue;
                 }
@@ -2115,6 +2148,17 @@ fn patch_single_cache_file(
     }
 
     Ok(any_patched)
+}
+
+/// Parse a semver-like version string into (major, minor, patch) for comparison.
+/// Non-numeric or missing components default to 0.
+fn parse_semver(s: &str) -> (u32, u32, u32) {
+    let parts: Vec<u32> = s.split('.').filter_map(|p| p.parse().ok()).collect();
+    (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+        parts.get(2).copied().unwrap_or(0),
+    )
 }
 
 /// Returns true if a matcher string contains "Bash" as a whole token
