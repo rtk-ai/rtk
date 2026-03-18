@@ -222,6 +222,7 @@ pub struct MonthStats {
 }
 
 /// Per-command aggregate statistics from tracking database.
+/// Type alias: (command, count, saved_tokens, avg_savings_pct, avg_time_ms)
 type CommandStats = (String, usize, usize, f64, u64);
 
 impl Tracker {
@@ -254,6 +255,12 @@ impl Tracker {
         }
 
         let conn = Connection::open(&db_path)?;
+        // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
+        // Non-fatal: NFS/read-only filesystems may not support WAL.
+        let _ = conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;",
+        );
         conn.execute(
             "CREATE TABLE IF NOT EXISTS commands (
                 id INTEGER PRIMARY KEY,
@@ -491,6 +498,7 @@ impl Tracker {
     ///     summary.total_saved, summary.avg_savings_pct);
     /// # Ok::<(), anyhow::Error>(())
     /// ```
+    #[allow(dead_code)]
     pub fn get_summary(&self) -> Result<GainSummary> {
         self.get_summary_filtered(None) // delegate to filtered variant
     }
@@ -852,6 +860,7 @@ impl Tracker {
     /// }
     /// # Ok::<(), anyhow::Error>(())
     /// ```
+    #[allow(dead_code)]
     pub fn get_recent(&self, limit: usize) -> Result<Vec<CommandRecord>> {
         self.get_recent_filtered(limit, None) // delegate to filtered variant
     }
@@ -972,6 +981,7 @@ fn get_db_path() -> Result<PathBuf> {
 pub struct ParseFailureRecord {
     pub timestamp: String,
     pub raw_command: String,
+    #[allow(dead_code)]
     pub error_message: String,
     pub fallback_succeeded: bool,
 }
@@ -1176,6 +1186,7 @@ pub fn args_display(args: &[OsString]) -> String {
 /// timer.track("ls -la", "rtk ls", "input", "output");
 /// ```
 #[deprecated(note = "Use TimedExecution instead")]
+#[allow(dead_code)]
 pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
     let input_tokens = estimate_tokens(input);
     let output_tokens = estimate_tokens(output);

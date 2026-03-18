@@ -182,9 +182,8 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
 }
 
 /// TeeMode controls when tee writes files.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
-#[derive(Default)]
 pub enum TeeMode {
     #[default]
     Failures,

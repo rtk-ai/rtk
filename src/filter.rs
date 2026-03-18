@@ -50,6 +50,7 @@ pub enum Language {
     Java,
     Ruby,
     Shell,
+    /// Data formats (JSON, YAML, TOML, XML, CSV) — no comment stripping
     Data,
     Unknown,
 }
@@ -67,9 +68,10 @@ impl Language {
             "java" => Language::Java,
             "rb" => Language::Ruby,
             "sh" | "bash" | "zsh" => Language::Shell,
-            "json" | "jsonc" | "json5" | "yaml" | "yml" | "toml" | "xml" | "html" | "htm"
-            | "css" | "scss" | "svg" | "md" | "markdown" | "txt" | "csv" | "tsv" | "env"
-            | "ini" | "cfg" | "conf" | "lock" => Language::Data,
+            "json" | "jsonc" | "json5" | "yaml" | "yml" | "toml" | "xml" | "csv" | "tsv"
+            | "graphql" | "gql" | "sql" | "md" | "markdown" | "txt" | "env" | "lock" => {
+                Language::Data
+            }
             _ => Language::Unknown,
         }
     }
@@ -249,6 +251,11 @@ lazy_static! {
 
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
+        // Data formats (JSON, YAML, etc.) must never be code-filtered
+        if *lang == Language::Data {
+            return MinimalFilter.filter(content, lang);
+        }
+
         let minimal = MinimalFilter.filter(content, lang);
         let mut result = String::with_capacity(minimal.len() / 2);
         let mut brace_depth = 0;
@@ -407,14 +414,15 @@ mod tests {
         assert_eq!(Language::from_extension("yml"), Language::Data);
         assert_eq!(Language::from_extension("toml"), Language::Data);
         assert_eq!(Language::from_extension("xml"), Language::Data);
-        assert_eq!(Language::from_extension("md"), Language::Data);
         assert_eq!(Language::from_extension("csv"), Language::Data);
+        assert_eq!(Language::from_extension("md"), Language::Data);
         assert_eq!(Language::from_extension("lock"), Language::Data);
     }
 
     #[test]
-    fn test_data_files_no_comment_stripping() {
-        // Regression test for #464: package.json with `/*` in strings
+    fn test_json_no_comment_stripping() {
+        // Reproduces #464: package.json with "packages/*" was corrupted
+        // because /* was treated as block comment start
         let json = r#"{
   "workspaces": {
     "packages": [
@@ -432,17 +440,41 @@ mod tests {
 }"#;
         let filter = MinimalFilter;
         let result = filter.filter(json, &Language::Data);
-        assert!(
-            result.contains("scripts"),
-            "scripts section must be preserved"
-        );
+        // All fields must be preserved — no comment stripping on JSON
         assert!(
             result.contains("packages/*"),
-            "glob pattern must be preserved"
+            "packages/* should not be treated as block comment start"
+        );
+        assert!(
+            result.contains("scripts"),
+            "scripts section must not be stripped"
+        );
+        assert!(
+            result.contains("lint-staged"),
+            "lint-staged section must not be stripped"
         );
         assert!(
             result.contains("**/package.json"),
-            "glob pattern must be preserved"
+            "**/package.json should not be treated as block comment end"
+        );
+    }
+
+    #[test]
+    fn test_json_aggressive_filter_preserves_structure() {
+        let json = r#"{
+  "name": "my-app",
+  "dependencies": {
+    "react": "^18.0.0"
+  },
+  "scripts": {
+    "dev": "next dev /* not a comment */"
+  }
+}"#;
+        let filter = AggressiveFilter;
+        let result = filter.filter(json, &Language::Data);
+        assert!(
+            result.contains("/* not a comment */"),
+            "Aggressive filter must not strip comment-like patterns in JSON"
         );
     }
 

@@ -96,10 +96,11 @@ fn detect_output_type(output: &str, command: &str) -> OutputType {
         OutputType::JsonOutput
     } else if output.lines().all(|l| {
         l.len() < 200
-            && !l
-                .contains('\t')
-                .then_some(true)
-                .unwrap_or(l.split_whitespace().count() < 10)
+            && if l.contains('\t') {
+                false
+            } else {
+                l.split_whitespace().count() < 10
+            }
     }) {
         OutputType::ListOutput
     } else {

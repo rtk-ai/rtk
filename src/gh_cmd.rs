@@ -193,8 +193,8 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<()> {
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
-        "comment" => pr_action("commented", &args, verbose),
-        "edit" => pr_action("edited", &args, verbose),
+        "comment" => pr_action("commented", args, verbose),
+        "edit" => pr_action("edited", args, verbose),
         _ => run_passthrough("gh", "pr", args),
     }
 }

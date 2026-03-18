@@ -59,6 +59,7 @@ mod telemetry;
 mod toml_filter;
 mod tracking;
 mod tree;
+mod trust;
 mod tsc_cmd;
 mod utils;
 mod verify_cmd;
@@ -312,7 +313,7 @@ enum Commands {
         #[arg(short = 'l', long, default_value = "80")]
         max_len: usize,
         /// Max results to show
-        #[arg(short, long, default_value = "50")]
+        #[arg(short, long, default_value = "200")]
         max: usize,
         /// Show only match context (not full line)
         #[arg(short, long)]
@@ -599,6 +600,16 @@ enum Commands {
         #[arg(long)]
         passthrough: bool,
     },
+
+    /// Trust project-local TOML filters in current directory
+    Trust {
+        /// List all trusted projects
+        #[arg(long)]
+        list: bool,
+    },
+
+    /// Revoke trust for project-local TOML filters
+    Untrust,
 
     /// Verify hook integrity and run TOML filter inline tests
     Verify {
@@ -1061,6 +1072,10 @@ const RTK_META_COMMANDS: &[&str] = &[
     "hook-audit",
     "cc-economics",
     "verify",
+    "trust",
+    "untrust",
+    "session",
+    "rewrite",
 ];
 
 fn run_fallback(parse_error: clap::Error) -> Result<()> {
@@ -1219,11 +1234,11 @@ enum GtCommands {
 fn shell_split(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let mut chars = input.chars().peekable();
+    let chars = input.chars();
     let mut in_single = false;
     let mut in_double = false;
 
-    while let Some(c) = chars.next() {
+    for c in chars {
         match c {
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
@@ -2186,6 +2201,14 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Trust { list } => {
+            trust::run_trust(list)?;
+        }
+
+        Commands::Untrust => {
+            trust::run_untrust()?;
+        }
+
         Commands::Verify {
             filter,
             require_all,
@@ -2537,8 +2560,8 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in RTK_META_COMMANDS {
-            if *cmd == "proxy" {
-                continue;
+            if matches!(*cmd, "proxy" | "rewrite" | "session") {
+                continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
             assert!(
