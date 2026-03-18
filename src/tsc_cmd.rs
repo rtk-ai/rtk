@@ -109,7 +109,7 @@ fn filter_tsc_output(output: &str) -> String {
 
     if errors.is_empty() {
         if output.contains("Found 0 errors") {
-            return "✓ TypeScript: No errors found".to_string();
+            return "TypeScript: No errors found".to_string();
         }
         return "TypeScript compilation completed".to_string();
     }

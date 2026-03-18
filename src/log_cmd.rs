@@ -105,23 +105,23 @@ fn analyze_logs(content: &str) -> String {
     let total_warnings: usize = warn_counts.values().sum();
     let total_info: usize = info_counts.values().sum();
 
-    result.push("📊 Log Summary".to_string());
+    result.push("Log Summary".to_string());
     result.push(format!(
-        "   ❌ {} errors ({} unique)",
+        "   [error] {} errors ({} unique)",
         total_errors,
         error_counts.len()
     ));
     result.push(format!(
-        "   ⚠️  {} warnings ({} unique)",
+        "   [warn] {} warnings ({} unique)",
         total_warnings,
         warn_counts.len()
     ));
-    result.push(format!("   ℹ️  {} info messages", total_info));
+    result.push(format!("   [info] {} info messages", total_info));
     result.push(String::new());
 
     // Errors with counts
     if !unique_errors.is_empty() {
-        result.push("❌ ERRORS:".to_string());
+        result.push("[ERRORS]".to_string());
 
         // Sort by count
         let mut error_list: Vec<_> = error_counts.iter().collect();
@@ -163,7 +163,7 @@ fn analyze_logs(content: &str) -> String {
 
     // Warnings with counts
     if !unique_warnings.is_empty() {
-        result.push("⚠️  WARNINGS:".to_string());
+        result.push("[WARNINGS]".to_string());
 
         let mut warn_list: Vec<_> = warn_counts.iter().collect();
         warn_list.sort_by(|a, b| b.1.cmp(a.1));

@@ -125,14 +125,14 @@ fn filter_next_build(output: &str) -> String {
 
     // Build filtered output
     let mut result = String::new();
-    result.push_str("⚡ Next.js Build\n");
+    result.push_str("Next.js Build\n");
     result.push_str("═══════════════════════════════════════\n");
 
     if already_built && routes_total == 0 {
-        result.push_str("✓ Already built (using cache)\n\n");
+        result.push_str("Already built (using cache)\n\n");
     } else if routes_total > 0 {
         result.push_str(&format!(
-            "✓ {} routes ({} static, {} dynamic)\n\n",
+            "{} routes ({} static, {} dynamic)\n\n",
             routes_total, routes_static, routes_dynamic
         ));
     }
@@ -146,7 +146,7 @@ fn filter_next_build(output: &str) -> String {
         for (route, size, pct_change) in bundles.iter().take(10) {
             let warning_marker = if let Some(pct) = pct_change {
                 if *pct > 10.0 {
-                    format!(" ⚠️ (+{:.0}%)", pct)
+                    format!(" [warn] (+{:.0}%)", pct)
                 } else {
                     String::new()
                 }
@@ -219,7 +219,7 @@ Route (app)                    Size     First Load JS
 ✓ Built in 34.2s
 "#;
         let result = filter_next_build(output);
-        assert!(result.contains("⚡ Next.js Build"));
+        assert!(result.contains("Next.js Build"));
         assert!(result.contains("routes"));
         assert!(!result.contains("Creating an optimized")); // Should filter verbose logs
     }
