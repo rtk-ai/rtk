@@ -722,7 +722,7 @@ fn run_default_mode(
     _verbose: u8,
     _install_opencode: bool,
 ) -> Result<()> {
-    eprintln!("⚠️  Hook-based mode requires Unix (macOS/Linux).");
+    eprintln!("[warn] Hook-based mode requires Unix (macOS/Linux).");
     eprintln!("    Windows: use --claude-md mode for full injection.");
     eprintln!("    Falling back to --claude-md mode.");
     run_claude_md_mode(_global, _verbose, _install_opencode)
@@ -779,7 +779,7 @@ fn run_default_mode(
     println!("  CLAUDE.md: @RTK.md reference added");
 
     if migrated {
-        println!("\n  ✅ Migrated: removed 137-line RTK block from CLAUDE.md");
+        println!("\n  [ok] Migrated: removed 137-line RTK block from CLAUDE.md");
         println!("              replaced with @RTK.md (10 lines)");
     }
 
@@ -880,7 +880,7 @@ fn run_hook_only_mode(
     install_opencode: bool,
 ) -> Result<()> {
     if !global {
-        eprintln!("⚠️  Warning: --hook-only only makes sense with --global");
+        eprintln!("[warn] Warning: --hook-only only makes sense with --global");
         eprintln!("    For local projects, use default mode or --claude-md");
         return Ok(());
     }
@@ -963,22 +963,22 @@ fn run_claude_md_mode(global: bool, verbose: u8, install_opencode: bool) -> Resu
         match action {
             RtkBlockUpsert::Added => {
                 fs::write(&path, new_content)?;
-                println!("✅ Added rtk instructions to existing {}", path.display());
+                println!("[ok] Added rtk instructions to existing {}", path.display());
             }
             RtkBlockUpsert::Updated => {
                 fs::write(&path, new_content)?;
-                println!("✅ Updated rtk instructions in {}", path.display());
+                println!("[ok] Updated rtk instructions in {}", path.display());
             }
             RtkBlockUpsert::Unchanged => {
                 println!(
-                    "✅ {} already contains up-to-date rtk instructions",
+                    "[ok] {} already contains up-to-date rtk instructions",
                     path.display()
                 );
                 return Ok(());
             }
             RtkBlockUpsert::Malformed => {
                 eprintln!(
-                    "⚠️  Warning: Found '<!-- rtk-instructions' without closing marker in {}",
+                    "[warn] Warning: Found '<!-- rtk-instructions' without closing marker in {}",
                     path.display()
                 );
 
@@ -1001,7 +1001,7 @@ fn run_claude_md_mode(global: bool, verbose: u8, install_opencode: bool) -> Resu
         }
     } else {
         fs::write(&path, RTK_INSTRUCTIONS)?;
-        println!("✅ Created {} with rtk instructions", path.display());
+        println!("[ok] Created {} with rtk instructions", path.display());
     }
 
     if global {
@@ -1009,7 +1009,7 @@ fn run_claude_md_mode(global: bool, verbose: u8, install_opencode: bool) -> Resu
             let opencode_plugin_path = prepare_opencode_plugin_path()?;
             ensure_opencode_plugin_installed(&opencode_plugin_path, verbose)?;
             println!(
-                "✅ OpenCode plugin installed: {}",
+                "[ok] OpenCode plugin installed: {}",
                 opencode_plugin_path.display()
             );
         }
@@ -1151,7 +1151,7 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
 
         (result, true) // migrated
     } else if content.contains("<!-- rtk-instructions") {
-        eprintln!("⚠️  Warning: Found '<!-- rtk-instructions' without closing marker.");
+        eprintln!("[warn] Warning: Found '<!-- rtk-instructions' without closing marker.");
         eprintln!("    This can happen if CLAUDE.md was manually edited.");
 
         // Find line number
@@ -1238,7 +1238,7 @@ pub fn show_config() -> Result<()> {
     let global_claude_md = claude_dir.join("CLAUDE.md");
     let local_claude_md = PathBuf::from("CLAUDE.md");
 
-    println!("📋 rtk Configuration:\n");
+    println!("rtk Configuration:\n");
 
     // Check hook
     if hook_path.exists() {
@@ -1257,12 +1257,12 @@ pub fn show_config() -> Result<()> {
 
             if !is_executable {
                 println!(
-                    "⚠️  Hook: {} (NOT executable - run: chmod +x)",
+                    "[warn] Hook: {} (NOT executable - run: chmod +x)",
                     hook_path.display()
                 );
             } else if !is_thin_delegator {
                 println!(
-                    "⚠️  Hook: {} (outdated — inline logic, not thin delegator)",
+                    "[warn] Hook: {} (outdated — inline logic, not thin delegator)",
                     hook_path.display()
                 );
                 println!(
@@ -1270,47 +1270,50 @@ pub fn show_config() -> Result<()> {
                 );
             } else if is_executable && has_guards {
                 println!(
-                    "✅ Hook: {} (thin delegator, version {})",
+                    "[ok] Hook: {} (thin delegator, version {})",
                     hook_path.display(),
                     hook_version
                 );
             } else {
-                println!("⚠️  Hook: {} (no guards - outdated)", hook_path.display());
+                println!(
+                    "[warn] Hook: {} (no guards - outdated)",
+                    hook_path.display()
+                );
             }
         }
 
         #[cfg(not(unix))]
         {
-            println!("✅ Hook: {} (exists)", hook_path.display());
+            println!("[ok] Hook: {} (exists)", hook_path.display());
         }
     } else {
-        println!("⚪ Hook: not found");
+        println!("[--] Hook: not found");
     }
 
     // Check RTK.md
     if rtk_md_path.exists() {
-        println!("✅ RTK.md: {} (slim mode)", rtk_md_path.display());
+        println!("[ok] RTK.md: {} (slim mode)", rtk_md_path.display());
     } else {
-        println!("⚪ RTK.md: not found");
+        println!("[--] RTK.md: not found");
     }
 
     // Check hook integrity
     match integrity::verify_hook_at(&hook_path) {
         Ok(integrity::IntegrityStatus::Verified) => {
-            println!("✅ Integrity: hook hash verified");
+            println!("[ok] Integrity: hook hash verified");
         }
         Ok(integrity::IntegrityStatus::Tampered { .. }) => {
-            println!("❌ Integrity: hook modified outside rtk init (run: rtk verify)");
+            println!("[FAIL] Integrity: hook modified outside rtk init (run: rtk verify)");
         }
         Ok(integrity::IntegrityStatus::NoBaseline) => {
-            println!("⚠️  Integrity: no baseline hash (run: rtk init -g to establish)");
+            println!("[warn] Integrity: no baseline hash (run: rtk init -g to establish)");
         }
         Ok(integrity::IntegrityStatus::NotInstalled)
         | Ok(integrity::IntegrityStatus::OrphanedHash) => {
             // Don't show integrity line if hook isn't installed
         }
         Err(_) => {
-            println!("⚠️  Integrity: check failed");
+            println!("[warn] Integrity: check failed");
         }
     }
 
@@ -1318,28 +1321,28 @@ pub fn show_config() -> Result<()> {
     if global_claude_md.exists() {
         let content = fs::read_to_string(&global_claude_md)?;
         if content.contains("@RTK.md") {
-            println!("✅ Global (~/.claude/CLAUDE.md): @RTK.md reference");
+            println!("[ok] Global (~/.claude/CLAUDE.md): @RTK.md reference");
         } else if content.contains("<!-- rtk-instructions") {
             println!(
-                "⚠️  Global (~/.claude/CLAUDE.md): old RTK block (run: rtk init -g to migrate)"
+                "[warn] Global (~/.claude/CLAUDE.md): old RTK block (run: rtk init -g to migrate)"
             );
         } else {
-            println!("⚪ Global (~/.claude/CLAUDE.md): exists but rtk not configured");
+            println!("[--] Global (~/.claude/CLAUDE.md): exists but rtk not configured");
         }
     } else {
-        println!("⚪ Global (~/.claude/CLAUDE.md): not found");
+        println!("[--] Global (~/.claude/CLAUDE.md): not found");
     }
 
     // Check local CLAUDE.md
     if local_claude_md.exists() {
         let content = fs::read_to_string(&local_claude_md)?;
         if content.contains("rtk") {
-            println!("✅ Local (./CLAUDE.md): rtk enabled");
+            println!("[ok] Local (./CLAUDE.md): rtk enabled");
         } else {
-            println!("⚪ Local (./CLAUDE.md): exists but rtk not configured");
+            println!("[--] Local (./CLAUDE.md): exists but rtk not configured");
         }
     } else {
-        println!("⚪ Local (./CLAUDE.md): not found");
+        println!("[--] Local (./CLAUDE.md): not found");
     }
 
     // Check settings.json
@@ -1350,31 +1353,31 @@ pub fn show_config() -> Result<()> {
             if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
                 let hook_command = hook_path.display().to_string();
                 if hook_already_present(&root, &hook_command) {
-                    println!("✅ settings.json: RTK hook configured");
+                    println!("[ok] settings.json: RTK hook configured");
                 } else {
-                    println!("⚠️  settings.json: exists but RTK hook not configured");
+                    println!("[warn] settings.json: exists but RTK hook not configured");
                     println!("    Run: rtk init -g --auto-patch");
                 }
             } else {
-                println!("⚠️  settings.json: exists but invalid JSON");
+                println!("[warn] settings.json: exists but invalid JSON");
             }
         } else {
-            println!("⚪ settings.json: empty");
+            println!("[--] settings.json: empty");
         }
     } else {
-        println!("⚪ settings.json: not found");
+        println!("[--] settings.json: not found");
     }
 
     // Check OpenCode plugin
     if let Ok(opencode_dir) = resolve_opencode_dir() {
         let plugin = opencode_plugin_path(&opencode_dir);
         if plugin.exists() {
-            println!("✅ OpenCode: plugin installed ({})", plugin.display());
+            println!("[ok] OpenCode: plugin installed ({})", plugin.display());
         } else {
-            println!("⚪ OpenCode: plugin not found");
+            println!("[--] OpenCode: plugin not found");
         }
     } else {
-        println!("⚪ OpenCode: config dir not found");
+        println!("[--] OpenCode: config dir not found");
     }
 
     println!("\nUsage:");

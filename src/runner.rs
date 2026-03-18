@@ -34,10 +34,10 @@ pub fn run_err(command: &str, verbose: u8) -> Result<()> {
 
     if filtered.is_empty() {
         if output.status.success() {
-            rtk.push_str("✅ Command completed successfully (no errors)");
+            rtk.push_str("[ok] Command completed successfully (no errors)");
         } else {
             rtk.push_str(&format!(
-                "❌ Command failed (exit code: {:?})\n",
+                "[FAIL] Command failed (exit code: {:?})\n",
                 output.status.code()
             ));
             let lines: Vec<&str> = raw.lines().collect();
@@ -228,7 +228,7 @@ fn extract_test_summary(output: &str, command: &str) -> String {
     let mut output = String::new();
 
     if !failures.is_empty() {
-        output.push_str("❌ FAILURES:\n");
+        output.push_str("[FAIL] FAILURES:\n");
         for f in failures.iter().take(10) {
             output.push_str(&format!("  {}\n", f));
         }
@@ -239,13 +239,13 @@ fn extract_test_summary(output: &str, command: &str) -> String {
     }
 
     if !result.is_empty() {
-        output.push_str("📊 SUMMARY:\n");
+        output.push_str("SUMMARY:\n");
         for r in &result {
             output.push_str(&format!("  {}\n", r));
         }
     } else {
         // Fallback: show last few lines
-        output.push_str("📊 OUTPUT (last 5 lines):\n");
+        output.push_str("OUTPUT (last 5 lines):\n");
         let start = lines.len().saturating_sub(5);
         for line in &lines[start..] {
             if !line.trim().is_empty() {

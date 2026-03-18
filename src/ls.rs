@@ -203,7 +203,7 @@ fn compact_ls(raw: &str, show_all: bool) -> String {
 
     // Summary line
     out.push('\n');
-    let mut summary = format!("📊 {} files, {} dirs", files.len(), dirs.len());
+    let mut summary = format!("{} files, {} dirs", files.len(), dirs.len());
     if !by_ext.is_empty() {
         let mut ext_counts: Vec<_> = by_ext.iter().collect();
         ext_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -291,7 +291,7 @@ mod tests {
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n\
                      -rw-r--r--  1 user  staff   100 Jan  1 12:00 Cargo.toml\n";
         let output = compact_ls(input, false);
-        assert!(output.contains("📊 3 files, 1 dirs"));
+        assert!(output.contains("3 files, 1 dirs"));
         assert!(output.contains(".rs"));
         assert!(output.contains(".toml"));
     }

@@ -389,7 +389,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
     };
 
     if filtered.trim().is_empty() {
-        println!("All packages up-to-date ✓");
+        println!("All packages up-to-date");
     } else {
         println!("{}", filtered);
     }
@@ -484,7 +484,7 @@ fn filter_pnpm_install(output: &str) -> String {
     }
 
     if result.is_empty() {
-        "ok ✓".to_string()
+        "ok".to_string()
     } else {
         result.join("\n")
     }

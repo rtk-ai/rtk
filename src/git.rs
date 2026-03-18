@@ -573,7 +573,7 @@ fn format_status_output(porcelain: &str) -> String {
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
-            output.push_str(&format!("branch: {}\n", branch));
+            output.push_str(&format!("* {}\n", branch));
         }
     }
 
@@ -623,7 +623,7 @@ fn format_status_output(porcelain: &str) -> String {
     let max_untracked = limits.status_max_untracked;
 
     if staged > 0 {
-        output.push_str(&format!("staged: {} files\n", staged));
+        output.push_str(&format!("+ Staged: {} files\n", staged));
         for f in staged_files.iter().take(max_files) {
             output.push_str(&format!("   {}\n", f));
         }
@@ -636,7 +636,7 @@ fn format_status_output(porcelain: &str) -> String {
     }
 
     if modified > 0 {
-        output.push_str(&format!("modified: {} files\n", modified));
+        output.push_str(&format!("~ Modified: {} files\n", modified));
         for f in modified_files.iter().take(max_files) {
             output.push_str(&format!("   {}\n", f));
         }
@@ -649,7 +649,7 @@ fn format_status_output(porcelain: &str) -> String {
     }
 
     if untracked > 0 {
-        output.push_str(&format!("untracked: {} files\n", untracked));
+        output.push_str(&format!("? Untracked: {} files\n", untracked));
         for f in untracked_files.iter().take(max_untracked) {
             output.push_str(&format!("   {}\n", f));
         }
@@ -704,7 +704,7 @@ fn filter_status_with_args(output: &str) -> String {
     }
 
     if result.is_empty() {
-        "ok ✓".to_string()
+        "ok".to_string()
     } else {
         result.join("\n")
     }
@@ -830,9 +830,9 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
             // Parse "1 file changed, 5 insertions(+)" format
             let short = stat.lines().last().unwrap_or("").trim();
             if short.is_empty() {
-                "ok ✓".to_string()
+                "ok".to_string()
             } else {
-                format!("ok ✓ {}", short)
+                format!("ok {}", short)
             }
         };
 
@@ -893,15 +893,15 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
             if let Some(hash_start) = line.find(' ') {
                 let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
                 if !hash.is_empty() && hash.len() >= 7 {
-                    format!("ok ✓ {}", &hash[..7.min(hash.len())])
+                    format!("ok {}", &hash[..7.min(hash.len())])
                 } else {
-                    "ok ✓".to_string()
+                    "ok".to_string()
                 }
             } else {
-                "ok ✓".to_string()
+                "ok".to_string()
             }
         } else {
-            "ok ✓".to_string()
+            "ok".to_string()
         };
 
         println!("{}", compact);
@@ -959,7 +959,7 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> 
                 if line.contains("->") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 {
-                        result = format!("ok ✓ {}", parts[parts.len() - 1]);
+                        result = format!("ok {}", parts[parts.len() - 1]);
                         break;
                     }
                 }
@@ -967,7 +967,7 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> 
             if !result.is_empty() {
                 result
             } else {
-                "ok ✓".to_string()
+                "ok".to_string()
             }
         };
 
@@ -1051,9 +1051,9 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> 
                 }
 
                 if files > 0 {
-                    format!("ok ✓ {} files +{} -{}", files, insertions, deletions)
+                    format!("ok {} files +{} -{}", files, insertions, deletions)
                 } else {
-                    "ok ✓".to_string()
+                    "ok".to_string()
                 }
             };
 
@@ -1171,7 +1171,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
         let combined = format!("{}{}", stdout, stderr);
 
         let msg = if output.status.success() {
-            "ok ✓"
+            "ok"
         } else {
             &combined
         };
@@ -1184,7 +1184,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<()
         );
 
         if output.status.success() {
-            println!("ok ✓");
+            println!("ok");
         } else {
             eprintln!("FAILED: git branch {}", args.join(" "));
             if !stderr.trim().is_empty() {
@@ -1548,7 +1548,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         let combined = format!("{}{}", stdout, stderr);
 
         let msg = if output.status.success() {
-            "ok ✓"
+            "ok"
         } else {
             &combined
         };
@@ -1561,7 +1561,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         );
 
         if output.status.success() {
-            println!("ok ✓");
+            println!("ok");
         } else {
             eprintln!("FAILED: git worktree {}", args.join(" "));
             if !stderr.trim().is_empty() {
@@ -1808,8 +1808,8 @@ mod tests {
     fn test_format_status_output_modified_files() {
         let porcelain = "## main...origin/main\n M src/main.rs\n M src/lib.rs\n";
         let result = format_status_output(porcelain);
-        assert!(result.contains("branch: main...origin/main"));
-        assert!(result.contains("modified: 2 files"));
+        assert!(result.contains("* main...origin/main"));
+        assert!(result.contains("~ Modified: 2 files"));
         assert!(result.contains("src/main.rs"));
         assert!(result.contains("src/lib.rs"));
         assert!(!result.contains("Staged"));
@@ -1820,8 +1820,8 @@ mod tests {
     fn test_format_status_output_untracked_files() {
         let porcelain = "## feature/new\n?? temp.txt\n?? debug.log\n?? test.sh\n";
         let result = format_status_output(porcelain);
-        assert!(result.contains("branch: feature/new"));
-        assert!(result.contains("untracked: 3 files"));
+        assert!(result.contains("* feature/new"));
+        assert!(result.contains("? Untracked: 3 files"));
         assert!(result.contains("temp.txt"));
         assert!(result.contains("debug.log"));
         assert!(result.contains("test.sh"));
@@ -1837,13 +1837,13 @@ A  added.rs
 ?? untracked.txt
 "#;
         let result = format_status_output(porcelain);
-        assert!(result.contains("branch: main"));
-        assert!(result.contains("staged: 2 files"));
+        assert!(result.contains("* main"));
+        assert!(result.contains("+ Staged: 2 files"));
         assert!(result.contains("staged.rs"));
         assert!(result.contains("added.rs"));
-        assert!(result.contains("modified: 1 files"));
+        assert!(result.contains("~ Modified: 1 files"));
         assert!(result.contains("modified.rs"));
-        assert!(result.contains("untracked: 1 files"));
+        assert!(result.contains("? Untracked: 1 files"));
         assert!(result.contains("untracked.txt"));
     }
 
@@ -1855,7 +1855,7 @@ A  added.rs
             porcelain.push_str(&format!("M  file{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
-        assert!(result.contains("staged: 20 files"));
+        assert!(result.contains("+ Staged: 20 files"));
         assert!(result.contains("file1.rs"));
         assert!(result.contains("file15.rs"));
         assert!(result.contains("... +5 more"));
@@ -1871,7 +1871,7 @@ A  added.rs
             porcelain.push_str(&format!(" M file{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
-        assert!(result.contains("modified: 20 files"));
+        assert!(result.contains("~ Modified: 20 files"));
         assert!(result.contains("file1.rs"));
         assert!(result.contains("file15.rs"));
         assert!(result.contains("... +5 more"));
@@ -1886,7 +1886,7 @@ A  added.rs
             porcelain.push_str(&format!("?? file{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
-        assert!(result.contains("untracked: 15 files"));
+        assert!(result.contains("? Untracked: 15 files"));
         assert!(result.contains("file1.rs"));
         assert!(result.contains("file10.rs"));
         assert!(result.contains("... +5 more"));
@@ -2100,7 +2100,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let porcelain = "## main\n M สวัสดี.txt\n?? ทดสอบ.rs\n";
         let result = format_status_output(porcelain);
         // Should not panic
-        assert!(result.contains("branch: main"));
+        assert!(result.contains("* main"));
         assert!(result.contains("สวัสดี.txt"));
         assert!(result.contains("ทดสอบ.rs"));
     }
@@ -2109,7 +2109,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_format_status_output_emoji_filename() {
         let porcelain = "## main\nA  🎉-party.txt\n M 日本語ファイル.rs\n";
         let result = format_status_output(porcelain);
-        assert!(result.contains("branch: main"));
+        assert!(result.contains("* main"));
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.
