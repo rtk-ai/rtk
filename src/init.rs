@@ -1963,14 +1963,17 @@ fn show_claude_config() -> Result<()> {
 
                 if !is_executable {
                     println!(
-                        "⚠️  Cursor hook: {} (NOT executable - run: chmod +x)",
+                        "[warn] Cursor hook: {} (NOT executable - run: chmod +x)",
                         cursor_hook.display()
                     );
                 } else if is_thin {
-                    println!("✅ Cursor hook: {} (thin delegator)", cursor_hook.display());
+                    println!(
+                        "[ok] Cursor hook: {} (thin delegator)",
+                        cursor_hook.display()
+                    );
                 } else {
                     println!(
-                        "⚠️  Cursor hook: {} (outdated — missing rtk rewrite delegation)",
+                        "[warn] Cursor hook: {} (outdated - missing rtk rewrite delegation)",
                         cursor_hook.display()
                     );
                 }
@@ -1978,10 +1981,10 @@ fn show_claude_config() -> Result<()> {
 
             #[cfg(not(unix))]
             {
-                println!("✅ Cursor hook: {} (exists)", cursor_hook.display());
+                println!("[ok] Cursor hook: {} (exists)", cursor_hook.display());
             }
         } else {
-            println!("⚪ Cursor hook: not found");
+            println!("[--] Cursor hook: not found");
         }
 
         if cursor_hooks_json.exists() {
@@ -1989,22 +1992,22 @@ fn show_claude_config() -> Result<()> {
             if !content.trim().is_empty() {
                 if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
                     if cursor_hook_already_present(&root) {
-                        println!("✅ Cursor hooks.json: RTK preToolUse configured");
+                        println!("[ok] Cursor hooks.json: RTK preToolUse configured");
                     } else {
-                        println!("⚠️  Cursor hooks.json: exists but RTK not configured");
+                        println!("[warn] Cursor hooks.json: exists but RTK not configured");
                         println!("    Run: rtk init -g --agent cursor");
                     }
                 } else {
-                    println!("⚠️  Cursor hooks.json: exists but invalid JSON");
+                    println!("[warn] Cursor hooks.json: exists but invalid JSON");
                 }
             } else {
-                println!("⚪ Cursor hooks.json: empty");
+                println!("[--] Cursor hooks.json: empty");
             }
         } else {
-            println!("⚪ Cursor hooks.json: not found");
+            println!("[--] Cursor hooks.json: not found");
         }
     } else {
-        println!("⚪ Cursor: home dir not found");
+        println!("[--] Cursor: home dir not found");
     }
 
     println!("\nUsage:");
