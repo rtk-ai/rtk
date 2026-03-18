@@ -44,6 +44,6 @@ collect2: error: ld returned 1 exit status
 expected = "/usr/bin/ld: /tmp/main.o: undefined reference to 'missing_func'\ncollect2: error: ld returned 1 exit status"
 
 [[tests.gcc]]
-name = "empty input passes through"
+name = "empty input returns on_empty message"
 input = ""
-expected = ""
+expected = "gcc: ok"

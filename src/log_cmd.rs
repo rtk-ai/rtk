@@ -1,10 +1,22 @@
 use crate::tracking;
 use anyhow::Result;
+use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead};
 use std::path::Path;
+
+lazy_static! {
+    static ref TIMESTAMP_RE: Regex =
+        Regex::new(r"^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}[.,]?\d*\s*").unwrap();
+    static ref UUID_RE: Regex =
+        Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+            .unwrap();
+    static ref HEX_RE: Regex = Regex::new(r"0x[0-9a-fA-F]+").unwrap();
+    static ref NUM_RE: Regex = Regex::new(r"\b\d{4,}\b").unwrap();
+    static ref PATH_RE: Regex = Regex::new(r"/[\w./\-]+").unwrap();
+}
 
 /// Filter and deduplicate log output
 pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
@@ -58,22 +70,14 @@ fn analyze_logs(content: &str) -> String {
     let mut unique_errors: Vec<String> = Vec::new();
     let mut unique_warnings: Vec<String> = Vec::new();
 
-    // Patterns to normalize log messages
-    let timestamp_re =
-        Regex::new(r"^\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}:\d{2}[.,]?\d*\s*").unwrap();
-    let uuid_re =
-        Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-            .unwrap();
-    let hex_re = Regex::new(r"0x[0-9a-fA-F]+").unwrap();
-    let num_re = Regex::new(r"\b\d{4,}\b").unwrap();
-    let path_re = Regex::new(r"/[\w./\-]+").unwrap();
+    // Use module-level lazy_static regexes for normalization
 
     for line in content.lines() {
         let line_lower = line.to_lowercase();
 
         // Normalize for deduplication
         let normalized =
-            normalize_log_line(line, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re);
+            normalize_log_line(line, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
 
         // Categorize
         if line_lower.contains("error")
@@ -128,7 +132,7 @@ fn analyze_logs(content: &str) -> String {
             let original = unique_errors
                 .iter()
                 .find(|e| {
-                    &normalize_log_line(e, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re)
+                    &normalize_log_line(e, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE)
                         == *normalized
                 })
                 .map(|s| s.as_str())
@@ -168,7 +172,7 @@ fn analyze_logs(content: &str) -> String {
             let original = unique_warnings
                 .iter()
                 .find(|w| {
-                    &normalize_log_line(w, &timestamp_re, &uuid_re, &hex_re, &num_re, &path_re)
+                    &normalize_log_line(w, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE)
                         == *normalized
                 })
                 .map(|s| s.as_str())
