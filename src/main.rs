@@ -67,9 +67,18 @@ mod wget_cmd;
 
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+/// Target agent for hook installation.
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+pub enum AgentTarget {
+    /// Claude Code (default)
+    Claude,
+    /// Cursor Agent (editor and CLI)
+    Cursor,
+}
 
 #[derive(Parser)]
 #[command(
@@ -336,6 +345,10 @@ enum Commands {
         /// Initialize for Gemini CLI instead of Claude Code
         #[arg(long)]
         gemini: bool,
+
+        /// Target agent to install hooks for (default: claude)
+        #[arg(long, value_enum)]
+        agent: Option<AgentTarget>,
 
         /// Show current configuration
         #[arg(long)]
@@ -1632,6 +1645,7 @@ fn main() -> Result<()> {
             global,
             opencode,
             gemini,
+            agent,
             show,
             claude_md,
             hook_only,
@@ -1643,7 +1657,8 @@ fn main() -> Result<()> {
             if show {
                 init::show_config(codex)?;
             } else if uninstall {
-                init::uninstall(global, gemini, codex, cli.verbose)?;
+                let cursor = agent.map_or(false, |a| a == AgentTarget::Cursor);
+                init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1656,6 +1671,8 @@ fn main() -> Result<()> {
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
+                let install_cursor =
+                    agent.map_or(false, |a| a == AgentTarget::Cursor);
 
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1668,6 +1685,7 @@ fn main() -> Result<()> {
                     global,
                     install_claude,
                     install_opencode,
+                    install_cursor,
                     claude_md,
                     hook_only,
                     codex,
