@@ -1698,11 +1698,13 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Clean => {
-            let tracker = tracking::Tracker::new().context("Failed to open tracking database")?;
+            let tracker =
+                core::tracking::Tracker::new().context("Failed to open tracking database")?;
             let deleted = tracker
                 .clear_all()
                 .context("Failed to clear tracking history")?;
             println!("Cleared {} records from tracking history.", deleted);
+            0
         }
 
         Commands::Config { create } => {

@@ -1373,7 +1373,75 @@ mod tests {
         assert!(summary.recent.iter().any(|r| r.raw_command == test_cmd));
     }
 
-    // 13. recovery_rate calculation
+    // 13. clear_all on isolated temp DB — deletes all records
+    #[test]
+    fn test_clear_all_deletes_records() {
+        use std::env;
+
+        let tmp = env::temp_dir().join(format!("rtk_test_clean_{}.db", std::process::id()));
+        env::set_var("RTK_DB_PATH", &tmp);
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .unwrap();
+        tracker
+            .record("git log", "rtk git log", 200, 40, 8)
+            .unwrap();
+
+        let deleted = tracker.clear_all().unwrap();
+        assert_eq!(deleted, 2);
+
+        let recent = tracker.get_recent(10).unwrap();
+        assert!(recent.is_empty());
+
+        env::remove_var("RTK_DB_PATH");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // 14. clear_all on empty DB returns 0
+    #[test]
+    fn test_clear_all_empty_db() {
+        use std::env;
+
+        let tmp = env::temp_dir().join(format!("rtk_test_clean_empty_{}.db", std::process::id()));
+        env::set_var("RTK_DB_PATH", &tmp);
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let deleted = tracker.clear_all().unwrap();
+        assert_eq!(deleted, 0);
+
+        env::remove_var("RTK_DB_PATH");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // 15. clear_all also clears parse_failures table
+    #[test]
+    fn test_clear_all_clears_parse_failures() {
+        use std::env;
+
+        let tmp = env::temp_dir().join(format!("rtk_test_clean_pf_{}.db", std::process::id()));
+        env::set_var("RTK_DB_PATH", &tmp);
+
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        tracker.record("cmd1", "rtk cmd1", 100, 20, 5).unwrap();
+        tracker
+            .record_parse_failure("bad cmd", "parse error", false)
+            .unwrap();
+
+        tracker.clear_all().unwrap();
+
+        let recent = tracker.get_recent(10).unwrap();
+        assert!(recent.is_empty());
+
+        let pf_summary = tracker.get_parse_failure_summary().unwrap();
+        assert_eq!(pf_summary.total, 0);
+
+        env::remove_var("RTK_DB_PATH");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // 16. recovery_rate calculation
     #[test]
     fn test_parse_failure_recovery_rate() {
         let tracker = Tracker::new().expect("Failed to create tracker");
