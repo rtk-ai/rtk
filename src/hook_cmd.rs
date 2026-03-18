@@ -1,8 +1,143 @@
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::io::{self, Read};
 
 use crate::discover::registry::rewrite_command;
+
+// ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
+
+/// Format detected from the preToolUse JSON input.
+enum HookFormat {
+    /// VS Code Copilot Chat / Claude Code: `tool_name` + `tool_input.command`, supports `updatedInput`.
+    VsCode { command: String },
+    /// GitHub Copilot CLI: camelCase `toolName` + `toolArgs` (JSON string), deny-with-suggestion only.
+    CopilotCli { command: String },
+    /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
+    PassThrough,
+}
+
+/// Run the Copilot preToolUse hook.
+/// Auto-detects VS Code Copilot Chat vs Copilot CLI format.
+pub fn run_copilot() -> Result<()> {
+    let mut input = String::new();
+    io::stdin()
+        .read_to_string(&mut input)
+        .context("Failed to read stdin")?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match detect_format(&v) {
+        HookFormat::VsCode { command } => handle_vscode(&command),
+        HookFormat::CopilotCli { command } => handle_copilot_cli(&command),
+        HookFormat::PassThrough => Ok(()),
+    }
+}
+
+fn detect_format(v: &Value) -> HookFormat {
+    // VS Code Copilot Chat / Claude Code: snake_case keys
+    if let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) {
+        if matches!(tool_name, "runTerminalCommand" | "Bash" | "bash") {
+            if let Some(cmd) = v
+                .pointer("/tool_input/command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+            {
+                return HookFormat::VsCode {
+                    command: cmd.to_string(),
+                };
+            }
+        }
+        return HookFormat::PassThrough;
+    }
+
+    // Copilot CLI: camelCase keys, toolArgs is a JSON-encoded string
+    if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
+        if tool_name == "bash" {
+            if let Some(tool_args_str) = v.get("toolArgs").and_then(|t| t.as_str()) {
+                if let Ok(tool_args) = serde_json::from_str::<Value>(tool_args_str) {
+                    if let Some(cmd) = tool_args
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .filter(|c| !c.is_empty())
+                    {
+                        return HookFormat::CopilotCli {
+                            command: cmd.to_string(),
+                        };
+                    }
+                }
+            }
+        }
+        return HookFormat::PassThrough;
+    }
+
+    HookFormat::PassThrough
+}
+
+fn get_rewritten(cmd: &str) -> Option<String> {
+    if cmd.contains("<<") {
+        return None;
+    }
+
+    let excluded = crate::config::Config::load()
+        .map(|c| c.hooks.exclude_commands)
+        .unwrap_or_default();
+
+    let rewritten = rewrite_command(cmd, &excluded)?;
+
+    if rewritten == cmd {
+        return None;
+    }
+
+    Some(rewritten)
+}
+
+fn handle_vscode(cmd: &str) -> Result<()> {
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+
+    let output = json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": "RTK auto-rewrite",
+            "updatedInput": { "command": rewritten }
+        }
+    });
+    println!("{output}");
+    Ok(())
+}
+
+fn handle_copilot_cli(cmd: &str) -> Result<()> {
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+
+    let output = json!({
+        "permissionDecision": "deny",
+        "permissionDecisionReason": format!(
+            "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
+            rewritten
+        )
+    });
+    println!("{output}");
+    Ok(())
+}
+
+// ── Gemini hook ───────────────────────────────────────────────
 
 /// Run the Gemini CLI BeforeTool hook.
 /// Reads JSON from stdin, rewrites shell commands to rtk equivalents,
@@ -60,6 +195,77 @@ fn print_rewrite(cmd: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Copilot format detection ---
+
+    fn vscode_input(tool: &str, cmd: &str) -> Value {
+        json!({
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+    }
+
+    fn copilot_cli_input(cmd: &str) -> Value {
+        let args = serde_json::to_string(&json!({ "command": cmd })).unwrap();
+        json!({ "toolName": "bash", "toolArgs": args })
+    }
+
+    #[test]
+    fn test_detect_vscode_bash() {
+        assert!(matches!(
+            detect_format(&vscode_input("Bash", "git status")),
+            HookFormat::VsCode { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_vscode_run_terminal_command() {
+        assert!(matches!(
+            detect_format(&vscode_input("runTerminalCommand", "cargo test")),
+            HookFormat::VsCode { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_copilot_cli_bash() {
+        assert!(matches!(
+            detect_format(&copilot_cli_input("git status")),
+            HookFormat::CopilotCli { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_non_bash_is_passthrough() {
+        let v = json!({ "tool_name": "editFiles" });
+        assert!(matches!(detect_format(&v), HookFormat::PassThrough));
+    }
+
+    #[test]
+    fn test_detect_unknown_is_passthrough() {
+        assert!(matches!(detect_format(&json!({})), HookFormat::PassThrough));
+    }
+
+    #[test]
+    fn test_get_rewritten_supported() {
+        assert!(get_rewritten("git status").is_some());
+    }
+
+    #[test]
+    fn test_get_rewritten_unsupported() {
+        assert!(get_rewritten("htop").is_none());
+    }
+
+    #[test]
+    fn test_get_rewritten_already_rtk() {
+        assert!(get_rewritten("rtk git status").is_none());
+    }
+
+    #[test]
+    fn test_get_rewritten_heredoc() {
+        assert!(get_rewritten("cat <<'EOF'\nhello\nEOF").is_none());
+    }
+
+    // --- Gemini format ---
 
     #[test]
     fn test_print_allow_format() {
