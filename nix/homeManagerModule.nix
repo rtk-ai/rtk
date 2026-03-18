@@ -29,7 +29,7 @@ rtkPackages: {
       relpath=$(jq -r ".files[$i].path" manifest.json)
       mode=$(jq -r ".files[$i].mode" manifest.json)
       mkdir -p "$out/$(dirname "$relpath")"
-      jq -r ".files[$i].content" manifest.json > "$out/$relpath"
+      jq -j ".files[$i].content" manifest.json > "$out/$relpath"
       chmod "$mode" "$out/$relpath"
     done
   '';
