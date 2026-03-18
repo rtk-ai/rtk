@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "rtk hook",
+        "cwd": ".",
+        "timeout": 5
+      }
+    ]
+  }
+}

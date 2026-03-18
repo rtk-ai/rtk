@@ -673,7 +673,7 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Hook processors for LLM CLI tools (Gemini CLI, etc.)
+    /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, etc.)
     Hook {
         #[command(subcommand)]
         command: HookCommands,
@@ -684,6 +684,8 @@ enum Commands {
 enum HookCommands {
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
+    /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
+    Copilot,
 }
 
 #[derive(Subcommand)]
@@ -2013,6 +2015,9 @@ fn main() -> Result<()> {
         Commands::Hook { command } => match command {
             HookCommands::Gemini => {
                 hook_cmd::run_gemini()?;
+            }
+            HookCommands::Copilot => {
+                hook_cmd::run_copilot()?;
             }
         },
 
