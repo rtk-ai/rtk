@@ -391,10 +391,11 @@ fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Resu
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let parent = path.parent().with_context(|| {
+    let target_path = resolve_atomic_target(path)?;
+    let parent = target_path.parent().with_context(|| {
         format!(
             "Cannot write to {}: path has no parent directory",
-            path.display()
+            target_path.display()
         )
     })?;
 
@@ -408,14 +409,38 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
         .with_context(|| format!("Failed to write {} bytes to temp file", content.len()))?;
 
     // Atomic rename
-    temp_file.persist(path).with_context(|| {
+    temp_file.persist(&target_path).with_context(|| {
         format!(
             "Failed to atomically replace {} (disk full?)",
-            path.display()
+            target_path.display()
         )
     })?;
 
     Ok(())
+}
+
+fn resolve_atomic_target(path: &Path) -> Result<PathBuf> {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            let link_target = fs::read_link(path)
+                .with_context(|| format!("Failed to read symlink target: {}", path.display()))?;
+            if link_target.is_absolute() {
+                return Ok(link_target);
+            }
+            let parent = path.parent().with_context(|| {
+                format!(
+                    "Cannot resolve relative symlink target for {}: no parent directory",
+                    path.display()
+                )
+            })?;
+            return Ok(parent.join(link_target));
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn hook_command_for_settings() -> String {
+    "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/rtk-rewrite.sh".to_string()
 }
 
 /// Prompt user for consent to patch settings.json
@@ -509,7 +534,8 @@ fn print_manual_instructions(hook_path: &Path, include_opencode: bool) {
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
     println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_path.display());
+    let _ = hook_path;
+    println!("        \"command\": \"{}\"", hook_command_for_settings());
     println!("      }}]");
     println!("    }}]}}");
     println!("  }}");
@@ -773,9 +799,7 @@ fn patch_settings_json(
 ) -> Result<PatchResult> {
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
-    let hook_command = hook_path
-        .to_str()
-        .context("Hook path contains invalid UTF-8")?;
+    let hook_command = hook_command_for_settings();
 
     // Read or create settings.json
     let mut root = if settings_path.exists() {
@@ -793,7 +817,7 @@ fn patch_settings_json(
     };
 
     // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    if hook_already_present(&root, &hook_command) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -818,7 +842,7 @@ fn patch_settings_json(
     }
 
     // Deep-merge hook
-    insert_hook_entry(&mut root, hook_command);
+    insert_hook_entry(&mut root, &hook_command);
 
     // Backup original
     if settings_path.exists() {
@@ -3176,6 +3200,34 @@ More notes
         assert!(file_path.exists());
         let written = fs::read_to_string(&file_path).unwrap();
         assert_eq!(written, content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_write_preserves_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let target_path = temp.path().join("real-settings.json");
+        let link_path = temp.path().join("settings.json");
+
+        fs::write(&target_path, "{}").unwrap();
+        symlink(&target_path, &link_path).unwrap();
+
+        atomic_write(&link_path, "{\"hooks\":{}}").unwrap();
+
+        let metadata = fs::symlink_metadata(&link_path).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        let written = fs::read_to_string(&target_path).unwrap();
+        assert_eq!(written, "{\"hooks\":{}}");
+    }
+
+    #[test]
+    fn test_hook_command_for_settings_uses_portable_path() {
+        assert_eq!(
+            hook_command_for_settings(),
+            "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/rtk-rewrite.sh"
+        );
     }
 
     // Test for preserve_order round-trip
