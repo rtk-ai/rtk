@@ -43,7 +43,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    std::process::exit(output.status.code().unwrap_or(1));
+    if !output.status.success() {
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 struct MypyError {

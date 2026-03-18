@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_output, Dependency,
+    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, Dependency,
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
 
@@ -75,7 +75,7 @@ impl OutputParser for PnpmListParser {
                     }
                     None => {
                         // Tier 3: Passthrough
-                        ParseResult::Passthrough(truncate_output(input, 500))
+                        ParseResult::Passthrough(truncate_passthrough(input))
                     }
                 }
             }
@@ -202,7 +202,7 @@ impl OutputParser for PnpmOutdatedParser {
                     }
                     None => {
                         // Tier 3: Passthrough
-                        ParseResult::Passthrough(truncate_output(input, 500))
+                        ParseResult::Passthrough(truncate_passthrough(input))
                     }
                 }
             }
@@ -307,7 +307,8 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("pnpm list failed: {}", stderr);
+        eprint!("{}", stderr);
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -431,7 +432,8 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<()> 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     if !output.status.success() {
-        anyhow::bail!("pnpm install failed: {}", stderr);
+        eprint!("{}", stderr);
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     let combined = format!("{}{}", stdout, stderr);

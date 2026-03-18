@@ -5,8 +5,8 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_output, FormatMode, OutputParser,
-    ParseResult, TestFailure, TestResult, TokenFormatter,
+    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, FormatMode,
+    OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
 };
 
 /// Matches real Playwright JSON reporter output (suites → specs → tests → results)
@@ -110,7 +110,7 @@ impl OutputParser for PlaywrightParser {
                     }
                     None => {
                         // Tier 3: Passthrough
-                        ParseResult::Passthrough(truncate_output(input, 500))
+                        ParseResult::Passthrough(truncate_passthrough(input))
                     }
                 }
             }

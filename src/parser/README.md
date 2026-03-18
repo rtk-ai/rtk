@@ -70,7 +70,7 @@ impl OutputParser for VitestParser {
                     )
                 } else {
                     // Tier 3: Passthrough
-                    ParseResult::Passthrough(truncate_output(input, 500))
+                    ParseResult::Passthrough(truncate_output(input, 2000))
                 }
             }
         }

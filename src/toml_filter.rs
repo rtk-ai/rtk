@@ -181,11 +181,29 @@ impl TomlFilterRegistry {
     fn load() -> Self {
         let mut filters = Vec::new();
 
-        // Priority 1: project-local .rtk/filters.toml
-        if let Ok(content) = std::fs::read_to_string(".rtk/filters.toml") {
-            match Self::parse_and_compile(&content, "project") {
-                Ok(f) => filters.extend(f),
-                Err(e) => eprintln!("[rtk] warning: .rtk/filters.toml: {}", e),
+        // Priority 1: project-local .rtk/filters.toml (trust-gated)
+        let project_filter_path = std::path::Path::new(".rtk/filters.toml");
+        if project_filter_path.exists() {
+            let trust_status = crate::trust::check_trust(project_filter_path)
+                .unwrap_or(crate::trust::TrustStatus::Untrusted);
+
+            match trust_status {
+                crate::trust::TrustStatus::Trusted | crate::trust::TrustStatus::EnvOverride => {
+                    if let Ok(content) = std::fs::read_to_string(project_filter_path) {
+                        match Self::parse_and_compile(&content, "project") {
+                            Ok(f) => filters.extend(f),
+                            Err(e) => eprintln!("[rtk] warning: .rtk/filters.toml: {}", e),
+                        }
+                    }
+                }
+                crate::trust::TrustStatus::Untrusted => {
+                    eprintln!("[rtk] WARNING: untrusted project filters (.rtk/filters.toml)");
+                    eprintln!("[rtk] Filters NOT applied. Run `rtk trust` to review and enable.");
+                }
+                crate::trust::TrustStatus::ContentChanged { .. } => {
+                    eprintln!("[rtk] WARNING: .rtk/filters.toml changed since trusted.");
+                    eprintln!("[rtk] Filters NOT applied. Run `rtk trust` to re-review.");
+                }
             }
         }
 
@@ -529,21 +547,34 @@ pub fn run_filter_tests(filter_name_opt: Option<&str>) -> VerifyResults {
         &mut tested_filter_names,
     );
 
-    if let Ok(content) = std::fs::read_to_string(".rtk/filters.toml") {
-        collect_test_outcomes(
-            &content,
-            filter_name_opt,
-            &mut outcomes,
-            &mut all_filter_names,
-            &mut tested_filter_names,
-        );
+    // Trust-gated: only verify project-local filters if trusted (SA-2025-RTK-002)
+    let project_path = std::path::Path::new(".rtk/filters.toml");
+    if project_path.exists() {
+        let trust_status =
+            crate::trust::check_trust(project_path).unwrap_or(crate::trust::TrustStatus::Untrusted);
+        match trust_status {
+            crate::trust::TrustStatus::Trusted | crate::trust::TrustStatus::EnvOverride => {
+                if let Ok(content) = std::fs::read_to_string(project_path) {
+                    collect_test_outcomes(
+                        &content,
+                        filter_name_opt,
+                        &mut outcomes,
+                        &mut all_filter_names,
+                        &mut tested_filter_names,
+                    );
+                }
+            }
+            _ => {
+                eprintln!("[rtk] WARNING: untrusted project filters skipped in verify");
+            }
+        }
     }
 
     let filters_without_tests = all_filter_names
         .into_iter()
         .filter(|name| {
             // When a specific filter is requested, only report that one as missing tests
-            filter_name_opt.map_or(true, |f| name == f)
+            filter_name_opt.is_none_or(|f| name == f)
         })
         .filter(|name| !tested_filter_names.contains(name))
         .collect();
@@ -1579,8 +1610,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            47,
-            "Expected exactly 47 built-in filters, got {}. \
+            57,
+            "Expected exactly 57 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1637,11 +1668,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 47 existing filters still present + 1 new = 48
+        // All 57 existing filters still present + 1 new = 58
         assert_eq!(
             filters.len(),
-            48,
-            "Expected 48 filters after concat (47 built-in + 1 new)"
+            58,
+            "Expected 58 filters after concat (57 built-in + 1 new)"
         );
 
         // New filter is discoverable

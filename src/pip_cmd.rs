@@ -33,10 +33,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
             run_passthrough(base_cmd, args, verbose)?
         }
         _ => {
-            anyhow::bail!(
-                "rtk pip: unsupported subcommand '{}'\nSupported: list, outdated, install, uninstall, show",
-                subcommand
-            );
+            // Unknown subcommand: passthrough to pip/uv
+            run_passthrough(base_cmd, args, verbose)?
         }
     };
 
