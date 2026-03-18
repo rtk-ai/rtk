@@ -281,6 +281,71 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
     Ok(changed)
 }
 
+/// Pin the current rtk binary's absolute path to ~/.config/rtk/bin-path.
+///
+/// The v3 hook reads this file to resolve rtk without PATH lookup,
+/// preventing PATH poisoning attacks.
+fn write_bin_path(verbose: u8) -> Result<()> {
+    let bin_path = std::env::current_exe()
+        .context("Failed to determine current executable path")?;
+    let bin_path = match bin_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            if verbose > 0 {
+                eprintln!("rtk: could not canonicalize binary path: {} (using as-is)", e);
+            }
+            bin_path
+        }
+    };
+
+    let config_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("rtk");
+    fs::create_dir_all(&config_dir)
+        .with_context(|| format!("Failed to create config dir: {}", config_dir.display()))?;
+
+    let pin_path = config_dir.join("bin-path");
+    let new_content = bin_path.to_string_lossy();
+
+    // Idempotent: skip write if unchanged
+    if pin_path.exists() {
+        if let Ok(existing) = fs::read_to_string(&pin_path) {
+            if existing.trim() == new_content.trim() {
+                if verbose > 0 {
+                    eprintln!("bin-path already up to date: {}", pin_path.display());
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    fs::write(&pin_path, new_content.as_ref())
+        .with_context(|| format!("Failed to write bin-path: {}", pin_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Pinned rtk binary path: {}", bin_path.display());
+    }
+
+    Ok(())
+}
+
+/// Read the pinned binary path, if it exists.
+pub fn read_bin_path() -> Option<PathBuf> {
+    let config_dir = dirs::config_dir()?.join("rtk");
+    let pin_path = config_dir.join("bin-path");
+    let content = fs::read_to_string(&pin_path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 /// Idempotent file write: create or update if content differs
 fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Result<bool> {
     if path.exists() {
@@ -478,6 +543,17 @@ pub fn uninstall(global: bool, verbose: u8) -> Result<()> {
     // 1b. Remove integrity hash file
     if integrity::remove_hash(&hook_path)? {
         removed.push("Integrity hash: removed".to_string());
+    }
+
+    // 1c. Remove pinned binary path
+    let bin_path_file = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("rtk")
+        .join("bin-path");
+    if bin_path_file.exists() {
+        fs::remove_file(&bin_path_file)
+            .with_context(|| format!("Failed to remove bin-path: {}", bin_path_file.display()))?;
+        removed.push(format!("bin-path: {}", bin_path_file.display()));
     }
 
     // 2. Remove RTK.md
@@ -753,6 +829,9 @@ fn run_default_mode(
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
+    // 1b. Pin binary path for v3 hook (PATH poisoning prevention)
+    write_bin_path(verbose)?;
+
     // 2. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
 
@@ -891,6 +970,9 @@ fn run_hook_only_mode(
     // Prepare and install hook
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
+
+    // Pin binary path for v3 hook (PATH poisoning prevention)
+    write_bin_path(verbose)?;
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -1253,10 +1335,9 @@ pub fn show_config() -> Result<()> {
             let is_executable = perms.mode() & 0o111 != 0;
 
             let hook_content = fs::read_to_string(&hook_path)?;
-            let has_guards =
-                hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
             let is_thin_delegator = hook_content.contains("rtk rewrite");
             let hook_version = crate::hook_check::parse_hook_version(&hook_content);
+            let is_v3 = hook_content.contains("bin-path");
 
             if !is_executable {
                 println!(
@@ -1271,14 +1352,18 @@ pub fn show_config() -> Result<()> {
                 println!(
                     "   → Run `rtk init --global` to upgrade to the single source of truth hook"
                 );
-            } else if is_executable && has_guards {
+            } else if is_v3 {
                 println!(
-                    "✅ Hook: {} (thin delegator, version {})",
+                    "✅ Hook: {} (v3, pinned binary, version {})",
                     hook_path.display(),
                     hook_version
                 );
             } else {
-                println!("⚠️  Hook: {} (no guards - outdated)", hook_path.display());
+                // executable + thin delegator + not v3 = v2 PATH-based hook
+                println!(
+                    "⚠️  Hook: {} (v2, PATH-based — run `rtk init -g` to upgrade to v3)",
+                    hook_path.display(),
+                );
             }
         }
 
@@ -1315,6 +1400,12 @@ pub fn show_config() -> Result<()> {
         Err(_) => {
             println!("⚠️  Integrity: check failed");
         }
+    }
+
+    // Check pinned binary path
+    match read_bin_path() {
+        Some(p) => println!("✅ Pinned binary: {}", p.display()),
+        None => println!("⚪ Pinned binary: not set (run: rtk init -g)"),
     }
 
     // Check global CLAUDE.md
@@ -1444,15 +1535,26 @@ mod tests {
 
     #[test]
     fn test_hook_has_guards() {
-        assert!(REWRITE_HOOK.contains("command -v rtk"));
-        assert!(REWRITE_HOOK.contains("command -v jq"));
-        // Guards (rtk/jq availability checks) must appear before the actual delegation call.
-        // The thin delegating hook no longer uses set -euo pipefail.
-        let jq_pos = REWRITE_HOOK.find("command -v jq").unwrap();
-        let rtk_delegate_pos = REWRITE_HOOK.find("rtk rewrite \"$CMD\"").unwrap();
+        // v3 hook: uses bin-path for PATH poisoning prevention
         assert!(
-            jq_pos < rtk_delegate_pos,
-            "Guards must appear before rtk rewrite delegation"
+            REWRITE_HOOK.contains("bin-path"),
+            "v3 hook must reference bin-path for pinned binary resolution"
+        );
+        assert!(
+            REWRITE_HOOK.contains("rtk rewrite --hook"),
+            "v3 hook must use rtk rewrite --hook (not jq)"
+        );
+        // jq should only appear in the backward-compat fallback path
+        assert!(
+            REWRITE_HOOK.contains("command -v jq"),
+            "v3 hook must have jq fallback for old rtk binaries"
+        );
+        // Pinned binary resolution must appear before delegation
+        let bin_path_pos = REWRITE_HOOK.find("bin-path").unwrap();
+        let delegate_pos = REWRITE_HOOK.find("rtk rewrite --hook").unwrap();
+        assert!(
+            bin_path_pos < delegate_pos,
+            "bin-path resolution must appear before hook delegation"
         );
     }
 

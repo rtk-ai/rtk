@@ -657,7 +657,14 @@ enum Commands {
     ///
     /// Used by Claude Code, Gemini CLI, and other LLM hooks:
     ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
+    ///
+    /// With --hook: reads full JSON from stdin, emits hook JSON response to stdout.
+    ///   cat | rtk rewrite --hook
     Rewrite {
+        /// Hook mode: read JSON from stdin, emit hook JSON response (no jq needed)
+        #[arg(long)]
+        hook: bool,
+
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1977,9 +1984,13 @@ fn main() -> Result<()> {
             hook_audit_cmd::run(since, cli.verbose)?;
         }
 
-        Commands::Rewrite { args } => {
-            let cmd = args.join(" ");
-            rewrite_cmd::run(&cmd)?;
+        Commands::Rewrite { hook, args } => {
+            if hook {
+                rewrite_cmd::run_hook_mode()?;
+            } else {
+                let cmd = args.join(" ");
+                rewrite_cmd::run(&cmd)?;
+            }
         }
 
         Commands::Proxy { args } => {
@@ -2486,7 +2497,7 @@ mod tests {
             );
             if let Ok(cli) = result {
                 match cli.command {
-                    Commands::Rewrite { ref args } => {
+                    Commands::Rewrite { ref args, .. } => {
                         assert!(args.len() >= 2, "rewrite args should capture all tokens");
                     }
                     _ => panic!("expected Rewrite command"),

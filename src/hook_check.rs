@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-const CURRENT_HOOK_VERSION: u8 = 2;
+const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
 
 /// Hook status for diagnostics and `rtk gain`.

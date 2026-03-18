@@ -482,6 +482,57 @@ assert_fails   "rewrite gh --jq skip"                                 rtk rewrit
 assert_fails   "rewrite gh --template skip"                           rtk rewrite "gh pr view 1 --template '{{.title}}'"
 assert_contains "rewrite gh normal works"     "rtk gh pr list"        rtk rewrite "gh pr list"
 
+section "Rewrite --hook mode (#security: PATH poisoning fix)"
+
+# Supported command: should produce JSON with permissionDecision and rewritten command
+HOOK_OUT=$(echo '{"tool_input":{"command":"git status"}}' | rtk rewrite --hook 2>/dev/null)
+if echo "$HOOK_OUT" | grep -q '"permissionDecision"' && \
+   echo "$HOOK_OUT" | grep -q '"rtk git status"'; then
+    PASS=$((PASS + 1))
+    printf "  ${GREEN}PASS${NC}  hook mode: supported cmd produces JSON with rewrite\n"
+else
+    FAIL=$((FAIL + 1))
+    FAILURES+=("hook mode: supported cmd produces JSON with rewrite")
+    printf "  ${RED}FAIL${NC}  hook mode: supported cmd produces JSON with rewrite\n"
+    printf "        out: %s\n" "$HOOK_OUT"
+fi
+
+# Unsupported command: should produce empty output
+HOOK_OUT=$(echo '{"tool_input":{"command":"htop"}}' | rtk rewrite --hook 2>/dev/null)
+if [ -z "$HOOK_OUT" ]; then
+    PASS=$((PASS + 1))
+    printf "  ${GREEN}PASS${NC}  hook mode: unsupported cmd produces empty\n"
+else
+    FAIL=$((FAIL + 1))
+    FAILURES+=("hook mode: unsupported cmd produces empty")
+    printf "  ${RED}FAIL${NC}  hook mode: unsupported cmd produces empty\n"
+    printf "        out: %s\n" "$HOOK_OUT"
+fi
+
+# Empty stdin: should produce empty output, exit 0
+HOOK_OUT=$(echo '' | rtk rewrite --hook 2>/dev/null)
+if [ -z "$HOOK_OUT" ]; then
+    PASS=$((PASS + 1))
+    printf "  ${GREEN}PASS${NC}  hook mode: empty stdin produces empty\n"
+else
+    FAIL=$((FAIL + 1))
+    FAILURES+=("hook mode: empty stdin produces empty")
+    printf "  ${RED}FAIL${NC}  hook mode: empty stdin produces empty\n"
+    printf "        out: %s\n" "$HOOK_OUT"
+fi
+
+# Malformed JSON: should produce empty output, exit 0
+HOOK_OUT=$(echo 'not json' | rtk rewrite --hook 2>/dev/null)
+if [ -z "$HOOK_OUT" ]; then
+    PASS=$((PASS + 1))
+    printf "  ${GREEN}PASS${NC}  hook mode: malformed JSON produces empty\n"
+else
+    FAIL=$((FAIL + 1))
+    FAILURES+=("hook mode: malformed JSON produces empty")
+    printf "  ${RED}FAIL${NC}  hook mode: malformed JSON produces empty\n"
+    printf "        out: %s\n" "$HOOK_OUT"
+fi
+
 # ── 33. Verify ────────────────────────────────────────
 
 section "Verify"
