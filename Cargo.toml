@@ -39,6 +39,10 @@ toml = "0.8"
 
 [dev-dependencies]
 
+[profile.dev.package."*"]
+debug = 0       # No debug symbols for deps — smaller target dir
+opt-level = 1   # Light optimization for deps — faster runtime
+
 [profile.release]
 opt-level = 3
 lto = true
