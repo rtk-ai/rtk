@@ -303,7 +303,7 @@ assert_output "rtk rake test (with failure)" \
 
 assert_output "rtk rake test single passing file" \
     "ok rake test\|0 failures" \
-    rtk rake test test/models/post_pass_test.rb
+    rtk rake test TEST=test/models/post_pass_test.rb
 
 assert_exit_nonzero "rtk rake test single failing file" \
     "failure\|FAIL" \
