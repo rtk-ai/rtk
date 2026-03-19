@@ -1,7 +1,7 @@
 use crate::tracking;
+use crate::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 struct Package {
@@ -15,7 +15,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Auto-detect uv vs pip
-    let use_uv = which_command("uv").is_some();
+    let use_uv = tool_exists("uv");
     let base_cmd = if use_uv { "uv" } else { "pip" };
 
     if verbose > 0 && use_uv {
@@ -33,10 +33,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
             run_passthrough(base_cmd, args, verbose)?
         }
         _ => {
-            anyhow::bail!(
-                "rtk pip: unsupported subcommand '{}'\nSupported: list, outdated, install, uninstall, show",
-                subcommand
-            );
+            // Unknown subcommand: passthrough to pip/uv
+            run_passthrough(base_cmd, args, verbose)?
         }
     };
 
@@ -51,7 +49,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 }
 
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
-    let mut cmd = Command::new(base_cmd);
+    let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -86,7 +84,7 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
 }
 
 fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
-    let mut cmd = Command::new(base_cmd);
+    let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -121,7 +119,7 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
 }
 
 fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
-    let mut cmd = Command::new(base_cmd);
+    let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -151,18 +149,6 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
     }
 
     Ok((raw.clone(), raw))
-}
-
-/// Check if a command exists in PATH
-fn which_command(cmd: &str) -> Option<String> {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 /// Filter pip list JSON output
@@ -220,7 +206,7 @@ fn filter_pip_outdated(output: &str) -> String {
     };
 
     if packages.is_empty() {
-        return "✓ pip outdated: All packages up to date".to_string();
+        return "pip outdated: All packages up to date".to_string();
     }
 
     let mut result = String::new();
@@ -228,11 +214,7 @@ fn filter_pip_outdated(output: &str) -> String {
     result.push_str("═══════════════════════════════════════\n");
 
     for (i, pkg) in packages.iter().take(20).enumerate() {
-        let latest = pkg
-            .latest_version
-            .as_ref()
-            .map(|v| v.as_str())
-            .unwrap_or("unknown");
+        let latest = pkg.latest_version.as_deref().unwrap_or("unknown");
         result.push_str(&format!(
             "{}. {} ({} → {})\n",
             i + 1,
@@ -246,7 +228,7 @@ fn filter_pip_outdated(output: &str) -> String {
         result.push_str(&format!("\n... +{} more packages\n", packages.len() - 20));
     }
 
-    result.push_str("\n💡 Run `pip install --upgrade <package>` to update\n");
+    result.push_str("\n[hint] Run `pip install --upgrade <package>` to update\n");
 
     result.trim().to_string()
 }
@@ -281,7 +263,6 @@ mod tests {
     fn test_filter_pip_outdated_none() {
         let output = "[]";
         let result = filter_pip_outdated(output);
-        assert!(result.contains("✓"));
         assert!(result.contains("All packages up to date"));
     }
 

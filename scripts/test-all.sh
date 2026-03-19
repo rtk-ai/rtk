@@ -434,7 +434,7 @@ if command -v gt &>/dev/null; then
     assert_help   "rtk gt"                          rtk gt --help
     assert_ok     "rtk gt log short"                rtk gt log short
 else
-    skip "gt not installed"
+    skip_test "rtk gt" "gt not installed"
 fi
 
 # ── 30. Global flags ────────────────────────────────

@@ -1,12 +1,12 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::process::Command;
 
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, truncate_output, Dependency,
+    emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, Dependency,
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
 
@@ -75,7 +75,7 @@ impl OutputParser for PnpmListParser {
                     }
                     None => {
                         // Tier 3: Passthrough
-                        ParseResult::Passthrough(truncate_output(input, 500))
+                        ParseResult::Passthrough(truncate_passthrough(input))
                     }
                 }
             }
@@ -202,7 +202,7 @@ impl OutputParser for PnpmOutdatedParser {
                     }
                     None => {
                         // Tier 3: Passthrough
-                        ParseResult::Passthrough(truncate_output(input, 500))
+                        ParseResult::Passthrough(truncate_passthrough(input))
                     }
                 }
             }
@@ -294,7 +294,7 @@ pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<()> {
 fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("pnpm");
+    let mut cmd = resolved_command("pnpm");
     cmd.arg("list");
     cmd.arg(format!("--depth={}", depth));
     cmd.arg("--json");
@@ -307,7 +307,8 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("pnpm list failed: {}", stderr);
+        eprint!("{}", stderr);
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -350,7 +351,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<()> {
 fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = Command::new("pnpm");
+    let mut cmd = resolved_command("pnpm");
     cmd.arg("outdated");
     cmd.arg("--format");
     cmd.arg("json");
@@ -388,7 +389,7 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<()> {
     };
 
     if filtered.trim().is_empty() {
-        println!("All packages up-to-date ✓");
+        println!("All packages up-to-date");
     } else {
         println!("{}", filtered);
     }
@@ -411,7 +412,7 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<()> 
         }
     }
 
-    let mut cmd = Command::new("pnpm");
+    let mut cmd = resolved_command("pnpm");
     cmd.arg("install");
 
     for pkg in packages {
@@ -431,7 +432,8 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<()> 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     if !output.status.success() {
-        anyhow::bail!("pnpm install failed: {}", stderr);
+        eprint!("{}", stderr);
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     let combined = format!("{}{}", stdout, stderr);
@@ -482,7 +484,7 @@ fn filter_pnpm_install(output: &str) -> String {
     }
 
     if result.is_empty() {
-        "ok ✓".to_string()
+        "ok".to_string()
     } else {
         result.join("\n")
     }
@@ -495,7 +497,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("pnpm passthrough: {:?}", args);
     }
-    let status = Command::new("pnpm")
+    let status = resolved_command("pnpm")
         .args(args)
         .status()
         .context("Failed to run pnpm")?;

@@ -1,6 +1,6 @@
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
-use std::process::Command;
 
 /// Compact wget - strips progress bars, shows only result
 pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
@@ -19,7 +19,7 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
     }
     cmd_args.push(url);
 
-    let output = Command::new("wget")
+    let output = resolved_command("wget")
         .args(&cmd_args)
         .output()
         .context("Failed to run wget")?;
@@ -33,7 +33,7 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
         let filename = extract_filename_from_output(&stderr, url, args);
         let size = get_file_size(&filename);
         let msg = format!(
-            "⬇️ {} ok | {} | {}",
+            "{} ok | {} | {}",
             compact_url(url),
             filename,
             format_size(size)
@@ -42,9 +42,10 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
         timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
     } else {
         let error = parse_error(&stderr, &stdout);
-        let msg = format!("⬇️ {} FAILED: {}", compact_url(url), error);
+        let msg = format!("{} FAILED: {}", compact_url(url), error);
         println!("{}", msg);
         timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     Ok(())
@@ -64,7 +65,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
     }
     cmd_args.push(url);
 
-    let output = Command::new("wget")
+    let output = resolved_command("wget")
         .args(&cmd_args)
         .output()
         .context("Failed to run wget")?;
@@ -78,7 +79,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
         let mut rtk_output = String::new();
         if total > 20 {
             rtk_output.push_str(&format!(
-                "⬇️ {} ok | {} lines | {}\n",
+                "{} ok | {} lines | {}\n",
                 compact_url(url),
                 total,
                 format_size(output.stdout.len() as u64)
@@ -89,7 +90,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
             }
             rtk_output.push_str(&format!("... +{} more lines", total - 10));
         } else {
-            rtk_output.push_str(&format!("⬇️ {} ok | {} lines\n", compact_url(url), total));
+            rtk_output.push_str(&format!("{} ok | {} lines\n", compact_url(url), total));
             for line in &lines {
                 rtk_output.push_str(&format!("{}\n", line));
             }
@@ -104,9 +105,10 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let error = parse_error(&stderr, "");
-        let msg = format!("⬇️ {} FAILED: {}", compact_url(url), error);
+        let msg = format!("{} FAILED: {}", compact_url(url), error);
         println!("{}", msg);
         timer.track(&format!("wget -O - {}", url), "rtk wget -o", &stderr, &msg);
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     Ok(())
@@ -206,6 +208,7 @@ fn compact_url(url: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn parse_error(stderr: &str, stdout: &str) -> String {
     // Common wget error patterns
     let combined = format!("{}\n{}", stderr, stdout);

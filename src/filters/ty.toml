@@ -45,6 +45,6 @@ All checks passed!
 expected = "All checks passed!"
 
 [[tests.ty]]
-name = "empty input passes through"
+name = "empty input returns on_empty message"
 input = ""
-expected = ""
+expected = "ty: ok"

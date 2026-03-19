@@ -38,6 +38,7 @@ benchmark-report.md
 *.sqlite3
 rtk_tracking.db
 claudedocs
+.omc
 
 # Vitals provenance data
 .vitals/

@@ -90,7 +90,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.28.0"
+rtk --version   # Should show "rtk 0.28.2"
 rtk gain        # Should show token savings stats
 ```
 
@@ -102,13 +102,15 @@ rtk gain        # Should show token savings stats
 # 1. Install hook for Claude Code (recommended)
 rtk init --global
 # Follow instructions to register in ~/.claude/settings.json
-# Claude Code only by default (use --opencode for OpenCode)
+# Claude Code only by default (use --opencode for OpenCode, --gemini for Gemini CLI)
 
 # 2. Restart Claude Code, then test
 git status  # Automatically rewritten to rtk git status
 ```
 
-The hook transparently rewrites commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+
+**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
 ## How It Works
 
@@ -225,6 +227,8 @@ rtk gain --all --format json    # JSON export for dashboards
 
 rtk discover                    # Find missed savings opportunities
 rtk discover --all --since 7    # All projects, last 7 days
+
+rtk session                     # Show RTK adoption across recent sessions
 ```
 
 ## Global Flags
@@ -269,6 +273,8 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
 
+**Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
+
 ### Setup
 
 ```bash
@@ -280,6 +286,27 @@ rtk init --show             # Verify installation
 ```
 
 After install, **restart Claude Code**.
+
+## Gemini CLI Support (Global)
+
+RTK supports Gemini CLI via a native Rust hook processor. The hook intercepts `run_shell_command` tool calls and rewrites them to `rtk` equivalents using the same rewrite engine as Claude Code.
+
+**Install Gemini hook:**
+```bash
+rtk init -g --gemini
+```
+
+**What it creates:**
+- `~/.gemini/hooks/rtk-hook-gemini.sh` (thin wrapper calling `rtk hook gemini`)
+- `~/.gemini/GEMINI.md` (RTK awareness instructions)
+- Patches `~/.gemini/settings.json` with BeforeTool hook
+
+**Uninstall:**
+```bash
+rtk init -g --gemini --uninstall
+```
+
+**Restart Required**: Restart Gemini CLI, then test with `git status` in a session.
 
 ## OpenCode Plugin (Global)
 

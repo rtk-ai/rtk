@@ -1,9 +1,11 @@
+use crate::config;
 use crate::tracking;
+use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
-use std::process::Command;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
     path: &str,
@@ -23,7 +25,7 @@ pub fn run(
     // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
     let rg_pattern = pattern.replace(r"\|", "|");
 
-    let mut rg_cmd = Command::new("rg");
+    let mut rg_cmd = resolved_command("rg");
     rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
@@ -40,7 +42,11 @@ pub fn run(
 
     let output = rg_cmd
         .output()
-        .or_else(|_| Command::new("grep").args(["-rn", pattern, path]).output())
+        .or_else(|_| {
+            resolved_command("grep")
+                .args(["-rn", pattern, path])
+                .output()
+        })
         .context("grep/rg failed")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -56,7 +62,7 @@ pub fn run(
                 eprintln!("{}", stderr.trim());
             }
         }
-        let msg = format!("🔍 0 for '{}'", pattern);
+        let msg = format!("0 matches for '{}'", pattern);
         println!("{}", msg);
         timer.track(
             &format!("grep -rn '{}' {}", pattern, path),
@@ -73,6 +79,13 @@ pub fn run(
     let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     let mut total = 0;
 
+    // Compile context regex once (instead of per-line in clean_line)
+    let context_re = if context_only {
+        Regex::new(&format!("(?i).{{0,20}}{}.*", regex::escape(pattern))).ok()
+    } else {
+        None
+    };
+
     for line in stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
 
@@ -87,12 +100,12 @@ pub fn run(
         };
 
         total += 1;
-        let cleaned = clean_line(content, max_line_len, context_only, pattern);
+        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!("🔍 {} in {}F:\n\n", total, by_file.len()));
+    rtk_output.push_str(&format!("{} matches in {}F:\n\n", total, by_file.len()));
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
@@ -104,9 +117,10 @@ pub fn run(
         }
 
         let file_display = compact_path(file);
-        rtk_output.push_str(&format!("📄 {} ({}):\n", file_display, matches.len()));
+        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, matches.len()));
 
-        for (line_num, content) in matches.iter().take(10) {
+        let per_file = config::limits().grep_max_per_file;
+        for (line_num, content) in matches.iter().take(per_file) {
             rtk_output.push_str(&format!("  {:>4}: {}\n", line_num, content));
             shown += 1;
             if shown >= max_results {
@@ -114,8 +128,8 @@ pub fn run(
             }
         }
 
-        if matches.len() > 10 {
-            rtk_output.push_str(&format!("  +{}\n", matches.len() - 10));
+        if matches.len() > per_file {
+            rtk_output.push_str(&format!("  +{}\n", matches.len() - per_file));
         }
         rtk_output.push('\n');
     }
@@ -139,16 +153,14 @@ pub fn run(
     Ok(())
 }
 
-fn clean_line(line: &str, max_len: usize, context_only: bool, pattern: &str) -> String {
+fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
     let trimmed = line.trim();
 
-    if context_only {
-        if let Ok(re) = Regex::new(&format!("(?i).{{0,20}}{}.*", regex::escape(pattern))) {
-            if let Some(m) = re.find(trimmed) {
-                let matched = m.as_str();
-                if matched.len() <= max_len {
-                    return matched.to_string();
-                }
+    if let Some(re) = context_re {
+        if let Some(m) = re.find(trimmed) {
+            let matched = m.as_str();
+            if matched.len() <= max_len {
+                return matched.to_string();
             }
         }
     }
@@ -212,7 +224,7 @@ mod tests {
     #[test]
     fn test_clean_line() {
         let line = "            const result = someFunction();";
-        let cleaned = clean_line(line, 50, false, "result");
+        let cleaned = clean_line(line, 50, None, "result");
         assert!(!cleaned.starts_with(' '));
         assert!(cleaned.len() <= 50);
     }
@@ -236,7 +248,7 @@ mod tests {
     fn test_clean_line_multibyte() {
         // Thai text that exceeds max_len in bytes
         let line = "  สวัสดีครับ นี่คือข้อความที่ยาวมากสำหรับทดสอบ  ";
-        let cleaned = clean_line(line, 20, false, "ครับ");
+        let cleaned = clean_line(line, 20, None, "ครับ");
         // Should not panic
         assert!(!cleaned.is_empty());
     }
@@ -244,7 +256,7 @@ mod tests {
     #[test]
     fn test_clean_line_emoji() {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
-        let cleaned = clean_line(line, 15, false, "text");
+        let cleaned = clean_line(line, 15, None, "text");
         assert!(!cleaned.is_empty());
     }
 
@@ -274,7 +286,7 @@ mod tests {
     fn test_rg_always_has_line_numbers() {
         // grep_cmd::run() always passes "-n" to rg (line 24).
         // This test documents that -n is built-in, so the clap flag is safe to ignore.
-        let mut cmd = std::process::Command::new("rg");
+        let mut cmd = resolved_command("rg");
         cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
         // If rg is available, it should accept -n without error (exit 1 = no match, not error)
         if let Ok(output) = cmd.output() {
