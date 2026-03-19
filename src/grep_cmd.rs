@@ -59,7 +59,7 @@ pub fn run(
                 eprintln!("{}", stderr.trim());
             }
         }
-        let msg = format!("🔍 0 for '{}'", pattern);
+        let msg = format!("0 matches for '{}'", pattern);
         println!("{}", msg);
         timer.track(
             &format!("grep -rn '{}' {}", pattern, path),
@@ -102,7 +102,7 @@ pub fn run(
     }
 
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!("🔍 {} in {}F:\n\n", total, by_file.len()));
+    rtk_output.push_str(&format!("{} matches in {}F:\n\n", total, by_file.len()));
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
@@ -114,7 +114,7 @@ pub fn run(
         }
 
         let file_display = compact_path(file);
-        rtk_output.push_str(&format!("📄 {} ({}):\n", file_display, matches.len()));
+        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, matches.len()));
 
         let per_file = config::limits().grep_max_per_file;
         for (line_num, content) in matches.iter().take(per_file) {
@@ -160,7 +160,7 @@ pub fn run(
 /// Uses defaults: max_line_len=80, max_results=50.
 pub(crate) fn filter_grep_raw(input: &str) -> String {
     if input.trim().is_empty() {
-        return "🔍 0 matches\n".to_string();
+        return "0 matches\n".to_string();
     }
 
     let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
@@ -197,11 +197,11 @@ pub(crate) fn filter_grep_raw(input: &str) -> String {
     }
 
     if total == 0 {
-        return "🔍 0 matches\n".to_string();
+        return "0 matches\n".to_string();
     }
 
     let mut out = String::new();
-    out.push_str(&format!("🔍 {} in {}F:\n\n", total, by_file.len()));
+    out.push_str(&format!("{} in {}F:\n\n", total, by_file.len()));
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
@@ -212,7 +212,7 @@ pub(crate) fn filter_grep_raw(input: &str) -> String {
             break;
         }
         let file_display = compact_path(file);
-        out.push_str(&format!("📄 {} ({}):\n", file_display, matches.len()));
+        out.push_str(&format!("{} ({}):\n", file_display, matches.len()));
         for (line_num, content) in matches.iter().take(10) {
             out.push_str(&format!("  {:>4}: {}\n", line_num, content));
             shown += 1;

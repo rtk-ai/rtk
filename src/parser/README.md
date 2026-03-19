@@ -152,7 +152,7 @@ For build tools (next, webpack, vite, cargo, etc.)
 - Human-readable
 
 ### Ultra (verbosity=2+)
-- Symbols: ✓✗⚠📦⬆️
+- Symbols: ✓✗⚠ pkg: ^
 - Ultra-compressed
 - 30-50% token reduction
 

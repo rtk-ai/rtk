@@ -102,7 +102,7 @@ rtk gain        # Should show token savings stats
 # 1. Install hook for Claude Code (recommended)
 rtk init --global
 # Follow instructions to register in ~/.claude/settings.json
-# Claude Code only by default (use --opencode for OpenCode)
+# Claude Code only by default (use --opencode for OpenCode, --gemini for Gemini CLI)
 
 # 2. Restart Claude Code, then test
 git status  # Automatically rewritten to rtk git status
@@ -286,6 +286,27 @@ rtk init --show             # Verify installation
 ```
 
 After install, **restart Claude Code**.
+
+## Gemini CLI Support (Global)
+
+RTK supports Gemini CLI via a native Rust hook processor. The hook intercepts `run_shell_command` tool calls and rewrites them to `rtk` equivalents using the same rewrite engine as Claude Code.
+
+**Install Gemini hook:**
+```bash
+rtk init -g --gemini
+```
+
+**What it creates:**
+- `~/.gemini/hooks/rtk-hook-gemini.sh` (thin wrapper calling `rtk hook gemini`)
+- `~/.gemini/GEMINI.md` (RTK awareness instructions)
+- Patches `~/.gemini/settings.json` with BeforeTool hook
+
+**Uninstall:**
+```bash
+rtk init -g --gemini --uninstall
+```
+
+**Restart Required**: Restart Gemini CLI, then test with `git status` in a session.
 
 ## OpenCode Plugin (Global)
 

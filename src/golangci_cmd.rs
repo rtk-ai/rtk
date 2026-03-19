@@ -118,7 +118,7 @@ fn filter_golangci_json(output: &str) -> String {
     let issues = golangci_output.issues;
 
     if issues.is_empty() {
-        return "✓ golangci-lint: No issues found".to_string();
+        return "golangci-lint: No issues found".to_string();
     }
 
     let total_issues = issues.len();
@@ -215,7 +215,7 @@ mod tests {
     fn test_filter_golangci_no_issues() {
         let output = r#"{"Issues":[]}"#;
         let result = filter_golangci_json(output);
-        assert!(result.contains("✓ golangci-lint"));
+        assert!(result.contains("golangci-lint"));
         assert!(result.contains("No issues found"));
     }
 

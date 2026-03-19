@@ -250,7 +250,7 @@ fn merge_weekly(cc: Option<Vec<CcusagePeriod>>, rtk: Vec<WeekStats>) -> Vec<Peri
         let monday_key = match convert_saturday_to_monday(&entry.week_start) {
             Some(m) => m,
             None => {
-                eprintln!("⚠️  Invalid week_start format: {}", entry.week_start);
+                eprintln!("[warn] Invalid week_start format: {}", entry.week_start);
                 continue;
             }
         };
@@ -442,7 +442,7 @@ fn display_summary(tracker: &Tracker, verbose: u8) -> Result<()> {
 
     let totals = compute_totals(&periods);
 
-    println!("💰 Claude Code Economics");
+    println!("[cost] Claude Code Economics");
     println!("════════════════════════════════════════════════════");
     println!();
 
@@ -550,7 +550,7 @@ fn display_daily(tracker: &Tracker, verbose: u8) -> Result<()> {
         .context("Failed to load daily token savings from database")?;
     let periods = merge_daily(cc_daily, rtk_daily);
 
-    println!("📅 Daily Economics");
+    println!("Daily Economics");
     println!("════════════════════════════════════════════════════");
     print_period_table(&periods, verbose);
     Ok(())
@@ -564,7 +564,7 @@ fn display_weekly(tracker: &Tracker, verbose: u8) -> Result<()> {
         .context("Failed to load weekly token savings from database")?;
     let periods = merge_weekly(cc_weekly, rtk_weekly);
 
-    println!("📅 Weekly Economics");
+    println!("Weekly Economics");
     println!("════════════════════════════════════════════════════");
     print_period_table(&periods, verbose);
     Ok(())
@@ -578,7 +578,7 @@ fn display_monthly(tracker: &Tracker, verbose: u8) -> Result<()> {
         .context("Failed to load monthly token savings from database")?;
     let periods = merge_monthly(cc_monthly, rtk_monthly);
 
-    println!("📅 Monthly Economics");
+    println!("Monthly Economics");
     println!("════════════════════════════════════════════════════");
     print_period_table(&periods, verbose);
     Ok(())

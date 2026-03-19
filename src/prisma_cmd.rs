@@ -221,7 +221,7 @@ fn filter_prisma_generate(output: &str) -> String {
     }
 
     let mut result = String::new();
-    result.push_str("✓ Prisma Client generated\n");
+    result.push_str("Prisma Client generated\n");
 
     if models > 0 || enums > 0 || types > 0 {
         result.push_str(&format!(
@@ -283,7 +283,7 @@ fn filter_migrate_dev(output: &str) -> String {
     let mut result = String::new();
 
     if !migration_name.is_empty() {
-        result.push_str(&format!("🗃️  Migration: {}\n", migration_name));
+        result.push_str(&format!("Migration: {}\n", migration_name));
         result.push_str("═══════════════════════════════════════\n");
     }
 
@@ -303,7 +303,7 @@ fn filter_migrate_dev(output: &str) -> String {
 
     result.push('\n');
     if applied {
-        result.push_str("✓ Applied | Pending: 0\n");
+        result.push_str("Applied | Pending: 0\n");
     }
 
     result.trim().to_string()
@@ -360,9 +360,9 @@ fn filter_migrate_deploy(output: &str) -> String {
     let mut result = String::new();
 
     if errors.is_empty() {
-        result.push_str(&format!("✓ {} migration(s) deployed\n", deployed));
+        result.push_str(&format!("{} migration(s) deployed\n", deployed));
     } else {
-        result.push_str("❌ Deployment failed:\n");
+        result.push_str("[FAIL] Deployment failed:\n");
         for err in errors.iter().take(5) {
             result.push_str(&format!("  {}\n", err));
         }
@@ -390,7 +390,7 @@ fn filter_db_push(output: &str) -> String {
     }
 
     let mut result = String::new();
-    result.push_str("✓ Schema pushed to database\n");
+    result.push_str("Schema pushed to database\n");
 
     if tables_added > 0 || columns_modified > 0 || dropped > 0 {
         result.push_str(&format!(
@@ -460,7 +460,7 @@ import { PrismaClient } from '@prisma/client'
 42 models, 18 enums, 890 types generated
 "#;
         let result = filter_prisma_generate(output);
-        assert!(result.contains("✓ Prisma Client generated"));
+        assert!(result.contains("Prisma Client generated"));
         // Parser may not extract exact counts from this format, just check it doesn't crash
         assert!(!result.contains("Prisma schema loaded"));
         assert!(!result.contains("Start by importing"));
@@ -484,7 +484,7 @@ CREATE INDEX "session_status_idx" ON "Session"("status");
         let result = filter_migrate_dev(output);
         assert!(result.contains("20260128_add_sessions"));
         assert!(result.contains("+ 1 table"));
-        assert!(result.contains("✓ Applied"));
+        assert!(result.contains("Applied"));
     }
 
     #[test]

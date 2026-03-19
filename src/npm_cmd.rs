@@ -160,7 +160,7 @@ fn filter_npm_output(output: &str) -> String {
     }
 
     if result.is_empty() {
-        "ok ✓".to_string()
+        "ok".to_string()
     } else {
         result.join("\n")
     }
@@ -231,6 +231,6 @@ npm notice
     fn test_filter_npm_output_empty() {
         let output = "\n\n\n";
         let result = filter_npm_output(output);
-        assert_eq!(result, "ok ✓");
+        assert_eq!(result, "ok");
     }
 }
