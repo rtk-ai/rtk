@@ -52,6 +52,21 @@ lazy_static! {
         Regex::new(r"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=[^\s]*\s+)+").unwrap();
 }
 
+const CODEX_NEVER_SHIM: &[&str] = &[
+    "cat", "head", "tail", "ls", "find", "rg", "grep", "pip", "pip3",
+];
+const CODEX_GLOBAL_PASSTHROUGH_FLAGS: &[&str] = &["--help", "-h", "--version", "-V"];
+const CODEX_STRUCTURED_OUTPUT_FLAGS: &[&str] = &[
+    "--json",
+    "--jq",
+    "--template",
+    "--output-format",
+    "--format",
+    "--reporter",
+    "--out-format",
+];
+const CODEX_GH_STRUCTURED_OUTPUT_FLAGS: &[&str] = &["--json", "--jq", "--template"];
+
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
     let trimmed = cmd.trim();
@@ -325,24 +340,57 @@ pub fn entrypoints() -> BTreeSet<String> {
         .collect()
 }
 
+pub fn codex_entrypoints() -> BTreeSet<String> {
+    entrypoints()
+        .into_iter()
+        .filter(|entrypoint| !is_codex_passthrough_only_entrypoint(entrypoint))
+        .collect()
+}
+
 pub fn rewrite_argv(
     invoked_as: &str,
     args: &[OsString],
     excluded: &[String],
 ) -> Option<Vec<OsString>> {
+    let command = build_argv_command(invoked_as, args);
+    rewrite_argv_from_command(&command, excluded)
+}
+
+pub fn rewrite_codex_argv(
+    invoked_as: &str,
+    args: &[OsString],
+    excluded: &[String],
+) -> Option<Vec<OsString>> {
+    if is_codex_passthrough_only_entrypoint(invoked_as) {
+        return None;
+    }
+
+    let command = build_argv_command(invoked_as, args);
+    if should_passthrough_codex_argv(invoked_as, &command[1..]) {
+        return None;
+    }
+
+    rewrite_argv(invoked_as, args, excluded)
+}
+
+fn build_argv_command(invoked_as: &str, args: &[OsString]) -> Vec<String> {
+    let mut command: Vec<String> = Vec::with_capacity(args.len() + 1);
+    command.push(invoked_as.to_string());
+    command.extend(args.iter().map(|arg| arg.to_string_lossy().into_owned()));
+    command
+}
+
+fn rewrite_argv_from_command(command: &[String], excluded: &[String]) -> Option<Vec<OsString>> {
+    let invoked_as = command.first()?.as_str();
     if excluded.iter().any(|entry| entry == invoked_as) {
         return None;
     }
 
-    let mut command: Vec<String> = Vec::with_capacity(args.len() + 1);
-    command.push(invoked_as.to_string());
-    command.extend(args.iter().map(|arg| arg.to_string_lossy().into_owned()));
-
     if invoked_as == "head" {
-        return rewrite_head_argv(&command);
+        return rewrite_head_argv(command);
     }
     if invoked_as == "tail" {
-        return rewrite_tail_argv(&command);
+        return rewrite_tail_argv(command);
     }
 
     for rule in RULES {
@@ -374,6 +422,43 @@ pub fn rewrite_argv(
     }
 
     None
+}
+
+fn is_codex_passthrough_only_entrypoint(invoked_as: &str) -> bool {
+    CODEX_NEVER_SHIM.contains(&invoked_as)
+}
+
+fn should_passthrough_codex_argv(invoked_as: &str, args: &[String]) -> bool {
+    match invoked_as {
+        "uv" => {
+            is_uv_pip_invocation(args)
+                || has_any_contract_sensitive_flag(args, CODEX_GLOBAL_PASSTHROUGH_FLAGS)
+        }
+        "eslint" | "biome" | "lint" | "golangci-lint" | "golangci" => {
+            has_any_contract_sensitive_flag(args, CODEX_GLOBAL_PASSTHROUGH_FLAGS)
+                || has_any_contract_sensitive_flag(args, CODEX_STRUCTURED_OUTPUT_FLAGS)
+        }
+        "gh" => has_any_contract_sensitive_flag(args, CODEX_GH_STRUCTURED_OUTPUT_FLAGS),
+        _ => false,
+    }
+}
+
+fn is_uv_pip_invocation(args: &[String]) -> bool {
+    args.first().is_some_and(|arg| arg == "pip")
+}
+
+fn has_any_contract_sensitive_flag(args: &[String], flags: &[&str]) -> bool {
+    args.iter()
+        .any(|arg| flags.iter().any(|flag| arg_matches_flag(arg, flag)))
+}
+
+fn arg_matches_flag(arg: &str, flag: &str) -> bool {
+    arg == flag
+        || (arg.starts_with(flag)
+            && arg
+                .as_bytes()
+                .get(flag.len())
+                .is_some_and(|next| *next == b'='))
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
@@ -739,6 +824,16 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::super::report::RtkStatus;
     use super::*;
+
+    fn os_args(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    fn into_strings(argv: Vec<OsString>) -> Vec<String> {
+        argv.into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
 
     #[test]
     fn test_classify_git_status() {
@@ -2198,5 +2293,84 @@ mod tests {
             "cargo test"
         );
         assert_eq!(strip_disabled_prefix("git status"), "git status");
+    }
+
+    #[test]
+    fn test_codex_entrypoints_exclude_passthrough_only_wrappers() {
+        let entrypoints = codex_entrypoints();
+
+        for denied in [
+            "cat", "head", "tail", "ls", "find", "rg", "grep", "pip", "pip3",
+        ] {
+            assert!(
+                !entrypoints.contains(denied),
+                "{denied} should not be installed as a Codex shim"
+            );
+        }
+    }
+
+    #[test]
+    fn test_codex_entrypoints_include_conditionally_safe_wrappers() {
+        let entrypoints = codex_entrypoints();
+
+        for allowed in ["uv", "eslint", "biome", "lint", "golangci-lint", "gh"] {
+            assert!(
+                entrypoints.contains(allowed),
+                "{allowed} should remain installable as a Codex shim"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_codex_argv_passthrough_cases() {
+        let cases = [
+            ("uv", vec!["pip", "--version"]),
+            ("uv", vec!["pip", "list", "--format=json"]),
+            ("eslint", vec!["--version"]),
+            ("golangci-lint", vec!["--version"]),
+            ("gh", vec!["pr", "list", "--json", "number"]),
+            ("rg", vec!["--files", "src"]),
+            ("find", vec!["src", "-maxdepth", "1", "-type", "f"]),
+            ("cat", vec!["README.md"]),
+            ("pip", vec!["--version"]),
+        ];
+
+        for (invoked_as, args) in cases {
+            assert!(
+                rewrite_codex_argv(invoked_as, &os_args(&args), &[]).is_none(),
+                "{invoked_as} {args:?} should passthrough in Codex mode"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_codex_argv_rewrite_cases() {
+        let rewritten = rewrite_codex_argv("git", &os_args(&["status"]), &[]).unwrap();
+        assert_eq!(into_strings(rewritten), vec!["rtk", "git", "status"]);
+
+        let rewritten =
+            rewrite_codex_argv("python", &os_args(&["-m", "pytest", "-x"]), &[]).unwrap();
+        assert_eq!(into_strings(rewritten), vec!["rtk", "pytest", "-x"]);
+
+        let rewritten = rewrite_codex_argv("uv", &os_args(&["sync"]), &[]).unwrap();
+        assert_eq!(into_strings(rewritten), vec!["rtk", "uv", "sync"]);
+
+        let rewritten = rewrite_codex_argv("eslint", &os_args(&["src"]), &[]).unwrap();
+        assert_eq!(into_strings(rewritten), vec!["rtk", "lint", "src"]);
+    }
+
+    #[test]
+    fn test_rewrite_codex_argv_passthrough_on_structured_lint_flags() {
+        for args in [
+            vec!["src", "--format=json"],
+            vec!["src", "--reporter", "json"],
+            vec!["src", "--output-format=json"],
+            vec!["src", "--out-format=json"],
+        ] {
+            assert!(
+                rewrite_codex_argv("eslint", &os_args(&args), &[]).is_none(),
+                "eslint {args:?} should passthrough in Codex mode"
+            );
+        }
     }
 }

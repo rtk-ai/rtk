@@ -1582,8 +1582,21 @@ fn load_codex_manifest(path: &Path) -> Result<CodexInstallManifest> {
 fn ensure_codex_shims_installed(shim_dir: &Path, rtk_binary: &Path, verbose: u8) -> Result<()> {
     use std::os::unix::fs::symlink;
 
+    let desired_entrypoints = crate::discover::registry::codex_entrypoints();
     for entrypoint in crate::discover::registry::entrypoints() {
         let link = shim_dir.join(&entrypoint);
+
+        if !desired_entrypoints.contains(&entrypoint) {
+            if link.exists() || link.symlink_metadata().is_ok() {
+                fs::remove_file(&link)
+                    .with_context(|| format!("Failed to remove shim: {}", link.display()))?;
+                if verbose > 0 {
+                    eprintln!("Removed Codex shim: {}", link.display());
+                }
+            }
+            continue;
+        }
+
         if link.exists() || link.symlink_metadata().is_ok() {
             let target = fs::read_link(&link).ok();
             if target.as_deref() == Some(rtk_binary) {
@@ -2330,16 +2343,22 @@ More notes
         let previous_home = std::env::var_os("HOME");
         std::env::set_var("XDG_DATA_HOME", temp.path());
         std::env::set_var("HOME", temp.path());
+        let shim_dir = codex_shim_dir().unwrap();
 
         install_codex_adapter(&codex_dir, &binary, "/usr/bin:/bin", 0).unwrap();
 
         let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
         assert!(config.contains("RTK_HOST = \"codex\""));
         assert!(config.contains("PATH = "));
+        assert!(fs::symlink_metadata(shim_dir.join("git")).is_ok());
+        assert!(fs::symlink_metadata(shim_dir.join("uv")).is_ok());
+        assert!(fs::symlink_metadata(shim_dir.join("cat")).is_err());
+        assert!(fs::symlink_metadata(shim_dir.join("find")).is_err());
 
         uninstall_codex_adapter(&codex_dir, 0).unwrap();
         let config_after = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
         assert!(!config_after.contains("RTK_HOST = \"codex\""));
+        assert!(fs::symlink_metadata(shim_dir.join("git")).is_err());
 
         match previous_xdg {
             Some(value) => std::env::set_var("XDG_DATA_HOME", value),
@@ -2349,5 +2368,46 @@ More notes
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_codex_shims_installed_removes_passthrough_only_shims() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let shim_dir = temp.path().join("shims");
+        let binary = temp.path().join("rtk");
+        fs::create_dir_all(&shim_dir).unwrap();
+        fs::write(&binary, "rtk").unwrap();
+
+        symlink(&binary, shim_dir.join("cat")).unwrap();
+        ensure_codex_shims_installed(&shim_dir, &binary, 0).unwrap();
+
+        assert!(fs::symlink_metadata(shim_dir.join("git")).is_ok());
+        assert!(fs::symlink_metadata(shim_dir.join("uv")).is_ok());
+        assert!(fs::symlink_metadata(shim_dir.join("cat")).is_err());
+        assert!(fs::symlink_metadata(shim_dir.join("rg")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remove_codex_shims_removes_legacy_and_safe_shims() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let shim_dir = temp.path().join("shims");
+        let binary = temp.path().join("rtk");
+        fs::create_dir_all(&shim_dir).unwrap();
+        fs::write(&binary, "rtk").unwrap();
+
+        symlink(&binary, shim_dir.join("cat")).unwrap();
+        symlink(&binary, shim_dir.join("git")).unwrap();
+
+        remove_codex_shims(&shim_dir, 0).unwrap();
+
+        assert!(fs::symlink_metadata(shim_dir.join("cat")).is_err());
+        assert!(fs::symlink_metadata(shim_dir.join("git")).is_err());
+        assert!(!shim_dir.exists());
     }
 }

@@ -20,7 +20,7 @@ pub fn maybe_run_as_codex_shim(argv0: &OsStr, args: &[OsString]) -> Result<Optio
     if env::var(RTK_HOST_ENV).ok().as_deref() != Some(RTK_HOST_CODEX)
         || env::var(RTK_BYPASS_ENV).ok().as_deref() == Some("1")
         || env::var(RTK_DISABLED_ENV).ok().as_deref() == Some("1")
-        || !registry::entrypoints().contains(invoked_as.as_str())
+        || !registry::codex_entrypoints().contains(invoked_as.as_str())
     {
         return Ok(Some(exec_real_binary(&invoked_as, args)?));
     }
@@ -29,7 +29,7 @@ pub fn maybe_run_as_codex_shim(argv0: &OsStr, args: &[OsString]) -> Result<Optio
         .map(|c| c.hooks.exclude_commands)
         .unwrap_or_default();
 
-    if let Some(rewritten) = registry::rewrite_argv(&invoked_as, args, &excluded) {
+    if let Some(rewritten) = registry::rewrite_codex_argv(&invoked_as, args, &excluded) {
         return Ok(Some(exec_rewritten(&rewritten)?));
     }
 
@@ -121,18 +121,24 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn test_entrypoints_cover_wrapper_binaries() {
-        let entrypoints = registry::entrypoints();
+    fn test_codex_entrypoints_cover_safe_wrapper_binaries() {
+        let entrypoints = registry::codex_entrypoints();
         assert!(entrypoints.contains("python"));
         assert!(entrypoints.contains("python3"));
         assert!(entrypoints.contains("npx"));
         assert!(entrypoints.contains("uv"));
+        assert!(entrypoints.contains("eslint"));
+        assert!(entrypoints.contains("gh"));
+        assert!(!entrypoints.contains("cat"));
+        assert!(!entrypoints.contains("find"));
+        assert!(!entrypoints.contains("rg"));
+        assert!(!entrypoints.contains("pip"));
     }
 
     #[test]
-    fn test_rewrite_git_status_argv() {
+    fn test_rewrite_git_status_argv_in_codex_mode() {
         let args = vec![OsString::from("status")];
-        let rewritten = registry::rewrite_argv("git", &args, &[]).unwrap();
+        let rewritten = registry::rewrite_codex_argv("git", &args, &[]).unwrap();
         let actual: Vec<String> = rewritten
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -141,14 +147,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_python_m_pytest_argv() {
+    fn test_rewrite_python_m_pytest_argv_in_codex_mode() {
         let args = vec![
             OsString::from("-m"),
             OsString::from("pytest"),
             OsString::from("-x"),
             OsString::from("tests/"),
         ];
-        let rewritten = registry::rewrite_argv("python", &args, &[]).unwrap();
+        let rewritten = registry::rewrite_codex_argv("python", &args, &[]).unwrap();
         let actual: Vec<String> = rewritten
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -157,14 +163,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_gh_json_argv_skipped() {
+    fn test_rewrite_gh_json_argv_skipped_in_codex_mode() {
         let args = vec![
             OsString::from("pr"),
             OsString::from("list"),
             OsString::from("--json"),
             OsString::from("number"),
         ];
-        assert!(registry::rewrite_argv("gh", &args, &[]).is_none());
+        assert!(registry::rewrite_codex_argv("gh", &args, &[]).is_none());
     }
 
     #[cfg(unix)]
