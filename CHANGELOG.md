@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **hook:** respect Claude Code deny/ask permission rules on rewrite — hook now checks settings.json before rewriting commands, preventing bypass of user-configured deny/ask permissions
+* **git:** replace symbol prefixes (`* branch`, `+ Staged:`, `~ Modified:`, `? Untracked:`) with plain lowercase labels (`branch:`, `staged:`, `modified:`, `untracked:`) in git status output
 * **ruby:** use `rails test` instead of `rake test` when positional file args are passed — `rake test` ignores positional files and only supports `TEST=path`
 
 ### Features
