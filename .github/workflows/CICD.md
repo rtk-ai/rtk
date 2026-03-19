@@ -39,18 +39,19 @@ Trigger: pull_request to develop or master
 
 ## Merge to develop — pre-release (cd.yml)
 
-Trigger: push to develop | Concurrency: cancel-in-progress
+Trigger: push to develop | workflow_dispatch (not master) | Concurrency: cancel-in-progress
 
 ```
      ┌──────────────────┐
      │ push to develop   │
+     │ OR dispatch       │
      └────────┬─────────┘
               │
      ┌────────▼──────────────────┐
      │ pre-release                │
-     │ read Cargo.toml version   │
-     │ tag = v{ver}-rc.{run}     │
-     │ safety: fail if exists    │
+     │ compute next version      │
+     │ from conventional commits │
+     │ tag = v{next}-rc.{run}    │
      └────────┬──────────────────┘
               │
      ┌────────▼──────────────────┐
@@ -74,7 +75,7 @@ Trigger: push to develop | Concurrency: cancel-in-progress
 
 ## Merge to master — stable release (cd.yml)
 
-Trigger: push to master | Concurrency: never cancelled
+Trigger: push to master (only) | Concurrency: never cancelled
 
 ```
      ┌──────────────────┐
