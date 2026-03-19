@@ -381,6 +381,10 @@ enum Commands {
         /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
         #[arg(long)]
         codex: bool,
+
+        /// Use Node.js hooks instead of shell scripts (cross-platform for Windows)
+        #[arg(long)]
+        windows: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -1657,6 +1661,7 @@ fn main() -> Result<()> {
             no_patch,
             uninstall,
             codex,
+            windows,
         } => {
             if show {
                 init::show_config(codex)?;
@@ -1698,6 +1703,7 @@ fn main() -> Result<()> {
                     codex,
                     patch_mode,
                     cli.verbose,
+                    windows,
                 )?;
             }
         }

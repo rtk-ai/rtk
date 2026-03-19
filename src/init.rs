@@ -12,6 +12,10 @@ const REWRITE_HOOK: &str = include_str!("../hooks/rtk-rewrite.sh");
 // Embedded Cursor hook script (preToolUse format)
 const CURSOR_REWRITE_HOOK: &str = include_str!("../hooks/cursor-rtk-rewrite.sh");
 
+// Embedded Node.js hooks for Windows/cross-platform support (via --windows flag)
+const REWRITE_HOOK_CJS: &str = include_str!("../hooks/rtk-rewrite.cjs");
+const CURSOR_REWRITE_HOOK_CJS: &str = include_str!("../hooks/cursor-rtk-rewrite.cjs");
+
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../hooks/opencode-rtk.ts");
 
@@ -217,6 +221,7 @@ pub fn run(
     codex: bool,
     patch_mode: PatchMode,
     verbose: u8,
+    windows: bool,
 ) -> Result<()> {
     // Validation: Codex mode conflicts
     if codex {
@@ -265,8 +270,8 @@ pub fn run(
     match (install_claude, install_opencode, claude_md, hook_only) {
         (false, true, _, _) => run_opencode_only_mode(verbose)?,
         (true, opencode, true, _) => run_claude_md_mode(global, verbose, opencode)?,
-        (true, opencode, false, true) => run_hook_only_mode(global, patch_mode, verbose, opencode)?,
-        (true, opencode, false, false) => run_default_mode(global, patch_mode, verbose, opencode)?,
+        (true, opencode, false, true) => run_hook_only_mode(global, patch_mode, verbose, opencode, windows)?,
+        (true, opencode, false, false) => run_default_mode(global, patch_mode, verbose, opencode, windows)?,
         (false, false, _, _) => {
             if !install_cursor {
                 anyhow::bail!("at least one of install_claude or install_opencode must be true")
@@ -276,36 +281,41 @@ pub fn run(
 
     // Cursor hooks (additive, installed alongside Claude Code)
     if install_cursor {
-        install_cursor_hooks(verbose)?;
+        install_cursor_hooks(verbose, windows)?;
     }
 
     Ok(())
 }
 
 /// Prepare hook directory and return paths (hook_dir, hook_path)
-fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
+/// When use_windows is true, uses .cjs extension; otherwise uses .sh
+fn prepare_hook_paths(use_windows: bool) -> Result<(PathBuf, PathBuf)> {
     let claude_dir = resolve_claude_dir()?;
     let hook_dir = claude_dir.join("hooks");
     fs::create_dir_all(&hook_dir)
         .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
-    let hook_path = hook_dir.join("rtk-rewrite.sh");
+    let hook_extension = if use_windows { "cjs" } else { "sh" };
+    let hook_path = hook_dir.join(format!("rtk-rewrite.{}", hook_extension));
     Ok((hook_dir, hook_path))
 }
 
 /// Write hook file if missing or outdated, return true if changed
-#[cfg(unix)]
-fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
+/// When use_windows is true, writes .cjs hook; otherwise writes .sh hook
+fn ensure_hook_installed(hook_path: &Path, use_windows: bool, verbose: u8) -> Result<bool> {
+    let hook_content = if use_windows { REWRITE_HOOK_CJS } else { REWRITE_HOOK };
+    let _is_sh = !use_windows;
+
     let changed = if hook_path.exists() {
         let existing = fs::read_to_string(hook_path)
             .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
 
-        if existing == REWRITE_HOOK {
+        if existing == hook_content {
             if verbose > 0 {
                 eprintln!("Hook already up to date: {}", hook_path.display());
             }
             false
         } else {
-            fs::write(hook_path, REWRITE_HOOK)
+            fs::write(hook_path, hook_content)
                 .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
             if verbose > 0 {
                 eprintln!("Updated hook: {}", hook_path.display());
@@ -313,7 +323,7 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
             true
         }
     } else {
-        fs::write(hook_path, REWRITE_HOOK)
+        fs::write(hook_path, hook_content)
             .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
         if verbose > 0 {
             eprintln!("Created hook: {}", hook_path.display());
@@ -321,10 +331,13 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
         true
     };
 
-    // Set executable permissions
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    // Set executable permissions only for .sh hooks on Unix
+    #[cfg(unix)]
+    if is_sh {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
 
     // Store SHA-256 hash for runtime integrity verification.
     // Always store (idempotent) to ensure baseline exists even for
@@ -857,25 +870,12 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
-#[cfg(not(unix))]
-fn run_default_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    eprintln!("[warn] Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose, _install_opencode)
-}
-
-#[cfg(unix)]
 fn run_default_mode(
     global: bool,
     patch_mode: PatchMode,
     verbose: u8,
     install_opencode: bool,
+    use_windows: bool,
 ) -> Result<()> {
     if !global {
         // Local init: inject CLAUDE.md + generate project-local filters template
@@ -889,8 +889,8 @@ fn run_default_mode(
     let claude_md_path = claude_dir.join("CLAUDE.md");
 
     // 1. Prepare hook directory and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
-    let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
+    let (_hook_dir, hook_path) = prepare_hook_paths(use_windows)?;
+    let hook_changed = ensure_hook_installed(&hook_path, use_windows, verbose)?;
 
     // 2. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
@@ -1004,22 +1004,12 @@ fn generate_global_filters_template(verbose: u8) -> Result<()> {
 }
 
 /// Hook-only mode: just the hook, no RTK.md
-#[cfg(not(unix))]
-fn run_hook_only_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
-}
-
-#[cfg(unix)]
 fn run_hook_only_mode(
     global: bool,
     patch_mode: PatchMode,
     verbose: u8,
     install_opencode: bool,
+    use_windows: bool,
 ) -> Result<()> {
     if !global {
         eprintln!("[warn] Warning: --hook-only only makes sense with --global");
@@ -1028,8 +1018,8 @@ fn run_hook_only_mode(
     }
 
     // Prepare and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
-    let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
+    let (_hook_dir, hook_path) = prepare_hook_paths(use_windows)?;
+    let hook_changed = ensure_hook_installed(&hook_path, use_windows, verbose)?;
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -1578,7 +1568,7 @@ fn resolve_cursor_dir() -> Result<PathBuf> {
 }
 
 /// Install Cursor hooks: hook script + hooks.json
-fn install_cursor_hooks(verbose: u8) -> Result<()> {
+fn install_cursor_hooks(verbose: u8, use_windows: bool) -> Result<()> {
     let cursor_dir = resolve_cursor_dir()?;
     let hooks_dir = cursor_dir.join("hooks");
     fs::create_dir_all(&hooks_dir).with_context(|| {
@@ -1589,11 +1579,14 @@ fn install_cursor_hooks(verbose: u8) -> Result<()> {
     })?;
 
     // 1. Write hook script
-    let hook_path = hooks_dir.join("rtk-rewrite.sh");
-    let hook_changed = write_if_changed(&hook_path, CURSOR_REWRITE_HOOK, "Cursor hook", verbose)?;
+    let hook_extension = if use_windows { "cjs" } else { "sh" };
+    let hook_path = hooks_dir.join(format!("rtk-rewrite.{}", hook_extension));
+    let hook_content = if use_windows { CURSOR_REWRITE_HOOK_CJS } else { CURSOR_REWRITE_HOOK };
+    let hook_changed = write_if_changed(&hook_path, hook_content, "Cursor hook", verbose)?;
 
+    // Set executable permissions only for .sh on Unix
     #[cfg(unix)]
-    {
+    if !use_windows {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).with_context(|| {
             format!(
@@ -2534,6 +2527,7 @@ More notes
             true,
             PatchMode::Auto,
             0,
+            false,
         )
         .unwrap_err();
         assert_eq!(
@@ -2556,6 +2550,7 @@ More notes
             true,
             PatchMode::Skip,
             0,
+            false,
         )
         .unwrap_err();
         assert_eq!(
