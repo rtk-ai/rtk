@@ -240,13 +240,16 @@ enum Commands {
         command: Vec<String>,
     },
 
-    /// Show JSON structure without values
+    /// Show JSON (compact values, or schema-only with --schema)
     Json {
         /// JSON file
         file: PathBuf,
         /// Max depth
         #[arg(short, long, default_value = "5")]
         depth: usize,
+        /// Show structure only (strip all values)
+        #[arg(long)]
+        schema: bool,
     },
 
     /// Summarize project dependencies
@@ -390,9 +393,9 @@ enum Commands {
     Wget {
         /// URL to download
         url: String,
-        /// Output to stdout instead of file
-        #[arg(short = 'O', long)]
-        stdout: bool,
+        /// Output file (-O - for stdout)
+        #[arg(short = 'O', long = "output-document", allow_hyphen_values = true)]
+        output: Option<String>,
         /// Additional wget arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1525,11 +1528,15 @@ fn main() -> Result<()> {
             runner::run_test(&cmd, cli.verbose)?;
         }
 
-        Commands::Json { file, depth } => {
+        Commands::Json {
+            file,
+            depth,
+            schema,
+        } => {
             if file == Path::new("-") {
-                json_cmd::run_stdin(depth, cli.verbose)?;
+                json_cmd::run_stdin(depth, schema, cli.verbose)?;
             } else {
-                json_cmd::run(&file, depth, cli.verbose)?;
+                json_cmd::run(&file, depth, schema, cli.verbose)?;
             }
         }
 
@@ -1726,11 +1733,18 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Wget { url, stdout, args } => {
-            if stdout {
+        Commands::Wget { url, output, args } => {
+            if output.as_deref() == Some("-") {
                 wget_cmd::run_stdout(&url, &args, cli.verbose)?;
             } else {
-                wget_cmd::run(&url, &args, cli.verbose)?;
+                // Pass -O <file> through to wget via args
+                let mut all_args = Vec::new();
+                if let Some(out_file) = &output {
+                    all_args.push("-O".to_string());
+                    all_args.push(out_file.clone());
+                }
+                all_args.extend(args);
+                wget_cmd::run(&url, &all_args, cli.verbose)?;
             }
         }
 
