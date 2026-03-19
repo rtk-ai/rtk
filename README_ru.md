@@ -29,7 +29,7 @@
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
   <a href="README_es.md">Espanol</a> &bull;
-  <a href="README.ru.md">Русский</a>
+  <a href="README_ru.md">Русский</a>
 </p>
 
 ---
