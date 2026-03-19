@@ -71,11 +71,14 @@ cargo test rake_cmd     # 10 tests
 # 3. Build and install locally
 cargo install --path .
 
-# 4. Manual testing (requires Ruby/Rails project)
-rtk rspec spec/models/
-rtk rubocop
-rtk rake test
-rtk bundle install
+# 4. Run E2E smoke tests (~60-120s, requires Ruby/Bundler/Rails)
+bash scripts/test-ruby.sh
+# Creates a temp Rails app, exercises all 4 commands:
+# rspec (JSON/text fallback, pending, empty suite, failure caps)
+# rubocop (JSON, autocorrect, offenses)
+# rake test (minitest pass/fail, exit codes)
+# bundle install (TOML filter, idempotent)
+# + exit code preservation, bundle exec variants, token savings checks
 ```
 
 # Attribution
