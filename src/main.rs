@@ -26,6 +26,7 @@ mod grep_cmd;
 mod gt_cmd;
 mod hook_audit_cmd;
 mod hook_check;
+mod hook_cmd;
 mod init;
 mod integrity;
 mod json_cmd;
@@ -66,9 +67,22 @@ mod wget_cmd;
 
 use anyhow::{Context, Result};
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+/// Target agent for hook installation.
+#[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
+pub enum AgentTarget {
+    /// Claude Code (default)
+    Claude,
+    /// Cursor Agent (editor and CLI)
+    Cursor,
+    /// Windsurf IDE (Cascade)
+    Windsurf,
+    /// Cline / Roo Code (VS Code)
+    Cline,
+}
 
 #[derive(Parser)]
 #[command(
@@ -322,15 +336,23 @@ enum Commands {
         extra_args: Vec<String>,
     },
 
-    /// Initialize rtk instructions in CLAUDE.md
+    /// Initialize rtk instructions for assistant CLI usage
     Init {
-        /// Add to global ~/.claude/CLAUDE.md instead of local
+        /// Add to global assistant config directory instead of local project file
         #[arg(short, long)]
         global: bool,
 
         /// Install OpenCode plugin (in addition to Claude Code)
         #[arg(long)]
         opencode: bool,
+
+        /// Initialize for Gemini CLI instead of Claude Code
+        #[arg(long)]
+        gemini: bool,
+
+        /// Target agent to install hooks for (default: claude)
+        #[arg(long, value_enum)]
+        agent: Option<AgentTarget>,
 
         /// Show current configuration
         #[arg(long)]
@@ -352,9 +374,13 @@ enum Commands {
         #[arg(long = "no-patch", group = "patch")]
         no_patch: bool,
 
-        /// Remove all RTK artifacts (hook, RTK.md, CLAUDE.md reference, settings.json entry)
+        /// Remove RTK artifacts for the selected assistant mode
         #[arg(long)]
         uninstall: bool,
+
+        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        #[arg(long)]
+        codex: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -663,6 +689,20 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, etc.)
+    Hook {
+        #[command(subcommand)]
+        command: HookCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookCommands {
+    /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
+    Gemini,
+    /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
+    Copilot,
 }
 
 #[derive(Subcommand)]
@@ -1608,20 +1648,36 @@ fn main() -> Result<()> {
         Commands::Init {
             global,
             opencode,
+            gemini,
+            agent,
             show,
             claude_md,
             hook_only,
             auto_patch,
             no_patch,
             uninstall,
+            codex,
         } => {
             if show {
-                init::show_config()?;
+                init::show_config(codex)?;
             } else if uninstall {
-                init::uninstall(global, cli.verbose)?;
+                let cursor = agent == Some(AgentTarget::Cursor);
+                init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+            } else if gemini {
+                let patch_mode = if auto_patch {
+                    init::PatchMode::Auto
+                } else if no_patch {
+                    init::PatchMode::Skip
+                } else {
+                    init::PatchMode::Ask
+                };
+                init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
+                let install_cursor = agent == Some(AgentTarget::Cursor);
+                let install_windsurf = agent == Some(AgentTarget::Windsurf);
+                let install_cline = agent == Some(AgentTarget::Cline);
 
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1634,8 +1690,12 @@ fn main() -> Result<()> {
                     global,
                     install_claude,
                     install_opencode,
+                    install_cursor,
+                    install_windsurf,
+                    install_cline,
                     claude_md,
                     hook_only,
+                    codex,
                     patch_mode,
                     cli.verbose,
                 )?;
@@ -1976,6 +2036,15 @@ fn main() -> Result<()> {
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
         }
+
+        Commands::Hook { command } => match command {
+            HookCommands::Gemini => {
+                hook_cmd::run_gemini()?;
+            }
+            HookCommands::Copilot => {
+                hook_cmd::run_copilot()?;
+            }
+        },
 
         Commands::Rewrite { args } => {
             let cmd = args.join(" ");

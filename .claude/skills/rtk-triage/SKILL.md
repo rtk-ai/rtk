@@ -57,8 +57,12 @@ gh api "repos/{owner}/{repo}/collaborators" --jq '.[].login'
 
 **PRs** :
 ```bash
-gh pr list --state open --limit 60 \
+# Fetcher toutes les PRs ouvertes — paginer si nécessaire (gh limite à 200 par appel)
+gh pr list --state open --limit 200 \
   --json number,title,author,createdAt,updatedAt,additions,deletions,changedFiles,isDraft,mergeable,reviewDecision,statusCheckRollup,body
+
+# Si le repo a >200 PRs ouvertes, relancer avec --search pour paginer :
+# gh pr list --state open --limit 200 --search "is:pr is:open sort:updated-desc" ...
 
 # Pour chaque PR, récupérer les fichiers modifiés (nécessaire pour overlap detection)
 # Prioriser les PRs candidates (même domaine, même auteur)
@@ -232,6 +236,6 @@ Croisement issues × PRs. {N} PRs ouvertes, {N} issues ouvertes.
 
 - Langue : argument `en`/`fr`. Défaut : `fr`. Les commentaires GitHub restent toujours en anglais.
 - Ne jamais poster de commentaires GitHub sans validation utilisateur (AskUserQuestion).
-- Si >150 issues ou >60 PRs : prévenir l'utilisateur, proposer de filtrer par label ou date.
+- Si >200 issues ou >200 PRs : prévenir l'utilisateur et paginer (relancer avec `--search` ou `gh api` avec pagination).
 - L'analyse croisée (Phase 3) est toujours exécutée — c'est la valeur ajoutée de ce skill.
 - Le fichier claudedocs est sauvegardé automatiquement sauf si l'utilisateur dit "no save".
