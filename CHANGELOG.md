@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **ruby:** add `ruby_exec()` shared utility for auto-detecting `bundle exec` when Gemfile exists
 * **ruby:** add discover/rewrite rules for rake, rails, rspec, rubocop, and bundle commands
 
+### Bug Fixes
+
+* **cargo:** preserve compile diagnostics when `cargo test` fails before any test suites run
+
 ## [0.30.1](https://github.com/rtk-ai/rtk/compare/v0.30.0...v0.30.1) (2026-03-18)
 
 
