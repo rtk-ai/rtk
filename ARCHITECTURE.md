@@ -272,6 +272,10 @@ PYTHON            ruff_cmd.rs       ruff check/format      80%+       ✓
 GO                go_cmd.rs         go test/build/vet      75-90%     ✓
                   golangci_cmd.rs   golangci-lint          85%        ✓
 
+RUBY              rake_cmd.rs       rake/rails test        85-90%     ✓
+                  rspec_cmd.rs      rspec                  60%+       ✓
+                  rubocop_cmd.rs    rubocop                60%+       ✓
+
 NETWORK           wget_cmd.rs       wget                   85-95%     ✓
                   curl_cmd.rs       curl                   70%        ✓
 
