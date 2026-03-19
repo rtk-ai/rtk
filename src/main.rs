@@ -46,8 +46,11 @@ mod prettier_cmd;
 mod prisma_cmd;
 mod psql_cmd;
 mod pytest_cmd;
+mod rake_cmd;
 mod read;
 mod rewrite_cmd;
+mod rspec_cmd;
+mod rubocop_cmd;
 mod ruff_cmd;
 mod runner;
 mod session_cmd;
@@ -637,6 +640,27 @@ enum Commands {
     /// Mypy type checker with grouped error output
     Mypy {
         /// Mypy arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Rake/Rails test with compact Minitest output (Ruby)
+    Rake {
+        /// Rake arguments (e.g., test, test TEST=path/to/test.rb)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// RuboCop linter with compact output (Ruby)
+    Rubocop {
+        /// RuboCop arguments (e.g., --auto-correct, -A)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// RSpec test runner with compact output (Rails/Ruby)
+    Rspec {
+        /// RSpec arguments (e.g., spec/models, --tag focus)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1986,6 +2010,18 @@ fn main() -> Result<()> {
             mypy_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Rake { args } => {
+            rake_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::Rubocop { args } => {
+            rubocop_cmd::run(&args, cli.verbose)?;
+        }
+
+        Commands::Rspec { args } => {
+            rspec_cmd::run(&args, cli.verbose)?;
+        }
+
         Commands::Pip { args } => {
             pip_cmd::run(&args, cli.verbose)?;
         }
@@ -2245,6 +2281,9 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
+            | Commands::Rake { .. }
+            | Commands::Rubocop { .. }
+            | Commands::Rspec { .. }
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }

@@ -44,6 +44,11 @@ pub const PATTERNS: &[&str] = &[
     // Go tooling
     r"^go\s+(test|build|vet)",
     r"^golangci-lint(\s|$)",
+    // Ruby tooling
+    r"^bundle\s+(install|update)\b",
+    r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
+    r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
+    r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
     // AWS CLI
     r"^aws\s+",
     // PostgreSQL
@@ -329,6 +334,45 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["golangci-lint", "golangci"],
         category: "Go",
         savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Ruby tooling
+    RtkRule {
+        rtk_cmd: "rtk bundle",
+        rewrite_prefixes: &["bundle"],
+        category: "Ruby",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk rake",
+        rewrite_prefixes: &[
+            "bundle exec rails",
+            "bundle exec rake",
+            "bin/rails",
+            "rails",
+            "rake",
+        ],
+        category: "Ruby",
+        savings_pct: 85.0,
+        subcmd_savings: &[("test", 90.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk rspec",
+        rewrite_prefixes: &["bundle exec rspec", "bin/rspec", "rspec"],
+        category: "Tests",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk rubocop",
+        rewrite_prefixes: &["bundle exec rubocop", "rubocop"],
+        category: "Build",
+        savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

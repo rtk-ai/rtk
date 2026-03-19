@@ -207,6 +207,58 @@ pub fn ok_confirmation(action: &str, detail: &str) -> String {
     }
 }
 
+/// Extract exit code from a process output. Returns the actual exit code, or
+/// `128 + signal` per Unix convention when terminated by a signal (no exit code
+/// available). Falls back to 1 on non-Unix platforms.
+pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 {
+    match output.status.code() {
+        Some(code) => code,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = output.status.signal() {
+                    eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
+                    return 128 + sig;
+                }
+            }
+            eprintln!("[rtk] {}: process terminated by signal", label);
+            1
+        }
+    }
+}
+
+/// Return the last `n` lines of output with a label, for use as a fallback
+/// when filter parsing fails. Logs a diagnostic to stderr.
+pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {
+    eprintln!(
+        "[rtk] {}: output format not recognized, showing last {} lines",
+        label, n
+    );
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// Build a Command for Ruby tools, auto-detecting bundle exec.
+/// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
+/// won't appear in the Gemfile but still need bundler for version isolation).
+pub fn ruby_exec(tool: &str) -> Command {
+    if std::path::Path::new("Gemfile").exists() {
+        let mut c = Command::new("bundle");
+        c.arg("exec").arg(tool);
+        return c;
+    }
+    Command::new(tool)
+}
+
+/// Count whitespace-delimited tokens in text. Used by filter tests to verify
+/// token savings claims.
+#[cfg(test)]
+pub fn count_tokens(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
 /// Detect the package manager used in the current directory.
 /// Returns "pnpm", "yarn", or "npm" based on lockfile presence.
 ///

@@ -171,6 +171,8 @@ rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
+rtk rake test                   # Ruby minitest (-90%)
+rtk rspec                       # RSpec tests (JSON, -60%+)
 ```
 
 ### Build & Lint
@@ -184,6 +186,7 @@ rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
+rtk rubocop                     # Ruby linting (JSON, -60%+)
 ```
 
 ### Package Managers
@@ -191,6 +194,7 @@ rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk pnpm list                   # Compact dependency tree
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
+rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
 ```
 
@@ -351,6 +355,10 @@ cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint` | `rtk golangci-lint` |
+| `rake test` / `rails test` | `rtk rake test` |
+| `rspec` / `bundle exec rspec` | `rtk rspec` |
+| `rubocop` / `bundle exec rubocop` | `rtk rubocop` |
+| `bundle install/update` | `rtk bundle ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
