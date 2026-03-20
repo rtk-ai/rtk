@@ -9,6 +9,7 @@ mod parser;
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
+use cmds::gcc::gcc_cmd;
 use cmds::git::{diff_cmd, gh_cmd, git, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
@@ -650,6 +651,21 @@ enum Commands {
     #[command(name = "golangci-lint")]
     GolangciLint {
         /// golangci-lint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// gcc/g++ compiler with grouped error output (60-80% token savings)
+    ///
+    /// Strips verbose caret/source-snippet context lines and groups
+    /// diagnostics by file.  Errors show file + line + message; warnings
+    /// are summarised by file.  Works with gcc, g++, and clang.
+    Gcc {
+        /// Compiler binary to invoke (gcc, g++, clang, clang++)
+        #[arg(default_value = "gcc")]
+        compiler: String,
+
+        /// Compiler arguments (source files, flags, …)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2049,6 +2065,10 @@ fn main() -> Result<()> {
             golangci_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Gcc { compiler, args } => {
+            gcc_cmd::run(&compiler, &args, cli.verbose)?;
+        }
+
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
         }
@@ -2268,6 +2288,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Gcc { .. }
     )
 }
 

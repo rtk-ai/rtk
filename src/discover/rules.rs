@@ -51,6 +51,8 @@ pub const PATTERNS: &[&str] = &[
     r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
     r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
     r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
+    // C/C++ compilers
+    r"^(gcc|g\+\+|clang|clang\+\+)(\s|$)",
     // AWS CLI
     r"^aws\s+",
     // PostgreSQL
@@ -375,6 +377,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["bundle exec rubocop", "rubocop"],
         category: "Build",
         savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // C/C++ compilers
+    RtkRule {
+        rtk_cmd: "rtk gcc",
+        rewrite_prefixes: &["clang++", "clang", "g++", "gcc"],
+        category: "Build",
+        savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
