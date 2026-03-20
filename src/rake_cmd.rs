@@ -8,11 +8,50 @@ use crate::tracking;
 use crate::utils::{exit_code_from_output, ruby_exec, strip_ansi};
 use anyhow::{Context, Result};
 
+/// Decide whether to use `rake test` or `rails test` based on args.
+///
+/// `rake test` only supports a single file via `TEST=path` and ignores positional
+/// file args. When any positional test file paths are detected, we switch to
+/// `rails test` which handles single files, multiple files, and line-number
+/// syntax (`file.rb:15`) natively.
+fn select_runner(args: &[String]) -> (&'static str, Vec<String>) {
+    let has_test_subcommand = args.first().map_or(false, |a| a == "test");
+    if !has_test_subcommand {
+        return ("rake", args.to_vec());
+    }
+
+    let after_test: Vec<&String> = args[1..].iter().collect();
+
+    let positional_files: Vec<&&String> = after_test
+        .iter()
+        .filter(|a| !a.contains('=') && !a.starts_with('-'))
+        .filter(|a| looks_like_test_path(a))
+        .collect();
+
+    let needs_rails = !positional_files.is_empty();
+
+    if needs_rails {
+        ("rails", args.to_vec())
+    } else {
+        ("rake", args.to_vec())
+    }
+}
+
+fn looks_like_test_path(arg: &str) -> bool {
+    let path = arg.split(':').next().unwrap_or(arg);
+    path.ends_with(".rb")
+        || path.starts_with("test/")
+        || path.starts_with("spec/")
+        || path.contains("_test.rb")
+        || path.contains("_spec.rb")
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = ruby_exec("rake");
-    for arg in args {
+    let (tool, effective_args) = select_runner(args);
+    let mut cmd = ruby_exec(tool);
+    for arg in &effective_args {
         cmd.arg(arg);
     }
 
@@ -20,7 +59,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!(
             "Running: {} {}",
             cmd.get_program().to_string_lossy(),
-            args.join(" ")
+            effective_args.join(" ")
         );
     }
 
@@ -437,5 +476,77 @@ NoMethodError: undefined method `blah'
         let result = filter_minitest_output(output);
         assert!(result.contains("ok rake test"));
         assert!(result.contains("4 runs"));
+    }
+
+    // ── select_runner tests ─────────────────────────────
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn test_select_runner_single_file_uses_rake() {
+        let (tool, _) = select_runner(&args("test TEST=test/models/post_test.rb"));
+        assert_eq!(tool, "rake");
+    }
+
+    #[test]
+    fn test_select_runner_no_files_uses_rake() {
+        let (tool, _) = select_runner(&args("test"));
+        assert_eq!(tool, "rake");
+    }
+
+    #[test]
+    fn test_select_runner_multiple_files_uses_rails() {
+        let (tool, a) = select_runner(&args(
+            "test test/models/post_test.rb test/models/user_test.rb",
+        ));
+        assert_eq!(tool, "rails");
+        assert_eq!(
+            a,
+            args("test test/models/post_test.rb test/models/user_test.rb")
+        );
+    }
+
+    #[test]
+    fn test_select_runner_line_number_uses_rails() {
+        let (tool, _) = select_runner(&args("test test/models/post_test.rb:15"));
+        assert_eq!(tool, "rails");
+    }
+
+    #[test]
+    fn test_select_runner_multiple_with_line_numbers() {
+        let (tool, _) = select_runner(&args(
+            "test test/models/post_test.rb:15 test/models/user_test.rb:30",
+        ));
+        assert_eq!(tool, "rails");
+    }
+
+    #[test]
+    fn test_select_runner_non_test_subcommand_uses_rake() {
+        let (tool, _) = select_runner(&args("db:migrate"));
+        assert_eq!(tool, "rake");
+    }
+
+    #[test]
+    fn test_select_runner_single_positional_file_uses_rails() {
+        let (tool, _) = select_runner(&args("test test/models/post_test.rb"));
+        assert_eq!(tool, "rails");
+    }
+
+    #[test]
+    fn test_select_runner_flags_not_counted_as_files() {
+        let (tool, _) = select_runner(&args("test --verbose --seed 12345"));
+        assert_eq!(tool, "rake");
+    }
+
+    #[test]
+    fn test_looks_like_test_path() {
+        assert!(looks_like_test_path("test/models/post_test.rb"));
+        assert!(looks_like_test_path("test/models/post_test.rb:15"));
+        assert!(looks_like_test_path("spec/models/post_spec.rb"));
+        assert!(looks_like_test_path("my_file.rb"));
+        assert!(!looks_like_test_path("--verbose"));
+        assert!(!looks_like_test_path("12345"));
     }
 }
