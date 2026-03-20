@@ -67,9 +67,11 @@ fn check_and_warn() -> Option<()> {
 
     eprintln!("{}", warning);
 
-    // Touch marker after warning is printed
+    // Touch marker after warning is printed.
+    // Write a non-empty payload — on Windows, writing 0 bytes to an already-empty
+    // file may not update the mtime, which breaks the rate-limiting check.
     let _ = std::fs::create_dir_all(marker.parent()?);
-    let _ = std::fs::write(&marker, b"");
+    let _ = std::fs::write(&marker, b"1");
 
     Some(())
 }
