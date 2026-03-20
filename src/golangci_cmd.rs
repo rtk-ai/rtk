@@ -4,7 +4,6 @@ use crate::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 struct Position {
@@ -62,7 +61,7 @@ fn parse_major_version(version_output: &str) -> u32 {
 /// Run `golangci-lint --version` and return the major version number.
 /// Returns 1 on any failure.
 fn detect_major_version() -> u32 {
-    let output = Command::new("golangci-lint").arg("--version").output();
+    let output = resolved_command("golangci-lint").arg("--version").output();
 
     match output {
         Ok(o) => {
@@ -511,151 +510,7 @@ mod tests {
 
     #[test]
     fn test_golangci_v2_token_savings() {
-        // Simulate a realistic v2 JSON output with multiple issues
-        let raw = r#"{
-  "Issues": [
-    {
-      "FromLinter": "errcheck",
-      "Text": "Error return value of `foo` is not checked",
-      "Severity": "error",
-      "SourceLines": [
-        "    if err := foo(); err != nil {",
-        "        return err",
-        "    }"
-      ],
-      "Pos": {
-        "Filename": "pkg/handler/server.go",
-        "Line": 42,
-        "Column": 5,
-        "Offset": 1024
-      },
-      "Replacement": null,
-      "ExpectNoLint": false,
-      "ExpectedNoLintLinter": ""
-    },
-    {
-      "FromLinter": "errcheck",
-      "Text": "Error return value of `bar` is not checked",
-      "Severity": "error",
-      "SourceLines": [
-        "    bar()",
-        "    return nil",
-        "}"
-      ],
-      "Pos": {
-        "Filename": "pkg/handler/server.go",
-        "Line": 55,
-        "Column": 2,
-        "Offset": 2048
-      },
-      "Replacement": null,
-      "ExpectNoLint": false,
-      "ExpectedNoLintLinter": ""
-    },
-    {
-      "FromLinter": "gosimple",
-      "Text": "S1003: should replace strings.Index with strings.Contains",
-      "Severity": "warning",
-      "SourceLines": [
-        "    if strings.Index(s, sub) >= 0 {",
-        "        return true",
-        "    }"
-      ],
-      "Pos": {
-        "Filename": "pkg/utils/strings.go",
-        "Line": 15,
-        "Column": 2,
-        "Offset": 512
-      },
-      "Replacement": null,
-      "ExpectNoLint": false,
-      "ExpectedNoLintLinter": ""
-    },
-    {
-      "FromLinter": "govet",
-      "Text": "printf: Sprintf format %s has arg of wrong type int",
-      "Severity": "error",
-      "SourceLines": [
-        "    fmt.Sprintf(\"%s\", 42)"
-      ],
-      "Pos": {
-        "Filename": "cmd/main/main.go",
-        "Line": 10,
-        "Column": 3,
-        "Offset": 256
-      },
-      "Replacement": null,
-      "ExpectNoLint": false,
-      "ExpectedNoLintLinter": ""
-    },
-    {
-      "FromLinter": "unused",
-      "Text": "func `unusedHelper` is unused",
-      "Severity": "warning",
-      "SourceLines": [
-        "func unusedHelper() {",
-        "    // implementation",
-        "}"
-      ],
-      "Pos": {
-        "Filename": "internal/helpers.go",
-        "Line": 100,
-        "Column": 1,
-        "Offset": 4096
-      },
-      "Replacement": null,
-      "ExpectNoLint": false,
-      "ExpectedNoLintLinter": ""
-    },
-    {
-      "FromLinter": "errcheck",
-      "Text": "Error return value of `close` is not checked",
-      "Severity": "error",
-      "SourceLines": [
-        "    defer file.Close()"
-      ],
-      "Pos": {
-        "Filename": "pkg/handler/server.go",
-        "Line": 120,
-        "Column": 10,
-        "Offset": 3072
-      },
-      "Replacement": null,
-      "ExpectNoLint": false,
-      "ExpectedNoLintLinter": ""
-    },
-    {
-      "FromLinter": "gosimple",
-      "Text": "S1005: should omit nil check",
-      "Severity": "warning",
-      "SourceLines": [
-        "    if m != nil {",
-        "        for k, v := range m {",
-        "            process(k, v)",
-        "        }",
-        "    }"
-      ],
-      "Pos": {
-        "Filename": "pkg/utils/strings.go",
-        "Line": 45,
-        "Column": 1,
-        "Offset": 1536
-      },
-      "Replacement": null,
-      "ExpectNoLint": false,
-      "ExpectedNoLintLinter": ""
-    }
-  ],
-  "Report": {
-    "Warnings": [],
-    "Linters": [
-      {"Name": "errcheck", "Enabled": true, "EnabledByDefault": true},
-      {"Name": "gosimple", "Enabled": true, "EnabledByDefault": true},
-      {"Name": "govet", "Enabled": true, "EnabledByDefault": true},
-      {"Name": "unused", "Enabled": true, "EnabledByDefault": true}
-    ]
-  }
-}"#;
+        let raw = include_str!("../tests/fixtures/golangci_v2_json.txt");
 
         let filtered = filter_golangci_json(raw, 2);
         let savings = 100.0 - (count_tokens(&filtered) as f64 / count_tokens(raw) as f64 * 100.0);
