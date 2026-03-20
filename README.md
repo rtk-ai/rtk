@@ -179,6 +179,7 @@ rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
+rtk tapioca gems                # Sorbet RBI generation (-98%)
 rtk err <cmd>                   # Filter errors only from any command
 rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
 ```

@@ -522,6 +522,16 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(?:bundle\s+exec\s+)?(?:bin/)?tapioca(?:\s|$)",
+        rtk_cmd: "rtk tapioca",
+        rewrite_prefixes: &["bundle exec tapioca", "bin/tapioca", "tapioca"],
+        category: "Ruby",
+        savings_pct: 98.0,
+        subcmd_savings: &[("gems", 98.0), ("dsl", 95.0), ("annotations", 95.0)],
+        subcmd_status: &[],
+    },
+    // AWS CLI
+    RtkRule {
         pattern: r"^aws\s+",
         rtk_cmd: "rtk aws",
         rewrite_prefixes: &["aws"],

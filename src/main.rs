@@ -16,7 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
-use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
+use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd, tapioca_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
@@ -689,6 +689,13 @@ enum Commands {
     /// RSpec test runner with compact output (Rails/Ruby)
     Rspec {
         /// RSpec arguments (e.g., spec/models, --tag focus)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Tapioca RBI generator with compact output (Ruby/Sorbet)
+    Tapioca {
+        /// Tapioca arguments (e.g., gems, dsl, annotations, gem <name>)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2076,6 +2083,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Rspec { args } => rspec_cmd::run(&args, cli.verbose)?,
 
+        Commands::Tapioca { args } => tapioca_cmd::run(&args, cli.verbose)?,
+
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
         Commands::Go { command } => match command {
@@ -2426,6 +2435,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
+            | Commands::Tapioca { .. }
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }

@@ -282,6 +282,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **ruby:** add TOML filter for `bundle install/update` — strip `Using` lines (90%+ reduction)
 * **ruby:** add `ruby_exec()` shared utility for auto-detecting `bundle exec` when Gemfile exists
 * **ruby:** add discover/rewrite rules for rake, rails, rspec, rubocop, and bundle commands
+* **ruby:** add Tapioca RBI generator filter — strips Compiling/Compiled/Loading/Fetching progress lines, keeps errors, warnings, and Done summary (~98% reduction for `gems`)
 
 ### Bug Fixes
 

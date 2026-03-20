@@ -1,0 +1,13 @@
+Removing RBI files of gems that have been removed:
+
+  Nothing to do.
+
+Generating RBI files of gems that are added or updated:
+
+  Nothing to do.
+
+Checking generated RBI files...  Done
+  No errors found
+
+All operations performed in working directory.
+Please review changes and commit them.
