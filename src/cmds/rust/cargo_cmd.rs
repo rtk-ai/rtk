@@ -567,6 +567,7 @@ fn filter_cargo_build(output: &str) -> String {
     let mut compiled = 0;
     let mut in_error = false;
     let mut current_error = Vec::new();
+    let mut finished_line: Option<String> = None;
 
     for line in output.lines() {
         if line.trim_start().starts_with("Compiling") || line.trim_start().starts_with("Checking") {
@@ -579,6 +580,7 @@ fn filter_cargo_build(output: &str) -> String {
             continue;
         }
         if line.trim_start().starts_with("Finished") {
+            finished_line = Some(line.trim_start().to_string());
             continue;
         }
 
@@ -625,7 +627,11 @@ fn filter_cargo_build(output: &str) -> String {
     }
 
     if error_count == 0 && warnings == 0 {
-        return format!("cargo build ({} crates compiled)", compiled);
+        return if let Some(finished) = finished_line {
+            format!("cargo build ({} crates compiled)\n{}", compiled, finished)
+        } else {
+            format!("cargo build ({} crates compiled)", compiled)
+        };
     }
 
     let mut result = String::new();
