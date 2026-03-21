@@ -231,6 +231,18 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
     let mut filtered = String::new();
 
     if let Some(prs) = json.as_array() {
+        if prs.is_empty() {
+            let msg = if ultra_compact {
+                "No PRs\n"
+            } else {
+                "No Pull Requests\n"
+            };
+            filtered.push_str(msg);
+            print!("{}", msg);
+            timer.track("gh pr list", "rtk gh pr list", &raw, &filtered);
+            return Ok(());
+        }
+
         if ultra_compact {
             filtered.push_str("PRs\n");
             println!("PRs");
