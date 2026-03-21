@@ -89,15 +89,16 @@ Every change **must** include tests. See [Testing](#testing) below.
 
 Every change **must** include documentation updates. See [Documentation](#documentation) below.
 
-### Developer Certificate of Origin (DCO)
+### Contributor License Agreement (CLA)
 
-All contributions must be signed off (git commit -s) to certify
-you have the right to submit the code under the project's license.
+All contributions require signing our [Contributor License Agreement (CLA)](CLA.md) before being merged.
 
-Expected format: Signed-off-by: Your Name your@email.com
-https://developercertificate.org/
+By signing, you certify that:
+- You have authored 100% of the contribution, or have the necessary rights to submit it.
+- You grant **rtk-ai** and **rtk-ai Labs** a perpetual, worldwide, royalty-free license to use your contribution — including in commercial products such as **rtk Pro** — under the [Apache License 2.0](LICENSE).
+- If your employer has rights over your work, you have obtained their permission.
 
-By signing off, you agree to the DCO.
+**This is automatic.** When you open a Pull Request, [CLA Assistant](https://cla-assistant.io) will post a comment asking you to sign. Click the link in that comment to sign with your GitHub account. You only need to sign once.
 
 ### 5. Merge into `develop`
 

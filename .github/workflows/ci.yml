@@ -201,14 +201,6 @@ jobs:
       - name: Run benchmark
         run: ./scripts/benchmark.sh
 
-  # ─── DCO: develop PRs only ───
-
-  check:
-    name: check
-    if: github.base_ref == 'develop'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: KineticCafe/actions-dco@v1
 
   # ─── AI Doc Review: develop PRs only ───
 
