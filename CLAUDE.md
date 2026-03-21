@@ -293,41 +293,11 @@ pub fn filter_git_log(input: &str) -> Result<String> {
     let hash = extract_hash(lines[0])
         .context("Failed to extract commit hash from git log")?;
 
-    // ❌ WRONG: No context
-    let hash = extract_hash(lines[0])?;
-
-    // ❌ WRONG: Panic in production
-    let hash = extract_hash(lines[0]).unwrap();
-
     Ok(format!("Commit: {}", hash))
 }
 ```
 
-**Fallback pattern** (critical for all filters):
-
-```rust
-// ✅ RIGHT: Fallback to raw command if filter fails
-pub fn execute_with_filter(cmd: &str, args: &[&str]) -> Result<()> {
-    match get_filter(cmd) {
-        Some(filter) => match filter.apply(cmd, args) {
-            Ok(output) => println!("{}", output),
-            Err(e) => {
-                eprintln!("Filter failed: {}, falling back to raw", e);
-                execute_raw(cmd, args)?;
-            }
-        },
-        None => execute_raw(cmd, args)?,
-    }
-    Ok(())
-}
-
-// ❌ WRONG: Panic if no filter
-pub fn execute_with_filter(cmd: &str, args: &[&str]) -> Result<()> {
-    let filter = get_filter(cmd).expect("Filter must exist");
-    filter.apply(cmd, args)?;
-    Ok(())
-}
-```
+See `.claude/rules/rust-patterns.md` for the complete fallback pattern and additional error handling details.
 
 ## Common Pitfalls
 
@@ -515,46 +485,6 @@ hyperfine 'target/release/rtk git log -10' --warmup 3
 2. Critical info preserved (commit hashes, messages)
 3. Format is readable and consistent
 4. Exit code matches git's exit code (0 for success)
-
-## Working Directory Confirmation
-
-**ALWAYS confirm working directory before starting any work**:
-
-```bash
-pwd  # Verify you're in the rtk project root
-git branch  # Verify correct branch (main, feature/*, etc.)
-```
-
-**Never assume** which project to work in. Always verify before file operations.
-
-## Avoiding Rabbit Holes
-
-**Stay focused on the task**. Do not make excessive operations to verify external APIs, documentation, or edge cases unless explicitly asked.
-
-**Rule**: If verification requires more than 3-4 exploratory commands, STOP and ask the user whether to continue or trust available info.
-
-**Examples of rabbit holes to avoid**:
-- Excessive regex pattern testing (trust snapshot tests, don't manually verify 20 edge cases)
-- Deep diving into external command documentation (use fixtures, don't research git/cargo internals)
-- Over-testing cross-platform behavior (test macOS + Linux, trust CI for Windows)
-- Verifying API signatures across multiple crate versions (use docs.rs if needed, don't clone repos)
-
-**When to stop and ask**:
-- "Should I research X external API behavior?" → ASK if it requires >3 commands
-- "Should I test Y edge case?" → ASK if not mentioned in requirements
-- "Should I verify Z across N platforms?" → ASK if N > 2
-
-## Plan Execution Protocol
-
-When user provides a numbered plan (QW1-QW4, Phase 1-5, sprint tasks, etc.):
-
-1. **Execute sequentially**: Follow plan order unless explicitly told otherwise
-2. **Commit after each logical step**: One commit per completed phase/task
-3. **Never skip or reorder**: If a step is blocked, report it and ask before proceeding
-4. **Track progress**: Use task list (TaskCreate/TaskUpdate) for plans with 3+ steps
-5. **Validate assumptions**: Before starting, verify all referenced file paths exist and working directory is correct
-
-**Why**: Plan-driven execution produces better outcomes than ad-hoc implementation. Structured plans help maintain focus and prevent scope creep.
 
 
 ## Filter Development Checklist
