@@ -87,6 +87,16 @@ rtk gain  # MUST show token savings, not "command not found"
             No hook, no global effect
 ```
 
+**Using Codex CLI instead?**
+
+```bash
+rtk init --codex        # Local AGENTS.md + RTK.md
+rtk init -g --codex     # ~/.codex/AGENTS.md + ~/.codex/RTK.md
+rtk init --show --codex # Verify Codex setup
+```
+
+Codex support is awareness-based: RTK adds concise instructions, and Codex should prefer explicit `rtk ...` commands. It does **not** patch a hook registry like Claude Code.
+
 ### Recommended: Global Hook-First Setup
 
 **Best for: All projects, automatic RTK usage**
@@ -147,6 +157,34 @@ rtk init  # Creates ./CLAUDE.md with full RTK instructions (137 lines)
 ```
 
 **Token savings**: Instructions loaded only for this project
+
+### Codex CLI Setup
+
+**Best for: Codex CLI users who want RTK awareness without Claude hook patching**
+
+```bash
+# Global Codex setup
+rtk init -g --codex
+# → Creates ~/.codex/RTK.md
+# → Adds @RTK.md reference to ~/.codex/AGENTS.md
+
+# Project-local Codex setup
+rtk init --codex
+# → Creates ./RTK.md
+# → Adds @RTK.md reference to ./AGENTS.md
+
+# Verify
+rtk init --show --codex
+```
+
+**Usage pattern in Codex**:
+```bash
+rtk git status
+rtk git diff
+rtk read file.rs
+rtk grep "pattern" .
+rtk cargo test
+```
 
 ### Upgrading from Previous Version
 
@@ -210,6 +248,24 @@ rtk init -g --no-patch
 # Restart Claude Code
 ```
 
+### Codex CLI User
+```bash
+# 1. Install RTK
+brew install rtk
+rtk gain  # Verify (must show token stats)
+
+# 2. Setup for Codex
+rtk init -g --codex
+
+# 3. Verify
+rtk init --show --codex
+
+# 4. In Codex sessions, prefer explicit rtk commands
+rtk git status
+rtk read README.md
+rtk cargo test
+```
+
 ### Temporary Trial
 ```bash
 # Install hook
@@ -253,6 +309,16 @@ rtk init -g --uninstall
 #   - Registration: RTK hook entry from settings.json
 
 # Restart Claude Code after uninstall
+```
+
+**Codex CLI global uninstall:**
+
+```bash
+rtk init -g --codex --uninstall
+
+# What gets removed:
+#   - Context: ~/.codex/RTK.md
+#   - Reference: @RTK.md line from ~/.codex/AGENTS.md
 ```
 
 **For Local Projects**: Manually remove RTK block from `./CLAUDE.md`

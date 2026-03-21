@@ -104,6 +104,11 @@ rtk init --global
 # Follow instructions to register in ~/.claude/settings.json
 # Claude Code only by default (use --opencode for OpenCode, --gemini for Gemini CLI)
 
+# Codex CLI (awareness mode, no hook patching)
+rtk init -g --codex
+# Creates ~/.codex/RTK.md and adds @RTK.md to ~/.codex/AGENTS.md
+# Then prefer explicit rtk commands such as: rtk git status
+
 # 2. Restart Claude Code, then test
 git status  # Automatically rewritten to rtk git status
 ```
@@ -328,6 +333,38 @@ rtk init -g --opencode
 ```bash
 mkdir -p ~/.config/opencode/plugins
 cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
+```
+
+## Codex CLI Support (Global or Local)
+
+RTK supports Codex CLI through lightweight awareness files rather than hook-based command rewriting.
+
+**Install for Codex CLI:**
+```bash
+rtk init --codex        # Configure local AGENTS.md + RTK.md
+rtk init -g --codex     # Configure ~/.codex/AGENTS.md + ~/.codex/RTK.md
+rtk init --show --codex # Verify current Codex configuration
+```
+
+**What it creates:**
+- `RTK.md` with concise Codex-specific RTK guidance
+- `@RTK.md` reference in `AGENTS.md`
+
+**How to use it in Codex:**
+```bash
+rtk git status
+rtk git diff
+rtk read src/main.rs
+rtk grep "pattern" .
+rtk cargo test
+rtk pytest
+```
+
+**Behavior note:** unlike Claude Code, Gemini CLI, and OpenCode, Codex support is instruction-based today. Use explicit `rtk ...` commands for the highest reliability.
+
+**Uninstall:**
+```bash
+rtk init -g --codex --uninstall
 ```
 
 ### Commands Rewritten
