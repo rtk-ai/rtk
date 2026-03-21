@@ -286,7 +286,13 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
 fn should_passthrough_pr_view(extra_args: &[String]) -> bool {
     extra_args
         .iter()
-        .any(|a| a == "--json" || a == "--jq" || a == "--web")
+        .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments")
+}
+
+fn should_passthrough_issue_view(extra_args: &[String]) -> bool {
+    extra_args
+        .iter()
+        .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments")
 }
 
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<()> {
@@ -679,6 +685,13 @@ fn view_issue(args: &[String], _verbose: u8) -> Result<()> {
         Some(result) => result,
         None => return Err(anyhow::anyhow!("Issue number required")),
     };
+
+    // Passthrough when --comments, --json, --jq, or --web is present.
+    // --comments changes the output to include comments which our JSON
+    // field list doesn't request, causing silent data loss.
+    if should_passthrough_issue_view(&extra_args) {
+        return run_passthrough_with_extra("gh", &["issue", "view", &issue_number], &extra_args);
+    }
 
     let mut cmd = resolved_command("gh");
     cmd.args([
@@ -1488,8 +1501,41 @@ mod tests {
     }
 
     #[test]
-    fn test_should_passthrough_pr_view_other_flags() {
-        assert!(!should_passthrough_pr_view(&["--comments".into()]));
+    fn test_should_passthrough_pr_view_comments() {
+        assert!(should_passthrough_pr_view(&["--comments".into()]));
+    }
+
+    // --- should_passthrough_issue_view tests ---
+
+    #[test]
+    fn test_should_passthrough_issue_view_comments() {
+        assert!(should_passthrough_issue_view(&["--comments".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_issue_view_json() {
+        assert!(should_passthrough_issue_view(&[
+            "--json".into(),
+            "body,comments".into()
+        ]));
+    }
+
+    #[test]
+    fn test_should_passthrough_issue_view_jq() {
+        assert!(should_passthrough_issue_view(&[
+            "--jq".into(),
+            ".body".into()
+        ]));
+    }
+
+    #[test]
+    fn test_should_passthrough_issue_view_web() {
+        assert!(should_passthrough_issue_view(&["--web".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_issue_view_default() {
+        assert!(!should_passthrough_issue_view(&[]));
     }
 
     // --- filter_markdown_body tests ---
