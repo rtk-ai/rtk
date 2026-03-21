@@ -236,6 +236,13 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
         Some(prs) => prs,
         None => return String::new(),
     };
+    if prs.is_empty() {
+        return if ultra_compact {
+            "No PRs\n".to_string()
+        } else {
+            "No Pull Requests\n".to_string()
+        };
+    }
     let mut out = String::new();
     out.push_str(if ultra_compact {
         "PRs\n"
