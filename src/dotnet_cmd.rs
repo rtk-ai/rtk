@@ -4,6 +4,9 @@ use crate::dotnet_trx;
 use crate::tracking;
 use crate::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
+use quick_xml::events::Event;
+use quick_xml::Reader;
+use serde_json::Value;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -492,25 +495,56 @@ fn build_effective_dotnet_args(
         effective.push("-v:minimal".to_string());
     }
 
-    if !has_nologo_arg(args) {
+    let runner_mode = if subcommand == "test" {
+        detect_test_runner_mode(args)
+    } else {
+        TestRunnerMode::Classic
+    };
+
+    // --nologo: skip for MtpNative — args pass directly to the MTP runtime which
+    // does not understand MSBuild/VSTest flags.
+    if runner_mode != TestRunnerMode::MtpNative && !has_nologo_arg(args) {
         effective.push("-nologo".to_string());
     }
 
     if subcommand == "test" {
-        if !has_trx_logger_arg(args) {
-            effective.push("--logger".to_string());
-            effective.push("trx".to_string());
-        }
-
-        if !has_results_directory_arg(args) {
-            if let Some(results_dir) = trx_results_dir {
-                effective.push("--results-directory".to_string());
-                effective.push(results_dir.display().to_string());
+        match runner_mode {
+            TestRunnerMode::Classic => {
+                if !has_trx_logger_arg(args) {
+                    effective.push("--logger".to_string());
+                    effective.push("trx".to_string());
+                }
+                if !has_results_directory_arg(args) {
+                    if let Some(results_dir) = trx_results_dir {
+                        effective.push("--results-directory".to_string());
+                        effective.push(results_dir.display().to_string());
+                    }
+                }
+                effective.extend(args.iter().cloned());
+            }
+            TestRunnerMode::MtpNative => {
+                // In .NET 10 native MTP mode, --report-trx is a direct dotnet test flag.
+                // Modern MTP frameworks (TUnit 1.19.74+, MSTest, xUnit with MTP runner)
+                // include Microsoft.Testing.Extensions.TrxReport natively.
+                if !has_report_trx_arg(args) {
+                    effective.push("--report-trx".to_string());
+                }
+                effective.extend(args.iter().cloned());
+            }
+            TestRunnerMode::MtpVsTestBridge => {
+                // In VsTestBridge mode (supported on .NET 9 SDK and earlier), --report-trx
+                // goes after the -- separator so it reaches the MTP runtime.
+                if !has_report_trx_arg(args) {
+                    effective.extend(inject_report_trx_into_args(args));
+                } else {
+                    effective.extend(args.iter().cloned());
+                }
             }
         }
+    } else {
+        effective.extend(args.iter().cloned());
     }
 
-    effective.extend(args.iter().cloned());
     effective
 }
 
@@ -531,6 +565,176 @@ fn has_verbosity_arg(args: &[String]) -> bool {
             || lower == "--verbosity"
             || lower.starts_with("--verbosity=")
     })
+}
+
+/// How the targeted test project(s) run tests — determines which TRX injection strategy to use.
+#[derive(Debug, PartialEq)]
+enum TestRunnerMode {
+    /// Classic VSTest runner. Inject `--logger trx --results-directory`.
+    Classic,
+    /// Native MTP runner (`UseMicrosoftTestingPlatformRunner`, `UseTestingPlatformRunner`, or
+    /// global.json MTP mode). `--logger trx` breaks the run; inject `--report-trx` directly.
+    MtpNative,
+    /// VSTest bridge for MTP (`TestingPlatformDotnetTestSupport=true`). `--logger trx` is
+    /// silently ignored; MTP args must come after `--`. Inject `-- --report-trx`.
+    MtpVsTestBridge,
+}
+
+/// Which MTP-related property a single MSBuild file declares.
+#[derive(Debug, PartialEq)]
+enum MtpProjectKind {
+    None,
+    VsTestBridge, // UseMicrosoftTestingPlatformRunner | UseTestingPlatformRunner | TestingPlatformDotnetTestSupport
+}
+
+/// Scans a single MSBuild file (.csproj / .fsproj / .vbproj / Directory.Build.props) for
+/// MTP-related properties and returns which kind it is.
+fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return MtpProjectKind::None,
+    };
+
+    let mut reader = Reader::from_str(&content);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut inside_mtp_element = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name_lower = e.local_name().as_ref().to_ascii_lowercase();
+                // All project-file MTP properties run in VSTest bridge mode and require
+                // MTP-specific args to come after `--`. Only global.json MTP mode is native.
+                inside_mtp_element = matches!(
+                    name_lower.as_slice(),
+                    b"usemicrosofttestingplatformrunner"
+                        | b"usetestingplatformrunner"
+                        | b"testingplatformdotnettestsupport"
+                );
+            }
+            Ok(Event::Text(e)) => {
+                if inside_mtp_element {
+                    if let Ok(text) = e.unescape() {
+                        if text.trim().eq_ignore_ascii_case("true") {
+                            return MtpProjectKind::VsTestBridge;
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(_)) => inside_mtp_element = false,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    MtpProjectKind::None
+}
+
+fn parse_global_json_mtp_mode(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+    json.get("test")
+        .and_then(|t| t.get("runner"))
+        .and_then(|r| r.as_str())
+        .is_some_and(|r| r.eq_ignore_ascii_case("Microsoft.Testing.Platform"))
+}
+
+/// Checks whether the `global.json` closest to the current directory enables the .NET 10
+/// native MTP mode (`"test": { "runner": "Microsoft.Testing.Platform" }`).
+fn is_global_json_mtp_mode() -> bool {
+    let Ok(mut dir) = std::env::current_dir() else {
+        return false;
+    };
+    loop {
+        let path = dir.join("global.json");
+        if path.exists() {
+            let is_mtp = parse_global_json_mtp_mode(&path);
+            return is_mtp; // stop at first global.json found, regardless of result
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    false
+}
+
+/// Detects which test runner mode the targeted project(s) use.
+///
+/// Priority order: global.json (MtpNative) > project-file/Directory.Build.props (MtpVsTestBridge) > Classic.
+/// `global.json` MTP mode is checked first because it overrides all project-level properties.
+fn detect_test_runner_mode(args: &[String]) -> TestRunnerMode {
+    // global.json MTP mode takes overall precedence — when set, dotnet test runs MTP
+    // natively regardless of project file properties.
+    if is_global_json_mtp_mode() {
+        return TestRunnerMode::MtpNative;
+    }
+
+    let project_extensions = ["csproj", "fsproj", "vbproj"];
+
+    let explicit_projects: Vec<&str> = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| {
+            let lower = a.to_ascii_lowercase();
+            project_extensions
+                .iter()
+                .any(|ext| lower.ends_with(&format!(".{ext}")))
+        })
+        .collect();
+
+    let mut found = MtpProjectKind::None;
+
+    if !explicit_projects.is_empty() {
+        for p in &explicit_projects {
+            if scan_mtp_kind_in_file(Path::new(p)) == MtpProjectKind::VsTestBridge {
+                found = MtpProjectKind::VsTestBridge;
+            }
+        }
+    } else {
+        // No explicit project — scan current directory.
+        if let Ok(entries) = std::fs::read_dir(".") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy().to_ascii_lowercase();
+                if project_extensions
+                    .iter()
+                    .any(|ext| name_str.ends_with(&format!(".{ext}")))
+                    && scan_mtp_kind_in_file(&entry.path()) == MtpProjectKind::VsTestBridge
+                {
+                    found = MtpProjectKind::VsTestBridge;
+                }
+            }
+        }
+    }
+
+    if found == MtpProjectKind::VsTestBridge {
+        return TestRunnerMode::MtpVsTestBridge;
+    }
+
+    // Walk up from current directory looking for Directory.Build.props.
+    if let Ok(mut dir) = std::env::current_dir() {
+        loop {
+            let props = dir.join("Directory.Build.props");
+            if props.exists() {
+                if scan_mtp_kind_in_file(&props) == MtpProjectKind::VsTestBridge {
+                    return TestRunnerMode::MtpVsTestBridge;
+                }
+                break; // only read the first (closest) Directory.Build.props
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
+    TestRunnerMode::Classic
 }
 
 fn has_nologo_arg(args: &[String]) -> bool {
@@ -576,6 +780,25 @@ fn has_report_arg(args: &[String]) -> bool {
         let lower = arg.to_ascii_lowercase();
         lower == "--report" || lower.starts_with("--report=")
     })
+}
+
+fn has_report_trx_arg(args: &[String]) -> bool {
+    args.iter().any(|a| a.eq_ignore_ascii_case("--report-trx"))
+}
+
+/// Injects `--report-trx` after the `--` separator in `args`.
+/// If no `--` separator exists, appends `-- --report-trx` at the end.
+fn inject_report_trx_into_args(args: &[String]) -> Vec<String> {
+    if let Some(sep) = args.iter().position(|a| a == "--") {
+        let mut result = args.to_vec();
+        result.insert(sep + 1, "--report-trx".to_string());
+        result
+    } else {
+        let mut result = args.to_vec();
+        result.push("--".to_string());
+        result.push("--report-trx".to_string());
+        result
+    }
 }
 
 fn extract_report_arg(args: &[String]) -> Option<PathBuf> {
@@ -1472,6 +1695,336 @@ mod tests {
         assert!(injected
             .windows(2)
             .any(|w| w[0] == "--results-directory" && w[1] == "/custom/results"));
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_detects_use_microsoft_testing_platform_runner() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MyProject.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_detects_use_testing_platform_runner() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MyProject.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseTestingPlatformRunner>true</UseTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_is_mtp_project_file_returns_false_for_classic_vstest() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MyProject.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit" Version="2.9.0" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::None);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_returns_none_when_value_is_false() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MyProject.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseMicrosoftTestingPlatformRunner>false</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::None);
+    }
+
+    #[test]
+    fn test_scan_mtp_kind_detects_vstest_bridge() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MSTest.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_both_mtp_properties_in_same_file_still_vstest_bridge() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("Hybrid.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        // All project-file properties → VsTestBridge; only global.json gives MtpNative
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_detect_mode_mtp_csproj_is_vstest_bridge_injects_report_trx() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        let args = vec![csproj.display().to_string()];
+        assert_eq!(
+            detect_test_runner_mode(&args),
+            TestRunnerMode::MtpVsTestBridge
+        );
+
+        let binlog_path = Path::new("/tmp/test.binlog");
+        let injected = build_effective_dotnet_args("test", &args, binlog_path, None);
+
+        // MTP VsTestBridge → --report-trx injected after --, no VSTest --logger trx
+        assert!(!injected.contains(&"--logger".to_string()));
+        assert!(injected.contains(&"--report-trx".to_string()));
+        assert!(injected.contains(&"--".to_string()));
+    }
+
+    #[test]
+    fn test_detect_mode_vstest_bridge_injects_report_trx() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MSTest.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        let args = vec![csproj.display().to_string()];
+        assert_eq!(
+            detect_test_runner_mode(&args),
+            TestRunnerMode::MtpVsTestBridge
+        );
+
+        let binlog_path = Path::new("/tmp/test.binlog");
+        let injected = build_effective_dotnet_args("test", &args, binlog_path, None);
+
+        // --report-trx injected after --, --nologo supported in bridge mode
+        assert!(!injected.contains(&"--logger".to_string()));
+        assert!(injected.contains(&"--report-trx".to_string()));
+        assert!(injected.contains(&"--".to_string()));
+        assert!(injected.contains(&"-nologo".to_string()));
+    }
+
+    #[test]
+    fn test_parse_global_json_mtp_mode_detects_mtp_native() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let global_json = temp_dir.path().join("global.json");
+        fs::write(
+            &global_json,
+            r#"{"sdk":{"version":"10.0.100"},"test":{"runner":"Microsoft.Testing.Platform"}}"#,
+        )
+        .expect("write global.json");
+
+        assert!(parse_global_json_mtp_mode(&global_json));
+    }
+
+    #[test]
+    fn test_vstest_bridge_injects_report_trx_after_separator() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        let args = vec![csproj.display().to_string()];
+        assert_eq!(
+            detect_test_runner_mode(&args),
+            TestRunnerMode::MtpVsTestBridge
+        );
+
+        let binlog_path = Path::new("/tmp/test.binlog");
+        let injected = build_effective_dotnet_args("test", &args, binlog_path, None);
+
+        // VsTestBridge → inject -- --report-trx after user args
+        assert!(injected.contains(&"--".to_string()));
+        assert!(injected.contains(&"--report-trx".to_string()));
+        let sep_pos = injected.iter().position(|a| a == "--").unwrap();
+        let trx_pos = injected.iter().position(|a| a == "--report-trx").unwrap();
+        assert!(sep_pos < trx_pos);
+        // No VSTest logger
+        assert!(!injected.contains(&"--logger".to_string()));
+    }
+
+    #[test]
+    fn test_vstest_bridge_existing_separator_inserts_report_trx_after_it() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        let args = vec![
+            csproj.display().to_string(),
+            "--".to_string(),
+            "--parallel".to_string(),
+        ];
+        let binlog_path = Path::new("/tmp/test.binlog");
+        let injected = build_effective_dotnet_args("test", &args, binlog_path, None);
+
+        // --report-trx inserted right after existing --
+        let sep_pos = injected.iter().position(|a| a == "--").unwrap();
+        assert_eq!(injected[sep_pos + 1], "--report-trx");
+        assert!(injected.contains(&"--parallel".to_string()));
+    }
+
+    #[test]
+    fn test_vstest_bridge_respects_existing_report_trx() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        let args = vec![
+            csproj.display().to_string(),
+            "--".to_string(),
+            "--report-trx".to_string(),
+        ];
+        let binlog_path = Path::new("/tmp/test.binlog");
+        let injected = build_effective_dotnet_args("test", &args, binlog_path, None);
+
+        // Should not double-inject
+        assert_eq!(injected.iter().filter(|a| *a == "--report-trx").count(), 1);
+    }
+
+    #[test]
+    fn test_detect_mode_classic_csproj_injects_trx() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("Classic.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        let args = vec![csproj.display().to_string()];
+        assert_eq!(detect_test_runner_mode(&args), TestRunnerMode::Classic);
+
+        let binlog_path = Path::new("/tmp/test.binlog");
+        let trx_dir = Path::new("/tmp/test_results");
+        let injected = build_effective_dotnet_args("test", &args, binlog_path, Some(trx_dir));
+        assert!(injected.contains(&"--logger".to_string()));
+        assert!(injected.contains(&"trx".to_string()));
+    }
+
+    #[test]
+    fn test_detect_mode_directory_build_props_vstest_bridge() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let props = temp_dir.path().join("Directory.Build.props");
+        fs::write(
+            &props,
+            r#"<Project>
+  <PropertyGroup>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write Directory.Build.props");
+
+        assert_eq!(scan_mtp_kind_in_file(&props), MtpProjectKind::VsTestBridge);
+    }
+
+    #[test]
+    fn test_is_global_json_mtp_mode_detects_mtp_runner() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let global_json = temp_dir.path().join("global.json");
+        fs::write(
+            &global_json,
+            r#"{ "sdk": { "version": "10.0.100" }, "test": { "runner": "Microsoft.Testing.Platform" } }"#,
+        )
+        .expect("write global.json");
+
+        assert!(parse_global_json_mtp_mode(&global_json));
+    }
+
+    #[test]
+    fn test_is_global_json_mtp_mode_returns_false_for_vstest_runner() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let global_json = temp_dir.path().join("global.json");
+        fs::write(&global_json, r#"{ "sdk": { "version": "9.0.100" } }"#)
+            .expect("write global.json");
+
+        assert!(!parse_global_json_mtp_mode(&global_json));
     }
 
     #[test]
