@@ -1871,8 +1871,22 @@ fn run_cli() -> Result<i32> {
                 "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
                 "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
                 _ => {
-                    // Generic passthrough with npm boilerplate filter
-                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?
+                    // Passthrough via npx (not npm) — unknown tools need npx directly.
+                    let timer = core::tracking::TimedExecution::start();
+                    let mut cmd = core::utils::resolved_command("npx");
+                    cmd.args(&args);
+                    if cli.skip_env {
+                        cmd.env("SKIP_ENV_VALIDATION", "1");
+                    }
+                    let cmd_label = format!("npx {}", args.join(" "));
+                    let status = cmd.status().with_context(|| {
+                        format!("Failed to run `{cmd_label}`. Is npx on PATH?")
+                    })?;
+                    timer.track_passthrough(
+                        &cmd_label,
+                        &format!("rtk {cmd_label} (passthrough)"),
+                    );
+                    core::utils::exit_code_from_status(&status, &cmd_label)
                 }
             }
         }
