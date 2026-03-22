@@ -690,6 +690,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Claude Code hook (reads JSON from stdin, outputs JSON)
+    Claude,
 }
 
 #[derive(Subcommand)]
@@ -2060,6 +2062,9 @@ fn main() -> Result<()> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+            }
+            HookCommands::Claude => {
+                hook_cmd::run_claude()?;
             }
         },
 

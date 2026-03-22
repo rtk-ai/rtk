@@ -180,9 +180,10 @@ fn read_stored_hash(path: &Path) -> Result<String> {
 
 /// Resolve the default hook path (~/.claude/hooks/rtk-rewrite.sh)
 pub fn resolve_hook_path() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".claude").join("hooks").join("rtk-rewrite.sh"))
-        .context("Cannot determine home directory. Is $HOME set?")
+    let home = dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?;
+    // On Windows: use .py hook; on Unix: use .sh hook
+    let extension = if cfg!(windows) { "py" } else { "sh" };
+    Ok(home.join(".claude").join("hooks").join(format!("rtk-rewrite.{}", extension)))
 }
 
 /// Run integrity check and print results (for `rtk verify` subcommand)

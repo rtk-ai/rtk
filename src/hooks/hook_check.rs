@@ -18,6 +18,7 @@ pub enum HookStatus {
 
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
+/// Returns `Ok` for native hook (built into rtk binary).
 pub fn status() -> HookStatus {
     // Don't warn users who don't have Claude Code installed
     let home = match dirs::home_dir() {
@@ -28,17 +29,9 @@ pub fn status() -> HookStatus {
         return HookStatus::Ok;
     }
 
-    let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
-    };
-    let Ok(content) = std::fs::read_to_string(&hook_path) else {
-        return HookStatus::Outdated; // exists but unreadable — treat as needs-update
-    };
-    if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
-        HookStatus::Ok
-    } else {
-        HookStatus::Outdated
-    }
+    // Native hook is built into rtk binary - always available
+    // No file-based check needed
+    HookStatus::Ok
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -77,9 +70,15 @@ fn check_and_warn() -> Option<()> {
 }
 
 pub fn parse_hook_version(content: &str) -> u8 {
-    // Version tag must be in the first 5 lines (shebang + header convention)
+    // Bash hook: "# rtk-hook-version: 2"
+    // Python hook: "HOOK_VERSION = 2"
     for line in content.lines().take(5) {
         if let Some(rest) = line.strip_prefix("# rtk-hook-version:") {
+            if let Ok(v) = rest.trim().parse::<u8>() {
+                return v;
+            }
+        }
+        if let Some(rest) = line.strip_prefix("HOOK_VERSION = ") {
             if let Ok(v) = rest.trim().parse::<u8>() {
                 return v;
             }
@@ -90,7 +89,12 @@ pub fn parse_hook_version(content: &str) -> u8 {
 
 fn hook_installed_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    let path = home.join(".claude").join("hooks").join("rtk-rewrite.sh");
+    let hooks_dir = home.join(".claude").join("hooks");
+
+    // On Windows, check for .py hook; on Unix, check for .sh hook
+    let extension = if cfg!(windows) { "py" } else { "sh" };
+    let path = hooks_dir.join(format!("rtk-rewrite.{}", extension));
+
     if path.exists() {
         Some(path)
     } else {
@@ -108,8 +112,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_hook_version_present() {
+    fn test_parse_hook_version_present_bash() {
         let content = "#!/usr/bin/env bash\n# rtk-hook-version: 2\n# some comment\n";
+        assert_eq!(parse_hook_version(content), 2);
+    }
+
+    #[test]
+    fn test_parse_hook_version_present_python() {
+        let content = "#!/usr/bin/env python3\nHOOK_VERSION = 2\n# some comment\n";
         assert_eq!(parse_hook_version(content), 2);
     }
 
@@ -148,12 +158,15 @@ mod tests {
             Some(h) => h,
             None => return,
         };
-        if !home
+
+        // Check for appropriate hook file based on platform
+        let extension = if cfg!(windows) { "py" } else { "sh" };
+        let hook_path = home
             .join(".claude")
             .join("hooks")
-            .join("rtk-rewrite.sh")
-            .exists()
-        {
+            .join(format!("rtk-rewrite.{}", extension));
+
+        if !hook_path.exists() {
             // No hook — status should be Missing (if .claude exists) or Ok (if not)
             let s = status();
             if home.join(".claude").exists() {

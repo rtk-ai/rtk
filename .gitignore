@@ -1,9 +1,11 @@
 # Build
 /target
+.cargo-ok
 
 # Environment & Secrets
 .env
 .env.*
+settings.local.json
 *.pem
 *.key
 *.crt

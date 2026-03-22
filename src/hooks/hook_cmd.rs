@@ -139,6 +139,43 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
     Ok(())
 }
 
+// ── Claude Code hook ───────────────────────────────────────────
+
+/// Run Claude Code PreToolUse hook.
+/// Reads JSON from stdin, rewrites shell commands to rtk equivalents,
+/// outputs JSON to stdout in Claude Code format.
+pub fn run_claude() -> Result<()> {
+    let mut input = String::new();
+    io::stdin()
+        .read_to_string(&mut input)
+        .context("Failed to read stdin")?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    // Extract command from tool_input.command
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return Ok(()), // No command = pass through
+    };
+
+    handle_vscode(cmd)
+}
+
 // ── Gemini hook ───────────────────────────────────────────────
 
 /// Run the Gemini CLI BeforeTool hook.
@@ -330,6 +367,51 @@ mod tests {
         assert_eq!(
             rewrite_command("RUST_LOG=debug cargo test", &[]),
             Some("RUST_LOG=debug rtk cargo test".into())
+        );
+    }
+
+    // --- Claude Code hook ---
+
+    #[test]
+    fn test_claude_hook_format_matches_vscode() {
+        // Claude Code uses same format as VS Code
+        let input = json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git status" }
+        });
+        assert!(matches!(
+            detect_format(&input),
+            HookFormat::VsCode { .. }
+        ));
+    }
+
+    #[test]
+    fn test_claude_hook_output_format() {
+        // Verify the output format matches expected Claude Code hook format
+        let cmd = "git status";
+        let rewritten = get_rewritten(cmd).unwrap();
+
+        let output = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "RTK auto-rewrite",
+                "updatedInput": { "command": rewritten }
+            }
+        });
+
+        let json: Value = serde_json::from_str(&output.to_string()).unwrap();
+        assert_eq!(
+            json["hookSpecificOutput"]["hookEventName"],
+            "PreToolUse"
+        );
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"],
+            "allow"
+        );
+        assert_eq!(
+            json["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
         );
     }
 }
