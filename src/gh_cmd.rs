@@ -1118,6 +1118,18 @@ fn pr_merge(args: &[String], _verbose: u8) -> Result<()> {
     Ok(())
 }
 
+/// Flags that change `gh pr diff` output from unified diff to a different format.
+/// When present, compact_diff would produce empty output since it expects diff headers.
+fn has_non_diff_format_flag(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "--name-only"
+            || a == "--name-status"
+            || a == "--stat"
+            || a == "--numstat"
+            || a == "--shortstat"
+    })
+}
+
 fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
     // --no-compact: pass full diff through (gh CLI doesn't know this flag, strip it)
     let no_compact = args.iter().any(|a| a == "--no-compact");
@@ -1127,7 +1139,9 @@ fn pr_diff(args: &[String], _verbose: u8) -> Result<()> {
         .cloned()
         .collect();
 
-    if no_compact {
+    // Passthrough when --no-compact or when a format flag changes output away from
+    // unified diff (e.g. --name-only produces a filename list, not diff hunks).
+    if no_compact || has_non_diff_format_flag(&gh_args) {
         return run_passthrough_with_extra("gh", &["pr", "diff"], &gh_args);
     }
 
@@ -1536,6 +1550,46 @@ mod tests {
     #[test]
     fn test_should_passthrough_issue_view_default() {
         assert!(!should_passthrough_issue_view(&[]));
+    }
+
+    // --- has_non_diff_format_flag tests ---
+
+    #[test]
+    fn test_non_diff_format_flag_name_only() {
+        assert!(has_non_diff_format_flag(&["--name-only".into()]));
+    }
+
+    #[test]
+    fn test_non_diff_format_flag_stat() {
+        assert!(has_non_diff_format_flag(&["--stat".into()]));
+    }
+
+    #[test]
+    fn test_non_diff_format_flag_name_status() {
+        assert!(has_non_diff_format_flag(&["--name-status".into()]));
+    }
+
+    #[test]
+    fn test_non_diff_format_flag_numstat() {
+        assert!(has_non_diff_format_flag(&["--numstat".into()]));
+    }
+
+    #[test]
+    fn test_non_diff_format_flag_shortstat() {
+        assert!(has_non_diff_format_flag(&["--shortstat".into()]));
+    }
+
+    #[test]
+    fn test_non_diff_format_flag_absent() {
+        assert!(!has_non_diff_format_flag(&[]));
+    }
+
+    #[test]
+    fn test_non_diff_format_flag_regular_args() {
+        assert!(!has_non_diff_format_flag(&[
+            "123".into(),
+            "--color=always".into()
+        ]));
     }
 
     // --- filter_markdown_body tests ---
