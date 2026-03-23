@@ -153,34 +153,23 @@ mod tests {
 
     #[test]
     fn test_status_returns_valid_variant() {
-        // Skip on machines without Claude Code or without hook
+        // Native hook is built into rtk binary - always returns Ok if Claude Code exists
         let home = match dirs::home_dir() {
             Some(h) => h,
-            None => return,
+            None => {
+                // No home dir - should return Ok (not applicable)
+                assert_eq!(status(), HookStatus::Ok);
+                return;
+            }
         };
 
-        // Check for appropriate hook file based on platform
-        let extension = if cfg!(windows) { "py" } else { "sh" };
-        let hook_path = home
-            .join(".claude")
-            .join("hooks")
-            .join(format!("rtk-rewrite.{}", extension));
-
-        if !hook_path.exists() {
-            // No hook — status should be Missing (if .claude exists) or Ok (if not)
-            let s = status();
-            if home.join(".claude").exists() {
-                assert_eq!(s, HookStatus::Missing);
-            } else {
-                assert_eq!(s, HookStatus::Ok);
-            }
-            return;
-        }
         let s = status();
-        assert!(
-            s == HookStatus::Ok || s == HookStatus::Outdated,
-            "Expected Ok or Outdated when hook exists, got {:?}",
-            s
-        );
+        if home.join(".claude").exists() {
+            // Claude Code installed - native hook is always available
+            assert_eq!(s, HookStatus::Ok);
+        } else {
+            // Claude Code not installed - not applicable
+            assert_eq!(s, HookStatus::Ok);
+        }
     }
 }
