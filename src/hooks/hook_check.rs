@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
 
 /// Hook status for diagnostics and `rtk gain`.
@@ -69,38 +68,6 @@ fn check_and_warn() -> Option<()> {
     Some(())
 }
 
-pub fn parse_hook_version(content: &str) -> u8 {
-    // Bash hook: "# rtk-hook-version: 2"
-    // Python hook: "HOOK_VERSION = 2"
-    for line in content.lines().take(5) {
-        if let Some(rest) = line.strip_prefix("# rtk-hook-version:") {
-            if let Ok(v) = rest.trim().parse::<u8>() {
-                return v;
-            }
-        }
-        if let Some(rest) = line.strip_prefix("HOOK_VERSION = ") {
-            if let Ok(v) = rest.trim().parse::<u8>() {
-                return v;
-            }
-        }
-    }
-    0 // No version tag = version 0 (outdated)
-}
-
-fn hook_installed_path() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let hooks_dir = home.join(".claude").join("hooks");
-
-    // On Windows, check for .py hook; on Unix, check for .sh hook
-    let extension = if cfg!(windows) { "py" } else { "sh" };
-    let path = hooks_dir.join(format!("rtk-rewrite.{}", extension));
-
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
-}
 
 fn warn_marker_path() -> Option<PathBuf> {
     let data_dir = dirs::data_local_dir()?.join("rtk");
@@ -110,36 +77,6 @@ fn warn_marker_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_hook_version_present_bash() {
-        let content = "#!/usr/bin/env bash\n# rtk-hook-version: 2\n# some comment\n";
-        assert_eq!(parse_hook_version(content), 2);
-    }
-
-    #[test]
-    fn test_parse_hook_version_present_python() {
-        let content = "#!/usr/bin/env python3\nHOOK_VERSION = 2\n# some comment\n";
-        assert_eq!(parse_hook_version(content), 2);
-    }
-
-    #[test]
-    fn test_parse_hook_version_missing() {
-        let content = "#!/usr/bin/env bash\n# old hook without version\n";
-        assert_eq!(parse_hook_version(content), 0);
-    }
-
-    #[test]
-    fn test_parse_hook_version_future() {
-        let content = "#!/usr/bin/env bash\n# rtk-hook-version: 5\n";
-        assert_eq!(parse_hook_version(content), 5);
-    }
-
-    #[test]
-    fn test_parse_hook_version_no_tag() {
-        assert_eq!(parse_hook_version("no version here"), 0);
-        assert_eq!(parse_hook_version(""), 0);
-    }
 
     #[test]
     fn test_hook_status_enum() {
