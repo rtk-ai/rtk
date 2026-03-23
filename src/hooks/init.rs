@@ -513,9 +513,8 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         return Ok(());
     }
 
-    // 1. Remove hook file (.py on Windows, .sh on Unix)
-    let hook_extension = if cfg!(windows) { "py" } else { "sh" };
-    let hook_path = claude_dir.join("hooks").join(format!("rtk-rewrite.{}", hook_extension));
+    // 1. Remove legacy hook file (.sh script)
+    let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
     if hook_path.exists() {
         fs::remove_file(&hook_path)
             .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
