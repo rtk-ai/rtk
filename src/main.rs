@@ -662,6 +662,9 @@ enum Commands {
         since: u64,
     },
 
+    /// Filter MCP tool output from a PostToolUse hook (reads JSON from stdin)
+    FilterMcpOutput,
+
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
     ///
     /// Exits 0 and prints the rewritten command if supported.
@@ -2061,6 +2064,10 @@ fn main() -> Result<()> {
                 hooks::hook_cmd::run_copilot()?;
             }
         },
+
+        Commands::FilterMcpOutput => {
+            hooks::mcp_filter::run()?;
+        }
 
         Commands::Rewrite { args } => {
             let cmd = args.join(" ");

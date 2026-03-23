@@ -1,6 +1,7 @@
 //! Hook installation and lifecycle management for AI coding agents.
 
 pub mod hook_audit_cmd;
+pub mod mcp_filter;
 pub mod hook_check;
 pub mod hook_cmd;
 pub mod init;
