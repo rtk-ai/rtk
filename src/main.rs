@@ -656,10 +656,10 @@ enum Commands {
         command: GtCommands,
     },
 
-    /// golangci-lint with compact output
+    /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
     #[command(name = "golangci-lint")]
     GolangciLint {
-        /// golangci-lint arguments
+        /// Additional golangci-lint arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

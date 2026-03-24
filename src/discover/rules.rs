@@ -276,9 +276,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^golangci-lint(\s|$)",
-        rtk_cmd: "rtk golangci-lint",
-        rewrite_prefixes: &["golangci-lint", "golangci"],
+        pattern: r"^(?:golangci-lint|golangci)\s+(run)(?:\s|$)",
+        rtk_cmd: "rtk golangci-lint run",
+        rewrite_prefixes: &["golangci-lint run", "golangci run"],
         category: "Go",
         savings_pct: 85.0,
         subcmd_savings: &[],

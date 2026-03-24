@@ -1877,7 +1877,29 @@ mod tests {
         assert!(matches!(
             classify_command("golangci-lint run"),
             Classification::Supported {
-                rtk_equivalent: "rtk golangci-lint",
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_bare_is_not_compact_wrapper() {
+        assert!(!matches!(
+            classify_command("golangci-lint"),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_other_subcommand_is_not_compact_wrapper() {
+        assert!(!matches!(
+            classify_command("golangci-lint version"),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
                 ..
             }
         ));
@@ -1913,6 +1935,16 @@ mod tests {
             rewrite_command("golangci-lint run ./...", &[]),
             Some("rtk golangci-lint run ./...".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_bare_golangci_lint_skips_compact_wrapper() {
+        assert_eq!(rewrite_command("golangci-lint", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_other_golangci_lint_subcommand_skips_compact_wrapper() {
+        assert_eq!(rewrite_command("golangci-lint version", &[]), None);
     }
 
     // --- JS/TS tooling ---
