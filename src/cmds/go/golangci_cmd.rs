@@ -191,7 +191,7 @@ fn find_subcommand_index(args: &[String]) -> Option<usize> {
         }
 
         if let Some(flag) = split_flag_name(arg) {
-            if GLOBAL_FLAGS_WITH_VALUE.contains(&flag) {
+            if golangci_flag_takes_separate_value(arg, flag) {
                 i += 1;
             }
         }
@@ -212,6 +212,18 @@ fn split_flag_name(arg: &str) -> Option<&str> {
     }
 
     None
+}
+
+fn golangci_flag_takes_separate_value(arg: &str, flag: &str) -> bool {
+    if !GLOBAL_FLAGS_WITH_VALUE.contains(&flag) {
+        return false;
+    }
+
+    if arg.starts_with("--") && arg.contains('=') {
+        return false;
+    }
+
+    true
 }
 
 fn build_filtered_args(invocation: &RunInvocation, version: u32) -> Vec<String> {
@@ -488,6 +500,28 @@ mod tests {
             classify_invocation(&["-v".into(), "run".into(), "./...".into()]),
             Invocation::FilteredRun(RunInvocation {
                 global_args: vec!["-v".into()],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_with_inline_value_flag_uses_filtered_path() {
+        assert_eq!(
+            classify_invocation(&["--color=never".into(), "run".into(), "./...".into()]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec!["--color=never".into()],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_with_inline_config_flag_uses_filtered_path() {
+        assert_eq!(
+            classify_invocation(&["--config=foo.yml".into(), "run".into(), "./...".into()]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec!["--config=foo.yml".into()],
                 run_args: vec!["./...".into()],
             })
         );

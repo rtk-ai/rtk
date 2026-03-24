@@ -319,7 +319,7 @@ fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
         }
 
         if let Some(flag) = split_golangci_flag_name(token) {
-            if GOLANGCI_GLOBAL_OPT_WITH_VALUE.contains(&flag) {
+            if golangci_flag_takes_separate_value(token, flag) {
                 i += 1;
             }
         }
@@ -340,6 +340,18 @@ fn split_golangci_flag_name(arg: &str) -> Option<&str> {
     }
 
     None
+}
+
+fn golangci_flag_takes_separate_value(arg: &str, flag: &str) -> bool {
+    if !GOLANGCI_GLOBAL_OPT_WITH_VALUE.contains(&flag) {
+        return false;
+    }
+
+    if arg.starts_with("--") && arg.contains('=') {
+        return false;
+    }
+
+    true
 }
 
 fn split_token_spans(cmd: &str) -> Vec<(&str, usize, usize)> {
@@ -2023,6 +2035,28 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_golangci_lint_with_inline_value_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint --color=never run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_inline_config_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint --config=foo.yml run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn test_classify_golangci_lint_bare_is_not_compact_wrapper() {
         assert!(!matches!(
             classify_command("golangci-lint"),
@@ -2093,10 +2127,34 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_golangci_lint_with_inline_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command("golangci-lint --color=never run ./...", &[]),
+            Some("rtk golangci-lint --color=never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_with_inline_config_flag_before_run() {
+        assert_eq!(
+            rewrite_command("golangci-lint --config=foo.yml run ./...", &[]),
+            Some("rtk golangci-lint --config=foo.yml run ./...".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_env_prefixed_golangci_lint_with_value_flag_before_run() {
         assert_eq!(
             rewrite_command("FOO=1 golangci-lint --color never run ./...", &[]),
             Some("FOO=1 rtk golangci-lint --color never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefixed_golangci_lint_with_inline_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command("FOO=1 golangci-lint --color=never run ./...", &[]),
+            Some("FOO=1 rtk golangci-lint --color=never run ./...".into())
         );
     }
 
@@ -2540,6 +2598,14 @@ mod tests {
         );
         assert_eq!(
             strip_golangci_global_opts("golangci-lint --color never run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint --color=never run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint --config=foo.yml run ./..."),
             "golangci-lint run ./..."
         );
         assert_eq!(
