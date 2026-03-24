@@ -22,7 +22,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
     let diff = compute_diff(&lines1, &lines2);
     let mut rtk = String::new();
 
-    if diff.added == 0 && diff.removed == 0 {
+    if diff.added == 0 && diff.removed == 0 && diff.modified == 0 {
         rtk.push_str("[ok] Files are identical");
         println!("{}", rtk);
         timer.track(
@@ -140,17 +140,26 @@ fn compute_diff(lines1: &[&str], lines2: &[&str]) -> DiffResult {
 }
 
 fn similarity(a: &str, b: &str) -> f64 {
-    let a_chars: std::collections::HashSet<char> = a.chars().collect();
-    let b_chars: std::collections::HashSet<char> = b.chars().collect();
-
-    let intersection = a_chars.intersection(&b_chars).count();
-    let union = a_chars.union(&b_chars).count();
-
-    if union == 0 {
-        1.0
-    } else {
-        intersection as f64 / union as f64
+    let max_len = a.len().max(b.len());
+    if max_len == 0 {
+        return 1.0;
     }
+
+    let common_prefix = a
+        .chars()
+        .zip(b.chars())
+        .take_while(|(ca, cb)| ca == cb)
+        .count();
+    let common_suffix = a
+        .chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take_while(|(ca, cb)| ca == cb)
+        .count();
+
+    // Avoid double-counting when strings overlap entirely
+    let matching = (common_prefix + common_suffix).min(max_len);
+    matching as f64 / max_len as f64
 }
 
 fn condense_unified_diff(diff: &str) -> String {
@@ -232,8 +241,8 @@ mod tests {
     #[test]
     fn test_similarity_partial_overlap() {
         let s = similarity("abcd", "abef");
-        // Shared: a, b. Union: a, b, c, d, e, f = 6. Jaccard = 2/6
-        assert!((s - 2.0 / 6.0).abs() < f64::EPSILON);
+        // Common prefix: "ab" (2). Common suffix: "" (0). max_len=4. ratio=2/4=0.5
+        assert!((s - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -364,9 +373,6 @@ diff --git a/b.rs b/b.rs
 
     #[test]
     fn test_condense_unified_diff_overflow_count_accuracy() {
-        // 100 added + 100 removed = 200 total changes, only 10 shown
-        // True overflow = 200 - 10 = 190
-        // Bug: changes vec capped at 15, so old code showed "+5 more" (15-10) instead of "+190 more"
         let diff = make_large_unified_diff(100, 100);
         let result = condense_unified_diff(&diff);
         assert!(
@@ -382,7 +388,6 @@ diff --git a/b.rs b/b.rs
 
     #[test]
     fn test_condense_unified_diff_no_false_overflow() {
-        // 8 changes total — all fit within the 10-line display cap, no overflow message
         let diff = make_large_unified_diff(4, 4);
         let result = condense_unified_diff(&diff);
         assert!(
@@ -394,7 +399,6 @@ diff --git a/b.rs b/b.rs
 
     #[test]
     fn test_no_truncation_large_diff() {
-        // Verify compute_diff returns all changes without truncation
         let mut a = Vec::new();
         let mut b = Vec::new();
         for i in 0..500 {
@@ -431,5 +435,46 @@ diff --git a/b.rs b/b.rs
                 assert_eq!(old.len(), 500, "Line was truncated!");
             }
         }
+    }
+
+    // --- regression: issue #781 - modified lines must not report "identical" ---
+
+    #[test]
+    fn test_compute_diff_single_char_difference_long_prefix() {
+        let a = vec!["abcd"];
+        let b = vec!["abce"];
+        let result = compute_diff(&a, &b);
+        assert!(
+            result.added > 0 || result.removed > 0 || result.modified > 0,
+            "Diff must detect change between 'abcd' and 'abce'"
+        );
+    }
+
+    #[test]
+    fn test_compute_diff_foo_bar_vs_foo_baz() {
+        let a = vec!["foo bar"];
+        let b = vec!["foo baz"];
+        let result = compute_diff(&a, &b);
+        assert!(
+            result.added > 0 || result.removed > 0 || result.modified > 0,
+            "Diff must detect change between 'foo bar' and 'foo baz'"
+        );
+    }
+
+    #[test]
+    fn test_compute_diff_abc_def_vs_abc_deg() {
+        let a = vec!["abc def"];
+        let b = vec!["abc deg"];
+        let result = compute_diff(&a, &b);
+        assert!(
+            result.added > 0 || result.removed > 0 || result.modified > 0,
+            "Diff must detect change between 'abc def' and 'abc deg'"
+        );
+    }
+
+    #[test]
+    fn test_similarity_single_char_change_not_identical() {
+        assert!(similarity("abcd", "abce") < 1.0);
+        assert!(similarity("foo bar", "foo baz") < 1.0);
     }
 }
