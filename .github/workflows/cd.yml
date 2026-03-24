@@ -1,6 +1,7 @@
 name: CD
 
 on:
+  workflow_dispatch:
   push:
     branches: [develop, master]
 
@@ -18,7 +19,9 @@ jobs:
   # ═══════════════════════════════════════════════
 
   pre-release:
-    if: github.ref == 'refs/heads/develop'
+    if: >-
+      github.ref == 'refs/heads/develop'
+      || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/master')
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -26,17 +29,49 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
-      - name: Compute pre-release tag
+      - name: Compute version from commits like release please   
         id: tag
         run: |
-          VERSION=$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | grep -v '-' | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::error::No stable release tag found"
+            exit 1
+          fi
+          LATEST_VERSION="${LATEST_TAG#v}"
+          echo "Latest release: $LATEST_TAG"
+
+          # ── Analyse conventional commits since that tag ──
+          COMMITS=$(git log "${LATEST_TAG}..HEAD" --format="%s")
+          HAS_BREAKING=$(echo "$COMMITS" | grep -cE '^[a-z]+(\(.+\))?!:' || true)
+          HAS_FEAT=$(echo "$COMMITS"    | grep -cE '^feat(\(.+\))?:'     || true)
+          HAS_FIX=$(echo "$COMMITS"     | grep -cE '^fix(\(.+\))?:'      || true)
+          echo "Commits since ${LATEST_TAG} — breaking=$HAS_BREAKING feat=$HAS_FEAT fix=$HAS_FIX"
+
+          # ── Compute next version (matches release-please observed behaviour) ──
+          # Pre-1.0 with bump-minor-pre-major: breaking → minor, feat → minor, fix → patch
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
+          if [ "$MAJOR" -eq 0 ]; then
+            if [ "$HAS_BREAKING" -gt 0 ] || [ "$HAS_FEAT" -gt 0 ]; then
+              MINOR=$((MINOR + 1)); PATCH=0            # breaking or feat → minor
+            else
+              PATCH=$((PATCH + 1))                     # fix only → patch
+            fi
+          else
+            if [ "$HAS_BREAKING" -gt 0 ]; then
+              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0   # breaking → major
+            elif [ "$HAS_FEAT" -gt 0 ]; then
+              MINOR=$((MINOR + 1)); PATCH=0             # feat → minor
+            else
+              PATCH=$((PATCH + 1))                      # fix → patch
+            fi
+          fi
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
           TAG="v${VERSION}-rc.${{ github.run_number }}"
 
-          # Safety: warn if this base version is already released
-          if git ls-remote --tags origin "refs/tags/v${VERSION}" | grep -q .; then
-            echo "::warning::v${VERSION} already released. Consider bumping Cargo.toml on develop."
-          fi
+          echo "Next version: $VERSION (from $LATEST_VERSION)"
+          echo "Pre-release tag: $TAG"
 
           # Safety: fail if this exact tag already exists
           if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
@@ -45,7 +80,6 @@ jobs:
           fi
 
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Pre-release tag: $TAG"
 
   build-prerelease:
     name: Build pre-release
@@ -64,7 +98,7 @@ jobs:
   # ═══════════════════════════════════════════════
 
   release-please:
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}

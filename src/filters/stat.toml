@@ -1,21 +1,17 @@
 [filters.stat]
-description = "Compact stat output — strip blank lines"
+description = "Compact stat output — strip device/inode/birth noise"
 match_command = "^stat\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
+  "^\\s*Device:",
+  "^\\s*Birth:",
 ]
-max_lines = 30
+truncate_lines_at = 120
+max_lines = 20
 
 [[tests.stat]]
-name = "macOS stat output kept"
-input = """
-16777234 8690244974 -rw-r--r-- 1 patrick staff 0 12345 "Mar 10 12:00:00 2026" "Mar 10 11:00:00 2026" "Mar 10 11:00:00 2026" "Mar  9 10:00:00 2026" 4096 24 0 file.txt
-"""
-expected = "16777234 8690244974 -rw-r--r-- 1 patrick staff 0 12345 \"Mar 10 12:00:00 2026\" \"Mar 10 11:00:00 2026\" \"Mar 10 11:00:00 2026\" \"Mar  9 10:00:00 2026\" 4096 24 0 file.txt"
-
-[[tests.stat]]
-name = "linux stat output kept"
+name = "linux stat output strips device and birth"
 input = """
   File: main.rs
   Size: 12345           Blocks: 24         IO Block: 4096   regular file
@@ -26,7 +22,21 @@ Modify: 2026-03-10 11:00:00.000000000 +0100
 Change: 2026-03-10 11:00:00.000000000 +0100
  Birth: 2026-03-09 10:00:00.000000000 +0100
 """
-expected = "  File: main.rs\n  Size: 12345           Blocks: 24         IO Block: 4096   regular file\nDevice: 801h/2049d      Inode: 1234567     Links: 1\nAccess: (0644/-rw-r--r--)  Uid: ( 1000/ patrick)   Gid: ( 1000/ patrick)\nAccess: 2026-03-10 12:00:00.000000000 +0100\nModify: 2026-03-10 11:00:00.000000000 +0100\nChange: 2026-03-10 11:00:00.000000000 +0100\n Birth: 2026-03-09 10:00:00.000000000 +0100"
+expected = "  File: main.rs\n  Size: 12345           Blocks: 24         IO Block: 4096   regular file\nAccess: (0644/-rw-r--r--)  Uid: ( 1000/ patrick)   Gid: ( 1000/ patrick)\nAccess: 2026-03-10 12:00:00.000000000 +0100\nModify: 2026-03-10 11:00:00.000000000 +0100\nChange: 2026-03-10 11:00:00.000000000 +0100"
+
+[[tests.stat]]
+name = "macOS stat -x strips device and birth"
+input = """
+  File: "main.rs"
+  Size: 82848        FileType: Regular File
+  Mode: (0644/-rw-r--r--)         Uid: (  501/ patrick)  Gid: (   20/   staff)
+Device: 1,15   Inode: 66302332    Links: 1
+Access: Wed Mar 18 21:21:15 2026
+Modify: Wed Mar 18 20:56:11 2026
+Change: Wed Mar 18 20:56:11 2026
+ Birth: Wed Mar 18 20:56:11 2026
+"""
+expected = "  File: \"main.rs\"\n  Size: 82848        FileType: Regular File\n  Mode: (0644/-rw-r--r--)         Uid: (  501/ patrick)  Gid: (   20/   staff)\nAccess: Wed Mar 18 21:21:15 2026\nModify: Wed Mar 18 20:56:11 2026\nChange: Wed Mar 18 20:56:11 2026"
 
 [[tests.stat]]
 name = "empty input passes through"

@@ -272,6 +272,10 @@ PYTHON            ruff_cmd.rs       ruff check/format      80%+       ✓
 GO                go_cmd.rs         go test/build/vet      75-90%     ✓
                   golangci_cmd.rs   golangci-lint          85%        ✓
 
+RUBY              rake_cmd.rs       rake/rails test        85-90%     ✓
+                  rspec_cmd.rs      rspec                  60%+       ✓
+                  rubocop_cmd.rs    rubocop                60%+       ✓
+
 NETWORK           wget_cmd.rs       wget                   85-95%     ✓
                   curl_cmd.rs       curl                   70%        ✓
 
@@ -303,6 +307,7 @@ SHARED            utils.rs          Helpers                N/A        ✓
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
 - **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
+- **Ruby Tooling**: 3 modules (rake/minitest, rspec, rubocop) + 1 TOML filter (bundle install)
 
 ---
 
@@ -604,6 +609,37 @@ pub fn run(command: &GoCommand, verbose: u8) -> Result<()> {
 - Third-party tool (not core Go toolchain)
 - Different output format (JSON API vs text)
 - Distinct use case (comprehensive linting vs single-tool diagnostics)
+
+### Ruby Module Architecture
+
+**Added**: 2026-03-15
+**Motivation**: Ruby on Rails development support (minitest, RSpec, RuboCop, Bundler)
+
+Ruby modules follow the standalone command pattern (like Python) with a shared `ruby_exec()` utility for auto-detecting `bundle exec`.
+
+```
+Module            Strategy              Output Format      Savings
+─────────────────────────────────────────────────────────────────────────
+rake_cmd.rs       STATE MACHINE         Text parser       85-90%
+  Minitest output (rake test / rails test)
+  → State machine: Header → Running → Failures → Summary
+  → All pass: "ok rake test: 8 runs, 0 failures"
+  → Failures: summary + numbered failure details
+
+rspec_cmd.rs      JSON/TEXT DUAL        JSON → 60%+       60%+
+  Injects --format json, parses structured results
+  → Fallback to text state machine when JSON unavailable
+  → Strips Spring, SimpleCov, DEPRECATION, Capybara noise
+
+rubocop_cmd.rs    JSON PARSING          JSON API          60%+
+  Injects --format json, groups by cop/severity
+  → Skips JSON injection in autocorrect mode (-a, -A)
+
+bundle-install.toml  TOML FILTER       Text rules        90%+
+  → Strips "Using" lines, short-circuits to "ok bundle: complete"
+```
+
+**Shared**: `ruby_exec(tool)` in utils.rs auto-detects `bundle exec` when `Gemfile` exists. Used by rake_cmd, rspec_cmd, rubocop_cmd.
 
 ### Format Strategy Decision Tree
 

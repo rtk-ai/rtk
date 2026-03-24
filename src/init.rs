@@ -279,6 +279,11 @@ pub fn run(
         install_cursor_hooks(verbose)?;
     }
 
+    // Telemetry notice (shown once during init)
+    println!();
+    println!("  [info] Anonymous telemetry is enabled (opt-out: RTK_TELEMETRY_DISABLED=1)");
+    println!("  [info] See: https://github.com/rtk-ai/rtk#privacy--telemetry");
+
     Ok(())
 }
 
