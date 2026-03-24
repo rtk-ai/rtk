@@ -31,16 +31,15 @@ All rewrite logic lives in the Rust binary (`src/discover/registry.rs`). Hook sc
 
 ## Directory Structure
 
-```
-hooks/
-  claude/       Claude Code (shell hook + settings.json)
-  copilot/      GitHub Copilot (VS Code Chat + Copilot CLI)
-  cursor/       Cursor IDE (shell hook)
-  cline/        Cline / Roo Code VS Code extension (rules file)
-  windsurf/     Windsurf / Cascade IDE (rules file)
-  codex/        OpenAI Codex CLI (awareness file)
-  opencode/     OpenCode (TypeScript plugin)
-```
+Each agent subdirectory has its own README with hook-specific details:
+
+- **[`claude/`](claude/README.md)** — Shell hook, `PreToolUse` JSON format, `settings.json` patching, test script
+- **[`copilot/`](copilot/README.md)** — Rust binary hook, dual format (VS Code Chat vs Copilot CLI), deny-with-suggestion fallback
+- **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
+- **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
+- **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
+- **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `~/.codex/` location
+- **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 
 ## Supported Agents
 
@@ -208,4 +207,29 @@ Hooks are **non-blocking** -- they never prevent a command from executing:
 - Invalid JSON input: pass through unchanged
 - `rtk rewrite` crashes: hook exits 0 (subprocess error ignored)
 - Filter logic error: fallback to raw command output
+
+## Adding a New Agent Integration
+
+New integrations must follow the [Exit Code Contract](#exit-code-contract) and [Graceful Degradation](#graceful-degradation) above, as well as the project's [Design Philosophy](../CONTRIBUTING.md#design-philosophy).
+
+### Integration Tiers
+
+| Tier | Mechanism | Maintenance | Examples |
+|------|-----------|-------------|----------|
+| **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini |
+| **Plugin** | TypeScript/JS plugin in agent's plugin system | Medium — agent manages loading | OpenCode |
+| **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Codex |
+
+### Eligibility
+
+RTK supports AI coding assistants that developers actually use day-to-day. To add a new agent:
+
+- Agent has a **documented, stable hook/plugin API** (not experimental/alpha)
+- Agent is **actively maintained** (commit activity in last 3 months)
+- Integration follows the **exit code contract** (exit 0 on all error paths)
+- Hook output matches the **agent's expected JSON format** exactly
+
+### Maintenance
+
+If an agent's API changes and the hook breaks, the integration should be updated promptly. If the agent becomes unmaintained or the hook can't be fixed, the integration may be deprecated with a release note.
 

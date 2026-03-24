@@ -10,22 +10,30 @@ Does **not** own: the TOML DSL filter engine (that's `core/toml_filter`), hook i
 
 Boundary rule: a module belongs here if and only if it executes an external command and filters its output. Infrastructure that serves multiple modules without calling external commands belongs in `core/`.
 
+## When to Write a Rust Module (vs TOML Filter)
+
+Rust modules exist here because they need capabilities TOML filters don't have: parsing structured output (JSON, NDJSON), state machine parsing across phases, injecting CLI flags (`--format json`), cross-command routing, or **flag-aware filtering** — detecting user-requested verbose flags (e.g., `--nocapture`) and adjusting compression accordingly (see [Design Philosophy](../../CONTRIBUTING.md#design-philosophy) and [TOML vs Rust decision table](../../CONTRIBUTING.md#toml-vs-rust-which-one)).
+
+**Ecosystem placement**: Match the command's language/toolchain. Use `system/` for language-agnostic commands. New ecosystem when 3+ related commands justify it.
+
+For the full contribution checklist (including `discover/rules.rs` registration), see [CONTRIBUTING.md](../../CONTRIBUTING.md#complete-contribution-checklist).
+
 ## Purpose
 All command-specific filter modules that execute CLI commands and transform their output to minimize LLM token consumption. Each module follows a consistent pattern: execute the underlying command, filter its output through specialized parsers, track token savings, and propagate exit codes.
 
-## Organization
-Commands are organized by ecosystem:
+## Ecosystems
 
-| Directory | Ecosystem | Commands |
-|-----------|-----------|----------|
-| `git/` | Git and VCS | git, gh (GitHub CLI), gt (Graphite), diff |
-| `rust/` | Rust | cargo (build, test, clippy, check), generic runner |
-| `js/` | JavaScript/TypeScript/Node | npm, pnpm, vitest, lint, tsc, next, prettier, playwright, prisma |
-| `python/` | Python | ruff, pytest, mypy, pip |
-| `go/` | Go | go (test, build, vet), golangci-lint |
-| `dotnet/` | .NET | dotnet (build, test, format), TRX/binlog parsers |
-| `cloud/` | Cloud and Infrastructure | aws, docker/kubectl, curl, wget, psql |
-| `system/` | System and Generic Utilities | ls, tree, read, grep, find, wc, env, json, log, deps, summary, format, smart |
+Each subdirectory has its own README with file descriptions, parsing strategies, and cross-command dependencies.
+
+- **[`git/`](git/README.md)** — git, gh, gt, diff — `trailing_var_arg` parsing, gh markdown filtering, gt passthrough
+- **[`rust/`](rust/README.md)** — cargo, runner (err/test) — Cargo sub-enum routing, runner dual-mode
+- **[`js/`](js/README.md)** — npm, pnpm, vitest, lint, tsc, next, prettier, playwright, prisma — Package manager auto-detection, lint routing, cross-deps with python
+- **[`python/`](python/README.md)** — ruff, pytest, mypy, pip — JSON check vs text format, state machine parsing, uv auto-detection
+- **[`go/`](go/README.md)** — go test/build/vet, golangci-lint — NDJSON streaming, Go sub-enum pattern
+- **[`dotnet/`](dotnet/README.md)** — dotnet, binlog, trx, format_report — DotnetCommands sub-enum, internal helper modules
+- **[`cloud/`](cloud/README.md)** — aws, docker/kubectl, curl, wget, psql — Docker/Kubectl sub-enums, JSON forced output
+- **[`system/`](system/README.md)** — ls, tree, read, grep, find, wc, env, json, log, deps, summary, format, smart — format_cmd routing, filter levels, language detection
+- **[`ruby/`](ruby/README.md)** — rake/rails test, rspec, rubocop — JSON injection pattern, `ruby_exec()` bundle exec auto-detection
 
 ## Common Pattern
 
@@ -33,27 +41,15 @@ Every command module follows this structure:
 
 ```rust
 pub fn run(args: MyArgs, verbose: u8) -> Result<()> {
-    // 1. Start timer for tracking
     let timer = tracking::TimedExecution::start();
+    let output = resolved_command("mycmd").args(&args).output().context("Failed to execute mycmd")?;
+    let raw = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
-    // 2. Execute the underlying command
-    let output = resolved_command("mycmd")
-        .args(&args.to_cmd_args())
-        .output()
-        .context("Failed to execute mycmd")?;
+    let filtered = filter_output(&raw).unwrap_or_else(|e| {
+        eprintln!("rtk: filter warning: {}", e);
+        raw.clone()  // Fallback to raw on filter failure
+    });
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    // 3. Filter the output (with fallback to raw on error)
-    let filtered = filter_output(&stdout)
-        .unwrap_or_else(|e| {
-            eprintln!("rtk: filter warning: {}", e);
-            raw.clone()  // Passthrough on failure
-        });
-
-    // 4. Tee raw output on failure (for LLM re-read)
     let exit_code = output.status.code().unwrap_or(1);
     if let Some(hint) = tee::tee_and_hint(&raw, "mycmd", exit_code) {
         println!("{}\n{}", filtered, hint);
@@ -61,23 +57,13 @@ pub fn run(args: MyArgs, verbose: u8) -> Result<()> {
         println!("{}", filtered);
     }
 
-    // 5. Track token savings to SQLite
     timer.track("mycmd args", "rtk mycmd args", &raw, &filtered);
-
-    // 6. Propagate exit code
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
+    if !output.status.success() { std::process::exit(exit_code); }
     Ok(())
 }
 ```
 
-Key aspects of this pattern:
-- **`TimedExecution`**: Records elapsed time, estimates tokens (`ceil(chars / 4.0)`), writes to SQLite
-- **`resolved_command()`**: Finds the command in PATH, handles aliases
-- **Fallback**: Filter errors fall back to raw output (never block the user)
-- **Tee recovery**: On failure, saves raw output to disk with a hint line for LLM re-read
-- **Exit code**: Always propagated via `std::process::exit(code)` for CI/CD reliability
+Six phases: **timer** → **execute** → **filter (with fallback)** → **tee on failure** → **track** → **exit code**. See [core/README.md](../core/README.md#consumer-contracts) for the contracts each phase must honor.
 
 ## Token Savings by Category
 
@@ -154,12 +140,4 @@ All modules accept `verbose: u8`. Use it to print debug info (command being run,
 
 ## Adding a New Command Filter
 
-1. Create `<cmd>_cmd.rs` in the appropriate ecosystem subdirectory
-2. Follow the common pattern above (timer, execute, filter with fallback, tee, track, exit code)
-3. Use `lazy_static!` for all regex patterns
-4. Add the command to the `Commands` enum in `main.rs`
-5. Create a test fixture in `tests/fixtures/` from real command output
-6. Write snapshot test (`assert_snapshot!`) and token savings test (verify >= 60% reduction)
-7. Run `cargo fmt --all && cargo clippy --all-targets && cargo test`
-
-See the Filter Development Checklist in `CLAUDE.md` and `.claude/rules/rust-patterns.md` for the full module structure.
+Follow the [Common Pattern](#common-pattern) above (timer, execute, filter with fallback, tee, track, exit code). For the full step-by-step checklist, see [CONTRIBUTING.md](../../CONTRIBUTING.md#complete-contribution-checklist). For the Rust module structure, see [`.claude/rules/rust-patterns.md`](../../.claude/rules/rust-patterns.md).

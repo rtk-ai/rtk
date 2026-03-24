@@ -1,5 +1,7 @@
 # GitHub Copilot Hooks
 
+> Part of [`hooks/`](../README.md) — see also [`src/hooks/`](../../src/hooks/README.md) for installation code
+
 ## Specifics
 
 - Uses the `rtk hook copilot` Rust binary (not a shell script) -- no `jq` dependency

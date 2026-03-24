@@ -1,5 +1,7 @@
 # Hook System
 
+> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview | [hooks/](../../hooks/README.md) for deployed hook artifacts
+
 ## Scope
 
 The **lifecycle management** layer for LLM agent hooks: install, uninstall, verify integrity, audit usage, and manage trust. This component creates and maintains the hook artifacts that live in `hooks/` (root), but does **not** execute rewrite logic itself — that lives in `discover/registry`.
@@ -14,18 +16,6 @@ Boundary notes:
 
 ## Purpose
 LLM agent integration layer that installs, validates, and executes command-rewriting hooks for AI coding assistants. Hooks intercept raw CLI commands (e.g., `git status`) and rewrite them to RTK equivalents (e.g., `rtk git status`) so that LLM agents automatically benefit from token savings without explicit user configuration.
-
-## Files
-| File | Responsibility |
-|------|---------------|
-| init.rs | `rtk init` command (2998 lines) -- orchestrates all installation/uninstallation flows for 4 agents (Claude, Cursor, Windsurf, Cline) + 3 special modes (Gemini, Codex, OpenCode); supports 6 installation modes (default, hook-only, claude-md, windsurf, cline, codex); handles settings.json patching, RTK.md writing, CLAUDE.md injection, and OpenCode/Cursor side-installs |
-| hook_cmd.rs | Hook processors for Gemini CLI (`run_gemini()`) and GitHub Copilot (`run_copilot()`); reads JSON from stdin, auto-detects agent format (VS Code vs Copilot CLI), calls `rewrite_command()` in-process, returns agent-specific JSON response |
-| hook_check.rs | Runtime hook version detection; parses `# rtk-hook-version: N` from hook script header; warns if outdated or missing; rate-limited to once per 24 hours via marker file at `~/.local/share/rtk/.hook_warn_last` |
-| hook_audit_cmd.rs | `rtk hook-audit` command; analyzes hook audit log (`~/.local/share/rtk/hook-audit.log`) enabled via `RTK_HOOK_AUDIT=1`; shows rewrite success rates, skip reasons, and top commands |
-| rewrite_cmd.rs | `rtk rewrite` command -- thin wrapper that loads config exclusions and delegates to `discover/registry::rewrite_command()`; used by all shell-based hooks as a subprocess |
-| verify_cmd.rs | `rtk verify` command -- runs inline tests from TOML filter files; integrity verification (`integrity::run_verify()`) is routed via `main.rs`, not this module |
-| trust.rs | `rtk trust` / `rtk untrust` commands -- manages a trust store for project-local TOML filters in `.rtk/filters/`; prevents untrusted filters from executing |
-| integrity.rs | SHA-256 hook integrity system (538 lines); computes and stores hashes at install time; verifies at runtime; 5-state model: Verified, Tampered, NoBaseline, NotInstalled, OrphanedHash |
 
 ## Installation Modes
 

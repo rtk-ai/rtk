@@ -1,5 +1,7 @@
 # Python Ecosystem
 
+> Part of [`src/cmds/`](../README.md) — see also [docs/TECHNICAL.md](../../../docs/TECHNICAL.md)
+
 ## Specifics
 
 - `pytest_cmd.rs` uses a state machine text parser (no JSON available from pytest)

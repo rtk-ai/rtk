@@ -1,5 +1,7 @@
 # Rust Ecosystem
 
+> Part of [`src/cmds/`](../README.md) — see also [docs/TECHNICAL.md](../../../docs/TECHNICAL.md)
+
 ## Specifics
 
 - `cargo_cmd.rs` uses `restore_double_dash()` fix: Clap strips `--` but cargo needs it for test flags (e.g., `cargo test -- --nocapture`)

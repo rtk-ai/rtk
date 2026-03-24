@@ -1,5 +1,7 @@
 # Go Ecosystem
 
+> Part of [`src/cmds/`](../README.md) — see also [docs/TECHNICAL.md](../../../docs/TECHNICAL.md)
+
 ## Specifics
 
 - `go_cmd.rs` uses `GoCommands` sub-enum in main.rs (same pattern as git/cargo)

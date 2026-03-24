@@ -1,5 +1,7 @@
 # System and Generic Utilities
 
+> Part of [`src/cmds/`](../README.md) — see also [docs/TECHNICAL.md](../../../docs/TECHNICAL.md)
+
 ## Specifics
 
 - `read.rs` uses `core/filter` for language-aware code stripping (FilterLevel: none/minimal/aggressive)

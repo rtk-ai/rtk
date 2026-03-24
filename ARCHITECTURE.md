@@ -1,8 +1,8 @@
 # rtk Architecture Documentation
 
-> **rtk (Rust Token Killer)** - A high-performance CLI proxy that minimizes LLM token consumption through intelligent output filtering and compression.
+> **Deep reference** for RTK's system design, filtering taxonomy, performance characteristics, and architecture decisions. For a guided tour of the end-to-end flow, start with [docs/TECHNICAL.md](docs/TECHNICAL.md).
 
-This document provides a comprehensive architectural overview of rtk, including system design, data flows, module organization, and implementation patterns.
+**rtk (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption through intelligent output filtering and compression.
 
 ---
 
@@ -17,51 +17,16 @@ This document provides a comprehensive architectural overview of rtk, including 
 7. [Global Flags Architecture](#global-flags-architecture)
 8. [Error Handling](#error-handling)
 9. [Configuration System](#configuration-system)
-10. [Module Development Pattern](#module-development-pattern)
+10. [Common Patterns](#common-patterns)
 11. [Build Optimizations](#build-optimizations)
 12. [Extensibility Guide](#extensibility-guide)
+13. [Architecture Decision Records](#architecture-decision-records)
 
 ---
 
 ## System Overview
 
-### Proxy Pattern Architecture
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                      rtk - Token Optimization Proxy                    │
-└────────────────────────────────────────────────────────────────────────┘
-
-User Input          CLI Layer           Router            Module Layer
-──────────          ─────────           ──────            ────────────
-
-$ rtk git log    ─→  Clap Parser   ─→   Commands    ─→   git::run()
-  -v --oneline       (main.rs)          enum match
-                     • Parse args                         Execute: git log
-                     • Extract flags                      Capture output
-                     • Route command                            ↓
-                                                          Filter/Compress
-                                                                 ↓
-$ 3 commits      ←─  Terminal      ←─   Format      ←─   Compact Stats
-  +142/-89           colored            optimized         (90% reduction)
-                     output                                     ↓
-                                                          tracking::track()
-                                                                 ↓
-                                                          SQLite INSERT
-                                                          (~/.local/share/rtk/)
-```
-
-### Key Components
-
-| Component | Location | Responsibility |
-|-----------|----------|----------------|
-| **CLI Parser** | main.rs | Clap-based argument parsing, global flags |
-| **Command Router** | main.rs | Dispatch to specialized modules |
-| **Module Layer** | src/*_cmd.rs, src/git.rs, etc. | Command execution + filtering |
-| **Shared Utils** | utils.rs | Package manager detection, text processing |
-| **Filter Engine** | filter.rs | Language-aware code filtering |
-| **Tracking** | tracking.rs | SQLite-based token metrics |
-| **Config** | config.rs, init.rs | User preferences, LLM integration |
+> For the proxy pattern diagram and key components table, see [docs/TECHNICAL.md](docs/TECHNICAL.md#2-architecture-overview).
 
 ### Design Principles
 
@@ -73,39 +38,7 @@ $ 3 commits      ←─  Terminal      ←─   Format      ←─   Compact Sta
 
 ### Hook Architecture (v0.9.5+)
 
-The recommended deployment mode uses a Claude Code PreToolUse hook for 100% transparent command rewriting.
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                    Hook-Based Command Rewriting                        │
-└────────────────────────────────────────────────────────────────────────┘
-
-Claude Code             settings.json        rtk-rewrite.sh        RTK binary
-     │                       │                     │                    │
-     │  Bash: "git status"   │                     │                    │
-     │ ─────────────────────►│                     │                    │
-     │                       │  PreToolUse hook    │                    │
-     │                       │ ───────────────────►│                    │
-     │                       │                     │  detect: git       │
-     │                       │                     │  rewrite:          │
-     │                       │                     │  rtk git status    │
-     │                       │◄────────────────────│                    │
-     │                       │  updatedInput        │                    │
-     │                       │                                          │
-     │  execute: rtk git status ────────────────────────────────────────►
-     │                                                                  │  run git
-     │                                                                  │  filter
-     │                                                                  │  track
-     │◄──────────────────────────────────────────────────────────────────
-     │  "3 modified, 1 untracked ✓"    (~10 tokens vs ~200 raw)
-     │
-     │  Claude never sees the rewrite — it only sees optimized output.
-
-Files:
-  ~/.claude/hooks/rtk-rewrite.sh  ← thin delegator (calls `rtk rewrite`, ~50 lines)
-  ~/.claude/settings.json         ← hook registry (PreToolUse registration)
-  ~/.claude/RTK.md                ← minimal context hint (10 lines)
-```
+> For the hook interception diagram and agent-specific JSON formats, see [docs/TECHNICAL.md](docs/TECHNICAL.md#32-hook-interception-command-rewriting) and [hooks/README.md](hooks/README.md).
 
 Two hook strategies:
 
@@ -224,85 +157,33 @@ Database: ~/.local/share/rtk/history.db
 
 ## Module Organization
 
-### Complete Module Map (30 Modules)
+### Module Map
+
+> For the full file-level module tree, see [docs/TECHNICAL.md](docs/TECHNICAL.md#4-folder-map) and each folder's README.
+
+**Token savings by ecosystem:**
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        Module Organization                             │
-└────────────────────────────────────────────────────────────────────────┘
-
-Category          Module            Commands               Savings    File
-──────────────────────────────────────────────────────────────────────────
-
-GIT               git.rs            status, diff, log      85-99%     ✓
-                                    add, commit, push
-                                    branch, checkout
-
-CODE SEARCH       grep_cmd.rs       grep                   60-80%     ✓
-                  diff_cmd.rs       diff                   70-85%     ✓
-                  find_cmd.rs       find                   50-70%     ✓
-
-FILE OPS          ls.rs             ls                     50-70%     ✓
-                  read.rs           read                   40-90%     ✓
-
-EXECUTION         runner.rs         err, test              60-99%     ✓
-                  summary.rs        smart (heuristic)      50-80%     ✓
-                  local_llm.rs      smart (LLM mode)       60-90%     ✓
-
-LOGS/DATA         log_cmd.rs        log                    70-90%     ✓
-                  json_cmd.rs       json                   80-95%     ✓
-
-JS/TS STACK       lint_cmd.rs       lint                   84%        ✓
-                  tsc_cmd.rs        tsc                    83%        ✓
-                  next_cmd.rs       next                   87%        ✓
-                  prettier_cmd.rs   prettier               70%        ✓
-                  playwright_cmd.rs playwright             94%        ✓
-                  prisma_cmd.rs     prisma                 88%        ✓
-                  vitest_cmd.rs     vitest                 99.5%      ✓
-                  pnpm_cmd.rs       pnpm                   70-90%     ✓
-
-CONTAINERS        container.rs      podman, docker         60-80%     ✓
-
-VCS               gh_cmd.rs         gh                     26-87%     ✓
-
-PYTHON            ruff_cmd.rs       ruff check/format      80%+       ✓
-                  pytest_cmd.rs     pytest                 90%+       ✓
-                  pip_cmd.rs        pip list/outdated      70-85%     ✓
-
-GO                go_cmd.rs         go test/build/vet      75-90%     ✓
-                  golangci_cmd.rs   golangci-lint          85%        ✓
-
-RUBY              rake_cmd.rs       rake/rails test        85-90%     ✓
-                  rspec_cmd.rs      rspec                  60%+       ✓
-                  rubocop_cmd.rs    rubocop                60%+       ✓
-
-NETWORK           wget_cmd.rs       wget                   85-95%     ✓
-                  curl_cmd.rs       curl                   70%        ✓
-
-INFRA             aws_cmd.rs        aws                    80%        ✓
-                  psql_cmd.rs       psql                   75%        ✓
-
-DEPENDENCIES      deps.rs           deps                   80-90%     ✓
-
-ENVIRONMENT       env_cmd.rs        env                    60-80%     ✓
-
-SYSTEM            init.rs           init                   N/A        ✓
-                  gain.rs           gain                   N/A        ✓
-                  config.rs         (internal)             N/A        ✓
-                  rewrite_cmd.rs    rewrite                N/A        ✓
-
-SHARED            utils.rs          Helpers                N/A        ✓
-                  filter.rs         Language filters       N/A        ✓
-                  tracking.rs       Token tracking         N/A        ✓
-                  tee.rs            Full output recovery   N/A        ✓
+Savings by ecosystem:
+  GIT (cmds/git/)          85-99%    status, diff, log, gh, gt
+  JS/TS (cmds/js/)         70-99%    lint, tsc, next, prettier, playwright, prisma, vitest, pnpm
+  PYTHON (cmds/python/)    70-90%    ruff, pytest, mypy, pip
+  GO (cmds/go/)            75-90%    go test/build/vet, golangci-lint
+  RUBY (cmds/ruby/)        60-90%    rake, rspec, rubocop
+  DOTNET (cmds/dotnet/)    70-85%    dotnet build/test, binlog
+  CLOUD (cmds/cloud/)      60-80%    aws, docker/kubectl, curl, wget, psql
+  SYSTEM (cmds/system/)    50-90%    ls, tree, read, grep, find, json, log, env, deps
+  RUST (cmds/rust/)        60-99%    cargo test/build/clippy, err
 ```
 
 **Total: 67 modules** (45 command modules + 22 infrastructure modules)
 
 ### Module Count Breakdown
 
-- **Command Modules**: 45 (directly exposed to users)
-- **Infrastructure Modules**: 22 (utils, filter, tracking, tee, config, init, gain, toml_filter, verify_cmd, trust, etc.)
+- **Command Modules**: 45 in `src/cmds/` (directly exposed to users)
+- **Core Infrastructure**: 8 in `src/core/` (utils, filter, tracking, tee, config, toml_filter, display_helpers, telemetry)
+- **Hook System**: 8 in `src/hooks/` (init, rewrite, hook_cmd, hook_check, hook_audit, verify, trust, integrity)
+- **Analytics**: 4 in `src/analytics/` (gain, cc_economics, ccusage, session_cmd)
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)
@@ -422,7 +303,7 @@ Strategy            Modules              Technique               Reduction
    Used by: go test (NDJSON stream, interleaved package events)
 ```
 
-### Code Filtering Levels (filter.rs)
+### Code Filtering Levels (src/core/filter.rs)
 
 ```rust
 // FilterLevel::None - Keep everything
@@ -576,29 +457,7 @@ golangci_cmd.rs   JSON PARSING          JSON API          85%
 
 #### Sub-Enum Pattern (go_cmd.rs)
 
-```rust
-// main.rs enum definition
-Commands::Go {
-    #[command(subcommand)]
-    command: GoCommand,
-}
-
-// go_cmd.rs sub-enum
-pub enum GoCommand {
-    Test { args: Vec<String> },
-    Build { args: Vec<String> },
-    Vet { args: Vec<String> },
-}
-
-// Router
-pub fn run(command: &GoCommand, verbose: u8) -> Result<()> {
-    match command {
-        GoCommand::Test { args } => run_test(args, verbose),
-        GoCommand::Build { args } => run_build(args, verbose),
-        GoCommand::Vet { args } => run_vet(args, verbose),
-    }
-}
-```
+Uses `Commands::Go { #[command(subcommand)] command: GoCommand }` in main.rs, with `GoCommand` enum routing to `run_test/run_build/run_vet`. Mirrors git/cargo patterns.
 
 **Why Sub-Enum?**
 - `go test/build/vet` are semantically related (core Go toolchain)
@@ -664,38 +523,6 @@ Output format known?
         Examples: go vet, go build
 ```
 
-### Testing Patterns
-
-#### Python Module Tests
-
-```rust
-// pytest_cmd.rs tests
-#[test]
-fn test_pytest_state_machine() {
-    let output = "test_auth.py::test_login PASSED\ntest_db.py::test_query FAILED";
-    let result = parse_pytest_output(output);
-    assert!(result.contains("1 failed"));
-    assert!(result.contains("test_db.py::test_query"));
-}
-```
-
-#### Go Module Tests
-
-```rust
-// go_cmd.rs tests
-#[test]
-fn test_go_test_ndjson_interleaved() {
-    let output = r#"{"Action":"run","Package":"pkg1"}
-{"Action":"fail","Package":"pkg1","Test":"TestA"}
-{"Action":"run","Package":"pkg2"}
-{"Action":"pass","Package":"pkg2","Test":"TestB"}"#;
-
-    let result = parse_go_test_ndjson(output);
-    assert!(result.contains("pkg1: 1 failed"));
-    assert!(!result.contains("pkg2")); // pkg2 passed, hidden
-}
-```
-
 ### Performance Characteristics
 
 ```
@@ -738,26 +565,9 @@ When adding Python/Go module support:
 
 ## Shared Infrastructure
 
-### Utilities Layer (utils.rs)
+### Utilities Layer
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                       Shared Utilities Layer                           │
-└────────────────────────────────────────────────────────────────────────┘
-
-utils.rs provides common functionality:
-
-┌─────────────────────────────────────────┐
-│ truncate(s: &str, max: usize) → String  │  Text truncation with "..."
-├─────────────────────────────────────────┤
-│ strip_ansi(text: &str) → String         │  Remove ANSI color codes
-├─────────────────────────────────────────┤
-│ execute_command(cmd, args)              │  Shell execution helper
-│   → (stdout, stderr, exit_code)         │  with error context
-└─────────────────────────────────────────┘
-
-Used by: All command modules (24 modules depend on utils.rs)
-```
+> For the full utilities API (`truncate`, `strip_ansi`, `execute_command`, `ruby_exec`, etc.), see [src/core/README.md](src/core/README.md). Used by 41 command modules.
 
 ### Package Manager Detection Pattern
 
@@ -918,15 +728,7 @@ Flow:
 
 ### Thread Safety
 
-```rust
-// tracking.rs:9-11
-lazy_static::lazy_static! {
-    static ref TRACKER: Mutex<Option<Tracker>> = Mutex::new(None);
-}
-```
-
-**Design**: Single-threaded execution with Mutex for future-proofing.
-**Current State**: No multi-threading, but Mutex enables safe concurrent access if needed.
+Single-threaded execution with `Mutex<Option<Tracker>>` for future-proofing. No multi-threading currently, but safe concurrent access is possible if needed.
 
 ---
 
@@ -1064,43 +866,11 @@ Modules with Exit Code Preservation:
 
 ## Configuration System
 
-### Two-Tier Configuration
+### Configuration
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                     Configuration Architecture                         │
-└────────────────────────────────────────────────────────────────────────┘
+> For config file format, tee settings, tracking database path, and TOML filter tiers, see [src/core/README.md](src/core/README.md).
 
-1. User Settings (config.toml)
-   ───────────────────────────
-   Location: ~/.config/rtk/config.toml
-
-   Format:
-   [general]
-   default_filter_level = "minimal"
-   enable_tracking = true
-   retention_days = 90
-
-   Loaded by: config.rs (main.rs:650-656)
-
-2. LLM Integration (CLAUDE.md)
-   ────────────────────────────
-   Locations:
-   • Global: ~/.config/rtk/CLAUDE.md
-   • Local:  ./CLAUDE.md (project-specific)
-
-   Purpose: Instruct LLM (Claude Code) to use rtk prefix
-   Created by: rtk init [--global]
-
-   Template (init.rs:40-60):
-   # CLAUDE.md
-   Use `rtk` prefix for all commands:
-   - rtk git status
-   - rtk grep "pattern"
-   - rtk read file.rs
-
-   Benefits: 60-90% token reduction
-```
+Two tiers: **User settings** (`~/.config/rtk/config.toml`) and **LLM integration** (CLAUDE.md via `rtk init`).
 
 ### Initialization Flow
 
@@ -1137,85 +907,7 @@ Success: "✓ Initialized rtk for LLM integration"
 
 ---
 
-## Module Development Pattern
-
-### Standard Module Template
-
-```rust
-// src/example_cmd.rs
-
-use anyhow::{Context, Result};
-use std::process::Command;
-use crate::{tracking, utils};
-
-/// Public entry point called by main.rs router
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    // 1. Execute underlying command
-    let raw_output = execute_command(args)?;
-
-    // 2. Apply filtering strategy
-    let filtered = filter_output(&raw_output, verbose);
-
-    // 3. Print result
-    println!("{}", filtered);
-
-    // 4. Track token savings
-    tracking::track(
-        "original_command",
-        "rtk command",
-        &raw_output,
-        &filtered
-    );
-
-    Ok(())
-}
-
-/// Execute the underlying tool
-fn execute_command(args: &[String]) -> Result<String> {
-    let output = Command::new("tool")
-        .args(args)
-        .output()
-        .context("Failed to execute tool")?;
-
-    // Preserve exit codes (critical for CI/CD)
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("{}", stderr);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Apply filtering strategy
-fn filter_output(raw: &str, verbose: u8) -> String {
-    // Choose strategy: stats, grouping, deduplication, etc.
-    // See "Filtering Strategies" section for options
-
-    if verbose >= 3 {
-        eprintln!("Raw output:\n{}", raw);
-    }
-
-    // Apply compression logic
-    let compressed = compress(raw);
-
-    compressed
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_filter_output() {
-        let raw = "verbose output here";
-        let filtered = filter_output(raw, 0);
-        assert!(filtered.len() < raw.len());
-    }
-}
-```
-
-### Common Patterns
+## Common Patterns
 
 #### 1. Package Manager Detection (JS/TS modules)
 
@@ -1234,18 +926,7 @@ let mut cmd = if is_pnpm {
 };
 ```
 
-#### 2. Lazy Static Regex (filter.rs, runner.rs)
-
-```rust
-lazy_static::lazy_static! {
-    static ref PATTERN: Regex = Regex::new(r"ERROR:.*").unwrap();
-}
-
-// Usage: compiled once, reused across invocations
-let matches: Vec<_> = PATTERN.find_iter(text).collect();
-```
-
-#### 3. Verbosity Guards
+#### 2. Verbosity Guards
 
 ```rust
 if verbose > 0 {
@@ -1308,162 +989,11 @@ Overhead Sources:
   • SQLite tracking: ~1-3ms
 ```
 
-### Compilation
-
-```bash
-# Development build (fast compilation, debug symbols)
-cargo build
-
-# Release build (optimized, stripped)
-cargo build --release
-
-# Check without building (fast feedback)
-cargo check
-
-# Run tests
-cargo test
-
-# Lint with clippy
-cargo clippy --all-targets
-
-# Format code
-cargo fmt
-```
-
 ---
 
 ## Extensibility Guide
 
-### Adding a New Command
-
-**Step-by-step process to add a new rtk command:**
-
-#### 1. Create Module File
-
-```bash
-touch src/mycmd.rs
-```
-
-#### 2. Implement Module (src/mycmd.rs)
-
-```rust
-use anyhow::{Context, Result};
-use std::process::Command;
-use crate::tracking;
-
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    // Execute underlying command
-    let output = Command::new("mycmd")
-        .args(args)
-        .output()
-        .context("Failed to execute mycmd")?;
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-
-    // Apply filtering strategy
-    let filtered = filter(&raw, verbose);
-
-    // Print result
-    println!("{}", filtered);
-
-    // Track savings
-    tracking::track("mycmd", "rtk mycmd", &raw, &filtered);
-
-    Ok(())
-}
-
-fn filter(raw: &str, verbose: u8) -> String {
-    // Implement your filtering logic
-    raw.lines().take(10).collect::<Vec<_>>().join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_filter() {
-        let raw = "line1\nline2\n";
-        let result = filter(raw, 0);
-        assert!(result.contains("line1"));
-    }
-}
-```
-
-#### 3. Declare Module (main.rs)
-
-```rust
-// Add to module declarations (alphabetically)
-mod mycmd;
-```
-
-#### 4. Add Command Enum Variant (main.rs)
-
-```rust
-#[derive(Subcommand)]
-enum Commands {
-    // ... existing commands ...
-
-    /// Description of your command
-    Mycmd {
-        /// Arguments your command accepts
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-}
-```
-
-#### 5. Add Router Match Arm (main.rs)
-
-```rust
-match cli.command {
-    // ... existing matches ...
-
-    Commands::Mycmd { args } => {
-        mycmd::run(&args, verbose)?;
-    }
-}
-```
-
-#### 6. Test Your Command
-
-```bash
-# Build and test
-cargo build
-./target/debug/rtk mycmd arg1 arg2
-
-# Run tests
-cargo test mycmd::tests
-
-# Check with clippy
-cargo clippy --all-targets
-```
-
-#### 7. Document Your Command
-
-Update CLAUDE.md:
-
-```markdown
-### New Commands
-
-**rtk mycmd** - Description of what it does
-- Strategy: [stats/grouping/filtering/etc.]
-- Savings: X-Y%
-- Used by: [workflow description]
-```
-
-### Design Checklist
-
-When implementing a new command, consider:
-
-- [ ] **Filtering Strategy**: Which of the 9 strategies fits best?
-- [ ] **Exit Code Preservation**: Does your command need to preserve exit codes for CI/CD?
-- [ ] **Verbosity Support**: Add debug output for `-v`, `-vv`, `-vvv`
-- [ ] **Error Handling**: Use `.context()` for meaningful error messages
-- [ ] **Package Manager Detection**: For JS/TS tools, use the standard detection pattern
-- [ ] **Tests**: Add unit tests for filtering logic
-- [ ] **Token Tracking**: Integrate with `tracking::track()`
-- [ ] **Documentation**: Update CLAUDE.md with token savings and use cases
+> For the complete step-by-step process to add a new command (module file, enum variant, routing, tests, documentation), see [CONTRIBUTING.md](CONTRIBUTING.md#complete-contribution-checklist) and the [Standard Module Template in cmds/README.md](src/cmds/README.md).
 
 ---
 
@@ -1500,11 +1030,11 @@ When implementing a new command, consider:
 
 ## Resources
 
+- **[docs/TECHNICAL.md](docs/TECHNICAL.md)**: Guided tour of end-to-end flow
+- **[CONTRIBUTING.md](CONTRIBUTING.md)**: Design philosophy, contribution workflow, checklist
+- **CLAUDE.md**: Quick reference for AI agents (dev commands, build verification)
 - **README.md**: User guide, installation, examples
-- **CLAUDE.md**: Developer documentation, module details, PR history
 - **Cargo.toml**: Dependencies, build profiles, package metadata
-- **src/**: Source code organized by module
-- **.github/workflows/**: CI/CD automation (multi-platform builds, releases)
 
 ---
 
@@ -1522,6 +1052,5 @@ When implementing a new command, consider:
 
 ---
 
-**Last Updated**: 2026-02-22
-**Architecture Version**: 2.2
-**rtk Version**: 0.28.2
+**Last Updated**: 2026-03-24
+**Architecture Version**: 3.1

@@ -1,5 +1,7 @@
 # Core Infrastructure
 
+> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview
+
 ## Scope
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
@@ -9,19 +11,7 @@ Owns: configuration loading, token tracking persistence, TOML filter engine, tee
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
 ## Purpose
-Core infrastructure shared by all RTK command modules. These are the foundational building blocks that every filter, tracker, and command handler depends on. This module group has no inward dependencies -- it is a leaf in the dependency graph, ensuring clean layering across the codebase.
-
-## Files
-| File | Responsibility |
-|------|---------------|
-| tracking.rs | SQLite-based persistent token metrics (1429 lines); records input/output token counts per command with project path; 90-day retention cleanup; token estimation via `ceil(chars / 4.0)` heuristic; `TimedExecution` API for timer-based tracking; imported by 46 files (highest dependency count); DB location: `RTK_DB_PATH` env > `config.toml` > `~/.local/share/rtk/tracking.db` |
-| utils.rs | Shared utilities used across 41 files: `strip_ansi`, `truncate`, `execute_command`, `resolved_command`, `package_manager_exec`; package manager auto-detection (pnpm/yarn/npm/npx); consistent error handling and output formatting |
-| config.rs | Configuration system reading `~/.config/rtk/config.toml`; sections: `[tracking]` (DB path, retention), `[display]` (colors, emoji, max_width), `[tee]` (recovery), `[telemetry]`, `[hooks]` (exclude_commands), `[limits]` (grep/status thresholds); on-demand loading (no startup I/O) |
-| filter.rs | Language-aware code filtering engine with `FilterLevel` enum (`none`, `minimal`, `aggressive`); strips comments, whitespace, and function bodies based on level; supports Rust, Python, JS/TS, Java, Go, C/C++ via file extension detection with fallback heuristics |
-| toml_filter.rs | TOML DSL filter engine (1686 lines); `TomlFilterRegistry` singleton via `lazy_static!`; three-tier lookup: project-local (trust-gated), user-global, built-in; 8-stage filter pipeline (see below); built-in filters compiled from `src/filters/*.toml` via `build.rs` |
-| tee.rs | Raw output recovery on command failure (400 lines); saves unfiltered output to `~/.local/share/rtk/tee/{epoch}_{slug}.log`; prints one-line hint for LLM re-read; 20-file rotation, 1MB cap, min 500 chars; configurable via `[tee]` config section or `RTK_TEE`/`RTK_TEE_DIR` env vars; tee errors never affect command output or exit code |
-| display_helpers.rs | Token display formatting helpers for consistent human-readable output of savings percentages, token counts, and comparison tables |
-| telemetry.rs | Fire-and-forget usage telemetry (248 lines); non-blocking background thread; once per 23 hours via marker file; sends device hash (SHA-256 of hostname:username), version, OS, top commands, savings stats; 2-second timeout; disabled via `RTK_TELEMETRY_DISABLED=1` or `[telemetry] enabled = false` |
+Core infrastructure shared by all RTK command modules. These are the foundational building blocks that every filter, tracker, and command handler depends on. This module group has no inward dependencies — it is a leaf in the dependency graph, ensuring clean layering across the codebase.
 
 ## TOML Filter Pipeline
 
@@ -101,6 +91,21 @@ status_max_files = 15
 status_max_untracked = 10
 passthrough_max_chars = 2000
 ```
+
+## Shared Utilities (utils.rs)
+
+Key functions available to all command modules (41 modules depend on `core::utils`):
+
+| Function | Purpose |
+|----------|---------|
+| `truncate(s, max)` | Truncate string with `...` suffix |
+| `strip_ansi(text)` | Remove ANSI escape/color codes |
+| `resolved_command(name)` | Find command in PATH, returns `Command` |
+| `tool_exists(name)` | Check if a CLI tool is available |
+| `detect_package_manager()` | Detect pnpm/yarn/npm from lockfiles |
+| `package_manager_exec(tool)` | Build `Command` using detected package manager |
+| `ruby_exec(tool)` | Auto-detect `bundle exec` when `Gemfile` exists |
+| `count_tokens(text)` | Estimate tokens: `ceil(chars / 4.0)` |
 
 ## Consumer Contracts
 

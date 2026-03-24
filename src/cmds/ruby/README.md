@@ -1,5 +1,7 @@
 # Ruby on Rails
 
+> Part of [`src/cmds/`](../README.md) — see also [docs/TECHNICAL.md](../../../docs/TECHNICAL.md)
+
 ## Specifics
 
 - `rake_cmd.rs` filters Minitest output via `rake test` / `rails test`; state machine text parser, failures only (85-90% reduction)

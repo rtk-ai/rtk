@@ -1,6 +1,8 @@
 # RTK Technical Documentation
 
-> For contributors and maintainers. See `CLAUDE.md` for development commands and coding guidelines.
+> **Start here** for a guided tour of how RTK works end-to-end. For the deep reference (filtering taxonomy, performance benchmarks, architecture decisions), see [ARCHITECTURE.md](../ARCHITECTURE.md).
+>
+> See `CLAUDE.md` for development commands and coding guidelines.
 > Each folder has its own README.md with implementation details, file descriptions, and contribution guidelines.
 
 ---
@@ -171,40 +173,34 @@ Tee is configurable (enabled/disabled, min size, max files, max file size) and n
 
 ## 4. Folder Map
 
-```
-src/
-+-- main.rs              # CLI entry point, Commands enum, command routing
-+-- core/                # Shared infrastructure (8 files)
-|   +-- README.md        # -> Details: tracking, config, tee, TOML filters
-+-- hooks/               # Hook system (8 files)
-|   +-- README.md        # -> Details: init, integrity, rewrite, verify
-+-- analytics/           # Token savings analytics (4 files)
-|   +-- README.md        # -> Details: gain, economics, session
-+-- cmds/                # Command filter modules (45 files)
-|   +-- README.md        # -> Details: common pattern, ecosystem organization
-|   +-- git/             # Git + GitHub CLI + Graphite (4 files)
-|   +-- rust/            # Cargo + runner (2 files)
-|   +-- js/              # JS/TS/Node ecosystem (9 files)
-|   +-- python/          # Python ecosystem (4 files)
-|   +-- go/              # Go ecosystem (2 files)
-|   +-- dotnet/          # .NET ecosystem (4 files)
-|   +-- cloud/           # Cloud and infra (5 files)
-|   +-- system/          # System utilities (13 files)
-+-- discover/            # Claude Code history analysis
-+-- learn/               # CLI correction detection
-+-- parser/              # Parser infrastructure
-+-- filters/             # 60+ TOML filter configs
+Start here, then drill down into each README for file-level details.
 
-hooks/                   # LLM agent hook scripts (root directory)
-+-- README.md            # -> Details: agent JSON formats, rewrite flow
-+-- claude/              # Claude Code (shell hook)
-+-- copilot/             # GitHub Copilot (Rust binary hook)
-+-- cursor/              # Cursor IDE (shell hook)
-+-- cline/               # Cline / Roo Code (rules file)
-+-- windsurf/            # Windsurf / Cascade (rules file)
-+-- codex/               # OpenAI Codex CLI (awareness doc)
-+-- opencode/            # OpenCode (TypeScript plugin)
-```
+### `src/` — Rust source code
+
+| Directory | What it does | What you'll find in its README |
+|-----------|-------------|-------------------------------|
+| `main.rs` | CLI entry point, `Commands` enum, routing match | _(no README — read the file directly)_ |
+| [`core/`](../src/core/README.md) | Shared infrastructure (8 files) | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
+| [`hooks/`](../src/hooks/README.md) | Hook system (8 files) | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
+| [`analytics/`](../src/analytics/README.md) | Token savings analytics (4 files) | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
+| [`cmds/`](../src/cmds/README.md) | **Command filters (45 files, 9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
+| [`discover/`](../src/discover/README.md) | History analysis + rewrite registry (5 files) | 70+ rewrite patterns, session providers, compound command splitting |
+| [`learn/`](../src/learn/README.md) | CLI correction detection (3 files) | Error classification (6 types), correction pair detection, rule generation |
+| [`parser/`](../src/parser/README.md) | Parser infrastructure (4 files) | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
+| [`filters/`](../src/filters/README.md) | 60+ TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |
+
+### `hooks/` — Deployed hook artifacts (root directory)
+
+| Directory | Agent | What you'll find in its README |
+|-----------|-------|-------------------------------|
+| [`hooks/`](../hooks/README.md) | _(parent)_ | **All JSON formats**, rewrite registry overview, exit code contract, override controls |
+| [`claude/`](../hooks/claude/README.md) | Claude Code | Shell hook mechanism, `PreToolUse` JSON, test script |
+| [`copilot/`](../hooks/copilot/README.md) | GitHub Copilot | Rust binary hook, VS Code Chat vs Copilot CLI dual format |
+| [`cursor/`](../hooks/cursor/README.md) | Cursor IDE | Shell hook, empty JSON response requirement |
+| [`cline/`](../hooks/cline/README.md) | Cline / Roo Code | Rules file (prompt-level, no programmatic hook) |
+| [`windsurf/`](../hooks/windsurf/README.md) | Windsurf / Cascade | Rules file (workspace-scoped) |
+| [`codex/`](../hooks/codex/README.md) | OpenAI Codex CLI | Awareness document, AGENTS.md integration |
+| [`opencode/`](../hooks/opencode/README.md) | OpenCode | TypeScript plugin, zx library, in-place mutation |
 
 ---
 

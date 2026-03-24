@@ -27,6 +27,90 @@
 | **Document** | Improve docs, add usage examples, clarify existing docs |
 ---
 
+## Design Philosophy
+
+Four principles guide every RTK design decision. Understanding them helps you write contributions that fit naturally into the project.
+
+### Correctness VS Token Savings
+
+When a user or LLM explicitly requests detailed output via flags (e.g., `git log --comments`, `cargo test -- --nocapture`, `ls -la`), respect that intent. Compressing explicitly-requested detail defeats the purpose — the LLM asked for it because it needs it.
+
+Filters should be flag-aware: default output (no flags) gets aggressively compressed, but verbose/detailed flags should pass through more content. When in doubt, preserve correctness.
+
+> Example: `rtk cargo test` shows failures only (90% savings). But `rtk cargo test -- --nocapture` preserves all output because the user explicitly asked for it.
+
+### Transparency
+
+The LLM doesn't know RTK is involved — hooks rewrite commands silently. RTK's output must be a valid, useful subset of the original tool's output, not a different format the LLM wouldn't expect. If an LLM parses `git diff` output, RTK's filtered version must still look like `git diff` output.
+
+Don't invent new output formats. Don't add RTK-specific headers or markers in the default output. The filtered output should be indistinguishable from "a shorter version of the real command."
+
+### Never Block
+
+If a filter fails, fall back to raw output. RTK should never prevent a command from executing or producing output. Better to pass through unfiltered than to error out. Same for hooks: exit 0 on all error paths so the agent's command runs unmodified.
+
+Every filter needs a fallback path. Every hook must handle malformed input gracefully.
+
+### Zero Overhead
+
+<10ms startup. No async runtime. No config file I/O on the critical path. If developers perceive any delay, they'll disable RTK. Speed is the difference between adoption and abandonment.
+
+`lazy_static!` for all regex. No network calls. No disk reads in the hot path. Benchmark before/after with `hyperfine`.
+
+---
+
+## What Belongs in RTK?
+
+RTK filters **development CLI commands** consumed by LLM coding assistants — the commands an AI agent runs during a coding session: test runners, linters, build tools, VCS operations, package managers, file operations.
+
+### In Scope
+
+Commands that produce **text output** (typically 100+ tokens) and can be compressed **60%+** without losing essential information for the LLM.
+
+- Test runners (vitest, pytest, cargo test, go test)
+- Linters and type checkers (eslint, ruff, tsc, mypy)
+- Build tools (cargo build, dotnet build, make, next build)
+- VCS operations (git status/log/diff, gh pr/issue)
+- Package managers (pnpm, pip, cargo install, brew)
+- File operations (ls, tree, grep, find, cat/head/tail)
+- Infrastructure tools with text output (docker, kubectl, terraform)
+
+### Out of Scope
+
+- Interactive TUIs (htop, vim, less) — not batch-mode compatible
+- Binary output (images, compiled artifacts) — no text to filter
+- Trivial commands (<100 tokens typical output) — not worth the overhead
+- Commands with no text output — nothing to compress
+
+### TOML vs Rust: Which One?
+
+| Use **TOML filter** when | Use **Rust module** when |
+|--------------------------|--------------------------|
+| Output is plain text with predictable line structure | Output is structured (JSON, NDJSON) |
+| Regex line filtering achieves 60%+ savings | Needs state machine parsing (e.g., pytest phases) |
+| No need to inject CLI flags | Needs to inject flags like `--format json` |
+| No cross-command routing | Routes to other commands (lint → ruff/mypy) |
+| Examples: brew, df, shellcheck, rsync, ping | Examples: vitest, pytest, golangci-lint, gh |
+
+See [`src/filters/README.md`](src/filters/README.md) for TOML filter guidance and [`src/cmds/README.md`](src/cmds/README.md) for Rust module guidance.
+
+### Complete Contribution Checklist
+
+Adding a new filter or command requires changes in multiple places:
+
+1. **Create the filter** — TOML file in `src/filters/` or Rust module in `src/cmds/<ecosystem>/`
+2. **Add rewrite pattern** — Entry in `src/discover/rules.rs` (PATTERNS + RULES arrays at matching index) so hooks auto-rewrite the command
+3. **Register in main.rs** — (Rust modules only) Three changes:
+   - Add `pub mod mymod;` to the ecosystem's `mod.rs` (e.g., `src/cmds/system/mod.rs`)
+   - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`
+   - Add routing match arm in `main.rs` to call `mymod::run()`
+4. **Write tests** — Real fixture, snapshot test, token savings >= 60%
+5. **Update docs** — README.md command list, CHANGELOG.md
+
+See [src/cmds/README.md](src/cmds/README.md#common-pattern) for the standard module template with timer, fallback, tee, and tracking.
+
+---
+
 ## Branch Naming Convention
 
 Every branch **must** follow one of these prefixes to identify the level of change:
@@ -135,7 +219,7 @@ Every change **must** include tests. We follow **TDD (Red-Green-Refactor)**: wri
 
 ### How to Write Tests
 
-Tests for new commands live **in the module file itself** inside a `#[cfg(test)] mod tests` block (e.g. tests for `src/kubectl_cmd.rs` go at the bottom of that same file).
+Tests for new commands live **in the module file itself** inside a `#[cfg(test)] mod tests` block (e.g. tests for `src/cmds/cloud/container.rs` go at the bottom of that same file).
 
 **1. Create a fixture from real command output** (not synthetic data):
 ```bash

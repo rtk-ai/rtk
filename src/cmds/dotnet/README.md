@@ -1,5 +1,7 @@
 # .NET Ecosystem
 
+> Part of [`src/cmds/`](../README.md) — see also [docs/TECHNICAL.md](../../../docs/TECHNICAL.md)
+
 ## Specifics
 
 - `dotnet_cmd.rs` uses `DotnetCommands` sub-enum in main.rs

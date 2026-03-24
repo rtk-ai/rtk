@@ -1,5 +1,7 @@
 # Cloud and Infrastructure
 
+> Part of [`src/cmds/`](../README.md) — see also [docs/TECHNICAL.md](../../../docs/TECHNICAL.md)
+
 ## Specifics
 
 - `aws_cmd.rs` forces `--output json` for structured parsing

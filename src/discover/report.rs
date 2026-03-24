@@ -1,3 +1,5 @@
+//! Data types for reporting which commands RTK can and cannot optimize.
+
 use serde::Serialize;
 
 /// RTK support status for a command.

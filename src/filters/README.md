@@ -1,7 +1,21 @@
 # Built-in Filters
 
+> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview
+
 Each `.toml` file in this directory defines one filter and its inline tests.
 Files are concatenated alphabetically by `build.rs` into a single TOML blob embedded in the binary.
+
+## When to Use a TOML Filter
+
+TOML filters strip noise lines — they don't reformat output. The filtered result must still look like real command output (see [Design Philosophy](../../CONTRIBUTING.md#design-philosophy)). For the full TOML-vs-Rust decision criteria, see [CONTRIBUTING.md](../../CONTRIBUTING.md#toml-vs-rust-which-one).
+
+TOML works well for commands with **predictable, line-by-line text output** where regex filtering achieves 60%+ savings:
+- Install/update logs (brew, composer, poetry) — strip `Using ...` / `Already installed` lines
+- System monitoring (df, ps, systemctl) — keep essential rows, drop headers/decorations
+- Simple linters (shellcheck, yamllint, hadolint) — strip context, keep findings
+- Infra tools (terraform plan, helm, rsync) — strip progress, keep summary
+
+For the full contribution checklist (including `discover/rules.rs` registration), see [CONTRIBUTING.md](../../CONTRIBUTING.md#complete-contribution-checklist).
 
 ## Adding a filter
 
