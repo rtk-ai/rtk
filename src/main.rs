@@ -85,6 +85,10 @@ pub enum AgentTarget {
     Windsurf,
     /// Cline / Roo Code (VS Code)
     Cline,
+    /// Kilo Code
+    Kilocode,
+    /// Google Antigravity
+    Antigravity,
 }
 
 #[derive(Parser)]
@@ -1709,6 +1713,8 @@ fn main() -> Result<()> {
                 let install_cursor = agent == Some(AgentTarget::Cursor);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
+                let install_kilocode = agent == Some(AgentTarget::Kilocode);
+                let install_antigravity = agent == Some(AgentTarget::Antigravity);
 
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1724,6 +1730,8 @@ fn main() -> Result<()> {
                     install_cursor,
                     install_windsurf,
                     install_cline,
+                    install_kilocode,
+                    install_antigravity,
                     claude_md,
                     hook_only,
                     codex,

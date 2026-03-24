@@ -19,6 +19,9 @@ const OPENCODE_PLUGIN: &str = include_str!("../hooks/opencode-rtk.ts");
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../hooks/rtk-awareness-codex.md");
 
+const KILOCODE_RULES: &str = include_str!("../hooks/kilocode-rtk-rules.md");
+const ANTIGRAVITY_RULES: &str = include_str!("../hooks/antigravity-rtk-rules.md");
+
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
 # Filters here override user-global and built-in filters.
@@ -212,6 +215,8 @@ pub fn run(
     install_cursor: bool,
     install_windsurf: bool,
     install_cline: bool,
+    install_kilocode: bool,
+    install_antigravity: bool,
     claude_md: bool,
     hook_only: bool,
     codex: bool,
@@ -259,6 +264,14 @@ pub fn run(
     // Cline-only mode
     if install_cline {
         return run_cline_mode(verbose);
+    }
+
+    if install_kilocode {
+        return run_kilocode_mode();
+    }
+
+    if install_antigravity {
+        return run_antigravity_mode();
     }
 
     // Mode selection (Claude Code / OpenCode)
@@ -1233,6 +1246,36 @@ fn run_windsurf_mode(verbose: u8) -> Result<()> {
     }
     println!("  Cascade will now use rtk commands for token savings.");
     println!("  Restart Windsurf. Test with: git status\n");
+
+    Ok(())
+}
+
+fn run_kilocode_mode() -> Result<()> {
+    let target_dir = std::path::Path::new(".kilocode/rules");
+    std::fs::create_dir_all(target_dir)?;
+
+    let rules_path = target_dir.join("rtk-rules.md");
+    std::fs::write(&rules_path, KILOCODE_RULES)?;
+
+    println!("\nRTK configured for Kilo Code.\n");
+    println!("  Rules: .kilocode/rules/rtk-rules.md (installed)");
+    println!("  Kilo Code will now use rtk commands for token savings.");
+    println!("  Test with: git status\n");
+
+    Ok(())
+}
+
+fn run_antigravity_mode() -> Result<()> {
+    let target_dir = std::path::Path::new(".agent/rules");
+    std::fs::create_dir_all(target_dir)?;
+
+    let rules_path = target_dir.join("antigravity-rtk-rules.md");
+    std::fs::write(&rules_path, ANTIGRAVITY_RULES)?;
+
+    println!("\nRTK configured for Google Antigravity.\n");
+    println!("  Rules: .agent/rules/antigravity-rtk-rules.md (installed)");
+    println!("  Antigravity will now use rtk commands for token savings.");
+    println!("  Test with: git status\n");
 
     Ok(())
 }
