@@ -2307,6 +2307,81 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
     Ok(removed)
 }
 
+// ── Copilot integration ─────────────────────────────────────
+
+const COPILOT_HOOK_JSON: &str = r#"{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "rtk hook copilot",
+        "cwd": ".",
+        "timeout": 5
+      }
+    ]
+  }
+}
+"#;
+
+const COPILOT_INSTRUCTIONS: &str = r#"# RTK — Token-Optimized CLI
+
+**rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
+
+## Rule
+
+Always prefix shell commands with `rtk`:
+
+```bash
+# Instead of:              Use:
+git status                 rtk git status
+git log -10                rtk git log -10
+cargo test                 rtk cargo test
+docker ps                  rtk docker ps
+kubectl get pods           rtk kubectl pods
+```
+
+## Meta commands (use directly)
+
+```bash
+rtk gain              # Token savings dashboard
+rtk gain --history    # Per-command savings history
+rtk discover          # Find missed rtk opportunities
+rtk proxy <cmd>       # Run raw (no filtering) but track usage
+```
+"#;
+
+/// Entry point for `rtk init --copilot`
+pub fn run_copilot(verbose: u8) -> Result<()> {
+    // Install in current project's .github/ directory
+    let github_dir = Path::new(".github");
+    let hooks_dir = github_dir.join("hooks");
+
+    fs::create_dir_all(&hooks_dir)
+        .context("Failed to create .github/hooks/ directory")?;
+
+    // 1. Write hook config
+    let hook_path = hooks_dir.join("rtk-rewrite.json");
+    write_if_changed(&hook_path, COPILOT_HOOK_JSON, "Copilot hook config", verbose)?;
+
+    // 2. Write instructions
+    let instructions_path = github_dir.join("copilot-instructions.md");
+    write_if_changed(
+        &instructions_path,
+        COPILOT_INSTRUCTIONS,
+        "Copilot instructions",
+        verbose,
+    )?;
+
+    println!("\nGitHub Copilot integration installed (project-scoped).\n");
+    println!("  Hook config:    {}", hook_path.display());
+    println!("  Instructions:   {}", instructions_path.display());
+    println!("\n  Works with VS Code Copilot Chat (transparent rewrite)");
+    println!("  and Copilot CLI (deny-with-suggestion).");
+    println!("\n  Restart your IDE or Copilot CLI session to activate.\n");
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
