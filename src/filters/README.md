@@ -15,7 +15,7 @@ TOML works well for commands with **predictable, line-by-line text output** wher
 - Simple linters (shellcheck, yamllint, hadolint) — strip context, keep findings
 - Infra tools (terraform plan, helm, rsync) — strip progress, keep summary
 
-For the full contribution checklist (including `discover/rules.rs` registration), see [CONTRIBUTING.md](../../CONTRIBUTING.md#complete-contribution-checklist).
+For the full contribution checklist (including `discover/rules.rs` registration), see [src/cmds/README.md — Adding a New Command Filter](../cmds/README.md#adding-a-new-command-filter).
 
 ## Adding a filter
 

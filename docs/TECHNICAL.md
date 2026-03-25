@@ -1,9 +1,10 @@
 # RTK Technical Documentation
 
-> **Start here** for a guided tour of how RTK works end-to-end. For the deep reference (filtering taxonomy, performance benchmarks, architecture decisions), see [ARCHITECTURE.md](../ARCHITECTURE.md).
+> **Start here** for a guided tour of how RTK works end-to-end.
 >
-> See `CLAUDE.md` for development commands and coding guidelines.
-> Each folder has its own README.md with implementation details, file descriptions, and contribution guidelines.
+> - [CONTRIBUTING.md](../CONTRIBUTING.md) — Design philosophy, PR process, branch naming, testing requirements
+> - [ARCHITECTURE.md](../ARCHITECTURE.md) — Deep reference: filtering taxonomy, performance benchmarks, architecture decisions
+> - Each folder has its own `README.md` with implementation details and file descriptions
 
 ---
 
@@ -11,7 +12,7 @@
 
 LLM-powered coding agents (Claude Code, Copilot, Cursor, etc.) consume tokens for every CLI command output they process. Most command outputs contain boilerplate, progress bars, ANSI escape codes, and verbose formatting that wastes tokens without providing actionable information.
 
-RTK sits between the agent and the CLI, filtering outputs to keep only what matters. This achieves 60-90% token savings per command, reducing costs and increasing effective context window utilization. RTK is a single Rust binary with zero external dependencies, adding less than 10ms overhead per command.
+RTK sits between the agent and the CLI, filtering outputs to keep only what matters. This achieves 60-90% token savings per command, reducing costs and increasing effective context window utilization. RTK is a single Rust binary with no runtime dependencies beyond the compiled binary itself, adding less than 10ms overhead per command.
 
 ---
 
@@ -85,7 +86,7 @@ When an LLM agent runs a command (e.g., `git status`):
 1. The agent fires a `PreToolUse` event (or equivalent) containing the command as JSON
 2. The hook script reads the JSON, extracts the command string
 3. The hook calls `rtk rewrite "git status"` as a subprocess
-4. `rtk rewrite` consults the command registry (70+ patterns) and returns `rtk git status`
+4. `rtk rewrite` consults the command registry and returns `rtk git status`
 5. The hook sends a response telling the agent to use the rewritten command
 6. If anything fails (jq missing, rtk not found, no match), the hook exits silently -- the raw command runs unchanged
 
@@ -98,7 +99,7 @@ All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin del
 Once the rewritten command reaches RTK:
 
 1. **Telemetry**: `telemetry::maybe_ping()` fires a non-blocking daily usage ping
-2. **Clap parsing**: `Cli::try_parse()` matches against the `Commands` enum (~50 subcommands)
+2. **Clap parsing**: `Cli::try_parse()` matches against the `Commands` enum
 3. **Hook check**: `hook_check::maybe_warn()` warns if the installed hook is outdated (rate-limited to 1/day)
 4. **Integrity check**: `integrity::runtime_check()` verifies the hook's SHA-256 hash for operational commands
 5. **Routing**: A `match cli.command` dispatches to the specialized filter module
@@ -109,9 +110,9 @@ If Clap parsing fails (command not in the enum), the fallback path runs instead.
 
 RTK has two filter systems:
 
-**Rust Filters** (~45 commands): Compiled modules in `src/cmds/` that execute the command, parse its output, and apply specialized transformations (regex, JSON, state machines).
+**Rust Filters**: Compiled modules in `src/cmds/` that execute the command, parse its output, and apply specialized transformations (regex, JSON, state machines).
 
-**TOML DSL Filters** (~60 built-in): Declarative filters in `src/filters/*.toml` that apply regex-based line filtering, truncation, and section extraction. Applied in `run_fallback()` when no Rust filter matches.
+**TOML DSL Filters**: Declarative filters in `src/filters/*.toml` that apply regex-based line filtering, truncation, and section extraction. Applied in `run_fallback()` when no Rust filter matches.
 
 Each filter module follows the same pattern:
 1. Start a timer (`TimedExecution::start()`)
@@ -180,14 +181,14 @@ Start here, then drill down into each README for file-level details.
 | Directory | What it does | What you'll find in its README |
 |-----------|-------------|-------------------------------|
 | `main.rs` | CLI entry point, `Commands` enum, routing match | _(no README — read the file directly)_ |
-| [`core/`](../src/core/README.md) | Shared infrastructure (8 files) | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
-| [`hooks/`](../src/hooks/README.md) | Hook system (8 files) | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
-| [`analytics/`](../src/analytics/README.md) | Token savings analytics (4 files) | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
-| [`cmds/`](../src/cmds/README.md) | **Command filters (45 files, 9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
-| [`discover/`](../src/discover/README.md) | History analysis + rewrite registry (5 files) | 70+ rewrite patterns, session providers, compound command splitting |
-| [`learn/`](../src/learn/README.md) | CLI correction detection (3 files) | Error classification (6 types), correction pair detection, rule generation |
-| [`parser/`](../src/parser/README.md) | Parser infrastructure (4 files) | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
-| [`filters/`](../src/filters/README.md) | 60+ TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |
+| [`core/`](../src/core/README.md) | Shared infrastructure | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
+| [`hooks/`](../src/hooks/README.md) | Hook system | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
+| [`analytics/`](../src/analytics/README.md) | Token savings analytics | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
+| [`cmds/`](../src/cmds/README.md) | **Command filters (9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
+| [`discover/`](../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
+| [`learn/`](../src/learn/README.md) | CLI correction detection | Error classification, correction pair detection, rule generation |
+| [`parser/`](../src/parser/README.md) | Parser infrastructure | Canonical types (TestResult, LintResult, etc.), 3-tier format modes, migration guide |
+| [`filters/`](../src/filters/README.md) | TOML filter configs | TOML DSL syntax, 8-stage pipeline, inline testing, naming conventions |
 
 ### `hooks/` — Deployed hook artifacts (root directory)
 
@@ -206,7 +207,7 @@ Start here, then drill down into each README for file-level details.
 
 ## 5. Hook System Summary
 
-RTK supports 7 LLM agents through hook integrations:
+RTK supports the following LLM agents through hook integrations:
 
 | Agent | Hook Type | Mechanism | Can Modify Command? |
 |-------|-----------|-----------|---------------------|
@@ -228,7 +229,7 @@ RTK supports 7 LLM agents through hook integrations:
 
 ### Rust Filters (cmds/**)
 
-Compiled filter modules for complex transformations. ~45 commands with 60-95% token savings.
+Compiled filter modules for complex transformations with 60-95% token savings.
 
 > **Details**: [`src/cmds/README.md`](../src/cmds/README.md) and each ecosystem subdirectory README.
 
@@ -257,7 +258,59 @@ Achieved through:
 
 ---
 
-## 8. Future Improvements
+## 8. Testing
+
+Tests live **in the module file itself** inside a `#[cfg(test)] mod tests` block (e.g., tests for `src/cmds/cloud/container.rs` go at the bottom of that same file).
+
+### How to Write Tests
+
+**1. Create a fixture from real command output** (not synthetic data):
+```bash
+kubectl get pods > tests/fixtures/kubectl_pods_raw.txt
+```
+
+**2. Write your test in the same module file** (`#[cfg(test)] mod tests`):
+```rust
+#[test]
+fn test_my_filter() {
+    let input = include_str!("../tests/fixtures/my_cmd_raw.txt");
+    let output = filter_my_cmd(input);
+    assert!(output.contains("expected content"));
+    assert!(!output.contains("noise line"));
+}
+```
+
+**3. Verify token savings** (60% minimum required):
+```rust
+#[test]
+fn test_my_filter_savings() {
+    let input = include_str!("../tests/fixtures/my_cmd_raw.txt");
+    let output = filter_my_cmd(input);
+    let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+    assert!(savings >= 60.0, "Expected >=60% savings, got {:.1}%", savings);
+}
+```
+
+### Test Organization
+
+```
+tests/
+├── fixtures/           # Real command output (never synthetic)
+│   ├── git_log_raw.txt
+│   ├── cargo_test_raw.txt
+│   └── dotnet/         # Ecosystem-specific fixtures
+└── integration_test.rs # Integration tests (#[ignore])
+```
+
+- **Unit tests**: `#[cfg(test)] mod tests` embedded in each module
+- **Fixtures**: real command output in `tests/fixtures/`
+- **Integration tests**: `#[ignore]` attribute, run with `cargo test --ignored`
+
+> For testing requirements, pre-commit gate, and PR checklist, see [CONTRIBUTING.md — Testing](../CONTRIBUTING.md#testing).
+
+---
+
+## 9. Future Improvements
 
 - **Extract cli.rs**: Move `Commands` enum, 13 sub-enums (`GitCommands`, `CargoCommands`, etc.), and `AgentTarget` from main.rs to a dedicated cli.rs module. This would reduce main.rs from ~2600 to ~1500 lines.
 - **Split routing**: Extract the `match cli.command { ... }` block into a separate routing module.

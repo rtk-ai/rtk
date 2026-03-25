@@ -29,7 +29,7 @@ The TOML DSL applies 8 stages in order:
 Three-tier filter lookup (first match wins):
 1. `.rtk/filters.toml` (project-local, requires `rtk trust`)
 2. `~/.config/rtk/filters.toml` (user-global)
-3. Built-in filters concatenated by `build.rs` at compile time (57+ filters)
+3. Built-in filters concatenated by `build.rs` at compile time
 
 ## Tracking Database Schema
 
@@ -94,7 +94,7 @@ passthrough_max_chars = 2000
 
 ## Shared Utilities (utils.rs)
 
-Key functions available to all command modules (41 modules depend on `core::utils`):
+Key functions available to all command modules:
 
 | Function | Purpose |
 |----------|---------|
@@ -123,7 +123,7 @@ Consumers that parse structured output (JSON, NDJSON, state machines) should cal
 
 - `ls.rs`, `tree.rs` — exit before `track()` on error path (lost metrics)
 - `container.rs` — inconsistent tracking across subcommands
-- 26/38 command modules missing tee integration — see `src/cmds/README.md` for the full list
+- Many command modules still missing tee integration — see `src/cmds/README.md` for the full list
 
 ## Adding New Functionality
 Place new infrastructure code here if it meets **all** of these criteria: (1) it has no dependencies on command modules or hooks, (2) it is used by two or more other modules, and (3) it provides a general-purpose utility rather than command-specific logic. Follow the existing pattern of lazy-initialized resources (`lazy_static!` for regex, on-demand config loading) to preserve the <10ms startup target. Add `#[cfg(test)] mod tests` with unit tests in the same file.

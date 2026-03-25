@@ -108,7 +108,7 @@ Rust patterns, error handling, and anti-patterns are defined in `.claude/rules/r
 
 Testing strategy and performance targets are defined in `.claude/rules/cli-testing.md` (auto-loaded). Key targets: <10ms startup, <5MB memory, 60-90% token savings.
 
-For contribution workflow, design philosophy, and the complete checklist for adding new filters, see [CONTRIBUTING.md](CONTRIBUTING.md).
+For contribution workflow and design philosophy, see [CONTRIBUTING.md](CONTRIBUTING.md). For the step-by-step filter implementation checklist, see [src/cmds/README.md](src/cmds/README.md#adding-a-new-command-filter).
 
 ## Build Verification (Mandatory)
 

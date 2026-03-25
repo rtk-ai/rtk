@@ -6,7 +6,7 @@
 
 Scans Claude Code JSONL session files to identify commands that could benefit from RTK filtering. Powers the `rtk discover` command, which reports missed savings opportunities and adoption metrics.
 
-Also provides the **command rewrite registry** — the single source of truth for all 70+ patterns used by every LLM agent hook to decide which commands to rewrite.
+Also provides the **command rewrite registry** — the single source of truth for all rewrite patterns used by every LLM agent hook to decide which commands to rewrite.
 
 ## Key Types
 
@@ -22,7 +22,7 @@ Also provides the **command rewrite registry** — the single source of truth fo
 
 ## Registry Architecture
 
-`registry.rs` (2270 lines) is the largest file in the project. It contains:
+`registry.rs` is the largest file in the project. It contains:
 
 1. **Pattern matching** — Compiled regexes in `lazy_static!` matching command prefixes (e.g., `^git\s+(status|log|diff|...)`)
 2. **Compound splitting** — `split_command_chain()` handles `&&`, `||`, `;`, `|`, `&` operators with shell quoting awareness

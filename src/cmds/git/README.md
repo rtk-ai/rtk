@@ -11,5 +11,5 @@
 
 ## Cross-command
 
-- `gh_cmd.rs` imports markdown filtering helpers from `git.rs` for PR body rendering
+- `gh_cmd.rs` imports `compact_diff()` from `git.rs` for diff formatting; markdown helpers (`filter_markdown_body`, `filter_markdown_segment`) are defined in `gh_cmd.rs` itself
 - `diff_cmd.rs` is a standalone ultra-condensed diff (separate from `git diff`)

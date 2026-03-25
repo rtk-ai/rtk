@@ -176,19 +176,12 @@ Savings by ecosystem:
   RUST (cmds/rust/)        60-99%    cargo test/build/clippy, err
 ```
 
-**Total: 67 modules** (45 command modules + 22 infrastructure modules)
+### Module Breakdown
 
-### Module Count Breakdown
-
-- **Command Modules**: 45 in `src/cmds/` (directly exposed to users)
-- **Core Infrastructure**: 8 in `src/core/` (utils, filter, tracking, tee, config, toml_filter, display_helpers, telemetry)
-- **Hook System**: 8 in `src/hooks/` (init, rewrite, hook_cmd, hook_check, hook_audit, verify, trust, integrity)
-- **Analytics**: 4 in `src/analytics/` (gain, cc_economics, ccusage, session_cmd)
-- **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
-- **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
-- **Python Tooling**: 3 modules (ruff, pytest, pip)
-- **Go Tooling**: 2 modules (go test/build/vet, golangci-lint)
-- **Ruby Tooling**: 3 modules (rake/minitest, rspec, rubocop) + 1 TOML filter (bundle install)
+- **Command Modules**: `src/cmds/` — organized by ecosystem (git, rust, js, python, go, dotnet, cloud, system, ruby). Each ecosystem README lists its files.
+- **Core Infrastructure**: `src/core/` — utils, filter, tracking, tee, config, toml_filter, display_helpers, telemetry
+- **Hook System**: `src/hooks/` — init, rewrite, hook_cmd, hook_check, hook_audit, verify, trust, integrity
+- **Analytics**: `src/analytics/` — gain, cc_economics, ccusage, session_cmd
 
 ---
 
@@ -363,7 +356,7 @@ Mirrors: lint, prettier              Mirrors: git, cargo
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                      Python Commands (3 modules)                       │
+│                           Python Commands                              │
 └────────────────────────────────────────────────────────────────────────┘
 
 Module            Strategy              Output Format      Savings
@@ -420,7 +413,7 @@ Commands respect active virtualenv via `sys.executable` paths.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                       Go Commands (2 modules)                          │
+│                            Go Commands                                 │
 └────────────────────────────────────────────────────────────────────────┘
 
 Module            Strategy              Output Format      Savings
@@ -567,11 +560,11 @@ When adding Python/Go module support:
 
 ### Utilities Layer
 
-> For the full utilities API (`truncate`, `strip_ansi`, `execute_command`, `ruby_exec`, etc.), see [src/core/README.md](src/core/README.md). Used by 41 command modules.
+> For the full utilities API (`truncate`, `strip_ansi`, `execute_command`, `ruby_exec`, etc.), see [src/core/README.md](src/core/README.md). Used by most command modules.
 
 ### Package Manager Detection Pattern
 
-**Critical Infrastructure for JS/TS Stack (8 modules)**
+**Critical Infrastructure for JS/TS Stack**
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -993,7 +986,7 @@ Overhead Sources:
 
 ## Extensibility Guide
 
-> For the complete step-by-step process to add a new command (module file, enum variant, routing, tests, documentation), see [CONTRIBUTING.md](CONTRIBUTING.md#complete-contribution-checklist) and the [Standard Module Template in cmds/README.md](src/cmds/README.md).
+> For the complete step-by-step process to add a new command (module file, enum variant, routing, tests, documentation), see [src/cmds/README.md — Adding a New Command Filter](src/cmds/README.md#adding-a-new-command-filter).
 
 ---
 

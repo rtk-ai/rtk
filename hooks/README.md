@@ -158,7 +158,7 @@ if (rewritten && rewritten !== command) {
 
 ## Command Rewrite Registry
 
-The registry (`src/discover/registry.rs`) handles 70+ command patterns across these categories:
+The registry (`src/discover/registry.rs`) handles command patterns across these categories:
 
 | Category | Examples | Savings |
 |----------|----------|---------|

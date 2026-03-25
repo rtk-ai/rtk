@@ -16,7 +16,7 @@ Rust modules exist here because they need capabilities TOML filters don't have: 
 
 **Ecosystem placement**: Match the command's language/toolchain. Use `system/` for language-agnostic commands. New ecosystem when 3+ related commands justify it.
 
-For the full contribution checklist (including `discover/rules.rs` registration), see [CONTRIBUTING.md](../../CONTRIBUTING.md#complete-contribution-checklist).
+For the full contribution checklist (including `discover/rules.rs` registration), see [Adding a New Command Filter](#adding-a-new-command-filter) below.
 
 ## Purpose
 All command-specific filter modules that execute CLI commands and transform their output to minimize LLM token consumption. Each module follows a consistent pattern: execute the underlying command, filter its output through specialized parsers, track token savings, and propagate exit codes.
@@ -81,7 +81,7 @@ Six phases: **timer** → **execute** → **filter (with fallback)** → **tee o
 
 - `lint_cmd` routes to `mypy_cmd` or `ruff_cmd` when detecting Python projects
 - `format_cmd` routes to `prettier_cmd` or `ruff_cmd` depending on the formatter detected
-- `gh_cmd` imports markdown filtering helpers from `git`
+- `gh_cmd` imports `compact_diff()` from `git` for diff formatting (markdown helpers are defined in `gh_cmd` itself)
 
 ## Cross-Cutting Behavior Contracts
 
@@ -120,10 +120,10 @@ All modules accept `verbose: u8`. Use it to print debug info (command being run,
 
 **Filter passthrough** — silent passthrough, no warning:
 - `gh_cmd.rs`, `pip_cmd.rs`, `container.rs`, `dotnet_cmd.rs` — `run_passthrough()` skips filtering without warning
-- `pnpm_cmd.rs`, `playwright_cmd.rs` — 3-tier degradation but no tee recovery on final tier
+- `pnpm_cmd.rs` — 3-tier degradation but no tee recovery on final tier
 
-**Tee recovery** — currently 12/38 modules implement tee. Missing from high-risk modules:
-- `pnpm_cmd.rs`, `playwright_cmd.rs` — 3-tier parsers, no tee
+**Tee recovery** — missing from some high-risk modules:
+- `pnpm_cmd.rs` — 3-tier parser, no tee
 - `gh_cmd.rs` — aggressive markdown filtering, no tee
 - `ruff_cmd.rs`, `golangci_cmd.rs` — JSON parsers, no tee
 - `psql_cmd.rs` — has tee but exits before calling it on error path
@@ -140,4 +140,15 @@ All modules accept `verbose: u8`. Use it to print debug info (command being run,
 
 ## Adding a New Command Filter
 
-Follow the [Common Pattern](#common-pattern) above (timer, execute, filter with fallback, tee, track, exit code). For the full step-by-step checklist, see [CONTRIBUTING.md](../../CONTRIBUTING.md#complete-contribution-checklist). For the Rust module structure, see [`.claude/rules/rust-patterns.md`](../../.claude/rules/rust-patterns.md).
+Adding a new filter or command requires changes in multiple places:
+
+1. **Create the filter** — TOML file in [`src/filters/`](../filters/README.md) or Rust module in `src/cmds/<ecosystem>/`
+2. **Add rewrite pattern** — Entry in `src/discover/rules.rs` (PATTERNS + RULES arrays at matching index) so hooks auto-rewrite the command
+3. **Register in main.rs** — (Rust modules only) Three changes:
+   - Add `pub mod mymod;` to the ecosystem's `mod.rs` (e.g., `src/cmds/system/mod.rs`)
+   - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`
+   - Add routing match arm in `main.rs` to call `mymod::run()`
+4. **Write tests** — Real fixture, snapshot test, token savings >= 60% (see [testing rules](../../.claude/rules/cli-testing.md))
+5. **Update docs** — README.md command list, CHANGELOG.md
+
+Follow the [Common Pattern](#common-pattern) above for the module template (timer, fallback, tee, tracking, exit code). For TOML-vs-Rust decision criteria, see [CONTRIBUTING.md](../../CONTRIBUTING.md#toml-vs-rust-which-one).
