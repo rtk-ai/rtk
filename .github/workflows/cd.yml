@@ -68,7 +68,7 @@ jobs:
             fi
           fi
           VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          TAG="v${VERSION}-rc.${{ github.run_number }}"
+          TAG="dev-${VERSION}-rc.${{ github.run_number }}"
 
           echo "Next version: $VERSION (from $LATEST_VERSION)"
           echo "Pre-release tag: $TAG"

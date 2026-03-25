@@ -19,8 +19,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read,
-    summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read, summary,
+    tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -1098,7 +1098,11 @@ fn run_fallback(parse_error: clap::Error) -> Result<()> {
 
                 // Tee raw output BEFORE filtering on failure — lets LLM re-read if needed
                 let tee_hint = if !output.status.success() {
-                    core::tee::tee_and_hint(&stdout_raw, &raw_command, output.status.code().unwrap_or(1))
+                    core::tee::tee_and_hint(
+                        &stdout_raw,
+                        &raw_command,
+                        output.status.code().unwrap_or(1),
+                    )
                 } else {
                     None
                 };
