@@ -52,7 +52,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         .collect();
 
     // Build ls -la + any extra flags the user passed (e.g. -R)
-    // Strip -l, -a, -h (we handle all of these ourselves)
+    // Filter flags that break parsing (-1, -C, -m, -D, -g, -o, -i, -s, -x),
+    // cause visual issues (-F, -p), or are RTK-handled (-l, -a, -h).
     let mut cmd = resolved_command("ls");
     cmd.arg("-la");
     for flag in &flags {
@@ -65,7 +66,24 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
             let stripped = flag.trim_start_matches('-');
             let extra: String = stripped
                 .chars()
-                .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
+                .filter(|c| {
+                    !matches!(
+                        c,
+                        'l' | 'a'
+                            | 'h'
+                            | '1'
+                            | 'C'
+                            | 'm'
+                            | 'D'
+                            | 'g'
+                            | 'o'
+                            | 'i'
+                            | 's'
+                            | 'x'
+                            | 'F'
+                            | 'p'
+                    )
+                })
                 .collect();
             if !extra.is_empty() {
                 cmd.arg(format!("-{}", extra));

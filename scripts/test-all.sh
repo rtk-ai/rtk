@@ -139,6 +139,11 @@ assert_ok      "rtk ls multi paths"           rtk ls src/ scripts/
 assert_contains "rtk ls -a shows hidden"      ".git" rtk ls -a .
 assert_contains "rtk ls shows sizes"          "K"  rtk ls src/
 assert_contains "rtk ls shows dirs with /"    "/" rtk ls .
+assert_ok      "rtk ls -1 (filters no-metadata)"    rtk ls -1 .
+assert_ok      "rtk ls -F (filters duplicate /)"    rtk ls -F .
+assert_ok      "rtk ls -p (filters duplicate /)"    rtk ls -p .
+assert_ok      "rtk ls -CmDgiosx (parser breakers)"  rtk ls -CmDgiosx .
+assert_ok      "rtk ls -1Fp combined"         rtk ls -1Fp .
 
 # ── 2b. Tree ─────────────────────────────────────────
 
