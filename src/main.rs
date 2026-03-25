@@ -39,6 +39,7 @@ mod mypy_cmd;
 mod next_cmd;
 mod npm_cmd;
 mod parser;
+mod permissions;
 mod pip_cmd;
 mod playwright_cmd;
 mod pnpm_cmd;
