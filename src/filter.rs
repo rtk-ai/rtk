@@ -491,4 +491,49 @@ fn main() {
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
     }
+
+    // --- truncation accuracy ---
+
+    #[test]
+    fn test_smart_truncate_overflow_count_exact() {
+        // 200 plain-text lines with max_lines=20.
+        // smart_truncate keeps the first max_lines/2=10 lines, then skips the rest.
+        // The overflow message "// ... N more lines (total: T)" must satisfy:
+        //   kept_count + N == T
+        let total_lines = 200usize;
+        let max_lines = 20usize;
+        let content: String = (0..total_lines)
+            .map(|i| format!("plain text line number {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = smart_truncate(&content, max_lines, &Language::Rust);
+
+        // Extract the overflow message
+        let overflow_line = output
+            .lines()
+            .find(|l| l.contains("more lines"))
+            .unwrap_or_else(|| panic!("No overflow message found in:\n{}", output));
+
+        // Parse "// ... N more lines (total: T)"
+        let reported_more: usize = overflow_line
+            .split_whitespace()
+            .find(|w| w.parse::<usize>().is_ok())
+            .and_then(|w| w.parse().ok())
+            .unwrap_or_else(|| panic!("Could not parse overflow count from: {}", overflow_line));
+
+        let kept_count = output
+            .lines()
+            .filter(|l| !l.contains("more lines") && !l.contains("omitted"))
+            .count();
+
+        assert_eq!(
+            kept_count + reported_more,
+            total_lines,
+            "kept ({}) + reported_more ({}) must equal total ({})",
+            kept_count,
+            reported_more,
+            total_lines
+        );
+    }
 }

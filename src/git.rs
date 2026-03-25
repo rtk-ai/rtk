@@ -2304,4 +2304,47 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    // --- truncation accuracy ---
+
+    #[test]
+    fn test_format_status_overflow_count_exact() {
+        // 25 staged files, default status_max_files = 15
+        // Should show 15, overflow = 25 - 15 = 10, report "+10 more"
+        let mut porcelain = String::from("## main...origin/main\n");
+        for i in 0..25 {
+            porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
+        }
+        let result = format_status_output(&porcelain);
+        assert!(
+            result.contains("+10 more"),
+            "Expected '+10 more' for 25 staged files (max_files=15), got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("Staged: 25 files"),
+            "Expected 'Staged: 25 files', got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_recovery_hint_present() {
+        // A hunk with 110 lines exceeds max_hunk_lines (100), triggers truncation
+        // The recovery hint must appear so LLMs can re-fetch the full diff
+        let mut diff = String::new();
+        diff.push_str("diff --git a/large.rs b/large.rs\n");
+        diff.push_str("--- a/large.rs\n");
+        diff.push_str("+++ b/large.rs\n");
+        diff.push_str("@@ -1,150 +1,150 @@\n");
+        for i in 0..110 {
+            diff.push_str(&format!("+added line {}\n", i));
+        }
+        let result = compact_diff(&diff, 500);
+        assert!(
+            result.contains("[full diff: rtk git diff --no-compact]"),
+            "Expected recovery hint when hunk is truncated, got:\n{}",
+            result
+        );
+    }
 }
