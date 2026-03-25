@@ -86,6 +86,8 @@ pub enum AgentTarget {
     Windsurf,
     /// Cline / Roo Code (VS Code)
     Cline,
+    /// pi coding agent
+    Pi,
 }
 
 #[derive(Parser)]
@@ -1694,7 +1696,8 @@ fn main() -> Result<()> {
                 init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                let pi = agent == Some(AgentTarget::Pi);
+                init::uninstall(global, gemini, codex, cursor, pi, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1706,10 +1709,11 @@ fn main() -> Result<()> {
                 init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
             } else {
                 let install_opencode = opencode;
-                let install_claude = !opencode;
+                let install_claude = !opencode && agent != Some(AgentTarget::Pi);
                 let install_cursor = agent == Some(AgentTarget::Cursor);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
+                let install_pi = agent == Some(AgentTarget::Pi);
 
                 let patch_mode = if auto_patch {
                     init::PatchMode::Auto
@@ -1725,6 +1729,7 @@ fn main() -> Result<()> {
                     install_cursor,
                     install_windsurf,
                     install_cline,
+                    install_pi,
                     claude_md,
                     hook_only,
                     codex,
