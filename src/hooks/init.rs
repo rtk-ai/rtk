@@ -588,12 +588,10 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         removed.push("Integrity hash: removed".to_string());
     }
 
-    // 2. Remove RTK.md
+    // 2. Remove RTK.md RTK block
     let rtk_md_path = claude_dir.join("RTK.md");
-    if rtk_md_path.exists() {
-        fs::remove_file(&rtk_md_path)
-            .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
-        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    if remove_rtk_block_from_file(&rtk_md_path, "RTK.md", verbose)? {
+        removed.push("RTK.md: removed RTK block".to_string());
     }
 
     // 3. Remove @RTK.md reference from CLAUDE.md
@@ -674,13 +672,8 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
     let mut removed = Vec::new();
 
     let rtk_md_path = codex_dir.join("RTK.md");
-    if rtk_md_path.exists() {
-        fs::remove_file(&rtk_md_path)
-            .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Removed RTK.md: {}", rtk_md_path.display());
-        }
-        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    if remove_rtk_block_from_file(&rtk_md_path, "RTK.md", verbose)? {
+        removed.push("RTK.md: removed RTK block".to_string());
     }
 
     let agents_md_path = codex_dir.join("AGENTS.md");
@@ -905,8 +898,8 @@ fn run_default_mode(
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
-    // 2. Write RTK.md
-    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
+    // 2. Write RTK.md (use upsert to avoid clobbering user content)
+    upsert_write_rtk_block(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -1264,7 +1257,8 @@ fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
         }
     }
 
-    write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, "RTK.md", verbose)?;
+    // Use upsert to avoid clobbering user content
+    upsert_write_rtk_block(&rtk_md_path, RTK_SLIM_CODEX, "RTK.md", verbose)?;
     let added_ref = patch_agents_md(&agents_md_path, verbose)?;
 
     println!("\nRTK configured for Codex CLI.\n");
@@ -1349,6 +1343,85 @@ fn upsert_rtk_block(content: &str, block: &str) -> (String, RtkBlockUpsert) {
             format!("{trimmed}\n\n{}", block.trim()),
             RtkBlockUpsert::Added,
         )
+    }
+}
+
+/// Upsert-based file write for instructions (RTK.md, GEMINI.md, etc.)
+/// Wraps content in markers and appends if not present, or updates the existing block
+fn upsert_write_rtk_block(path: &Path, content: &str, name: &str, verbose: u8) -> Result<bool> {
+    let block = format!(
+        "<!-- rtk-instructions v2 -->\n{}\n<!-- /rtk-instructions -->",
+        content.trim()
+    );
+
+    let existing = if path.exists() {
+        fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}: {}", name, path.display()))?
+    } else {
+        String::new()
+    };
+
+    let (new_content, action) = upsert_rtk_block(&existing, &block);
+
+    match action {
+        RtkBlockUpsert::Unchanged => {
+            if verbose > 0 {
+                eprintln!("{} already up to date: {}", name, path.display());
+            }
+            Ok(false)
+        }
+        RtkBlockUpsert::Added | RtkBlockUpsert::Updated => {
+            atomic_write(path, &new_content)
+                .with_context(|| format!("Failed to write {}: {}", name, path.display()))?;
+            if verbose > 0 {
+                if action == RtkBlockUpsert::Added {
+                    eprintln!("Created/Appended {}: {}", name, path.display());
+                } else {
+                    eprintln!("Updated {}: {}", name, path.display());
+                }
+            }
+            Ok(true)
+        }
+        RtkBlockUpsert::Malformed => {
+            eprintln!(
+                "[warn] Warning: Found incomplete rtk-instructions block in {}",
+                path.display()
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Remove RTK instructions block from a file (RTK.md, GEMINI.md, etc.)
+/// Deletes the file if it becomes empty after removing the block
+fn remove_rtk_block_from_file(path: &Path, name: &str, verbose: u8) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let existing = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}: {}", name, path.display()))?;
+
+    let (new_content, did_remove) = remove_rtk_block(&existing);
+
+    if did_remove {
+        let trimmed = new_content.trim();
+        if trimmed.is_empty() {
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to remove empty {}: {}", name, path.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed empty {}: {}", name, path.display());
+            }
+        } else {
+            atomic_write(path, &new_content)
+                .with_context(|| format!("Failed to update {}: {}", name, path.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed RTK block from {}: {}", name, path.display());
+            }
+        }
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -2147,8 +2220,8 @@ pub fn run_gemini(global: bool, hook_only: bool, patch_mode: PatchMode, verbose:
     // 2. Install GEMINI.md (RTK awareness for Gemini)
     if !hook_only {
         let gemini_md_path = gemini_dir.join("GEMINI.md");
-        // Reuse the same slim RTK awareness content
-        write_if_changed(&gemini_md_path, RTK_SLIM, "GEMINI.md", verbose)?;
+        // Use upsert to avoid clobbering existing user content in GEMINI.md
+        upsert_write_rtk_block(&gemini_md_path, RTK_SLIM, "GEMINI.md", verbose)?;
     }
 
     // 3. Patch ~/.gemini/settings.json
@@ -2276,12 +2349,10 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
         removed.push(format!("Gemini hook: {}", hook_path.display()));
     }
 
-    // Remove GEMINI.md
+    // Remove GEMINI.md RTK block
     let gemini_md = gemini_dir.join("GEMINI.md");
-    if gemini_md.exists() {
-        fs::remove_file(&gemini_md)
-            .with_context(|| format!("Failed to remove {}", gemini_md.display()))?;
-        removed.push(format!("GEMINI.md: {}", gemini_md.display()));
+    if remove_rtk_block_from_file(&gemini_md, "GEMINI.md", verbose)? {
+        removed.push(format!("GEMINI.md: removed RTK block"));
     }
 
     // Remove hook from settings.json
@@ -2582,6 +2653,71 @@ More notes
         let (content, action) = upsert_rtk_block(input, RTK_INSTRUCTIONS);
         assert_eq!(action, RtkBlockUpsert::Malformed);
         assert_eq!(content, input);
+    }
+
+    #[test]
+    fn test_upsert_write_rtk_block() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("GEMINI.md");
+        let name = "GEMINI.md";
+        let content = "Test content";
+
+        // 1. Create new
+        let changed = upsert_write_rtk_block(&path, content, name, 0).unwrap();
+        assert!(changed);
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(result.contains("<!-- rtk-instructions v2 -->"));
+        assert!(result.contains("Test content"));
+        assert!(result.contains("<!-- /rtk-instructions -->"));
+
+        // 2. Update existing (no-op)
+        let changed = upsert_write_rtk_block(&path, content, name, 0).unwrap();
+        assert!(!changed);
+
+        // 3. Update existing (content change)
+        let changed = upsert_write_rtk_block(&path, "New content", name, 0).unwrap();
+        assert!(changed);
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(result.contains("New content"));
+        assert!(!result.contains("Test content"));
+
+        // 4. Preserve surrounding content
+        fs::write(&path, format!("Header\n\n{result}\n\nFooter")).unwrap();
+        let changed = upsert_write_rtk_block(&path, "Updated block", name, 0).unwrap();
+        assert!(changed);
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(result.starts_with("Header"));
+        assert!(result.contains("Updated block"));
+        assert!(result.ends_with("Footer"));
+    }
+
+    #[test]
+    fn test_remove_rtk_block_from_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("GEMINI.md");
+        let name = "GEMINI.md";
+
+        // 1. Remove from missing file
+        let removed = remove_rtk_block_from_file(&path, name, 0).unwrap();
+        assert!(!removed);
+
+        // 2. Remove block leaving file empty (should delete file)
+        let block = "<!-- rtk-instructions v2 -->\ncontent\n<!-- /rtk-instructions -->";
+        fs::write(&path, block).unwrap();
+        let removed = remove_rtk_block_from_file(&path, name, 0).unwrap();
+        assert!(removed);
+        assert!(!path.exists());
+
+        // 3. Remove block preserving other content
+        let content = format!("Header\n\n{block}\n\nFooter");
+        fs::write(&path, content).unwrap();
+        let removed = remove_rtk_block_from_file(&path, name, 0).unwrap();
+        assert!(removed);
+        assert!(path.exists());
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(result.contains("Header"));
+        assert!(result.contains("Footer"));
+        assert!(!result.contains("rtk-instructions"));
     }
 
     #[test]
