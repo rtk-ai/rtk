@@ -54,6 +54,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     // Build ls -la + any extra flags the user passed (e.g. -R)
     // Strip -l, -a, -h (we handle all of these ourselves)
     let mut cmd = resolved_command("ls");
+    // Force C locale so date format is always "Mon DD HH:MM" (3 tokens, 9 columns total).
+    // Without this, non-English locales (e.g. Chinese "3月25日 17:58") produce 8 columns
+    // and the filename parser silently drops every entry → "(empty)".
+    cmd.env("LC_ALL", "C");
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
@@ -162,8 +166,22 @@ fn compact_ls(raw: &str, show_all: bool) -> String {
             continue;
         }
 
+        // Filter hidden entries unless -a
+        if !show_all && name.starts_with('.') {
+            continue;
+        }
+
         // Filter noise dirs unless -a
-        if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
+        // Patterns starting with "*" are suffix globs (e.g. "*.egg-info")
+        if !show_all
+            && NOISE_DIRS.iter().any(|noise| {
+                if let Some(suffix) = noise.strip_prefix('*') {
+                    name.ends_with(suffix)
+                } else {
+                    name == *noise
+                }
+            })
+        {
             continue;
         }
 
@@ -269,12 +287,38 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_filters_glob_noise() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 mypackage.egg-info\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
+        let output = compact_ls(input, false);
+        assert!(!output.contains("egg-info"), "*.egg-info glob should be filtered");
+        assert!(output.contains("src/"));
+    }
+
+    #[test]
+    fn test_compact_hides_dotfiles_by_default() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .local\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .dotnet\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  57 Jan  1 12:00 .bash_profile\n";
+        let output = compact_ls(input, false);
+        assert!(!output.contains(".local"), "hidden dir should be hidden without -a");
+        assert!(!output.contains(".dotnet"), "hidden dir should be hidden without -a");
+        assert!(!output.contains(".bash_profile"), "hidden file should be hidden without -a");
+        assert!(output.contains("src/"));
+    }
+
+    #[test]
     fn test_compact_show_all() {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
+                     drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .local\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
         let output = compact_ls(input, true);
         assert!(output.contains(".git/"));
+        assert!(output.contains(".local/"));
         assert!(output.contains("src/"));
     }
 
