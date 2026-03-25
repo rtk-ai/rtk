@@ -132,8 +132,8 @@ enum Commands {
     Read {
         /// File to read
         file: PathBuf,
-        /// Filter: none, minimal, aggressive
-        #[arg(short, long, default_value = "minimal")]
+        /// Filter: none (default, full content), minimal, aggressive
+        #[arg(short, long, default_value = "none")]
         level: filter::FilterLevel,
         /// Max lines
         #[arg(short, long, conflicts_with = "tail_lines")]

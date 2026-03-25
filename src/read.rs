@@ -18,39 +18,9 @@ pub fn run(
         eprintln!("Reading: {} (filter: {})", file.display(), level);
     }
 
-    // Read file — detect binary files early
-    let raw_bytes = fs::read(file)
+    // Read file content
+    let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
-
-    // Check for binary content (null bytes in first 8KB)
-    let check_len = raw_bytes.len().min(8192);
-    if raw_bytes[..check_len].contains(&0) {
-        let size = raw_bytes.len();
-        let human = if size >= 1_048_576 {
-            format!("{:.1} MB", size as f64 / 1_048_576.0)
-        } else if size >= 1024 {
-            format!("{:.1} KB", size as f64 / 1024.0)
-        } else {
-            format!("{} bytes", size)
-        };
-        let msg = format!(
-            "[binary file] {} ({}) — use `cat {}` or a hex viewer for raw content",
-            file.display(),
-            human,
-            file.display()
-        );
-        println!("{}", msg);
-        timer.track(
-            &format!("cat {}", file.display()),
-            "rtk read",
-            &format!("[binary {} bytes]", size),
-            &msg,
-        );
-        return Ok(());
-    }
-
-    let content = String::from_utf8(raw_bytes)
-        .with_context(|| format!("File is not valid UTF-8: {}", file.display()))?;
 
     // Detect language from extension
     let lang = file
