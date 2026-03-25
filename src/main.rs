@@ -2007,8 +2007,13 @@ fn main() -> Result<()> {
                     playwright_cmd::run(&args[1..], cli.verbose)?;
                 }
                 _ => {
-                    // Generic passthrough with npm boilerplate filter
-                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
+                    let status = utils::resolved_command("npx")
+                        .args(&args)
+                        .status()
+                        .context("Failed to run npx")?;
+                    if !status.success() {
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
                 }
             }
         }
@@ -2631,6 +2636,19 @@ mod tests {
                 }
                 _ => panic!("expected Rewrite command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_npx_passthrough_preserves_all_args() {
+        let cli =
+            Cli::try_parse_from(["rtk", "npx", "cowsay", "-f", "tux", "hello"])
+                .unwrap();
+        match cli.command {
+            Commands::Npx { args } => {
+                assert_eq!(args, vec!["cowsay", "-f", "tux", "hello"]);
+            }
+            _ => panic!("Expected Npx command"),
         }
     }
 }
