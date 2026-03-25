@@ -14,6 +14,7 @@ const CURSOR_REWRITE_HOOK: &str = include_str!("../hooks/cursor-rtk-rewrite.sh")
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../hooks/opencode-rtk.ts");
+const PI_PLUGIN: &str = include_str!("../hooks/pi-rtk.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../hooks/rtk-awareness.md");
@@ -212,6 +213,7 @@ pub fn run(
     install_cursor: bool,
     install_windsurf: bool,
     install_cline: bool,
+    install_pi: bool,
     claude_md: bool,
     hook_only: bool,
     codex: bool,
@@ -251,6 +253,10 @@ pub fn run(
         anyhow::bail!("Windsurf support is global-only. Use: rtk init -g --agent windsurf");
     }
 
+    if install_pi && !global {
+        anyhow::bail!("pi extension is global-only. Use: rtk init -g --agent pi");
+    }
+
     // Windsurf-only mode
     if install_windsurf {
         return run_windsurf_mode(verbose);
@@ -259,6 +265,11 @@ pub fn run(
     // Cline-only mode
     if install_cline {
         return run_cline_mode(verbose);
+    }
+
+    // pi-only mode
+    if install_pi {
+        return run_pi_mode(verbose);
     }
 
     // Mode selection (Claude Code / OpenCode)
@@ -521,7 +532,14 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
 }
 
 /// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
-pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
+pub fn uninstall(
+    global: bool,
+    gemini: bool,
+    codex: bool,
+    cursor: bool,
+    pi: bool,
+    verbose: u8,
+) -> Result<()> {
     if codex {
         return uninstall_codex(global, verbose);
     }
@@ -540,6 +558,23 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
             println!("\nRestart Cursor to apply changes.");
         } else {
             println!("RTK Cursor support was not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    if pi {
+        if !global {
+            anyhow::bail!("pi uninstall only works with --global flag");
+        }
+        let pi_removed = remove_pi_plugin(verbose).context("Failed to remove pi extension")?;
+        if !pi_removed.is_empty() {
+            println!("RTK uninstalled (pi):");
+            for item in &pi_removed {
+                println!("  - {}", item.display());
+            }
+            println!("\nRestart pi or run /reload to apply changes.");
+        } else {
+            println!("RTK pi support was not installed (nothing to remove)");
         }
         return Ok(());
     }
@@ -625,6 +660,12 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     // 6. Remove Cursor hooks
     let cursor_removed = remove_cursor_hooks(verbose)?;
     removed.extend(cursor_removed);
+
+    // 7. Remove pi extension
+    let pi_removed = remove_pi_plugin(verbose)?;
+    for path in pi_removed {
+        removed.push(format!("pi extension: {}", path.display()));
+    }
 
     // Report results
     if removed.is_empty() {
@@ -1573,6 +1614,82 @@ fn remove_opencode_plugin(verbose: u8) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
+/// Resolve pi agent directory (~/.pi/agent)
+fn resolve_pi_agent_dir() -> Result<PathBuf> {
+    dirs::home_dir()
+        .map(|h| h.join(".pi").join("agent"))
+        .context("Cannot determine home directory. Is $HOME set?")
+}
+
+/// Return pi extension path: ~/.pi/agent/extensions/rtk-bash/index.ts
+fn pi_plugin_path(agent_dir: &Path) -> PathBuf {
+    agent_dir
+        .join("extensions")
+        .join("rtk-bash")
+        .join("index.ts")
+}
+
+/// Prepare pi extension directory and return install path
+fn prepare_pi_plugin_path() -> Result<PathBuf> {
+    let agent_dir = resolve_pi_agent_dir()?;
+    let path = pi_plugin_path(&agent_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create pi extension directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+    Ok(path)
+}
+
+/// Write pi extension file if missing or outdated
+fn ensure_pi_plugin_installed(path: &Path, verbose: u8) -> Result<bool> {
+    write_if_changed(path, PI_PLUGIN, "pi extension", verbose)
+}
+
+/// Remove pi extension file
+fn remove_pi_plugin(verbose: u8) -> Result<Vec<PathBuf>> {
+    let agent_dir = resolve_pi_agent_dir()?;
+    let path = pi_plugin_path(&agent_dir);
+    let mut removed = Vec::new();
+
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove pi extension: {}", path.display()))?;
+        if verbose > 0 {
+            eprintln!("Removed pi extension: {}", path.display());
+        }
+        removed.push(path.clone());
+    }
+
+    if let Some(parent) = path.parent() {
+        if parent.exists() && fs::read_dir(parent)?.next().is_none() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+
+    Ok(removed)
+}
+
+fn run_pi_mode(verbose: u8) -> Result<()> {
+    let path = prepare_pi_plugin_path()?;
+    let changed = ensure_pi_plugin_installed(&path, verbose)?;
+
+    let status = if changed {
+        "installed/updated"
+    } else {
+        "already up to date"
+    };
+    println!("\npi extension {} (global).\n", status);
+    println!("  Extension: {}", path.display());
+    println!("  Reload pi with: /reload");
+    println!("  Test with: git status\n");
+
+    Ok(())
+}
+
 // ─── Cursor Agent support ─────────────────────────────────────────────
 
 /// Resolve ~/.cursor directory
@@ -1952,6 +2069,18 @@ fn show_claude_config() -> Result<()> {
         println!("[--] OpenCode: config dir not found");
     }
 
+    // Check pi extension
+    if let Ok(pi_agent_dir) = resolve_pi_agent_dir() {
+        let plugin = pi_plugin_path(&pi_agent_dir);
+        if plugin.exists() {
+            println!("[ok] pi: extension installed ({})", plugin.display());
+        } else {
+            println!("[--] pi: extension not found");
+        }
+    } else {
+        println!("[--] pi: home dir not found");
+    }
+
     // Check Cursor hooks
     if let Ok(cursor_dir) = resolve_cursor_dir() {
         let cursor_hook = cursor_dir.join("hooks").join("rtk-rewrite.sh");
@@ -2026,6 +2155,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
     println!("  rtk init -g --codex         # Configure ~/.codex/AGENTS.md + ~/.codex/RTK.md");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
+    println!("  rtk init -g --agent pi      # Install pi extension");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
     Ok(())
@@ -2536,6 +2666,7 @@ More notes
             false,
             false,
             false,
+            false,
             true,
             PatchMode::Auto,
             0,
@@ -2550,6 +2681,7 @@ More notes
     #[test]
     fn test_codex_mode_rejects_no_patch() {
         let err = run(
+            false,
             false,
             false,
             false,

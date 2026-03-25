@@ -106,6 +106,7 @@ rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
 rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
+rtk init -g --agent pi          # pi coding agent
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -296,7 +297,7 @@ After install, **restart Claude Code**.
 
 ## Supported AI Tools
 
-RTK supports 9 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports 10 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -309,6 +310,7 @@ RTK supports 9 AI coding tools. Each integration transparently rewrites shell co
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
+| **pi** | `rtk init -g --agent pi` | Extension TS (bash override) |
 
 ### Claude Code (default)
 
@@ -383,6 +385,14 @@ openclaw plugins install ./openclaw
 ```
 
 Plugin in `openclaw/` directory. Uses `before_tool_call` hook, delegates to `rtk rewrite`.
+
+### pi
+
+```bash
+rtk init -g --agent pi
+```
+
+Creates `~/.pi/agent/extensions/rtk-bash/index.ts`. The extension overrides pi's `bash` tool and delegates to `rtk rewrite` before execution. Run `/reload` in pi (or restart pi) after installation.
 
 ### Commands Rewritten
 
