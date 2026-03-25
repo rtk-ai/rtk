@@ -1,8 +1,8 @@
 //! Runs curl and auto-compresses JSON responses.
 
-use crate::json_cmd;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
+use crate::json_cmd;
 use anyhow::{Context, Result};
 
 pub fn run(args: &[String], verbose: u8) -> Result<()> {

@@ -1,9 +1,9 @@
 //! Shows users how many tokens RTK has saved them over time.
 
 use crate::core::display_helpers::{format_duration, print_period_table};
-use crate::hooks::hook_check;
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
+use crate::hooks::hook_check;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use serde::Serialize;

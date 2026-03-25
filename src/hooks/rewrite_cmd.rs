@@ -1,7 +1,7 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
+use super::permissions::{check_command, PermissionVerdict};
 use crate::discover::registry;
-use crate::permissions::{check_command, PermissionVerdict};
 use std::io::Write;
 
 /// Run the `rtk rewrite` command.

@@ -1,10 +1,10 @@
 //! Filters ESLint and Biome linter output, grouping violations by rule.
 
 use crate::core::config;
-use crate::mypy_cmd;
-use crate::ruff_cmd;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, resolved_command, truncate};
+use crate::mypy_cmd;
+use crate::ruff_cmd;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

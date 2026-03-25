@@ -236,7 +236,10 @@ fn build_minitest_summary(summary: &str, failures: &[String]) -> String {
         for line in lines.iter().skip(1).take(4) {
             let trimmed = line.trim();
             if !trimmed.is_empty() {
-                result.push_str(&format!("   {}\n", crate::core::utils::truncate(trimmed, 120)));
+                result.push_str(&format!(
+                    "   {}\n",
+                    crate::core::utils::truncate(trimmed, 120)
+                ));
             }
         }
         if i < failures.len().min(10) - 1 {

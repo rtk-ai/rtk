@@ -4,12 +4,12 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
 
+use crate::core::tracking;
+use crate::core::utils::{package_manager_exec, strip_ansi};
 use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_passthrough,
     FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
 };
-use crate::core::tracking;
-use crate::core::utils::{package_manager_exec, strip_ansi};
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]

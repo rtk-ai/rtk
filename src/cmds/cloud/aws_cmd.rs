@@ -3,9 +3,9 @@
 //! Replaces verbose `--output table`/`text` with JSON, then compresses.
 //! Specialized filters for high-frequency commands (STS, S3, EC2, ECS, RDS, CloudFormation).
 
-use crate::json_cmd;
 use crate::core::tracking;
 use crate::core::utils::{join_with_overflow, resolved_command, truncate_iso_date};
+use crate::json_cmd;
 use anyhow::{Context, Result};
 use serde_json::Value;
 

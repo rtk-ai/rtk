@@ -99,7 +99,8 @@ where
         .unwrap_or(if output.status.success() { 0 } else { 1 });
     let filtered = filter_fn(&raw);
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, &format!("cargo_{}", subcommand), exit_code)
+    if let Some(hint) =
+        crate::core::tee::tee_and_hint(&raw, &format!("cargo_{}", subcommand), exit_code)
     {
         println!("{}\n{}", filtered, hint);
     } else {

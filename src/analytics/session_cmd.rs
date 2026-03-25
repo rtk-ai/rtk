@@ -1,8 +1,8 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
+use crate::core::utils::format_tokens;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use crate::discover::registry::{classify_command, split_command_chain, Classification};
-use crate::core::utils::format_tokens;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;

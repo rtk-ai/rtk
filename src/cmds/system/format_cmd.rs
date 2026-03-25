@@ -1,9 +1,9 @@
 //! Runs code formatters (Prettier, Ruff) and shows only files that changed.
 
-use crate::prettier_cmd;
-use crate::ruff_cmd;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, resolved_command};
+use crate::prettier_cmd;
+use crate::ruff_cmd;
 use anyhow::{Context, Result};
 use std::path::Path;
 

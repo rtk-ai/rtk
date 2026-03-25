@@ -3,9 +3,9 @@
 //! Provides token-optimized alternatives to verbose `gh` commands.
 //! Focuses on extracting essential information from JSON outputs.
 
-use crate::git;
 use crate::core::tracking;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
+use crate::git;
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;

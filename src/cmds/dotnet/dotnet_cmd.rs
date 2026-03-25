@@ -1,10 +1,10 @@
 //! Filters dotnet CLI output — build, test, and format results.
 
 use crate::binlog;
-use crate::dotnet_format_report;
-use crate::dotnet_trx;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
+use crate::dotnet_format_report;
+use crate::dotnet_trx;
 use anyhow::{Context, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
