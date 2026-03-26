@@ -81,7 +81,7 @@ pub const PATTERNS: &[&str] = &[
     r"^shellcheck\b",
     r"^shopify\s+theme\s+(push|pull)",
     r"^sops\b",
-    r"^swift\s+build\b",
+    r"^swift\s+(build|test)\b",
     r"^systemctl\s+status\b",
     r"^terraform\s+plan",
     r"^tofu\s+(fmt|init|plan|validate)(\s|$)",
@@ -602,7 +602,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["swift"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
+        subcmd_savings: &[("test", 90.0)],
         subcmd_status: &[],
     },
     RtkRule {

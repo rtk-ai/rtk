@@ -1,7 +1,6 @@
 //! Compares two files and shows only the changed lines.
 
 use crate::core::tracking;
-use crate::core::utils::truncate;
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
@@ -41,20 +40,16 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
         diff.added, diff.removed, diff.modified
     ));
 
-    for change in diff.changes.iter().take(50) {
+    // Never truncate diff content — users make decisions based on this data.
+    // Only the summary header provides compression; all changes are shown in full.
+    for change in &diff.changes {
         match change {
-            DiffChange::Added(ln, c) => rtk.push_str(&format!("+{:4} {}\n", ln, truncate(c, 80))),
-            DiffChange::Removed(ln, c) => rtk.push_str(&format!("-{:4} {}\n", ln, truncate(c, 80))),
-            DiffChange::Modified(ln, old, new) => rtk.push_str(&format!(
-                "~{:4} {} → {}\n",
-                ln,
-                truncate(old, 70),
-                truncate(new, 70)
-            )),
+            DiffChange::Added(ln, c) => rtk.push_str(&format!("+{:4} {}\n", ln, c)),
+            DiffChange::Removed(ln, c) => rtk.push_str(&format!("-{:4} {}\n", ln, c)),
+            DiffChange::Modified(ln, old, new) => {
+                rtk.push_str(&format!("~{:4} {} → {}\n", ln, old, new))
+            }
         }
-    }
-    if diff.changes.len() > 50 {
-        rtk.push_str(&format!("... +{} more changes", diff.changes.len() - 50));
     }
 
     print!("{}", rtk);
@@ -165,17 +160,19 @@ fn condense_unified_diff(diff: &str) -> String {
     let mut removed = 0;
     let mut changes = Vec::new();
 
+    // Never truncate diff content — users make decisions based on this data.
+    // Only strip diff metadata (headers, @@ hunks); all +/- lines shown in full.
     for line in diff.lines() {
         if line.starts_with("diff --git") || line.starts_with("--- ") || line.starts_with("+++ ") {
-            // File header
             if line.starts_with("+++ ") {
                 if !current_file.is_empty() && (added > 0 || removed > 0) {
                     result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-                    for c in changes.iter().take(10) {
+                    for c in &changes {
                         result.push(format!("  {}", c));
                     }
-                    if changes.len() > 10 {
-                        result.push(format!("  ... +{} more", changes.len() - 10));
+                    let total = added + removed;
+                    if total > 10 {
+                        result.push(format!("  ... +{} more", total - 10));
                     }
                 }
                 current_file = line
@@ -188,25 +185,22 @@ fn condense_unified_diff(diff: &str) -> String {
             }
         } else if line.starts_with('+') && !line.starts_with("+++") {
             added += 1;
-            if changes.len() < 15 {
-                changes.push(truncate(line, 70));
-            }
+            changes.push(line.to_string());
         } else if line.starts_with('-') && !line.starts_with("---") {
             removed += 1;
-            if changes.len() < 15 {
-                changes.push(truncate(line, 70));
-            }
+            changes.push(line.to_string());
         }
     }
 
     // Last file
     if !current_file.is_empty() && (added > 0 || removed > 0) {
         result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-        for c in changes.iter().take(10) {
+        for c in &changes {
             result.push(format!("  {}", c));
         }
-        if changes.len() > 10 {
-            result.push(format!("  ... +{} more", changes.len() - 10));
+        let total = added + removed;
+        if total > 10 {
+            result.push(format!("  ... +{} more", total - 10));
         }
     }
 
@@ -246,23 +240,6 @@ mod tests {
     fn test_similarity_threshold_for_modified() {
         // "let x = 1;" vs "let x = 2;" should be > 0.5 (treated as modification)
         assert!(similarity("let x = 1;", "let x = 2;") > 0.5);
-    }
-
-    // --- truncate ---
-
-    #[test]
-    fn test_truncate_short_string() {
-        assert_eq!(truncate("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_exact_length() {
-        assert_eq!(truncate("hello", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_long_string() {
-        assert_eq!(truncate("hello world!", 8), "hello...");
     }
 
     // --- compute_diff ---
@@ -365,5 +342,94 @@ diff --git a/b.rs b/b.rs
     fn test_condense_unified_diff_empty() {
         let result = condense_unified_diff("");
         assert!(result.is_empty());
+    }
+
+    // --- truncation accuracy ---
+
+    fn make_large_unified_diff(added: usize, removed: usize) -> String {
+        let mut lines = vec![
+            "diff --git a/config.yaml b/config.yaml".to_string(),
+            "--- a/config.yaml".to_string(),
+            "+++ b/config.yaml".to_string(),
+            "@@ -1,200 +1,200 @@".to_string(),
+        ];
+        for i in 0..removed {
+            lines.push(format!("-old_value_{}", i));
+        }
+        for i in 0..added {
+            lines.push(format!("+new_value_{}", i));
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn test_condense_unified_diff_overflow_count_accuracy() {
+        // 100 added + 100 removed = 200 total changes, only 10 shown
+        // True overflow = 200 - 10 = 190
+        // Bug: changes vec capped at 15, so old code showed "+5 more" (15-10) instead of "+190 more"
+        let diff = make_large_unified_diff(100, 100);
+        let result = condense_unified_diff(&diff);
+        assert!(
+            result.contains("+190 more"),
+            "Expected '+190 more' but got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("+5 more"),
+            "Bug still present: showing '+5 more' instead of true overflow"
+        );
+    }
+
+    #[test]
+    fn test_condense_unified_diff_no_false_overflow() {
+        // 8 changes total — all fit within the 10-line display cap, no overflow message
+        let diff = make_large_unified_diff(4, 4);
+        let result = condense_unified_diff(&diff);
+        assert!(
+            !result.contains("more"),
+            "No overflow message expected for 8 changes, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_no_truncation_large_diff() {
+        // Verify compute_diff returns all changes without truncation
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for i in 0..500 {
+            a.push(format!("line_{}", i));
+            if i % 3 == 0 {
+                b.push(format!("CHANGED_{}", i));
+            } else {
+                b.push(format!("line_{}", i));
+            }
+        }
+        let a_refs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
+        let b_refs: Vec<&str> = b.iter().map(|s| s.as_str()).collect();
+        let result = compute_diff(&a_refs, &b_refs);
+
+        assert!(
+            result.changes.len() > 100,
+            "Expected 100+ changes, got {}",
+            result.changes.len()
+        );
+        assert!(!result.changes.is_empty());
+    }
+
+    #[test]
+    fn test_long_lines_not_truncated() {
+        let long_line = "x".repeat(500);
+        let a = vec![long_line.as_str()];
+        let b = vec!["short"];
+        let result = compute_diff(&a, &b);
+        match &result.changes[0] {
+            DiffChange::Removed(_, content) | DiffChange::Added(_, content) => {
+                assert_eq!(content.len(), 500, "Line was truncated!");
+            }
+            DiffChange::Modified(_, old, _) => {
+                assert_eq!(old.len(), 500, "Line was truncated!");
+            }
+        }
     }
 }

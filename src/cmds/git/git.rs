@@ -298,13 +298,19 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut added = 0;
     let mut removed = 0;
     let mut in_hunk = false;
-    let mut hunk_lines = 0;
+    let mut hunk_shown = 0;
+    let mut hunk_skipped = 0usize;
     let max_hunk_lines = 100;
     let mut was_truncated = false;
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
-            // New file
+            // Flush hunk truncation before starting a new file
+            if hunk_skipped > 0 {
+                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+                was_truncated = true;
+                hunk_skipped = 0;
+            }
             if !current_file.is_empty() && (added > 0 || removed > 0) {
                 result.push(format!("  +{} -{}", added, removed));
             }
@@ -313,37 +319,41 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             added = 0;
             removed = 0;
             in_hunk = false;
+            hunk_shown = 0;
         } else if line.starts_with("@@") {
-            // New hunk
+            // Flush hunk truncation before starting a new hunk
+            if hunk_skipped > 0 {
+                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+                was_truncated = true;
+                hunk_skipped = 0;
+            }
             in_hunk = true;
-            hunk_lines = 0;
+            hunk_shown = 0;
             let hunk_info = line.split("@@").nth(1).unwrap_or("").trim();
             result.push(format!("  @@ {} @@", hunk_info));
         } else if in_hunk {
             if line.starts_with('+') && !line.starts_with("+++") {
                 added += 1;
-                if hunk_lines < max_hunk_lines {
+                if hunk_shown < max_hunk_lines {
                     result.push(format!("  {}", line));
-                    hunk_lines += 1;
+                    hunk_shown += 1;
+                } else {
+                    hunk_skipped += 1;
                 }
             } else if line.starts_with('-') && !line.starts_with("---") {
                 removed += 1;
-                if hunk_lines < max_hunk_lines {
+                if hunk_shown < max_hunk_lines {
                     result.push(format!("  {}", line));
-                    hunk_lines += 1;
+                    hunk_shown += 1;
+                } else {
+                    hunk_skipped += 1;
                 }
-            } else if hunk_lines < max_hunk_lines && !line.starts_with("\\") {
+            } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
                 // Context line
-                if hunk_lines > 0 {
+                if hunk_shown > 0 {
                     result.push(format!("  {}", line));
-                    hunk_lines += 1;
+                    hunk_shown += 1;
                 }
-            }
-
-            if hunk_lines == max_hunk_lines {
-                result.push("  ... (truncated)".to_string());
-                hunk_lines += 1;
-                was_truncated = true;
             }
         }
 
@@ -352,6 +362,12 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             was_truncated = true;
             break;
         }
+    }
+
+    // Flush last hunk
+    if hunk_skipped > 0 {
+        result.push(format!("  ... ({} lines truncated)", hunk_skipped));
+        was_truncated = true;
     }
 
     if !current_file.is_empty() && (added > 0 || removed > 0) {
@@ -535,22 +551,26 @@ fn filter_log_output(
             None => continue,
         };
         // Remaining lines are the body — keep up to 3 non-empty, non-trailer lines
-        let body_lines: Vec<&str> = lines
+        let all_body_lines: Vec<&str> = lines
             .map(|l| l.trim())
             .filter(|l| {
                 !l.is_empty()
                     && !l.starts_with("Signed-off-by:")
                     && !l.starts_with("Co-authored-by:")
             })
-            .take(3)
             .collect();
+        let body_omitted = all_body_lines.len().saturating_sub(3);
+        let body_lines = &all_body_lines[..all_body_lines.len().min(3)];
 
         if body_lines.is_empty() {
             result.push(header);
         } else {
             let mut entry = header;
-            for body in &body_lines {
+            for body in body_lines {
                 entry.push_str(&format!("\n  {}", truncate_line(body, truncate_width)));
+            }
+            if body_omitted > 0 {
+                entry.push_str(&format!("\n  [+{} lines omitted]", body_omitted));
             }
             result.push(entry);
         }
@@ -2305,5 +2325,85 @@ no changes added to commit (use "git add" and/or "git commit -a")
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- truncation accuracy ---
+
+    #[test]
+    fn test_format_status_overflow_count_exact() {
+        // 25 staged files, default status_max_files = 15
+        // Should show 15, overflow = 25 - 15 = 10, report "+10 more"
+        let mut porcelain = String::from("## main...origin/main\n");
+        for i in 0..25 {
+            porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
+        }
+        let result = format_status_output(&porcelain);
+        assert!(
+            result.contains("+10 more"),
+            "Expected '+10 more' for 25 staged files (max_files=15), got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("Staged: 25 files"),
+            "Expected 'Staged: 25 files', got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_recovery_hint_present() {
+        // A hunk with 110 lines exceeds max_hunk_lines (100), triggers truncation
+        // The recovery hint must appear so LLMs can re-fetch the full diff
+        let mut diff = String::new();
+        diff.push_str("diff --git a/large.rs b/large.rs\n");
+        diff.push_str("--- a/large.rs\n");
+        diff.push_str("+++ b/large.rs\n");
+        diff.push_str("@@ -1,150 +1,150 @@\n");
+        for i in 0..110 {
+            diff.push_str(&format!("+added line {}\n", i));
+        }
+        let result = compact_diff(&diff, 500);
+        assert!(
+            result.contains("[full diff: rtk git diff --no-compact]"),
+            "Expected recovery hint when hunk is truncated, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_hunk_truncation_count_accurate() {
+        // 150 change lines in one hunk: 100 shown, 50 silently dropped
+        // Must report the exact count, not just "(truncated)"
+        let mut diff = String::from(
+            "diff --git a/large.rs b/large.rs\n--- a/large.rs\n+++ b/large.rs\n@@ -1,150 +1,150 @@\n",
+        );
+        for i in 0..150 {
+            diff.push_str(&format!("+line {}\n", i));
+        }
+        let result = compact_diff(&diff, 500);
+        assert!(
+            result.contains("50 lines truncated"),
+            "Expected '50 lines truncated' (150 - 100 = 50), got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_body_omission_indicator() {
+        // Commit with 6 meaningful body lines: only 3 shown, must signal "+3 lines omitted"
+        let body_lines = (1..=6)
+            .map(|i| format!("body line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = format!(
+            "abc1234 feat: big change (1 day ago) <author>\n{}\n---END---\n",
+            body_lines
+        );
+        let result = filter_log_output(&output, 10, false, false);
+        assert!(
+            result.contains("+3 lines omitted"),
+            "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
+            result
+        );
     }
 }

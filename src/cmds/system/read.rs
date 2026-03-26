@@ -39,6 +39,16 @@ pub fn run(
     let filter = filter::get_filter(level);
     let mut filtered = filter.filter(&content, &lang);
 
+    // Safety: if filter emptied a non-empty file, fall back to raw content
+    if filtered.trim().is_empty() && !content.trim().is_empty() {
+        eprintln!(
+            "rtk: warning: filter produced empty output for {} ({} bytes), showing raw content",
+            file.display(),
+            content.len()
+        );
+        filtered = content.clone();
+    }
+
     if verbose > 0 {
         let original_lines = content.lines().count();
         let filtered_lines = filtered.lines().count();
