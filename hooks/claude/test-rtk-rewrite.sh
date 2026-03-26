@@ -209,6 +209,26 @@ test_rewrite "docker exec -it db psql" \
   "docker exec -it db psql" \
   "rtk docker exec -it db psql"
 
+test_rewrite "uv pip list" \
+  "uv pip list" \
+  "rtk uv pip list"
+
+test_rewrite "uv run python -m pytest -q" \
+  "uv run python -m pytest -q" \
+  "rtk uv run python -m pytest -q"
+
+test_rewrite "uv run mypy" \
+  "uv run mypy src/" \
+  "rtk uv run mypy src/"
+
+test_rewrite "uv run ruff" \
+  "uv run ruff check src/" \
+  "rtk uv run ruff check src/"
+
+test_rewrite "uv sync --frozen" \
+  "uv sync --frozen" \
+  "rtk uv sync --frozen"
+
 test_rewrite "find (NOT rewritten — different arg format)" \
   "find . -name '*.ts'" \
   ""
