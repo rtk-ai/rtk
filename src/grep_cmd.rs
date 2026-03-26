@@ -4,6 +4,7 @@ use crate::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::io::IsTerminal;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -25,8 +26,14 @@ pub fn run(
     // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
     let rg_pattern = pattern.replace(r"\|", "|");
 
+    let stdin_is_tty = std::io::stdin().is_terminal();
+
     let mut rg_cmd = resolved_command("rg");
-    rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
+    if stdin_is_tty {
+        rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
+    } else {
+        rg_cmd.args(["-n", "--no-heading", &rg_pattern]);
+    }
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -43,9 +50,13 @@ pub fn run(
     let output = rg_cmd
         .output()
         .or_else(|_| {
-            resolved_command("grep")
-                .args(["-rn", pattern, path])
-                .output()
+            let mut fallback = resolved_command("grep");
+            if stdin_is_tty {
+                fallback.args(["-rn", pattern, path]);
+            } else {
+                fallback.args(["-n", pattern]);
+            }
+            fallback.output()
         })
         .context("grep/rg failed")?;
 
