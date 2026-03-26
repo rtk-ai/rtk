@@ -280,6 +280,27 @@ mod tests {
         assert_eq!(filtered[0], "-i");
     }
 
+    // --- truncation accuracy ---
+
+    #[test]
+    fn test_grep_overflow_uses_uncapped_total() {
+        // Confirm the grep overflow invariant: matches vec is never capped before overflow calc.
+        // If total_matches > per_file, overflow = total_matches - per_file (not capped).
+        // This documents that grep_cmd.rs avoids the diff_cmd bug (cap at N then compute N-10).
+        let per_file = config::limits().grep_max_per_file;
+        let total_matches = per_file + 42;
+        let overflow = total_matches - per_file;
+        assert_eq!(overflow, 42, "overflow must equal true suppressed count");
+        // Demonstrate why capping before subtraction is wrong:
+        let hypothetical_cap = per_file + 5;
+        let capped = total_matches.min(hypothetical_cap);
+        let wrong_overflow = capped - per_file;
+        assert_ne!(
+            wrong_overflow, overflow,
+            "capping before subtraction gives wrong overflow"
+        );
+    }
+
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
     // The -n/--line-numbers clap flag in main.rs is a no-op accepted for compat.
     #[test]

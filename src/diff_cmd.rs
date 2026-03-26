@@ -168,6 +168,10 @@ fn condense_unified_diff(diff: &str) -> String {
                     for c in &changes {
                         result.push(format!("  {}", c));
                     }
+                    let total = added + removed;
+                    if total > 10 {
+                        result.push(format!("  ... +{} more", total - 10));
+                    }
                 }
                 current_file = line
                     .trim_start_matches("+++ ")
@@ -191,6 +195,10 @@ fn condense_unified_diff(diff: &str) -> String {
         result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
         for c in &changes {
             result.push(format!("  {}", c));
+        }
+        let total = added + removed;
+        if total > 10 {
+            result.push(format!("  ... +{} more", total - 10));
         }
     }
 
@@ -334,9 +342,57 @@ diff --git a/b.rs b/b.rs
         assert!(result.is_empty());
     }
 
+    // --- truncation accuracy ---
+
+    fn make_large_unified_diff(added: usize, removed: usize) -> String {
+        let mut lines = vec![
+            "diff --git a/config.yaml b/config.yaml".to_string(),
+            "--- a/config.yaml".to_string(),
+            "+++ b/config.yaml".to_string(),
+            "@@ -1,200 +1,200 @@".to_string(),
+        ];
+        for i in 0..removed {
+            lines.push(format!("-old_value_{}", i));
+        }
+        for i in 0..added {
+            lines.push(format!("+new_value_{}", i));
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn test_condense_unified_diff_overflow_count_accuracy() {
+        // 100 added + 100 removed = 200 total changes, only 10 shown
+        // True overflow = 200 - 10 = 190
+        // Bug: changes vec capped at 15, so old code showed "+5 more" (15-10) instead of "+190 more"
+        let diff = make_large_unified_diff(100, 100);
+        let result = condense_unified_diff(&diff);
+        assert!(
+            result.contains("+190 more"),
+            "Expected '+190 more' but got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("+5 more"),
+            "Bug still present: showing '+5 more' instead of true overflow"
+        );
+    }
+
+    #[test]
+    fn test_condense_unified_diff_no_false_overflow() {
+        // 8 changes total — all fit within the 10-line display cap, no overflow message
+        let diff = make_large_unified_diff(4, 4);
+        let result = condense_unified_diff(&diff);
+        assert!(
+            !result.contains("more"),
+            "No overflow message expected for 8 changes, got:\n{}",
+            result
+        );
+    }
+
     #[test]
     fn test_no_truncation_large_diff() {
-        // Verify all changes are shown, not truncated
+        // Verify compute_diff returns all changes without truncation
         let mut a = Vec::new();
         let mut b = Vec::new();
         for i in 0..500 {
@@ -351,9 +407,11 @@ diff --git a/b.rs b/b.rs
         let b_refs: Vec<&str> = b.iter().map(|s| s.as_str()).collect();
         let result = compute_diff(&a_refs, &b_refs);
 
-        // Should have ~167 changes (every 3rd line), all present
-        assert!(result.changes.len() > 100, "Expected 100+ changes, got {}", result.changes.len());
-        // No truncation — changes count matches what we generate
+        assert!(
+            result.changes.len() > 100,
+            "Expected 100+ changes, got {}",
+            result.changes.len()
+        );
         assert!(!result.changes.is_empty());
     }
 
@@ -363,7 +421,6 @@ diff --git a/b.rs b/b.rs
         let a = vec![long_line.as_str()];
         let b = vec!["short"];
         let result = compute_diff(&a, &b);
-        // The removed line should contain the full 500-char string
         match &result.changes[0] {
             DiffChange::Removed(_, content) | DiffChange::Added(_, content) => {
                 assert_eq!(content.len(), 500, "Line was truncated!");
@@ -372,25 +429,5 @@ diff --git a/b.rs b/b.rs
                 assert_eq!(old.len(), 500, "Line was truncated!");
             }
         }
-    }
-
-    #[test]
-    fn test_condense_unified_no_truncation() {
-        // Generate a large unified diff
-        let mut lines = Vec::new();
-        lines.push("diff --git a/big.yaml b/big.yaml".to_string());
-        lines.push("--- a/big.yaml".to_string());
-        lines.push("+++ b/big.yaml".to_string());
-        for i in 0..200 {
-            lines.push(format!("+added_line_{}", i));
-        }
-        let diff = lines.join("\n");
-        let result = condense_unified_diff(&diff);
-
-        // All 200 added lines should be present
-        assert!(result.contains("added_line_0"));
-        assert!(result.contains("added_line_199"));
-        assert!(!result.contains("not shown"), "Should not truncate");
-        assert!(!result.contains("more"), "Should not have '... more'");
     }
 }

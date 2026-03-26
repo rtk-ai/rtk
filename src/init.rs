@@ -2356,12 +2356,16 @@ pub fn run_copilot(verbose: u8) -> Result<()> {
     let github_dir = Path::new(".github");
     let hooks_dir = github_dir.join("hooks");
 
-    fs::create_dir_all(&hooks_dir)
-        .context("Failed to create .github/hooks/ directory")?;
+    fs::create_dir_all(&hooks_dir).context("Failed to create .github/hooks/ directory")?;
 
     // 1. Write hook config
     let hook_path = hooks_dir.join("rtk-rewrite.json");
-    write_if_changed(&hook_path, COPILOT_HOOK_JSON, "Copilot hook config", verbose)?;
+    write_if_changed(
+        &hook_path,
+        COPILOT_HOOK_JSON,
+        "Copilot hook config",
+        verbose,
+    )?;
 
     // 2. Write instructions
     let instructions_path = github_dir.join("copilot-instructions.md");
