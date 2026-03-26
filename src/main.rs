@@ -1972,8 +1972,31 @@ fn main() -> Result<()> {
                     playwright_cmd::run(&args[1..], cli.verbose)?;
                 }
                 _ => {
-                    // Generic passthrough with npm boilerplate filter
-                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
+                    let timer = core::tracking::TimedExecution::start();
+                    let mut cmd = core::utils::resolved_command("npx");
+                    cmd.args(&args);
+                    if cli.skip_env {
+                        cmd.env("SKIP_ENV_VALIDATION", "1");
+                    }
+                    if cli.verbose > 0 {
+                        eprintln!("Running: npx {}", args.join(" "));
+                    }
+                    let output = cmd.output().context("Failed to run npx")?;
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let raw = format!("{}\n{}", stdout, stderr);
+                    let filtered = npm_cmd::filter_npm_output(&raw);
+                    println!("{}", filtered);
+                    let args_str = args.join(" ");
+                    timer.track(
+                        &format!("npx {}", args_str),
+                        &format!("rtk npx {}", args_str),
+                        &raw,
+                        &filtered,
+                    );
+                    if !output.status.success() {
+                        std::process::exit(output.status.code().unwrap_or(1));
+                    }
                 }
             }
         }
@@ -2595,6 +2618,41 @@ mod tests {
                     assert_eq!(args[0], "git status");
                 }
                 _ => panic!("expected Rewrite command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_npx_parses_simple_command() {
+        let cli = Cli::try_parse_from(["rtk", "npx", "cowsay", "hello"]).unwrap();
+        match cli.command {
+            Commands::Npx { args } => {
+                assert_eq!(args, vec!["cowsay", "hello"]);
+            }
+            _ => panic!("Expected Npx command"),
+        }
+    }
+
+    #[test]
+    fn test_npx_parses_flags_before_command() {
+        let cli = Cli::try_parse_from(["rtk", "npx", "--no-install", "cowsay", "hello"]).unwrap();
+        match cli.command {
+            Commands::Npx { args } => {
+                assert_eq!(args, vec!["--no-install", "cowsay", "hello"]);
+            }
+            _ => panic!("Expected Npx command"),
+        }
+    }
+
+    #[test]
+    fn test_npx_parses_known_tool_names() {
+        for tool in &["tsc", "eslint", "prisma", "next", "prettier", "playwright"] {
+            let cli = Cli::try_parse_from(["rtk", "npx", tool, "--help"]).unwrap();
+            match cli.command {
+                Commands::Npx { ref args } => {
+                    assert_eq!(args[0], *tool);
+                }
+                _ => panic!("Expected Npx command for {}", tool),
             }
         }
     }
