@@ -912,6 +912,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "toon-rust",
  "ureq",
  "walkdir",
  "which",
@@ -1205,6 +1206,17 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "toon-rust"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d50f7836e74bd95f702e07b4dbcdf62f6cfee7a102ef6fa53ee18660fc79b32f"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "typenum"

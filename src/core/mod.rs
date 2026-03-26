@@ -6,5 +6,6 @@ pub mod filter;
 pub mod tee;
 pub mod telemetry;
 pub mod toml_filter;
+pub mod toon_convert;
 pub mod tracking;
 pub mod utils;
