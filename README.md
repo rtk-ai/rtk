@@ -296,12 +296,13 @@ After install, **restart Claude Code**.
 
 ## Supported AI Tools
 
-RTK supports 9 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports 10 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
 
 | Tool | Install | Method |
 |------|---------|--------|
 | **Claude Code** | `rtk init -g` | PreToolUse hook (bash) |
-| **GitHub Copilot** | `rtk init -g` | PreToolUse hook (`rtk hook copilot`) |
+| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook (`rtk hook copilot`) — transparent rewrite |
+| **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook (`rtk hook gemini`) |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
@@ -309,6 +310,7 @@ RTK supports 9 AI coding tools. Each integration transparently rewrites shell co
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
+| **Mistral Vibe** | Planned (#800) | Blocked on upstream BeforeToolCallback |
 
 ### Claude Code (default)
 
@@ -322,10 +324,14 @@ rtk init -g --uninstall     # Remove
 ### GitHub Copilot (VS Code + CLI)
 
 ```bash
-rtk init -g                 # Same hook as Claude Code
+rtk init -g --copilot         # Install hook + instructions
 ```
 
-The hook auto-detects Copilot format (VS Code `runTerminalCommand` or CLI `toolName: bash`) and rewrites commands. Works with both Copilot Chat in VS Code and `copilot` CLI.
+Creates `.github/hooks/rtk-rewrite.json` (PreToolUse hook) and `.github/copilot-instructions.md` (prompt-level awareness).
+
+The hook (`rtk hook copilot`) auto-detects the format:
+- **VS Code Copilot Chat**: transparent rewrite via `updatedInput` (same as Claude Code)
+- **Copilot CLI**: deny-with-suggestion (CLI does not support `updatedInput` yet — see [copilot-cli#2013](https://github.com/github/copilot-cli/issues/2013))
 
 ### Cursor
 
@@ -383,6 +389,10 @@ openclaw plugins install ./openclaw
 ```
 
 Plugin in `openclaw/` directory. Uses `before_tool_call` hook, delegates to `rtk rewrite`.
+
+### Mistral Vibe (planned)
+
+Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531), [PR #533](https://github.com/mistralai/mistral-vibe/pull/533)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
 
 ### Commands Rewritten
 
