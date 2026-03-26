@@ -189,6 +189,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+* **toml-dsl:** replace RTK's custom 8-stage filter engine with `tokf-filter` crate
+  * Full backward compatibility — all 47 built-in filters and user-authored `.rtk/filters.toml` files work unchanged
+  * RTK keeps its TOML parsing/registry/matching layer; delegates filtering to `tokf-filter::apply()`
+  * RTK handles `head_lines`/`tail_lines`/`max_lines` with omission markers (tokf silently truncates)
+  * `truncate_lines_at` now uses `…` (unicode ellipsis) instead of `...` (3 ASCII dots)
+  * Unlocks tokf's advanced features for user-authored filters: sections, chunks, aggregates, templates, JSON extraction, `on_success`/`on_failure` branches, `dedup`
 * **toml-dsl:** declarative TOML filter engine — add command filters without writing Rust ([#299](https://github.com/rtk-ai/rtk/issues/299))
   * 8 primitives: `strip_ansi`, `replace`, `match_output`, `strip/keep_lines_matching`, `truncate_lines_at`, `head/tail_lines`, `max_lines`, `on_empty`
   * lookup chain: `.rtk/filters.toml` (project-local) → `~/.config/rtk/filters.toml` (user-global) → built-in filters

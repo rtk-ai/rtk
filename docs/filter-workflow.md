@@ -40,14 +40,15 @@ flowchart TD
         S -->|"✅ match"| U["exec command\ncapture stdout"]
         U --> V
 
-        subgraph PIPELINE ["8-stage filter pipeline"]
-            V["strip_ansi"] --> W["replace"]
-            W --> X{"match_output\nshort-circuit?"}
-            X -->|"✅ pattern matched"| Y[["emit message\nstop pipeline"]]
-            X -->|"no match"| Z["strip/keep_lines"]
-            Z --> AA["truncate_lines_at"]
-            AA --> AB["tail_lines"]
-            AB --> AC["max_lines"]
+        subgraph PIPELINE ["tokf-filter pipeline + RTK post-processing"]
+            V{"match_output\nshort-circuit?\n(strip_ansi applied\nif enabled)"} -->|"✅ pattern matched"| Y[["emit message\nstop pipeline"]]
+            V -->|"no match"| W["replace\n(replace_all mode)"]
+            W --> WA["strip_ansi\ntrim_lines"]
+            WA --> Z["skip/keep lines"]
+            Z --> ZA["dedup"]
+            ZA --> AA["truncate_lines_at"]
+            AA --> AB["head/tail_lines\n(RTK adds omission\nmarkers)"]
+            AB --> AC["max_lines\n(RTK adds truncation\nmarker)"]
             AC --> AD{"output\nempty?"}
             AD -->|"yes"| AE[["emit on_empty"]]
             AD -->|"no"| AF[["print filtered\noutput + exit code"]]

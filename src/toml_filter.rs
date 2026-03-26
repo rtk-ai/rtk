@@ -1,7 +1,7 @@
 /// TOML-based filter DSL for RTK.
 ///
-/// Provides a declarative pipeline of 8 stages that can be configured
-/// via TOML files. Lookup priority (first match wins):
+/// Provides a declarative pipeline that can be configured via TOML files.
+/// Lookup priority (first match wins):
 ///   1. `.rtk/filters.toml`              — project-local, committable with the repo
 ///   2. `~/.config/rtk/filters.toml`     — user-global, applies to all projects
 ///   3. Built-in TOML                     — `src/filters/*.toml`, concatenated by build.rs and embedded at compile time
@@ -13,19 +13,20 @@
 ///   - `RTK_NO_TOML=1`     — bypass TOML engine entirely
 ///   - `RTK_TOML_DEBUG=1`  — print which filter matched and line counts to stderr
 ///
-/// Pipeline stages (applied in order):
-///   1. strip_ansi           — remove ANSI escape codes
-///   2. replace              — regex substitutions, line-by-line, chainable
-///   3. match_output         — short-circuit: if blob matches a pattern, return message immediately
-///   4. strip/keep_lines     — filter lines by regex
-///   5. truncate_lines_at    — truncate each line to N chars
-///   6. head/tail_lines      — keep first/last N lines
-///   7. max_lines            — absolute line cap
-///   8. on_empty             — message if result is empty
+/// Filtering is delegated to the `tokf-filter` crate, which provides a rich
+/// pipeline (sections, chunks, aggregates, templates, JSON extraction, etc.).
+/// RTK keeps its own TOML parsing/registry/matching layer and adds omission
+/// markers for head/tail/max_lines that tokf silently truncates.
 use lazy_static::lazy_static;
-use regex::{Regex, RegexSet};
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use tokf_common::config::types::{
+    CommandPattern, FilterConfig, MatchOutputRule as TokfMatchOutputRule,
+    ReplaceRule as TokfReplaceRule,
+};
+use tokf_filter::filter::{FilterOptions, FilterResult};
+use tokf_filter::CommandResult;
 
 // Built-in filters: concatenated from src/filters/*.toml by build.rs at compile time.
 const BUILTIN_TOML: &str = include_str!(concat!(env!("OUT_DIR"), "/builtin_filters.toml"));
@@ -107,43 +108,22 @@ struct TomlFilterDef {
 // Compiled types (post-validation, ready to use)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-struct CompiledMatchOutputRule {
-    pattern: Regex,
-    message: String,
-    /// If set and matches the blob, this rule is skipped (prevents swallowing errors).
-    unless: Option<Regex>,
-}
-
-#[derive(Debug)]
-struct CompiledReplaceRule {
-    pattern: Regex,
-    replacement: String,
-}
-
-#[derive(Debug)]
-enum LineFilter {
-    None,
-    Strip(RegexSet),
-    Keep(RegexSet),
-}
-
 /// A filter that has been parsed and compiled — all regexes are ready.
+/// Delegates actual filtering to `tokf_filter::filter::apply()`.
 #[derive(Debug)]
 pub struct CompiledFilter {
     pub name: String,
     #[allow(dead_code)]
     pub description: Option<String>,
     match_regex: Regex,
-    strip_ansi: bool,
-    replace: Vec<CompiledReplaceRule>,
-    match_output: Vec<CompiledMatchOutputRule>,
-    line_filter: LineFilter,
-    truncate_lines_at: Option<usize>,
+    /// tokf-filter config (handles strip_ansi, replace, match_output, skip/keep,
+    /// truncate_lines_at, on_empty). Does NOT include head/tail/max_lines —
+    /// those are handled by RTK for omission markers.
+    config: FilterConfig,
+    /// RTK-specific: head/tail/max_lines with omission markers
     head_lines: Option<usize>,
     tail_lines: Option<usize>,
     pub max_lines: Option<usize>,
-    on_empty: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +285,95 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "learn",
 ];
 
+/// Convert an RTK `TomlFilterDef` into a tokf `FilterConfig`.
+///
+/// Maps RTK field names to tokf equivalents. `head_lines`, `tail_lines`,
+/// and `max_lines` are NOT included — RTK handles those separately to add
+/// omission markers (tokf silently truncates).
+fn convert_def_to_filter_config(def: &TomlFilterDef) -> FilterConfig {
+    FilterConfig {
+        command: CommandPattern::default(),
+        run: None,
+        skip: def.strip_lines_matching.clone(),
+        keep: def.keep_lines_matching.clone(),
+        step: vec![],
+        extract: None,
+        match_output: def
+            .match_output
+            .iter()
+            .map(|r| TokfMatchOutputRule {
+                contains: None,
+                pattern: Some(r.pattern.clone()),
+                output: r.message.clone(),
+                unless: r.unless.clone(),
+            })
+            .collect(),
+        section: vec![],
+        on_success: None,
+        on_failure: None,
+        parse: None,
+        output: None,
+        fallback: None,
+        replace: def
+            .replace
+            .iter()
+            .map(|r| TokfReplaceRule {
+                pattern: r.pattern.clone(),
+                output: r.replacement.clone(),
+                // RTK's original replace used replace_all semantics
+                replace_all: true,
+            })
+            .collect(),
+        dedup: false,
+        dedup_window: None,
+        strip_ansi: def.strip_ansi,
+        trim_lines: false,
+        strip_empty_lines: false,
+        collapse_empty_lines: false,
+        lua_script: None,
+        chunk: vec![],
+        json: None,
+        variant: vec![],
+        show_history_hint: false,
+        inject_path: false,
+        passthrough_args: vec![],
+        description: def.description.clone(),
+        truncate_lines_at: def.truncate_lines_at,
+        on_empty: def.on_empty.clone(),
+        // head/tail/max_lines deliberately NOT passed to tokf —
+        // RTK handles them with omission markers.
+        head: None,
+        tail: None,
+        max_lines: None,
+    }
+}
+
+/// Validate regexes in a filter definition before conversion.
+/// Returns an error string if any regex is invalid.
+fn validate_def_regexes(def: &TomlFilterDef) -> Result<(), String> {
+    for r in &def.replace {
+        Regex::new(&r.pattern)
+            .map_err(|e| format!("invalid replace pattern '{}': {}", r.pattern, e))?;
+    }
+    for r in &def.match_output {
+        Regex::new(&r.pattern)
+            .map_err(|e| format!("invalid match_output pattern '{}': {}", r.pattern, e))?;
+        if let Some(ref u) = r.unless {
+            Regex::new(u)
+                .map_err(|e| format!("invalid match_output unless pattern '{}': {}", u, e))?;
+        }
+    }
+    for pat in &def.strip_lines_matching {
+        Regex::new(pat)
+            .map_err(|e| format!("invalid strip_lines_matching regex '{}': {}", pat, e))?;
+    }
+    for pat in &def.keep_lines_matching {
+        Regex::new(pat)
+            .map_err(|e| format!("invalid keep_lines_matching regex '{}': {}", pat, e))?;
+    }
+    Ok(())
+}
+
 fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, String> {
     // Mutual exclusion: strip and keep cannot both be set
     if !def.strip_lines_matching.is_empty() && !def.keep_lines_matching.is_empty() {
@@ -327,68 +396,19 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         }
     }
 
-    let replace = def
-        .replace
-        .into_iter()
-        .map(|r| {
-            let pat = r.pattern.clone();
-            Regex::new(&r.pattern)
-                .map(|pattern| CompiledReplaceRule {
-                    pattern,
-                    replacement: r.replacement,
-                })
-                .map_err(|e| format!("invalid replace pattern '{}': {}", pat, e))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // Validate all regexes before converting
+    validate_def_regexes(&def)?;
 
-    let match_output = def
-        .match_output
-        .into_iter()
-        .map(|r| -> Result<CompiledMatchOutputRule, String> {
-            let pat = r.pattern.clone();
-            let pattern = Regex::new(&r.pattern)
-                .map_err(|e| format!("invalid match_output pattern '{}': {}", pat, e))?;
-            let unless = r
-                .unless
-                .as_deref()
-                .map(|u| {
-                    Regex::new(u)
-                        .map_err(|e| format!("invalid match_output unless pattern '{}': {}", u, e))
-                })
-                .transpose()?;
-            Ok(CompiledMatchOutputRule {
-                pattern,
-                message: r.message,
-                unless,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let line_filter = if !def.strip_lines_matching.is_empty() {
-        let set = RegexSet::new(&def.strip_lines_matching)
-            .map_err(|e| format!("invalid strip_lines_matching regex: {}", e))?;
-        LineFilter::Strip(set)
-    } else if !def.keep_lines_matching.is_empty() {
-        let set = RegexSet::new(&def.keep_lines_matching)
-            .map_err(|e| format!("invalid keep_lines_matching regex: {}", e))?;
-        LineFilter::Keep(set)
-    } else {
-        LineFilter::None
-    };
+    let config = convert_def_to_filter_config(&def);
 
     Ok(CompiledFilter {
         name,
         description: def.description,
         match_regex,
-        strip_ansi: def.strip_ansi,
-        replace,
-        match_output,
-        line_filter,
-        truncate_lines_at: def.truncate_lines_at,
+        config,
         head_lines: def.head_lines,
         tail_lines: def.tail_lines,
         max_lines: def.max_lines,
-        on_empty: def.on_empty,
     })
 }
 
@@ -415,74 +435,27 @@ pub fn find_filter_in<'a>(
 
 /// Apply a compiled filter pipeline to raw stdout. Pure String -> String.
 ///
-/// Pipeline stages (in order):
-///   1. strip_ansi           — remove ANSI escape codes
-///   2. replace              — regex substitutions, line-by-line, chainable
-///   3. match_output         — short-circuit if blob matches a pattern
-///   4. strip/keep_lines     — filter lines by regex
-///   5. truncate_lines_at    — truncate each line to N chars
-///   6. head/tail_lines      — keep first/last N lines
-///   7. max_lines            — absolute line cap
-///   8. on_empty             — message if result is empty
+/// Delegates to `tokf_filter::filter::apply()` for the core pipeline
+/// (strip_ansi, replace, match_output, skip/keep, truncate_lines_at, on_empty),
+/// then applies RTK's head/tail/max_lines with omission markers.
 pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
-    let mut lines: Vec<String> = stdout.lines().map(String::from).collect();
+    // Build a CommandResult for tokf — we only have stdout, no stderr capture
+    let cmd_result = CommandResult {
+        stdout: stdout.to_string(),
+        stderr: String::new(),
+        exit_code: 0,
+        combined: stdout.to_string(),
+    };
 
-    // 1. strip_ansi
-    if filter.strip_ansi {
-        lines = lines
-            .into_iter()
-            .map(|l| crate::utils::strip_ansi(&l))
-            .collect();
-    }
+    let FilterResult {
+        output: tokf_output,
+    } = tokf_filter::filter::apply(&filter.config, &cmd_result, &[], &FilterOptions::default());
 
-    // 2. replace — line-by-line, rules chained sequentially
-    if !filter.replace.is_empty() {
-        lines = lines
-            .into_iter()
-            .map(|mut line| {
-                for rule in &filter.replace {
-                    line = rule
-                        .pattern
-                        .replace_all(&line, rule.replacement.as_str())
-                        .into_owned();
-                }
-                line
-            })
-            .collect();
-    }
+    // Post-process: apply RTK's head/tail/max_lines with omission markers
+    // (tokf silently truncates; RTK adds "... (N lines omitted)" markers)
+    let mut lines: Vec<String> = tokf_output.lines().map(String::from).collect();
 
-    // 3. match_output — short-circuit on full blob match (first rule wins)
-    //    If `unless` is set and also matches the blob, the rule is skipped.
-    if !filter.match_output.is_empty() {
-        let blob = lines.join("\n");
-        for rule in &filter.match_output {
-            if rule.pattern.is_match(&blob) {
-                if let Some(ref unless_re) = rule.unless {
-                    if unless_re.is_match(&blob) {
-                        continue; // errors/warnings present — skip this rule
-                    }
-                }
-                return rule.message.clone();
-            }
-        }
-    }
-
-    // 4. strip OR keep (mutually exclusive)
-    match &filter.line_filter {
-        LineFilter::Strip(set) => lines.retain(|l| !set.is_match(l)),
-        LineFilter::Keep(set) => lines.retain(|l| set.is_match(l)),
-        LineFilter::None => {}
-    }
-
-    // 5. truncate_lines_at — uses utils::truncate (unicode-safe)
-    if let Some(max_chars) = filter.truncate_lines_at {
-        lines = lines
-            .into_iter()
-            .map(|l| crate::utils::truncate(&l, max_chars))
-            .collect();
-    }
-
-    // 6. head + tail
+    // head + tail
     let total = lines.len();
     if let (Some(head), Some(tail)) = (filter.head_lines, filter.tail_lines) {
         if total > head + tail {
@@ -504,7 +477,7 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
         }
     }
 
-    // 7. max_lines — absolute cap applied after head/tail (includes omit messages)
+    // max_lines — absolute cap applied after head/tail (includes omit messages)
     if let Some(max) = filter.max_lines {
         if lines.len() > max {
             let truncated = lines.len() - max;
@@ -513,15 +486,7 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
         }
     }
 
-    // 8. on_empty
-    let result = lines.join("\n");
-    if result.trim().is_empty() {
-        if let Some(ref msg) = filter.on_empty {
-            return msg.clone();
-        }
-    }
-
-    result
+    lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -750,11 +715,11 @@ match_command = "^cmd"
 truncate_lines_at = 5
 "#,
         );
-        // utils::truncate(s, 5) takes 2 chars + "..." when len > 5
+        // tokf truncates to N-1 chars + "…" (unicode ellipsis) when len > N
         // "hello" = 5 chars exactly, stays unchanged
-        // "日本語xyz" = 6 chars, truncated to "日本..." (take 2 + "...")
+        // "日本語xyz" = 6 chars, truncated to "日本語x" + "…" = 5 chars
         let out = apply_filter(&f, "hello\n日本語xyz");
-        assert_eq!(out, "hello\n日本...");
+        assert_eq!(out, "hello\n日本語x\u{2026}");
     }
 
     #[test]
