@@ -407,7 +407,11 @@ diff --git a/b.rs b/b.rs
         let b_refs: Vec<&str> = b.iter().map(|s| s.as_str()).collect();
         let result = compute_diff(&a_refs, &b_refs);
 
-        assert!(result.changes.len() > 100, "Expected 100+ changes, got {}", result.changes.len());
+        assert!(
+            result.changes.len() > 100,
+            "Expected 100+ changes, got {}",
+            result.changes.len()
+        );
         assert!(!result.changes.is_empty());
     }
 
