@@ -3884,4 +3884,103 @@ mod tests {
             Some("rtk git log | head | tail && rtk git status".into())
         );
     }
+
+    // --- PHP tooling ---
+
+    #[test]
+    fn test_classify_phpunit() {
+        assert!(matches!(
+            classify_command("phpunit tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_vendor_bin_phpunit() {
+        assert!(matches!(
+            classify_command("vendor/bin/phpunit --filter EmailTest"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_php_vendor_bin_phpunit() {
+        assert!(matches!(
+            classify_command("php vendor/bin/phpunit tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_bin_phpunit() {
+        // bin/phpunit is used by Symfony apps
+        assert!(matches!(
+            classify_command("bin/phpunit tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_php_bin_phpunit() {
+        assert!(matches!(
+            classify_command("php bin/phpunit --filter EmailTest"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_phpunit() {
+        assert_eq!(
+            rewrite_command("phpunit tests/", &[]),
+            Some("rtk phpunit tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_vendor_bin_phpunit() {
+        assert_eq!(
+            rewrite_command("vendor/bin/phpunit --filter EmailTest", &[]),
+            Some("rtk phpunit --filter EmailTest".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_php_vendor_bin_phpunit() {
+        assert_eq!(
+            rewrite_command("php vendor/bin/phpunit tests/", &[]),
+            Some("rtk phpunit tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bin_phpunit() {
+        // bin/phpunit used by Symfony apps
+        assert_eq!(
+            rewrite_command("bin/phpunit tests/", &[]),
+            Some("rtk phpunit tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_php_bin_phpunit() {
+        assert_eq!(
+            rewrite_command("php bin/phpunit --filter EmailTest", &[]),
+            Some("rtk phpunit --filter EmailTest".into())
+        );
+    }
 }

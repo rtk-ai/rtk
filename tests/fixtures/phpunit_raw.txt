@@ -1,0 +1,22 @@
+PHPUnit 10.5.0 by Sebastian Bergmann and contributors.
+
+Runtime:       PHP 8.2.27 with Xdebug 3.3.1
+Configuration: /var/www/html/phpunit.xml
+
+........................................          40 / 40 (100%)
+..................................................  80 / 80 (100%)
+.F................................................  100 / 100 (100%)
+..........                                         110 / 110 (100%)
+
+Time: 00:01:23.456, Memory: 48.00 MB
+
+There was 1 failure:
+
+1) App\Tests\UserTest::testEmailValidation
+Failed asserting that false is true.
+
+#0 /var/www/html/src/User.php:142 (App\User::validate)
+#1 /var/www/html/tests/UserTest.php:38 (App\Tests\UserTest::testEmailValidation)
+
+FAILURES!
+Tests: 110, Assertions: 340, Failures: 1.

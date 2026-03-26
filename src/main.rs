@@ -16,6 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::gradlew_cmd;
+use cmds::php::phpunit_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -761,6 +762,12 @@ enum Commands {
     Hook {
         #[command(subcommand)]
         command: HookCommands,
+    },
+
+    /// Run PHPUnit tests with compact output (PHP)
+    Phpunit {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -2445,6 +2452,11 @@ fn run_cli() -> Result<i32> {
             }
             0
         }
+
+        Commands::Phpunit { args } => {
+            phpunit_cmd::run(&args, cli.verbose)?;
+            0
+        }
     };
 
     Ok(code)
@@ -2505,6 +2517,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Phpunit { .. }
     )
 }
 

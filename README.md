@@ -182,6 +182,7 @@ rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
 rtk err <cmd>                   # Filter errors only from any command
 rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
+rtk phpunit                     # PHPUnit tests (failures only, -65%+)
 ```
 
 ### Build & Lint

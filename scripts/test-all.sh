@@ -564,6 +564,16 @@ section "Hook check (#344)"
 
 assert_contains "rtk init --show hook version" "version" rtk init --show
 
+# ── 42. PHP (conditional) ───────────────────────────
+
+section "PHP (conditional)"
+
+if command -v phpunit &>/dev/null || [ -f vendor/bin/phpunit ] || [ -f bin/phpunit ]; then
+    assert_help    "rtk phpunit"                    rtk phpunit --help
+else
+    skip_test "rtk phpunit" "phpunit not installed"
+fi
+
 # ══════════════════════════════════════════════════════
 # Report
 # ══════════════════════════════════════════════════════
