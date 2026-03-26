@@ -194,14 +194,33 @@ pub enum TeeMode {
 }
 
 /// Configuration for the tee feature.
+///
+/// All fields have `serde(default)` so that users can specify a partial `[tee]`
+/// section in config.toml without triggering a parse error for missing fields.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TeeConfig {
+    #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
     pub mode: TeeMode,
+    #[serde(default = "default_max_files")]
     pub max_files: usize,
+    #[serde(default = "default_max_file_size")]
     pub max_file_size: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_max_files() -> usize {
+    DEFAULT_MAX_FILES
+}
+
+fn default_max_file_size() -> usize {
+    DEFAULT_MAX_FILE_SIZE
 }
 
 impl Default for TeeConfig {
@@ -385,6 +404,34 @@ directory = "/tmp/rtk-tee"
         let deserialized: TeeConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(deserialized.mode, TeeMode::Always);
         assert_eq!(deserialized.max_files, 10);
+    }
+
+    #[test]
+    fn test_tee_config_partial_deserialize() {
+        // Users may specify only some fields in [tee]; missing fields must use defaults.
+        // Before this fix, omitting max_file_size caused the entire config to fail.
+        let toml_str = r#"
+enabled = true
+mode = "failures"
+max_files = 20
+"#;
+        let config: TeeConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.mode, TeeMode::Failures);
+        assert_eq!(config.max_files, 20);
+        assert_eq!(config.max_file_size, DEFAULT_MAX_FILE_SIZE);
+        assert!(config.directory.is_none());
+    }
+
+    #[test]
+    fn test_tee_config_empty_deserialize() {
+        // A completely empty [tee] section should also work with all defaults.
+        let config: TeeConfig = toml::from_str("").unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.mode, TeeMode::Failures);
+        assert_eq!(config.max_files, DEFAULT_MAX_FILES);
+        assert_eq!(config.max_file_size, DEFAULT_MAX_FILE_SIZE);
+        assert!(config.directory.is_none());
     }
 
     #[test]
