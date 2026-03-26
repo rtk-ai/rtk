@@ -93,8 +93,6 @@ export function generateReport(buildInfo: BuildInfo): string {
   lines.push("======================================================");
   if (failed === 0) {
     lines.push("  Verdict: READY FOR RELEASE");
-  } else if (failed <= 2) {
-    lines.push(`  Verdict: READY (${failed} minor issues)`);
   } else {
     lines.push(`  Verdict: NOT READY (${failed} failures)`);
   }

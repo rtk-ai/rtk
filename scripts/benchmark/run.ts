@@ -18,9 +18,14 @@ import { saveReport } from "./lib/report";
 
 const args = process.argv.slice(2);
 const quick = args.includes("--quick");
-const phaseOnly = args.includes("--phase")
+const phaseArg = args.includes("--phase")
   ? parseInt(args[args.indexOf("--phase") + 1], 10)
   : null;
+const phaseOnly = phaseArg !== null && !Number.isNaN(phaseArg) ? phaseArg : null;
+if (args.includes("--phase") && phaseOnly === null) {
+  console.error("Error: --phase requires a number (e.g. --phase 3)");
+  process.exit(1);
+}
 
 const PROJECT_ROOT = new URL("../../", import.meta.url).pathname.replace(/\/$/, "");
 const RTK = RTK_BIN;
@@ -52,8 +57,10 @@ const commit = (await $`git -C ${PROJECT_ROOT} log --oneline -1`.text()).trim();
 const buildInfo = await vmBuildRtk(PROJECT_ROOT);
 
 // Binary size check
-// ARM Linux binaries are larger (~6.5MB) than x86 stripped (~4MB)
-const sizeLimit = 8_388_608; // 8MB
+// ARM Linux release binaries are ~6.5MB (vs ~4MB x86 stripped).
+// CLAUDE.md target is <5MB for stripped x86 release builds.
+// VM builds are ARM + not fully stripped, so we use a relaxed 8MB limit here.
+const sizeLimit = 8_388_608; // 8MB (relaxed for ARM Linux VM)
 if (buildInfo.binarySize < sizeLimit) {
   console.log(`  \x1b[32mPASS\x1b[0m | binary size | ${buildInfo.binarySize} bytes < 8MB`);
 } else {
@@ -67,17 +74,14 @@ if (buildInfo.binarySize < sizeLimit) {
 if (shouldRun(2)) {
   heading(2, "Cargo Quality");
 
-  // NOTE: fmt/clippy may fail if non-Rust files (benchmark .ts) are transferred — test "any" exit
   await testCmd(
     "quality:cargo fmt",
-    "export PATH=$HOME/.cargo/bin:$PATH && cd /home/ubuntu/rtk && cargo fmt --all --check 2>&1",
-    "any"
+    "export PATH=$HOME/.cargo/bin:$PATH && cd /home/ubuntu/rtk && cargo fmt --all --check 2>&1"
   );
 
   await testCmd(
     "quality:cargo clippy",
-    "export PATH=$HOME/.cargo/bin:$PATH && cd /home/ubuntu/rtk && cargo clippy --all-targets 2>&1",
-    "any"
+    "export PATH=$HOME/.cargo/bin:$PATH && cd /home/ubuntu/rtk && cargo clippy --all-targets -- -D warnings 2>&1"
   );
 
   const testResult = await vmExec(
@@ -128,7 +132,7 @@ if (shouldRun(3)) {
 
   // Runners
   await testCmd("runner:summary", `${RTK} summary 'echo hello world'`);
-  // NOTE: rtk err swallows exit code (known bug) — test output only, not exit code
+  // BUG: rtk err swallows exit code — tracked in #846
   await testCmd("runner:err", `${RTK} err false`, "any");
   await testCmd("runner:test", `${RTK} test 'echo ok'`, "any");
 
@@ -141,22 +145,22 @@ if (shouldRun(3)) {
   // GitHub
   await testCmd("gh:pr list", `cd /home/ubuntu/rtk && ${RTK} gh pr list`, "any");
 
-  // Cargo (Rust test project)
-  await testCmd("cargo:build", `export PATH=$HOME/.cargo/bin:$PATH && cd /tmp/test-rust && ${RTK} cargo build`, "any");
-  await testCmd("cargo:test", `export PATH=$HOME/.cargo/bin:$PATH && cd /tmp/test-rust && ${RTK} cargo test`, "any");
-  await testCmd("cargo:clippy", `export PATH=$HOME/.cargo/bin:$PATH && cd /tmp/test-rust && ${RTK} cargo clippy`, "any");
+  // Cargo (test project has intentional test failure → exit 101)
+  await testCmd("cargo:build", `export PATH=$HOME/.cargo/bin:$PATH && cd /tmp/test-rust && ${RTK} cargo build`);
+  await testCmd("cargo:test", `export PATH=$HOME/.cargo/bin:$PATH && cd /tmp/test-rust && ${RTK} cargo test`, 101);
+  await testCmd("cargo:clippy", `export PATH=$HOME/.cargo/bin:$PATH && cd /tmp/test-rust && ${RTK} cargo clippy`);
 
-  // Python
-  await testCmd("python:pytest", `cd /tmp/test-python && ${RTK} pytest`, "any");
-  await testCmd("python:ruff check", `cd /tmp/test-python && ${RTK} ruff check .`, "any");
-  await testCmd("python:mypy", `cd /tmp/test-python && ${RTK} mypy .`, "any");
+  // Python (test project has intentional failures)
+  await testCmd("python:pytest", `cd /tmp/test-python && ${RTK} pytest`, 1);
+  await testCmd("python:ruff check", `cd /tmp/test-python && ${RTK} ruff check .`, 1);
+  await testCmd("python:mypy", `cd /tmp/test-python && ${RTK} mypy .`, 1);
   await testCmd("python:pip list", `${RTK} pip list`);
 
-  // Go
-  await testCmd("go:test", `export PATH=$PATH:/usr/local/go/bin && cd /tmp/test-go && ${RTK} go test ./...`, "any");
-  await testCmd("go:build", `export PATH=$PATH:/usr/local/go/bin && cd /tmp/test-go && ${RTK} go build .`, "any");
-  await testCmd("go:vet", `export PATH=$PATH:/usr/local/go/bin && cd /tmp/test-go && ${RTK} go vet ./...`, "any");
-  await testCmd("go:golangci-lint", `export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin && cd /tmp/test-go && ${RTK} golangci-lint run`, "any");
+  // Go (test project has intentional test failure)
+  await testCmd("go:test", `export PATH=$PATH:/usr/local/go/bin && cd /tmp/test-go && ${RTK} go test ./...`, 1);
+  await testCmd("go:build", `export PATH=$PATH:/usr/local/go/bin && cd /tmp/test-go && ${RTK} go build .`, 1);
+  await testCmd("go:vet", `export PATH=$PATH:/usr/local/go/bin && cd /tmp/test-go && ${RTK} go vet ./...`, 1);
+  await testCmd("go:golangci-lint", `export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin && cd /tmp/test-go && ${RTK} golangci-lint run`, 1);
 
   // TypeScript
   await testCmd("ts:tsc", `cd /tmp/test-node && ${RTK} tsc --noEmit`, "any");
@@ -399,9 +403,6 @@ const passRate = total > 0 ? Math.round((passed * 100) / total) : 0;
 
 if (failed === 0) {
   console.log(`\n\x1b[32m  READY FOR RELEASE — ${passed}/${total} (${passRate}%)\x1b[0m\n`);
-  process.exit(0);
-} else if (failed <= 2) {
-  console.log(`\n\x1b[33m  READY (${failed} minor issues) — ${passed}/${total} (${passRate}%)\x1b[0m\n`);
   process.exit(0);
 } else {
   console.log(`\n\x1b[31m  NOT READY — ${failed} failures — ${passed}/${total} (${passRate}%)\x1b[0m\n`);
