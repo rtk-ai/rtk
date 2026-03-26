@@ -127,7 +127,9 @@ fn extract_identifier_and_extra_args(args: &[String]) -> Option<(String, Vec<Str
         "--jq",
         "-t",
         "--template",
+        "-j",
         "--job",
+        "-a",
         "--attempt",
     ];
     let mut identifier = None;
@@ -883,15 +885,16 @@ fn should_passthrough_run_view(extra_args: &[String]) -> bool {
 }
 
 fn view_run(args: &[String], _verbose: u8) -> Result<()> {
+    // Pass through before extracting a positional run ID so flag-only forms like
+    // `gh run view --log-failed --job <job-id>` keep their original argument order.
+    if should_passthrough_run_view(args) {
+        return run_passthrough_with_extra("gh", &["run", "view"], args);
+    }
+
     let (run_id, extra_args) = match extract_identifier_and_extra_args(args) {
         Some(result) => result,
         None => return Err(anyhow::anyhow!("Run ID required")),
     };
-
-    // Pass through when user requests logs or JSON — the filter would strip them
-    if should_passthrough_run_view(&extra_args) {
-        return run_passthrough_with_extra("gh", &["run", "view", &run_id], &extra_args);
-    }
 
     let timer = tracking::TimedExecution::start();
 
@@ -1421,6 +1424,20 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_identifier_skips_short_job_flag_value() {
+        let args: Vec<String> = vec!["-j".into(), "123456789".into(), "--log-failed".into()];
+        assert!(extract_identifier_and_extra_args(&args).is_none());
+    }
+
+    #[test]
+    fn test_extract_identifier_short_attempt_flag_before_identifier() {
+        let args: Vec<String> = vec!["-a".into(), "2".into(), "123456789".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "123456789");
+        assert_eq!(extra, vec!["-a", "2"]);
+    }
+
+    #[test]
     fn test_run_view_passthrough_log_failed() {
         assert!(should_passthrough_run_view(&["--log-failed".into()]));
     }
@@ -1487,6 +1504,14 @@ mod tests {
         let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
         assert_eq!(id, "12345");
         assert_eq!(extra, vec!["--attempt", "3"]);
+    }
+
+    #[test]
+    fn test_extract_identifier_with_short_job_flag_before() {
+        let args: Vec<String> = vec!["-j".into(), "67890".into(), "12345".into()];
+        let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(extra, vec!["-j", "67890"]);
     }
 
     // --- should_passthrough_pr_view tests ---
