@@ -220,7 +220,13 @@ if (shouldRun(4)) {
   await testCmd("toml:pio", `${RTK} pio run`, "any");
   await testCmd("toml:quarto", `${RTK} quarto render`, "any");
   await testCmd("toml:sops", `${RTK} sops --version`);
-  await testCmd("toml:swift", `${RTK} swift build`, "any");
+  // Swift ecosystem
+  await testCmd("toml:swift build", `${RTK} swift build`, "any");
+  await testCmd("toml:swift test", `${RTK} swift test`, "any");
+  await testCmd("toml:swift run", `${RTK} swift run`, "any");
+  await testCmd("toml:swift package", `${RTK} swift package resolve`, "any");
+  await testCmd("toml:swiftlint", `${RTK} swiftlint`, "any");
+  await testCmd("toml:swiftformat", `${RTK} swiftformat`, "any");
   await testCmd("toml:kubectl", `${RTK} kubectl version --client`, "any");
 }
 
@@ -305,6 +311,18 @@ if (shouldRun(7)) {
     "cat /home/ubuntu/rtk/src/main.rs",
     `${RTK} read /home/ubuntu/rtk/src/main.rs -l aggressive`,
     50
+  );
+  await testSavings(
+    "savings:swift test",
+    "swift test",
+    `${RTK} swift test`,
+    60
+  );
+  await testSavings(
+    "savings:swiftlint",
+    "swiftlint",
+    `${RTK} swiftlint`,
+    20
   );
 }
 
