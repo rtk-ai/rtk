@@ -9,3 +9,4 @@ pub mod prettier_cmd;
 pub mod prisma_cmd;
 pub mod tsc_cmd;
 pub mod vitest_cmd;
+pub mod yarn_cmd;
