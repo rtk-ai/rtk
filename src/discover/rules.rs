@@ -15,6 +15,7 @@ pub struct RtkRule {
 pub const PATTERNS: &[&str] = &[
     r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
     r"^gh\s+(pr|issue|run|repo|api|release)",
+    r"^glab\s+(mr|issue|api|pipeline|release|repo)",
     r"^cargo\s+(build|test|clippy|check|fmt|install)",
     r"^pnpm\s+(list|ls|outdated|install)",
     r"^npm\s+(run|exec)",
@@ -108,6 +109,14 @@ pub const RULES: &[RtkRule] = &[
         category: "GitHub",
         savings_pct: 82.0,
         subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk glab",
+        rewrite_prefixes: &["glab"],
+        category: "GitLab",
+        savings_pct: 82.0,
+        subcmd_savings: &[("mr", 85.0), ("issue", 80.0)],
         subcmd_status: &[],
     },
     RtkRule {

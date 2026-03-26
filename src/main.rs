@@ -20,6 +20,7 @@ mod format_cmd;
 mod gain;
 mod gh_cmd;
 mod git;
+mod glab_cmd;
 mod go_cmd;
 mod golangci_cmd;
 mod grep_cmd;
@@ -199,6 +200,15 @@ enum Commands {
     /// GitHub CLI (gh) commands with token-optimized output
     Gh {
         /// Subcommand: pr, issue, run, repo
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// GitLab CLI (glab) commands with token-optimized output
+    Glab {
+        /// Subcommand: mr, issue, api, pipeline, release
         subcommand: String,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1487,6 +1497,10 @@ fn main() -> Result<()> {
             gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?;
         }
 
+        Commands::Glab { subcommand, args } => {
+            glab_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?;
+        }
+
         Commands::Aws { subcommand, args } => {
             aws_cmd::run(&subcommand, &args, cli.verbose)?;
         }
@@ -2275,6 +2289,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Smart { .. }
             | Commands::Git { .. }
             | Commands::Gh { .. }
+            | Commands::Glab { .. }
             | Commands::Pnpm { .. }
             | Commands::Err { .. }
             | Commands::Test { .. }
