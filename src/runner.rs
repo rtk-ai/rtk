@@ -59,6 +59,9 @@ pub fn run_err(command: &str, verbose: u8) -> Result<()> {
         println!("{}", rtk);
     }
     timer.track(command, "rtk run-err", &raw, &rtk);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 
@@ -100,6 +103,9 @@ pub fn run_test(command: &str, verbose: u8) -> Result<()> {
         println!("{}", summary);
     }
     timer.track(command, "rtk run-test", &raw, &summary);
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 
