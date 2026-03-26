@@ -29,7 +29,11 @@ pub fn run(
     let rg_pattern = pattern.replace(r"\|", "|");
 
     let mut rg_cmd = resolved_command("rg");
-    rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
+    // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
+    // Without this, rg returns 0 matches for files in .gitignore, causing
+    // false negatives that make AI agents draw wrong conclusions.
+    // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
+    rg_cmd.args(["-n", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -72,16 +76,18 @@ pub fn run(
         return Ok(exit_code);
     }
 
-    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
-    let mut total = 0;
+    // Always filter: truncate long lines, apply per-file and global caps.
+    // Output in standard file:line:content format that AI agents can parse.
+    // (A passthrough approach yields 0% savings — no reason for RTK to exist on that path.)
+    let total_matches = result.stdout.lines().count();
 
-    // Compile context regex once (instead of per-line in clean_line)
     let context_re = if context_only {
         Regex::new(&format!("(?i).{{0,20}}{}.*", regex::escape(pattern))).ok()
     } else {
         None
     };
 
+    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for line in result.stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
 
@@ -95,43 +101,39 @@ pub fn run(
             continue;
         };
 
-        total += 1;
         let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!("{} matches in {}F:\n\n", total, by_file.len()));
+    rtk_output.push_str(&format!(
+        "{} matches in {} files:\n\n",
+        total_matches,
+        by_file.len()
+    ));
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
     files.sort_by_key(|(f, _)| *f);
 
+    let per_file = config::limits().grep_max_per_file;
     for (file, matches) in files {
         if shown >= max_results {
             break;
         }
 
         let file_display = compact_path(file);
-        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, matches.len()));
-
-        let per_file = config::limits().grep_max_per_file;
         for (line_num, content) in matches.iter().take(per_file) {
-            rtk_output.push_str(&format!("  {:>4}: {}\n", line_num, content));
-            shown += 1;
             if shown >= max_results {
                 break;
             }
+            rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
+            shown += 1;
         }
-
-        if matches.len() > per_file {
-            rtk_output.push_str(&format!("  +{}\n", matches.len() - per_file));
-        }
-        rtk_output.push('\n');
     }
 
-    if total > shown {
-        rtk_output.push_str(&format!("... +{}\n", total - shown));
+    if total_matches > shown {
+        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
     }
 
     print!("{}", rtk_output);
@@ -306,6 +308,26 @@ mod tests {
             assert!(
                 output.status.code() == Some(1) || output.status.success(),
                 "rg -n should be accepted"
+            );
+        }
+        // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    #[test]
+    fn test_rg_no_ignore_vcs_flag_accepted() {
+        // Verify rg accepts --no-ignore-vcs (used to match grep -r behavior for .gitignore)
+        let mut cmd = resolved_command("rg");
+        cmd.args([
+            "-n",
+            "--no-heading",
+            "--no-ignore-vcs",
+            "NONEXISTENT_PATTERN_12345",
+            ".",
+        ]);
+        if let Ok(output) = cmd.output() {
+            assert!(
+                output.status.code() == Some(1) || output.status.success(),
+                "rg --no-ignore-vcs should be accepted"
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
