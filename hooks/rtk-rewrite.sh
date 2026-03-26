@@ -13,6 +13,7 @@
 #   2           Deny rule matched → pass through (Claude Code native deny handles it)
 #   3 + stdout  Ask rule matched → rewrite but let Claude Code prompt the user
 
+# NOTE: dependency guards duplicated across hook files intentionally — hooks must be self-contained for deployment
 if ! command -v jq &>/dev/null; then
   echo "[rtk] WARNING: jq is not installed. Hook cannot rewrite commands. Install jq: https://jqlang.github.io/jq/download/" >&2
   exit 0
@@ -70,29 +71,29 @@ case $EXIT_CODE in
     ;;
 esac
 
+_emit_hook_response() {
+  local updated="$1" exit_code="$2"
+  if [ "$exit_code" -eq 3 ]; then
+    jq -n --argjson updated "$updated" \
+      '{
+        "hookSpecificOutput": {
+          "hookEventName": "PreToolUse",
+          "updatedInput": $updated
+        }
+      }'
+  else
+    jq -n --argjson updated "$updated" \
+      '{
+        "hookSpecificOutput": {
+          "hookEventName": "PreToolUse",
+          "permissionDecision": "allow",
+          "permissionDecisionReason": "RTK auto-rewrite",
+          "updatedInput": $updated
+        }
+      }'
+  fi
+}
+
 ORIGINAL_INPUT=$(echo "$INPUT" | jq -c '.tool_input')
 UPDATED_INPUT=$(echo "$ORIGINAL_INPUT" | jq --arg cmd "$REWRITTEN" '.command = $cmd')
-
-if [ "$EXIT_CODE" -eq 3 ]; then
-  # Ask: rewrite the command, omit permissionDecision so Claude Code prompts.
-  jq -n \
-    --argjson updated "$UPDATED_INPUT" \
-    '{
-      "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "updatedInput": $updated
-      }
-    }'
-else
-  # Allow: rewrite the command and auto-allow.
-  jq -n \
-    --argjson updated "$UPDATED_INPUT" \
-    '{
-      "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": "allow",
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": $updated
-      }
-    }'
-fi
+_emit_hook_response "$UPDATED_INPUT" "$EXIT_CODE"

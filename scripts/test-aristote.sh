@@ -8,74 +8,8 @@ set -euo pipefail
 
 ARISTOTE="/Users/florianbruniaux/Sites/MethodeAristote/aristote-school-boost"
 
-PASS=0
-FAIL=0
-SKIP=0
-FAILURES=()
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
-
-assert_ok() {
-    local name="$1"; shift
-    local output
-    if output=$("$@" 2>&1); then
-        PASS=$((PASS + 1))
-        printf "  ${GREEN}PASS${NC}  %s\n" "$name"
-    else
-        FAIL=$((FAIL + 1))
-        FAILURES+=("$name")
-        printf "  ${RED}FAIL${NC}  %s\n" "$name"
-        printf "        cmd: %s\n" "$*"
-        printf "        out: %s\n" "$(echo "$output" | head -3)"
-    fi
-}
-
-assert_contains() {
-    local name="$1"; local needle="$2"; shift 2
-    local output
-    if output=$("$@" 2>&1) && echo "$output" | grep -q "$needle"; then
-        PASS=$((PASS + 1))
-        printf "  ${GREEN}PASS${NC}  %s\n" "$name"
-    else
-        FAIL=$((FAIL + 1))
-        FAILURES+=("$name")
-        printf "  ${RED}FAIL${NC}  %s\n" "$name"
-        printf "        expected: '%s'\n" "$needle"
-        printf "        got: %s\n" "$(echo "$output" | head -3)"
-    fi
-}
-
-# Allow non-zero exit but check output
-assert_output() {
-    local name="$1"; local needle="$2"; shift 2
-    local output
-    output=$("$@" 2>&1) || true
-    if echo "$output" | grep -q "$needle"; then
-        PASS=$((PASS + 1))
-        printf "  ${GREEN}PASS${NC}  %s\n" "$name"
-    else
-        FAIL=$((FAIL + 1))
-        FAILURES+=("$name")
-        printf "  ${RED}FAIL${NC}  %s\n" "$name"
-        printf "        expected: '%s'\n" "$needle"
-        printf "        got: %s\n" "$(echo "$output" | head -3)"
-    fi
-}
-
-skip_test() {
-    local name="$1"; local reason="$2"
-    SKIP=$((SKIP + 1))
-    printf "  ${YELLOW}SKIP${NC}  %s (%s)\n" "$name" "$reason"
-}
-
-section() {
-    printf "\n${BOLD}${CYAN}── %s ──${NC}\n" "$1"
-}
+# shellcheck source=./_test_harness.sh
+source "$(dirname "$0")/_test_harness.sh"
 
 # ── Preamble ─────────────────────────────────────────
 
@@ -212,16 +146,4 @@ assert_ok       "rtk gain --history"            rtk gain --history
 # Report
 # ══════════════════════════════════════════════════════
 
-printf "\n${BOLD}══════════════════════════════════════${NC}\n"
-printf "${BOLD}Results: ${GREEN}%d passed${NC}, ${RED}%d failed${NC}, ${YELLOW}%d skipped${NC}\n" "$PASS" "$FAIL" "$SKIP"
-
-if [[ ${#FAILURES[@]} -gt 0 ]]; then
-    printf "\n${RED}Failures:${NC}\n"
-    for f in "${FAILURES[@]}"; do
-        printf "  - %s\n" "$f"
-    done
-fi
-
-printf "${BOLD}══════════════════════════════════════${NC}\n"
-
-exit "$FAIL"
+report_and_exit
