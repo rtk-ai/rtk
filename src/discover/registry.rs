@@ -1,3 +1,5 @@
+//! Matches shell commands against known RTK rewrite rules to decide how to handle them.
+
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
@@ -48,6 +50,10 @@ lazy_static! {
         .collect();
     static ref ENV_PREFIX: Regex =
         Regex::new(r"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=[^\s]*\s+)+").unwrap();
+    // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
+    // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
+    static ref GIT_GLOBAL_OPT: Regex =
+        Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
 }
 
 /// Classify a single (already-split) command.
@@ -75,6 +81,12 @@ pub fn classify_command(cmd: &str) -> Classification {
     if cmd_clean.is_empty() {
         return Classification::Ignored;
     }
+
+    // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
+    let cmd_normalized = strip_absolute_path(cmd_clean);
+    // Strip git global options: git -C /tmp status → git status (#163)
+    let cmd_normalized = strip_git_global_opts(&cmd_normalized);
+    let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
     if cmd_clean.starts_with("cat ")
@@ -262,6 +274,42 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     results
 }
 
+/// Strip git global options before the subcommand (#163).
+/// `git -C /tmp status` → `git status`, preserving the rest.
+/// Returns the original string unchanged if not a git command.
+fn strip_git_global_opts(cmd: &str) -> String {
+    // Only applies to commands starting with "git "
+    if !cmd.starts_with("git ") {
+        return cmd.to_string();
+    }
+    let after_git = &cmd[4..]; // skip "git "
+    let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
+    format!("git {}", stripped.trim())
+}
+
+/// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
+/// Only strips if the first word contains a `/` (Unix path).
+fn strip_absolute_path(cmd: &str) -> String {
+    let first_space = cmd.find(' ');
+    let first_word = match first_space {
+        Some(pos) => &cmd[..pos],
+        None => cmd,
+    };
+    if first_word.contains('/') {
+        // Extract basename
+        let basename = first_word.rsplit('/').next().unwrap_or(first_word);
+        if basename.is_empty() {
+            return cmd.to_string();
+        }
+        match first_space {
+            Some(pos) => format!("{}{}", basename, &cmd[pos..]),
+            None => basename.to_string(),
+        }
+    } else {
+        cmd.to_string()
+    }
+}
+
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
 pub fn has_rtk_disabled_prefix(cmd: &str) -> bool {
     let trimmed = cmd.trim();
@@ -281,9 +329,34 @@ pub fn strip_disabled_prefix(cmd: &str) -> &str {
     trimmed[prefix_len..].trim_start()
 }
 
-/// Rewrite a raw command to its RTK equivalent.
-///
-/// Returns `Some(rewritten)` if the command has an RTK equivalent or is already RTK.
+lazy_static! {
+    // Match trailing shell redirections:
+    // Alt 1: N>&M or N>&- (fd redirect/close): 2>&1, 1>&2, 2>&-
+    // Alt 2: &>file or &>>file (bash redirect both): &>/dev/null
+    // Alt 3: N>file or N>>file (fd to file): 2>/dev/null, >/tmp/out, 1>>log
+    // Note: [^(\\s] excludes process substitutions like >(tee) from false-positive matching
+    static ref TRAILING_REDIRECT: Regex =
+        Regex::new(r"\s+(?:[0-9]?>&[0-9-]|&>>?\S+|[0-9]?>>?\s*[^(\s]\S*)\s*$").unwrap();
+}
+
+/// Strip trailing stderr/stdout redirects from a command segment (#530).
+/// Returns (command_without_redirects, redirect_suffix).
+fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
+    if let Some(m) = TRAILING_REDIRECT.find(cmd) {
+        // Verify redirect is not inside quotes (single-pass count)
+        let before = &cmd[..m.start()];
+        let (sq, dq) = before.chars().fold((0u32, 0u32), |(s, d), c| match c {
+            '\'' => (s + 1, d),
+            '"' => (s, d + 1),
+            _ => (s, d),
+        });
+        if sq % 2 == 0 && dq % 2 == 0 {
+            return (&cmd[..m.start()], &cmd[m.start()..]);
+        }
+    }
+    (cmd, "")
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
@@ -355,8 +428,18 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
                 } else {
                     // `|` pipe — rewrite first segment only, pass through the rest unchanged
                     let seg = cmd[seg_start..i].trim();
-                    let rewritten =
-                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+                    // Skip rewriting `find`/`fd` in pipes — rtk find outputs a grouped
+                    // format that is incompatible with pipe consumers like xargs, grep,
+                    // wc, sort, etc. which expect one path per line (#439).
+                    let is_pipe_incompatible = seg.starts_with("find ")
+                        || seg == "find"
+                        || seg.starts_with("fd ")
+                        || seg == "fd";
+                    let rewritten = if is_pipe_incompatible {
+                        seg.to_string()
+                    } else {
+                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string())
+                    };
                     if rewritten != seg {
                         any_changed = true;
                     }
@@ -509,8 +592,12 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
         return None;
     }
 
+    // Strip trailing stderr/stdout redirects before matching (#530)
+    // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
+    let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
+
     // Already RTK — pass through unchanged
-    if trimmed.starts_with("rtk ") || trimmed == "rtk" {
+    if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
         return Some(trimmed.to_string());
     }
 
@@ -518,21 +605,21 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // Must intercept before generic prefix replacement, which would produce `rtk read -20 file`.
     // Only intercept when head has a flag (-N, --lines=N, -c, etc.); plain `head file` falls
     // through to the generic rewrite below and produces `rtk read file` as expected.
-    if trimmed.starts_with("head -") {
-        return rewrite_head_numeric(trimmed);
+    if cmd_part.starts_with("head -") {
+        return rewrite_head_numeric(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
     // tail has several forms that are not compatible with generic prefix replacement.
     // Only rewrite recognized numeric line forms; otherwise skip rewrite.
-    if trimmed.starts_with("tail ") {
-        return rewrite_tail_lines(trimmed);
+    if cmd_part.starts_with("tail ") {
+        return rewrite_tail_lines(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
     // Use classify_command for correct ignore/prefix handling
-    let rtk_equivalent = match classify_command(trimmed) {
+    let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
             // Check if the base command is excluded from rewriting (#243)
-            let base = trimmed.split_whitespace().next().unwrap_or("");
+            let base = cmd_part.split_whitespace().next().unwrap_or("");
             if excluded.iter().any(|e| e == base) {
                 return None;
             }
@@ -545,13 +632,13 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
 
     // Extract env prefix (sudo, env VAR=val, etc.)
-    let stripped_cow = ENV_PREFIX.replace(trimmed, "");
-    let env_prefix_len = trimmed.len() - stripped_cow.len();
-    let env_prefix = &trimmed[..env_prefix_len];
+    let stripped_cow = ENV_PREFIX.replace(cmd_part, "");
+    let env_prefix_len = cmd_part.len() - stripped_cow.len();
+    let env_prefix = &cmd_part[..env_prefix_len];
     let cmd_clean = stripped_cow.trim();
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
-    if has_rtk_disabled_prefix(trimmed) {
+    if has_rtk_disabled_prefix(cmd_part) {
         return None;
     }
 
@@ -571,9 +658,9 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
             let rewritten = if rest.is_empty() {
-                format!("{}{}", env_prefix, rule.rtk_cmd)
+                format!("{}{}{}", env_prefix, rule.rtk_cmd, redirect_suffix)
             } else {
-                format!("{}{} {}", env_prefix, rule.rtk_cmd, rest)
+                format!("{}{} {}{}", env_prefix, rule.rtk_cmd, rest, redirect_suffix)
             };
             return Some(rewritten);
         }
@@ -679,12 +766,10 @@ mod tests {
             "tail -f app.log > /dev/null",
         ];
         for cmd in &write_commands {
-            match classify_command(cmd) {
-                Classification::Supported { .. } => {
-                    panic!("{} should NOT be classified as Supported", cmd)
-                }
-                _ => {} // Unsupported or Ignored is fine
+            if let Classification::Supported { .. } = classify_command(cmd) {
+                panic!("{} should NOT be classified as Supported", cmd)
             }
+            // Unsupported or Ignored is fine
         }
     }
 
@@ -936,6 +1021,48 @@ mod tests {
         );
     }
 
+    // --- git -C <path> support (#555) ---
+
+    #[test]
+    fn test_rewrite_git_dash_c_status() {
+        assert_eq!(
+            rewrite_command("git -C /path/to/repo status", &[]),
+            Some("rtk git -C /path/to/repo status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_dash_c_log() {
+        assert_eq!(
+            rewrite_command("git -C /tmp/myrepo log --oneline -5", &[]),
+            Some("rtk git -C /tmp/myrepo log --oneline -5".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_dash_c_diff() {
+        assert_eq!(
+            rewrite_command("git -C /home/user/project diff --name-only", &[]),
+            Some("rtk git -C /home/user/project diff --name-only".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_git_dash_c() {
+        let result = classify_command("git -C /tmp status");
+        assert!(
+            matches!(
+                result,
+                Classification::Supported {
+                    rtk_equivalent: "rtk git",
+                    ..
+                }
+            ),
+            "git -C should be classified as supported, got: {:?}",
+            result
+        );
+    }
+
     #[test]
     fn test_rewrite_cargo_test() {
         assert_eq!(
@@ -1072,6 +1199,30 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_find_pipe_skipped() {
+        // find in a pipe should NOT be rewritten — rtk find output format
+        // is incompatible with pipe consumers like xargs (#439)
+        assert_eq!(
+            rewrite_command("find . -name '*.rs' | xargs grep 'fn run'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_pipe_xargs_wc() {
+        assert_eq!(rewrite_command("find src -type f | wc -l", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_find_no_pipe_still_rewritten() {
+        // find WITHOUT a pipe should still be rewritten
+        assert_eq!(
+            rewrite_command("find . -name '*.rs'", &[]),
+            Some("rtk find . -name '*.rs'".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_heredoc_returns_none() {
         assert_eq!(rewrite_command("cat <<'EOF'\nfoo\nEOF", &[]), None);
     }
@@ -1162,6 +1313,35 @@ mod tests {
         assert_eq!(
             rewrite_command("cargo test &>/dev/null", &[]),
             Some("rtk cargo test &>/dev/null".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_double() {
+        // Double redirect: only last one stripped, but full command rewrites correctly
+        assert_eq!(
+            rewrite_command("git status 2>&1 >/dev/null", &[]),
+            Some("rtk git status 2>&1 >/dev/null".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_fd_close() {
+        // 2>&- (close stderr fd)
+        assert_eq!(
+            rewrite_command("git status 2>&-", &[]),
+            Some("rtk git status 2>&-".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_quotes_not_stripped() {
+        // Redirect-like chars inside quotes should NOT be stripped
+        // Known limitation: apostrophes cause conservative no-strip (safe fallback)
+        let result = rewrite_command("git commit -m \"it's fixed\" 2>&1", &[]);
+        assert!(
+            result.is_some(),
+            "Should still rewrite even with apostrophe"
         );
     }
 
@@ -1396,6 +1576,27 @@ mod tests {
         assert_eq!(
             rewrite_command("docker run --rm ubuntu bash", &[]),
             Some("rtk docker run --rm ubuntu bash".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_swift_test() {
+        assert!(matches!(
+            classify_command("swift test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk swift",
+                category: "Build",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_swift_test() {
+        assert_eq!(
+            rewrite_command("swift test --parallel", &[]),
+            Some("rtk swift test --parallel".into())
         );
     }
 
@@ -2018,5 +2219,133 @@ mod tests {
             "cargo test"
         );
         assert_eq!(strip_disabled_prefix("git status"), "git status");
+    }
+
+    // --- #485: absolute path normalization ---
+
+    #[test]
+    fn test_classify_absolute_path_grep() {
+        assert_eq!(
+            classify_command("/usr/bin/grep -rni pattern"),
+            Classification::Supported {
+                rtk_equivalent: "rtk grep",
+                category: "Files",
+                estimated_savings_pct: 75.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_absolute_path_ls() {
+        assert_eq!(
+            classify_command("/bin/ls -la"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ls",
+                category: "Files",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_absolute_path_git() {
+        assert_eq!(
+            classify_command("/usr/local/bin/git status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_absolute_path_no_args() {
+        // /usr/bin/find alone → still classified
+        assert_eq!(
+            classify_command("/usr/bin/find ."),
+            Classification::Supported {
+                rtk_equivalent: "rtk find",
+                category: "Files",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_strip_absolute_path_helper() {
+        assert_eq!(strip_absolute_path("/usr/bin/grep -rn foo"), "grep -rn foo");
+        assert_eq!(strip_absolute_path("/bin/ls -la"), "ls -la");
+        assert_eq!(strip_absolute_path("grep -rn foo"), "grep -rn foo");
+        assert_eq!(strip_absolute_path("/usr/local/bin/git"), "git");
+    }
+
+    // --- #163: git global options ---
+
+    #[test]
+    fn test_classify_git_with_dash_c_path() {
+        assert_eq!(
+            classify_command("git -C /tmp status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_no_pager_log() {
+        assert_eq!(
+            classify_command("git --no-pager log -5"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_git_dir() {
+        assert_eq!(
+            classify_command("git --git-dir /tmp/.git status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_dash_c() {
+        assert_eq!(
+            rewrite_command("git -C /tmp status", &[]),
+            Some("rtk git -C /tmp status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_no_pager() {
+        assert_eq!(
+            rewrite_command("git --no-pager log -5", &[]),
+            Some("rtk git --no-pager log -5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_strip_git_global_opts_helper() {
+        assert_eq!(strip_git_global_opts("git -C /tmp status"), "git status");
+        assert_eq!(strip_git_global_opts("git --no-pager log"), "git log");
+        assert_eq!(strip_git_global_opts("git status"), "git status");
+        assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
     }
 }

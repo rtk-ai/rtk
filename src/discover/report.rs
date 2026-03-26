@@ -1,3 +1,5 @@
+//! Data types for reporting which commands RTK can and cannot optimize.
+
 use serde::Serialize;
 
 /// RTK support status for a command.
@@ -164,6 +166,14 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     }
 
     out.push_str("\n~estimated from tool_result output sizes\n");
+
+    // Cursor note: check if Cursor hooks are installed
+    if let Some(home) = dirs::home_dir() {
+        let cursor_hook = home.join(".cursor").join("hooks").join("rtk-rewrite.sh");
+        if cursor_hook.exists() {
+            out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+        }
+    }
 
     if verbose && report.parse_errors > 0 {
         out.push_str(&format!("Parse errors skipped: {}\n", report.parse_errors));

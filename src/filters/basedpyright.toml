@@ -42,6 +42,6 @@ Found 10 source files
 expected = "0 errors, 0 warnings, 0 informations"
 
 [[tests.basedpyright]]
-name = "empty input passes through"
+name = "empty input returns on_empty message"
 input = ""
-expected = ""
+expected = "basedpyright: ok"

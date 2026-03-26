@@ -10,7 +10,7 @@
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://discord.gg/pvHdzAec"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
+  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
 
@@ -19,7 +19,7 @@
   <a href="#installation">Install</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> &bull;
   <a href="ARCHITECTURE.md">Architecture</a> &bull;
-  <a href="https://discord.gg/pvHdzAec">Discord</a>
+  <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
 <p align="center">
@@ -33,7 +33,7 @@
 
 ---
 
-rtk filters and compresses command outputs before they reach your LLM context. Single Rust binary, zero dependencies, <10ms overhead.
+rtk filters and compresses command outputs before they reach your LLM context. Single Rust binary, 100+ supported commands, <10ms overhead.
 
 ## Token Savings (30-min Claude Code Session)
 
@@ -90,7 +90,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 ### Verify Installation
 
 ```bash
-rtk --version   # Should show "rtk 0.28.0"
+rtk --version   # Should show "rtk 0.28.2"
 rtk gain        # Should show token savings stats
 ```
 
@@ -99,16 +99,21 @@ rtk gain        # Should show token savings stats
 ## Quick Start
 
 ```bash
-# 1. Install hook for Claude Code (recommended)
-rtk init --global
-# Follow instructions to register in ~/.claude/settings.json
-# Claude Code only by default (use --opencode for OpenCode)
+# 1. Install for your AI tool
+rtk init -g                     # Claude Code / Copilot (default)
+rtk init -g --gemini            # Gemini CLI
+rtk init -g --codex             # Codex (OpenAI)
+rtk init -g --agent cursor      # Cursor
+rtk init --agent windsurf       # Windsurf
+rtk init --agent cline          # Cline / Roo Code
 
-# 2. Restart Claude Code, then test
+# 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
 ```
 
-The hook transparently rewrites commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+
+**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
 ## How It Works
 
@@ -169,6 +174,8 @@ rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
+rtk rake test                   # Ruby minitest (-90%)
+rtk rspec                       # RSpec tests (JSON, -60%+)
 ```
 
 ### Build & Lint
@@ -182,6 +189,7 @@ rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
+rtk rubocop                     # Ruby linting (JSON, -60%+)
 ```
 
 ### Package Managers
@@ -189,6 +197,7 @@ rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk pnpm list                   # Compact dependency tree
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
+rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
 ```
 
@@ -225,6 +234,8 @@ rtk gain --all --format json    # JSON export for dashboards
 
 rtk discover                    # Find missed savings opportunities
 rtk discover --all --since 7    # All projects, last 7 days
+
+rtk session                     # Show RTK adoption across recent sessions
 ```
 
 ## Global Flags
@@ -269,6 +280,8 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
 
+**Scope note:** this only applies to Bash tool calls. Claude Code built-in tools such as `Read`, `Grep`, and `Glob` bypass the hook, so use shell commands or explicit `rtk` commands when you want RTK filtering there.
+
 ### Setup
 
 ```bash
@@ -281,27 +294,105 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
-## OpenCode Plugin (Global)
+## Supported AI Tools
 
-OpenCode supports plugins that can intercept tool execution. RTK provides a global plugin that mirrors the Claude auto-rewrite behavior by rewriting Bash tool commands to `rtk ...` before they execute. This plugin is **not** installed by default.
+RTK supports 10 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
 
-> **Note**: This plugin uses OpenCode's `tool.execute.before` hook. Known limitation: plugin hooks do not intercept subagent tool calls ([upstream issue](https://github.com/sst/opencode/issues/5894)). See [OpenCode plugin docs](https://open-code.ai/en/docs/plugins) for API details.
+| Tool | Install | Method |
+|------|---------|--------|
+| **Claude Code** | `rtk init -g` | PreToolUse hook (bash) |
+| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook (`rtk hook copilot`) — transparent rewrite |
+| **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
+| **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
+| **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook (`rtk hook gemini`) |
+| **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
+| **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
+| **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
+| **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
+| **Mistral Vibe** | Planned (#800) | Blocked on upstream BeforeToolCallback |
 
-**Install OpenCode plugin:**
+### Claude Code (default)
+
+```bash
+rtk init -g                 # Install hook + RTK.md
+rtk init -g --auto-patch    # Non-interactive (CI/CD)
+rtk init --show             # Verify installation
+rtk init -g --uninstall     # Remove
+```
+
+### GitHub Copilot (VS Code + CLI)
+
+```bash
+rtk init -g --copilot         # Install hook + instructions
+```
+
+Creates `.github/hooks/rtk-rewrite.json` (PreToolUse hook) and `.github/copilot-instructions.md` (prompt-level awareness).
+
+The hook (`rtk hook copilot`) auto-detects the format:
+- **VS Code Copilot Chat**: transparent rewrite via `updatedInput` (same as Claude Code)
+- **Copilot CLI**: deny-with-suggestion (CLI does not support `updatedInput` yet — see [copilot-cli#2013](https://github.com/github/copilot-cli/issues/2013))
+
+### Cursor
+
+```bash
+rtk init -g --agent cursor
+```
+
+Creates `~/.cursor/hooks/rtk-rewrite.sh` + patches `~/.cursor/hooks.json` with preToolUse matcher. Works with both Cursor editor and `cursor-agent` CLI.
+
+### Gemini CLI
+
+```bash
+rtk init -g --gemini
+rtk init -g --gemini --uninstall
+```
+
+Creates `~/.gemini/hooks/rtk-hook-gemini.sh` + patches `~/.gemini/settings.json` with BeforeTool hook.
+
+### Codex (OpenAI)
+
+```bash
+rtk init -g --codex
+```
+
+Creates `~/.codex/RTK.md` + `~/.codex/AGENTS.md` with `@RTK.md` reference. Codex reads these as global instructions.
+
+### Windsurf
+
+```bash
+rtk init --agent windsurf
+```
+
+Creates `.windsurfrules` in the current project. Cascade reads rules and prefixes commands with `rtk`.
+
+### Cline / Roo Code
+
+```bash
+rtk init --agent cline
+```
+
+Creates `.clinerules` in the current project. Cline reads rules and prefixes commands with `rtk`.
+
+### OpenCode
+
 ```bash
 rtk init -g --opencode
 ```
 
-**What it creates:**
-- `~/.config/opencode/plugins/rtk.ts`
+Creates `~/.config/opencode/plugins/rtk.ts`. Uses `tool.execute.before` hook.
 
-**Restart Required**: Restart OpenCode, then test with `git status` in a session.
+### OpenClaw
 
-**Manual install (fallback):**
 ```bash
-mkdir -p ~/.config/opencode/plugins
-cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
+openclaw plugins install ./openclaw
 ```
+
+Plugin in `openclaw/` directory. Uses `before_tool_call` hook, delegates to `rtk rewrite`.
+
+### Mistral Vibe (planned)
+
+Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531), [PR #533](https://github.com/mistralai/mistral-vibe/pull/533)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
 
 ### Commands Rewritten
 
@@ -324,6 +415,10 @@ cp hooks/opencode-rtk.ts ~/.config/opencode/plugins/rtk.ts
 | `pip list/install` | `rtk pip ...` |
 | `go test/build/vet` | `rtk go ...` |
 | `golangci-lint` | `rtk golangci-lint` |
+| `rake test` / `rails test` | `rtk rake test` |
+| `rspec` / `bundle exec rspec` | `rtk rspec` |
+| `rubocop` / `bundle exec rubocop` | `rtk rubocop` |
+| `bundle install/update` | `rtk bundle ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
@@ -375,11 +470,33 @@ brew uninstall rtk           # If installed via Homebrew
 - **[SECURITY.md](SECURITY.md)** - Security policy and PR review process
 - **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
 
+## Privacy & Telemetry
+
+RTK collects **anonymous, aggregate usage metrics** once per day to help prioritize development. This is standard practice for open-source CLI tools.
+
+**What is collected:**
+- Device hash (SHA-256 of hostname+username, not reversible)
+- RTK version, OS, architecture
+- Command count (last 24h) and top command names (e.g. "git", "cargo" — no arguments, no file paths)
+- Token savings percentage
+
+**What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, or any personally identifiable information.
+
+**Opt-out** (any of these):
+```bash
+# Environment variable
+export RTK_TELEMETRY_DISABLED=1
+
+# Or in config file (~/.config/rtk/config.toml)
+[telemetry]
+enabled = false
+```
+
 ## Contributing
 
 Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/rtk-ai/rtk).
 
-Join the community on [Discord](https://discord.gg/pvHdzAec).
+Join the community on [Discord](https://discord.gg/RySmvNF5kF).
 
 ## License
 

@@ -337,7 +337,7 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test
 newcmd --some-args > tests/fixtures/newcmd_raw.txt
 ```
 
-2. **Add snapshot test** to `src/newcmd_cmd.rs`:
+2. **Add snapshot test** to `src/cmds/<ecosystem>/newcmd_cmd.rs`:
 ```rust
 #[cfg(test)]
 mod tests {
@@ -439,18 +439,27 @@ cargo test --ignored
 ```
 rtk/
 ├── src/
-│   ├── git.rs                  # Filter implementation
-│   │   └── #[cfg(test)] mod tests { ... }  # Unit tests
-│   ├── snapshots/              # Insta snapshots (gitignored pattern)
-│   │   └── git.rs.snap         # Snapshot for git tests
+│   ├── cmds/
+│   │   ├── git/
+│   │   │   ├── git.rs                    # Filter implementation
+│   │   │   │   └── #[cfg(test)] mod tests { ... }  # Unit tests
+│   │   │   └── snapshots/                # Insta snapshots for git module
+│   │   ├── js/
+│   │   ├── python/
+│   │   └── ...                           # Other ecosystems
+│   ├── core/
+│   │   ├── filter.rs                     # Core filtering with tests
+│   │   └── snapshots/
+│   └── hooks/
 ├── tests/
 │   ├── common/
-│   │   └── mod.rs              # Shared test utilities (count_tokens, etc.)
-│   ├── fixtures/               # Real command output fixtures
-│   │   ├── git_log_raw.txt     # Real git log output
-│   │   ├── cargo_test_raw.txt  # Real cargo test output
-│   │   └── gh_pr_view_raw.txt  # Real gh pr view output
-│   └── integration_test.rs     # Integration tests (#[ignore])
+│   │   └── mod.rs                        # Shared test utilities (count_tokens, etc.)
+│   ├── fixtures/                         # Real command output fixtures
+│   │   ├── git_log_raw.txt
+│   │   ├── cargo_test_raw.txt
+│   │   ├── gh_pr_view_raw.txt
+│   │   └── dotnet/                       # Dotnet-specific fixtures
+│   └── integration_test.rs              # Integration tests (#[ignore])
 ```
 
 **Best practices**:
