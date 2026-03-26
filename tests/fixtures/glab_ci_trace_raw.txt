@@ -1,0 +1,67 @@
+Getting job trace...
+[0KRunning with gitlab-runner 17.8.0~pre.89.g48fca09f (48fca09f)[0;m
+[0K  on glab-runner-01 abcdef12, system ID: r_AbCdEfGh[0;m
+section_start:1711234567:prepare_executor[0K[0K[36;1mPreparing the "docker" executor[0;m[0;m
+[0KUsing Docker executor with image maven:3.9-eclipse-temurin-21 ...[0;m
+section_end:1711234568:prepare_executor[0K
+section_start:1711234568:prepare_script[0K[0K[36;1mPreparing environment[0;m[0;m
+[0KRunning on runner-abcdef12-project-100-concurrent-0 via glab-runner-01...[0;m
+section_end:1711234569:prepare_script[0K
+section_start:1711234569:get_sources[0K[0K[36;1mGetting source from Git repository[0;m[0;m
+[0KFetching changes with git depth set to 50...[0;m
+[0KInitialized empty Git repository in /builds/mygroup/myproject/.git/[0;m
+[0KCreated fresh repository.[0;m
+[0KChecking out a1b2c3d4 as detached HEAD (ref is main)...[0;m
+[0KSkipping Git submodules setup[0;m
+section_end:1711234575:get_sources[0K
+section_start:1711234575:download_artifacts[0K[0K[36;1mDownloading artifacts[0;m[0;m
+[0KDownloading artifacts for init-version (12345678)...[0;m
+[0KDownloading artifacts from coordinator... ok        host=gitlab.example.com id=12345678 responseStatus=200 OK token=abcdefgh[0;m
+section_end:1711234577:download_artifacts[0K
+section_start:1711234577:step_script[0K[0K[36;1mExecuting "step_script" stage of the job script[0;m[0;m
+[0K$ mvn -V -B compile -DskipTests[0;m
+Apache Maven 3.9.6 (bc0240f3c744dd6b6ec2920b3cd08dcc295161ae)
+Maven home: /usr/share/maven
+Java version: 21.0.2, vendor: Eclipse Adoptium, runtime: /opt/java/openjdk
+Default locale: en_US, platform encoding: UTF-8
+OS name: "linux", version: "6.1.0", arch: "aarch64", family: "unix"
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] --- mygroup:myproject ---
+[INFO] 
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ myproject ---
+[INFO] Copying 15 resources from src/main/resources to target/classes
+[INFO] 
+[INFO] --- maven-compiler-plugin:3.12.1:compile (default-compile) @ myproject ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 342 source files with javac [debug release 21] to target/classes
+[WARNING] /builds/mygroup/myproject/src/main/java/com/example/service/SearchService.java:[45,23] [deprecation] OldSearchEngine in com.example.engine has been deprecated
+[WARNING] /builds/mygroup/myproject/src/main/java/com/example/service/LegacyAdapter.java:[12,1] [deprecation] LegacyInterface in com.example.legacy has been deprecated
+[INFO] 
+[INFO] --- maven-resources-plugin:3.3.1:testResources (default-testResources) @ myproject ---
+[INFO] Copying 8 resources from src/test/resources to target/test-classes
+[INFO] 
+[INFO] --- maven-compiler-plugin:3.12.1:testCompile (default-testCompile) @ myproject ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 189 source files with javac [debug release 21] to target/test-classes
+[INFO] 
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ myproject ---
+[INFO] Tests are skipped.
+[INFO] 
+[INFO] --- maven-jar-plugin:3.3.0:jar (default-jar) @ myproject ---
+[INFO] Building jar: /builds/mygroup/myproject/target/myproject-2.1.0-SNAPSHOT.jar
+[INFO] 
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  2:34 min
+[INFO] Finished at: 2026-03-25T14:28:00+01:00
+[INFO] ------------------------------------------------------------------------
+section_end:1711234731:step_script[0K
+section_start:1711234731:upload_artifacts_on_success[0K[0K[36;1mUploading artifacts for successful job[0;m[0;m
+[0KUploading artifacts...[0;m
+[0Ktarget/*.jar: found 3 matching artifact files and directories[0;m
+[0KUploading artifacts as "archive" to coordinator... 201 Created  id=12345679 responseStatus=201 Created token=abcdefgh[0;m
+section_end:1711234735:upload_artifacts_on_success[0K
+section_start:1711234735:cleanup_file_variables[0K[0K[36;1mCleaning up project directory and file based variables[0;m[0;m
+section_end:1711234736:cleanup_file_variables[0K
+[0KJob succeeded[0;m

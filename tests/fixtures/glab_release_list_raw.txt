@@ -1,0 +1,8 @@
+Showing 5 releases on mygroup/myproject.
+
+Name	Tag	Created
+v2.1.0 Add search API and performance improvements	v2.1.0	about 2 days ago
+v2.0.1 [BF] Fix session timeout configuration handling	v2.0.1	about 1 week ago
+v2.0.0 Major release: new dashboard, auth rewrite, API v2	v2.0.0	about 2 weeks ago
+v1.9.5 [BF] Handle edge case in payment processing	v1.9.5	about 3 weeks ago
+v1.9.4 [BF] Fix locale detection for Swiss German users	v1.9.4	about 1 month ago

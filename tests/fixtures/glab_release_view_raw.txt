@@ -1,0 +1,46 @@
+v2.1.0 Add search API and performance improvements
+Jane Doe released this about 2 days ago
+a1b2c3d - v2.1.0
+
+  ## What's Changed                                                           
+                                                                              
+  ### New Features                                                            
+  - Full-text search API endpoint using PostgreSQL tsvector                   
+  - Search results pagination with cursor-based navigation                    
+  - Search suggestions based on recent queries                                
+                                                                              
+  ### Performance                                                             
+  - Optimized database queries for listing endpoints (40% faster)             
+  - Added Redis caching layer for frequently accessed resources               
+  - Reduced memory footprint of background workers                            
+                                                                              
+  ### Bug Fixes                                                               
+  - Fixed session timeout not respecting configuration values                 
+  - Fixed locale detection for Swiss German users                             
+  - Fixed race condition in concurrent payment processing                     
+                                                                              
+  ### Dependencies                                                            
+  - Updated Spring Boot to 3.2.4                                              
+  - Updated PostgreSQL driver to 42.7.2                                       
+  - Updated Redis client to 4.6.1                                             
+                                                                              
+  <!-- internal notes -->                                                     
+  ---                                                                         
+  ![deployment](https://example.com/deploy-status.png)                        
+                                                                              
+  **Full Changelog**: https://gitlab.example.com/mygroup/myproject/-/compare/v2.0.1...v2.1.0
+
+
+ASSETS
+modules-myproject-2.1.0.jar (45.2 MB)
+modules-myproject-2.1.0-javadoc.jar (12.1 MB)
+modules-myproject-2.1.0-sources.jar (8.3 MB)
+checksums.txt (256 B)
+SOURCES
+https://gitlab.example.com/mygroup/myproject/-/archive/v2.1.0/myproject-v2.1.0.zip
+https://gitlab.example.com/mygroup/myproject/-/archive/v2.1.0/myproject-v2.1.0.tar.gz
+https://gitlab.example.com/mygroup/myproject/-/archive/v2.1.0/myproject-v2.1.0.tar.bz2
+https://gitlab.example.com/mygroup/myproject/-/archive/v2.1.0/myproject-v2.1.0.tar
+
+
+View this release on GitLab at https://gitlab.example.com/mygroup/myproject/-/releases/v2.1.0
