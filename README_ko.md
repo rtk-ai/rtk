@@ -108,7 +108,7 @@ git status  # 자동으로 rtk git status로 재작성
 rtk ls .                        # 최적화된 디렉토리 트리
 rtk read file.rs                # 스마트 파일 읽기
 rtk find "*.rs" .               # 컴팩트한 검색 결과
-rtk grep "pattern" .            # 파일별 그룹화 검색
+rtk grep "pattern" .            # 필터링된 검색 결과 (file:line:content, --no-ignore-vcs)
 ```
 
 ### Git

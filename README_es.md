@@ -108,7 +108,7 @@ Cuatro estrategias:
 rtk ls .                        # Arbol de directorios optimizado
 rtk read file.rs                # Lectura inteligente
 rtk find "*.rs" .               # Resultados compactos
-rtk grep "pattern" .            # Busqueda agrupada por archivo
+rtk grep "pattern" .            # Resultados filtrados (file:line:content, --no-ignore-vcs)
 ```
 
 ### Git

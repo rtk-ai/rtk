@@ -109,7 +109,7 @@ git status  # 自动重写为 rtk git status
 rtk ls .                        # 优化的目录树
 rtk read file.rs                # 智能文件读取
 rtk find "*.rs" .               # 紧凑的查找结果
-rtk grep "pattern" .            # 按文件分组的搜索结果
+rtk grep "pattern" .            # 过滤搜索结果 (file:line:content, --no-ignore-vcs)
 ```
 
 ### Git

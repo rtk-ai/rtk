@@ -146,7 +146,7 @@ rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
-rtk grep "pattern" .            # Grouped search results
+rtk grep "pattern" .            # Filtered search results (file:line:content, --no-ignore-vcs)
 rtk diff file1 file2            # Condensed diff
 ```
 
