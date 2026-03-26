@@ -1,3 +1,5 @@
+//! Matches shell commands against known RTK rewrite rules to decide how to handle them.
+
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 

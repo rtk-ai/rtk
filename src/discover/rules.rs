@@ -1,3 +1,5 @@
+//! The master list of shell commands RTK knows how to rewrite.
+
 use super::report::RtkStatus;
 
 /// A rule mapping a shell command pattern to its RTK equivalent.
