@@ -172,15 +172,18 @@ pub fn run_gemini() -> Result<()> {
             }
         }
         "read_file" => {
-            let file_path = json
+            let file_path = match json
                 .pointer("/tool_input/file_path")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if file_path.is_empty() {
-                print_allow();
-                return Ok(());
-            }
+                .filter(|s| !s.is_empty())
+            {
+                Some(p) => p,
+                None => {
+                    eprintln!("rtk: read_file hook: missing or empty file_path, allowing through");
+                    print_allow();
+                    return Ok(());
+                }
+            };
 
             // Extract optional line range so we can pre-apply it before filtering,
             // then override both fields in the response to prevent Gemini's merge
