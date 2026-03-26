@@ -473,4 +473,240 @@ Done in 23.45s.
         assert!(detect_known_tool("dev").is_none());
         assert!(detect_known_tool("validate-translations").is_none());
     }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn test_filter_yarn_output_preserves_errors() {
+        let output = r#"yarn run v1.22.22
+$ tsc --noEmit
+src/app.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.
+src/utils.ts(3,1): error TS2304: Cannot find name 'foo'.
+
+error Command failed with exit code 2.
+Done in 1.50s.
+"#;
+        let result = filter_yarn_output(output);
+        assert!(!result.contains("yarn run v1.22"));
+        assert!(!result.contains("$ tsc"));
+        assert!(!result.contains("Done in"));
+        assert!(result.contains("error TS2322"));
+        assert!(result.contains("error TS2304"));
+        assert!(result.contains("error Command failed"));
+    }
+
+    #[test]
+    fn test_filter_yarn_output_ansi_codes() {
+        // ANSI codes in output should pass through (strip_ansi is not applied in generic filter)
+        let output =
+            "yarn run v1.22.22\n$ lint\n\x1b[31merror\x1b[0m: unused variable\n\nDone in 0.80s.\n";
+        let result = filter_yarn_output(output);
+        assert!(!result.contains("yarn run v1.22"));
+        assert!(result.contains("error"));
+        assert!(result.contains("unused variable"));
+    }
+
+    #[test]
+    fn test_filter_yarn_output_unicode() {
+        let output = "yarn run v1.22.22\n$ build\nコンパイル成功 ✓\n日本語のエラーメッセージ\n\nDone in 2.00s.\n";
+        let result = filter_yarn_output(output);
+        assert!(result.contains("コンパイル成功"));
+        assert!(result.contains("日本語のエラーメッセージ"));
+    }
+
+    #[test]
+    fn test_filter_yarn_output_only_warnings() {
+        // If output is ONLY warnings + boilerplate, should return "ok"
+        let output = "yarn run v1.22.22\n$ check\nwarning package.json: No license field\nwarning no description\n\nDone in 0.10s.\n";
+        let result = filter_yarn_output(output);
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_filter_yarn_install_add_package() {
+        let output = r#"yarn add v1.22.22
+[1/4] Resolving packages...
+[2/4] Fetching packages...
+[3/4] Linking dependencies...
+[4/4] Building fresh packages...
+success Saved lockfile.
+success Saved 5 new dependencies.
+info Direct dependencies
+├─ express@4.18.2
+└─ cors@2.8.5
+info All dependencies
+├─ accepts@1.3.8
+├─ array-flatten@1.1.1
+├─ body-parser@1.20.2
+├─ content-disposition@0.5.4
+└─ cookie@0.6.0
+Done in 3.21s.
+"#;
+        let result = filter_yarn_install_output(output);
+        assert!(!result.contains("[1/4]"));
+        assert!(!result.contains("[2/4]"));
+        assert!(!result.contains("info Direct"));
+        assert!(!result.contains("info All"));
+        assert!(!result.contains("Done in"));
+        assert!(result.contains("success Saved lockfile."));
+        assert!(result.contains("success Saved 5 new dependencies."));
+    }
+
+    #[test]
+    fn test_filter_yarn_install_with_errors() {
+        let output = r#"[1/4] Resolving packages...
+[2/4] Fetching packages...
+error An unexpected error occurred: "https://registry.yarnpkg.com/nonexistent: Not found".
+info If you think this is a bug, please open a bug report.
+info Visit https://yarnpkg.com/en/docs/cli/install for documentation.
+"#;
+        let result = filter_yarn_install_output(output);
+        assert!(!result.contains("[1/4]"));
+        assert!(!result.contains("info "));
+        assert!(result.contains("error An unexpected error"));
+    }
+
+    #[test]
+    fn test_filter_yarn_install_token_savings_add() {
+        let input = r#"yarn add v1.22.22
+[1/4] Resolving packages...
+[2/4] Fetching packages...
+[3/4] Linking dependencies...
+[4/4] Building fresh packages...
+warning "eslint-config-next > @typescript-eslint/parser > @typescript-eslint/typescript-estree > tsutils@3.21.0" has unmet peer dependency "typescript@>=2.8.0 || >= 3.2.0-dev".
+warning "react-hook-form > @hookform/resolvers" has unmet peer dependency "react-hook-form@^7.0.0".
+warning "@tanstack/react-query > @tanstack/query-core" has unmet peer dependency "@tanstack/query-core@>=5.0.0".
+info Direct dependencies
+├─ @tanstack/react-query@5.17.9
+├─ axios@1.6.5
+├─ date-fns@3.2.0
+├─ lodash@4.17.21
+└─ zod@3.22.4
+info All dependencies
+├─ @tanstack/query-core@5.17.9
+├─ asynckit@0.4.0
+├─ combined-stream@1.0.8
+├─ delayed-stream@1.0.0
+├─ follow-redirects@1.15.4
+├─ form-data@4.0.0
+├─ mime-types@2.1.35
+├─ mime-db@1.52.0
+└─ proxy-from-env@1.1.0
+success Saved lockfile.
+success Saved 9 new dependencies.
+Done in 12.34s.
+"#;
+        let output = filter_yarn_install_output(input);
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&output);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 55.0,
+            "Yarn add filter: expected ≥55% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    #[test]
+    fn test_filter_yarn_install_berry_output() {
+        let output = "➤ YN0000: · Yarn 4.1.0\n➤ YN0000: ┌ Resolution step\n➤ YN0000: └ Completed in 0s 234ms\n➤ YN0000: ┌ Fetch step\n➤ YN0000: └ Completed in 0s 120ms\n➤ YN0000: ┌ Link step\n➤ YN0000: └ Completed in 0s 53ms\n➤ YN0000: · Done in 0s 407ms\n";
+        let result = filter_yarn_install_output(output);
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn test_filter_yarn_output_multiline_error() {
+        let output = r#"yarn run v1.22.22
+$ eslint src/
+
+/src/app.ts
+  1:1  error  Unexpected console statement  no-console
+  5:3  error  'x' is assigned but never used  no-unused-vars
+
+/src/utils.ts
+  10:1  warning  Missing return type  @typescript-eslint/explicit-function-return-type
+
+✖ 3 problems (2 errors, 1 warning)
+
+Done in 4.56s.
+"#;
+        let result = filter_yarn_output(output);
+        assert!(!result.contains("yarn run v1.22"));
+        assert!(!result.contains("$ eslint"));
+        assert!(!result.contains("Done in"));
+        assert!(result.contains("error  Unexpected console"));
+        assert!(result.contains("no-unused-vars"));
+        // warning lines from eslint (indented, not starting with "warning ") should be kept
+        assert!(result.contains("Missing return type"));
+        assert!(result.contains("3 problems"));
+    }
+
+    #[test]
+    fn test_yarn_subcommand_routing_discover_commands() {
+        // Verify the specific commands from rtk discover output
+        fn needs_run_injection(args: &[&str]) -> bool {
+            let first = args.first().copied();
+            let is_run_explicit = first == Some("run");
+            let is_subcommand = first
+                .map(|a| YARN_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
+                .unwrap_or(false);
+            !is_run_explicit && !is_subcommand
+        }
+
+        // "yarn build" from discover → SHOULD inject "run"
+        assert!(needs_run_injection(&["build"]));
+        // "yarn lint" from discover → SHOULD inject "run"
+        assert!(needs_run_injection(&["lint"]));
+        // "yarn vitest" from discover → SHOULD inject "run"
+        assert!(needs_run_injection(&["vitest"]));
+        // "yarn tsc" from discover → SHOULD inject "run"
+        assert!(needs_run_injection(&["tsc"]));
+        // "yarn validate-translations" from discover → SHOULD inject "run"
+        assert!(needs_run_injection(&["validate-translations"]));
+
+        // "yarn check" from discover → check is a native subcommand, should NOT inject
+        assert!(!needs_run_injection(&["check"]));
+        // "yarn install" → native subcommand
+        assert!(!needs_run_injection(&["install"]));
+        // "yarn add" → native subcommand
+        assert!(!needs_run_injection(&["add"]));
+    }
+
+    #[test]
+    fn test_detect_known_tool_does_not_match_subcommands() {
+        // Native yarn subcommands should NOT be detected as known tools
+        assert!(detect_known_tool("install").is_none());
+        assert!(detect_known_tool("add").is_none());
+        assert!(detect_known_tool("remove").is_none());
+        assert!(detect_known_tool("check").is_none());
+        assert!(detect_known_tool("list").is_none());
+        assert!(detect_known_tool("audit").is_none());
+        assert!(detect_known_tool("why").is_none());
+    }
+
+    #[test]
+    fn test_filter_yarn_output_malformed_input() {
+        // Malformed input that doesn't look like yarn output at all
+        let output = "this is not yarn output at all\njust random text here\n";
+        let result = filter_yarn_output(output);
+        // Should passthrough unchanged (minus empty lines)
+        assert!(result.contains("this is not yarn output"));
+        assert!(result.contains("just random text here"));
+    }
+
+    #[test]
+    fn test_filter_yarn_output_mixed_berry_and_content() {
+        let output = r#"➤ YN0000: · Yarn 4.1.0
+➤ YN0000: ┌ Project validation
+➤ YN0007: core@workspace:. must be built because it never has been
+➤ YN0000: └ Completed
+Build successful: 42 modules compiled
+Wrote bundle to dist/main.js (1.2 MB)
+"#;
+        let result = filter_yarn_output(output);
+        assert!(!result.contains("YN0000"));
+        assert!(!result.contains("YN0007"));
+        assert!(result.contains("Build successful"));
+        assert!(result.contains("Wrote bundle"));
+    }
 }
