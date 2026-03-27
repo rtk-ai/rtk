@@ -3,6 +3,9 @@ use crate::tracking;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static CACHED_SALT: OnceLock<String> = OnceLock::new();
 
 const TELEMETRY_URL: Option<&str> = option_env!("RTK_TELEMETRY_URL");
 const TELEMETRY_TOKEN: Option<&str> = option_env!("RTK_TELEMETRY_TOKEN");
@@ -104,23 +107,27 @@ fn generate_device_hash() -> String {
 }
 
 fn get_or_create_salt() -> String {
-    let salt_path = salt_file_path();
+    CACHED_SALT
+        .get_or_init(|| {
+            let salt_path = salt_file_path();
 
-    if let Ok(contents) = std::fs::read_to_string(&salt_path) {
-        let trimmed = contents.trim().to_string();
-        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-            return trimmed;
-        }
-    }
+            if let Ok(contents) = std::fs::read_to_string(&salt_path) {
+                let trimmed = contents.trim().to_string();
+                if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return trimmed;
+                }
+            }
 
-    let salt = random_salt();
-    if let Some(parent) = salt_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(mut f) = std::fs::File::create(&salt_path) {
-        let _ = f.write_all(salt.as_bytes());
-    }
-    salt
+            let salt = random_salt();
+            if let Some(parent) = salt_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut f) = std::fs::File::create(&salt_path) {
+                let _ = f.write_all(salt.as_bytes());
+            }
+            salt
+        })
+        .clone()
 }
 
 fn random_salt() -> String {
