@@ -900,6 +900,7 @@ dependencies = [
  "colored",
  "dirs",
  "flate2",
+ "getrandom 0.4.2",
  "hostname",
  "ignore",
  "lazy_static",
