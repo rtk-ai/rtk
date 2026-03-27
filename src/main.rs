@@ -7,7 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, az_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -162,6 +162,15 @@ enum Commands {
     /// AWS CLI with compact output (force JSON, compress)
     Aws {
         /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Azure CLI with compact output (optimized for Azure DevOps pipelines)
+    Az {
+        /// Azure service subcommand (e.g., pipelines, devops, account)
         subcommand: String,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1449,6 +1458,10 @@ fn main() -> Result<()> {
             aws_cmd::run(&subcommand, &args, cli.verbose)?;
         }
 
+        Commands::Az { subcommand, args } => {
+            az_cmd::run(&subcommand, &args, cli.verbose)?;
+        }
+
         Commands::Psql { args } => {
             psql_cmd::run(&args, cli.verbose)?;
         }
@@ -2597,5 +2610,15 @@ mod tests {
                 _ => panic!("expected Rewrite command"),
             }
         }
+    }
+
+    #[test]
+    fn test_try_parse_az_pipelines_list() {
+        let result = Cli::try_parse_from(["rtk", "az", "pipelines", "list"]);
+        assert!(
+            result.is_ok(),
+            "Failed to parse 'rtk az pipelines list': {:?}",
+            result.err()
+        );
     }
 }

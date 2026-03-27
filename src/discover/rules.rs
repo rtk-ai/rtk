@@ -53,6 +53,8 @@ pub const PATTERNS: &[&str] = &[
     r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
     // AWS CLI
     r"^aws\s+",
+    // Azure CLI
+    r"^az\s+",
     // PostgreSQL
     r"^psql(\s|$)",
     // TOML-filtered commands
@@ -382,6 +384,15 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         rtk_cmd: "rtk aws",
         rewrite_prefixes: &["aws"],
+        category: "Infra",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Azure CLI
+    RtkRule {
+        rtk_cmd: "rtk az",
+        rewrite_prefixes: &["az"],
         category: "Infra",
         savings_pct: 80.0,
         subcmd_savings: &[],
