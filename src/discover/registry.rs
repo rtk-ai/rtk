@@ -38,6 +38,7 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         "Network" => 150,
         "GitHub" => 200,
         "PackageManager" => 150,
+        "AI" => 400,
         _ => 150,
     }
 }
@@ -1532,6 +1533,18 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_codex_review() {
+        assert!(matches!(
+            classify_command("codex review --base main"),
+            Classification::Supported {
+                rtk_equivalent: "rtk codex review",
+                category: "AI",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn test_rewrite_tree() {
         assert_eq!(
             rewrite_command("tree src/", &[]),
@@ -1560,6 +1573,14 @@ mod tests {
         assert_eq!(
             rewrite_command("cargo install rtk", &[]),
             Some("rtk cargo install rtk".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_codex_review() {
+        assert_eq!(
+            rewrite_command("codex review --base main", &[]),
+            Some("rtk codex review --base main".into())
         );
     }
 

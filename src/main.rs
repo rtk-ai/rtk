@@ -19,8 +19,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read, summary,
-    tree, wc_cmd,
+    codex_cmd, deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls,
+    read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -511,6 +511,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Codex review with compact output
+    Codex {
+        #[command(subcommand)]
+        command: CodexCommands,
+    },
+
     /// Discover missed RTK savings from Claude Code history
     Discover {
         /// Filter by project path (substring match)
@@ -689,6 +695,16 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+}
+
+#[derive(Subcommand)]
+enum CodexCommands {
+    /// Filter Codex review output to keep only the final review text
+    Review {
+        /// Codex review arguments (e.g., --base main)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1866,6 +1882,12 @@ fn main() -> Result<()> {
             curl_cmd::run(&args, cli.verbose)?;
         }
 
+        Commands::Codex { command } => match command {
+            CodexCommands::Review { args } => {
+                codex_cmd::run_review(&args, cli.verbose)?;
+            }
+        },
+
         Commands::Discover {
             project,
             limit,
@@ -2259,6 +2281,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Npm { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
+            | Commands::Codex { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
             | Commands::Rake { .. }
@@ -2328,6 +2351,19 @@ mod tests {
                 assert_eq!(args, vec!["-am", "quick fix"]);
             }
             _ => panic!("Expected Git Commit command"),
+        }
+    }
+
+    #[test]
+    fn test_codex_review_subcommand() {
+        let cli = Cli::try_parse_from(["rtk", "codex", "review", "--base", "main"]).unwrap();
+        match cli.command {
+            Commands::Codex {
+                command: CodexCommands::Review { args },
+            } => {
+                assert_eq!(args, vec!["--base", "main"]);
+            }
+            _ => panic!("Expected Codex Review command"),
         }
     }
 

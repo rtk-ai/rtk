@@ -55,6 +55,8 @@ pub const PATTERNS: &[&str] = &[
     r"^aws\s+",
     // PostgreSQL
     r"^psql(\s|$)",
+    // Codex CLI
+    r"^codex\s+review(\s|$)",
     // TOML-filtered commands
     r"^ansible-playbook\b",
     r"^brew\s+(install|upgrade)\b",
@@ -393,6 +395,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["psql"],
         category: "Infra",
         savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Codex CLI
+    RtkRule {
+        rtk_cmd: "rtk codex review",
+        rewrite_prefixes: &["codex review"],
+        category: "AI",
+        savings_pct: 70.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

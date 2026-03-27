@@ -1,0 +1,63 @@
+OpenAI Codex v0.114.0 (research preview)
+--------
+workdir: /tmp/rtk-codex-review-smoke
+model: gpt-5.4
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019ce022-13e0-7a83-8e4f-8ab95c2108c3
+--------
+user
+changes against 'main'
+mcp startup: no servers
+mcp startup: no servers
+exec
+/usr/bin/zsh -lc 'git diff --stat 0aae1e16c3d1744cd622ba3e2294bd935adda118' in /tmp/rtk-codex-review-smoke succeeded in 0ms:
+ settings.py | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+exec
+/usr/bin/zsh -lc 'git diff 0aae1e16c3d1744cd622ba3e2294bd935adda118 --' in /tmp/rtk-codex-review-smoke succeeded in 0ms:
+diff --git a/settings.py b/settings.py
+index 8bcd62e..8015372 100644
+--- a/settings.py
++++ b/settings.py
+@@ -5,12 +5,9 @@ from pathlib import Path
+ def update_settings(path: str, changes: dict) -> dict:
+     config_path = Path(path)
+
+-    with config_path.open() as fh:
+-        config = json.load(fh)
+-
+-    config.update(changes)
+-
+     with config_path.open("w") as fh:
++        config = json.load(fh)
++        config.update(changes)
+         json.dump(config, fh, indent=2, sort_keys=True)
+         fh.write("\n")
+
+exec
+/usr/bin/zsh -lc 'nl -ba settings.py' in /tmp/rtk-codex-review-smoke succeeded in 0ms:
+     1	import json
+     2	from pathlib import Path
+     3
+     4
+     5	def update_settings(path: str, changes: dict) -> dict:
+     6	    config_path = Path(path)
+     7
+     8	    with config_path.open("w") as fh:
+     9	        config = json.load(fh)
+    10	        config.update(changes)
+    11	        json.dump(config, fh, indent=2, sort_keys=True)
+    12	        fh.write("\n")
+    13
+    14	    return config
+codex
+The change regresses `update_settings` by trying to read JSON from a file that has already been reopened in write mode. This makes the function fail for all callers and risks truncating the config file.
+
+Review comment:
+
+- [P1] Read the settings file before opening it in write mode — /tmp/rtk-codex-review-smoke/settings.py:8-10
+  Opening `config_path` with `'w'` truncates the JSON file immediately and returns a write-only handle, so `json.load(fh)` now raises on every call to `update_settings` and can leave the settings file empty. Any caller that updates an existing config will fail and may lose the original contents.
