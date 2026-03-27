@@ -3,6 +3,7 @@
 use crate::core::config;
 use crate::core::tracking;
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::path::PathBuf;
 
 const TELEMETRY_URL: Option<&str> = option_env!("RTK_TELEMETRY_URL");
@@ -87,6 +88,7 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn generate_device_hash() -> String {
+    let salt = get_or_create_salt();
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
@@ -95,10 +97,50 @@ fn generate_device_hash() -> String {
         .unwrap_or_default();
 
     let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update(b":");
     hasher.update(hostname.as_bytes());
     hasher.update(b":");
     hasher.update(username.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn get_or_create_salt() -> String {
+    let salt_path = salt_file_path();
+
+    if let Ok(contents) = std::fs::read_to_string(&salt_path) {
+        let trimmed = contents.trim().to_string();
+        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            return trimmed;
+        }
+    }
+
+    let salt = random_salt();
+    if let Some(parent) = salt_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::File::create(&salt_path) {
+        let _ = f.write_all(salt.as_bytes());
+    }
+    salt
+}
+
+fn random_salt() -> String {
+    let mut buf = [0u8; 32];
+    if getrandom::fill(&mut buf).is_err() {
+        let fallback = format!("{:?}:{}", std::time::SystemTime::now(), std::process::id());
+        let mut hasher = Sha256::new();
+        hasher.update(fallback.as_bytes());
+        return format!("{:x}", hasher.finalize());
+    }
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn salt_file_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("rtk")
+        .join(".device_salt")
 }
 
 fn get_stats() -> (i64, Vec<String>, Option<f64>, i64, i64) {
@@ -176,7 +218,38 @@ mod tests {
         let h1 = generate_device_hash();
         let h2 = generate_device_hash();
         assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 64); // SHA-256 hex
+        assert_eq!(h1.len(), 64);
+    }
+
+    #[test]
+    fn test_device_hash_is_valid_hex() {
+        let hash = generate_device_hash();
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_salt_is_persisted() {
+        let s1 = get_or_create_salt();
+        let s2 = get_or_create_salt();
+        assert_eq!(s1, s2);
+        assert_eq!(s1.len(), 64);
+        assert!(s1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_random_salt_uniqueness() {
+        let s1 = random_salt();
+        let s2 = random_salt();
+        assert_ne!(s1, s2);
+        assert_eq!(s1.len(), 64);
+        assert_eq!(s2.len(), 64);
+    }
+
+    #[test]
+    fn test_salt_file_path_is_in_rtk_dir() {
+        let path = salt_file_path();
+        assert!(path.to_string_lossy().contains("rtk"));
+        assert!(path.to_string_lossy().contains(".device_salt"));
     }
 
     #[test]
