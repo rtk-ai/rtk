@@ -655,17 +655,28 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// gcc/g++ compiler with grouped error output (60-80% token savings)
-    ///
-    /// Strips verbose caret/source-snippet context lines and groups
-    /// diagnostics by file.  Errors show file + line + message; warnings
-    /// are summarised by file.  Works with gcc, g++, and clang.
+    /// gcc compiler with grouped error output (60-80% token savings)
     Gcc {
-        /// Compiler binary to invoke (gcc, g++, clang, clang++)
-        #[arg(default_value = "gcc")]
-        compiler: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 
-        /// Compiler arguments (source files, flags, …)
+    /// g++ compiler with grouped error output (60-80% token savings)
+    #[command(name = "g++")]
+    Gxx {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// clang compiler with grouped error output (60-80% token savings)
+    Clang {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// clang++ compiler with grouped error output (60-80% token savings)
+    #[command(name = "clang++")]
+    Clangxx {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2065,8 +2076,17 @@ fn main() -> Result<()> {
             golangci_cmd::run(&args, cli.verbose)?;
         }
 
-        Commands::Gcc { compiler, args } => {
-            gcc_cmd::run(&compiler, &args, cli.verbose)?;
+        Commands::Gcc { args } => {
+            gcc_cmd::run("gcc", &args, cli.verbose)?;
+        }
+        Commands::Gxx { args } => {
+            gcc_cmd::run("g++", &args, cli.verbose)?;
+        }
+        Commands::Clang { args } => {
+            gcc_cmd::run("clang", &args, cli.verbose)?;
+        }
+        Commands::Clangxx { args } => {
+            gcc_cmd::run("clang++", &args, cli.verbose)?;
         }
 
         Commands::HookAudit { since } => {
@@ -2289,6 +2309,9 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
             | Commands::Gcc { .. }
+            | Commands::Gxx { .. }
+            | Commands::Clang { .. }
+            | Commands::Clangxx { .. }
     )
 }
 

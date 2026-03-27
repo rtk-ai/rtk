@@ -51,8 +51,11 @@ pub const PATTERNS: &[&str] = &[
     r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
     r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
     r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
-    // C/C++ compilers
-    r"^(gcc|g\+\+|clang|clang\+\+)(\s|$)",
+    // C/C++ compilers (one pattern per binary so rtk_cmd can encode the name)
+    r"^gcc(\s|$)",
+    r"^g\+\+(\s|$)",
+    r"^clang(\s|$)",
+    r"^clang\+\+(\s|$)",
     // AWS CLI
     r"^aws\s+",
     // PostgreSQL
@@ -383,7 +386,31 @@ pub const RULES: &[RtkRule] = &[
     // C/C++ compilers
     RtkRule {
         rtk_cmd: "rtk gcc",
-        rewrite_prefixes: &["clang++", "clang", "g++", "gcc"],
+        rewrite_prefixes: &["gcc"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk g++",
+        rewrite_prefixes: &["g++"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk clang",
+        rewrite_prefixes: &["clang"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        rtk_cmd: "rtk clang++",
+        rewrite_prefixes: &["clang++"],
         category: "Build",
         savings_pct: 70.0,
         subcmd_savings: &[],
