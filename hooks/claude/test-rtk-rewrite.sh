@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Test suite for rtk-rewrite.sh
 # Feeds mock JSON through the hook and verifies the rewritten commands.
 #

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # RTK Installation Verification Script
 # Helps diagnose if you have the correct rtk (Token Killer) installed
 
