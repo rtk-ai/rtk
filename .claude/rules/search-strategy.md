@@ -31,8 +31,7 @@ src/
 │   ├── hook_cmd.rs            ← Gemini/Copilot hook processors
 │   ├── hook_check.rs          ← Hook status detection
 │   ├── verify_cmd.rs          ← rtk verify command
-│   ├── trust.rs               ← Project trust/untrust
-│   └── integrity.rs           ← SHA-256 hook verification
+│   └── trust.rs               ← Project trust/untrust
 ├── analytics/                 ← Token savings analytics
 │   ├── gain.rs                ← rtk gain command
 │   ├── cc_economics.rs        ← Claude Code economics

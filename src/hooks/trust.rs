@@ -11,11 +11,25 @@
 //! - Content changes invalidate trust (re-review required)
 //! - `RTK_TRUST_PROJECT_FILTERS=1` overrides for CI pipelines
 
-use super::integrity;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// SHA-256 hash computation
+// ---------------------------------------------------------------------------
+
+/// Compute SHA-256 hash of a file, returned as lowercase hex
+fn compute_hash(path: &Path) -> Result<String> {
+    let content =
+        fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
+    Ok(format!("{:x}", hasher.finalize()))
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -126,7 +140,7 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
         None => return Ok(TrustStatus::Untrusted),
     };
 
-    let actual_hash = integrity::compute_hash(filter_path)
+    let actual_hash = compute_hash(filter_path)
         .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
 
     if actual_hash == entry.sha256 {
@@ -142,7 +156,7 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
 /// Store current SHA-256 hash as trusted (computes hash from file).
 #[allow(dead_code)]
 pub fn trust_filter(filter_path: &Path) -> Result<()> {
-    let hash = integrity::compute_hash(filter_path)
+    let hash = compute_hash(filter_path)
         .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
     trust_filter_with_hash(filter_path, &hash)
 }
@@ -315,7 +329,7 @@ mod tests {
             None => return Ok(TrustStatus::Untrusted),
         };
 
-        let actual_hash = integrity::compute_hash(filter_path)?;
+        let actual_hash = compute_hash(filter_path)?;
 
         if actual_hash == entry.sha256 {
             Ok(TrustStatus::Trusted)
@@ -329,7 +343,7 @@ mod tests {
 
     fn trust_with_store(filter_path: &Path, store_file: &Path) -> Result<()> {
         let key = canonical_key(filter_path)?;
-        let hash = integrity::compute_hash(filter_path)?;
+        let hash = compute_hash(filter_path)?;
 
         let mut store: TrustStore = if store_file.exists() {
             let content = std::fs::read_to_string(store_file)?;

@@ -46,7 +46,7 @@ src/main.rs
 │   ├── tee.rs            ← Raw output recovery on failure
 │   ├── filter.rs         ← Language-aware code filtering
 │   └── utils.rs          ← strip_ansi, truncate, execute_command
-├── hooks/                ← init, rewrite, verify, trust, integrity
+├── hooks/                ← init, rewrite, verify, trust
 └── analytics/            ← gain, cc_economics, ccusage, session_cmd
 ```
 

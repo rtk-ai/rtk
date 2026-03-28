@@ -191,17 +191,28 @@ RTK integrates with Claude Code via bash hooks for transparent command rewriting
 4. RTK applies filter, returns condensed output
 5. Claude sees token-optimized result (80% savings)
 
-## Hook Files
+## Hook Configuration
 
-- `.claude/hooks/rtk-rewrite.sh` - Command rewriting (DO NOT MODIFY)
-- `.claude/hooks/rtk-suggest.sh` - Suggestion when filter available
+RTK uses native hooks defined in `~/.claude/settings.json`:
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": "rtk hook claude"
+      }]
+    }]
+  }
+}
+```
 
 ## Verification
 
-**Check hooks are active**:
+**Check hook is active**:
 ```bash
-ls -la .claude/hooks/*.sh
-# Should show -rwxr-xr-x (executable)
+rtk init --show  # Should show "✅ Hook: installed"
 ```
 
 **Test hook integration** (in Claude Code session):

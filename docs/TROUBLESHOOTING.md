@@ -138,13 +138,11 @@ rtk init --show  # Should show "✅ Hook: executable, with guards"
 
 **Option B: Manual (fallback)**
 ```bash
-# Copy hook to Claude Code hooks directory
-mkdir -p ~/.claude/hooks
-cp .claude/hooks/rtk-rewrite.sh ~/.claude/hooks/
-chmod +x ~/.claude/hooks/rtk-rewrite.sh
+# Verify rtk is in PATH
+which rtk  # Should show rtk binary location
 ```
 
-Then add to `~/.claude/settings.json` (replace `~` with full path):
+Then add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
@@ -154,7 +152,7 @@ Then add to `~/.claude/settings.json` (replace `~` with full path):
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/yourname/.claude/hooks/rtk-rewrite.sh"
+            "command": "rtk hook claude"
           }
         ]
       }
@@ -163,7 +161,7 @@ Then add to `~/.claude/settings.json` (replace `~` with full path):
 }
 ```
 
-**Note**: Use absolute path in `settings.json`, not `~/.claude/...`
+**Note**: The native `rtk hook claude` command is built into the RTK binary — no separate script file needed.
 
 ---
 

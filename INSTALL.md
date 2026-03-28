@@ -93,7 +93,7 @@ rtk gain  # MUST show token savings, not "command not found"
 
 ```bash
 rtk init -g
-# → Installs hook to ~/.claude/hooks/rtk-rewrite.sh
+# → Configures native hook in settings.json
 # → Creates ~/.claude/RTK.md (10 lines, meta commands only)
 # → Adds @RTK.md reference to ~/.claude/CLAUDE.md
 # → Prompts: "Patch settings.json? [y/N]"
@@ -113,22 +113,21 @@ rtk init --show  # Check hook is installed and executable
 Claude Code's hook registry. RTK adds a PreToolUse hook that rewrites commands transparently. Without this, Claude won't invoke the hook automatically.
 
 ```
-  Claude Code          settings.json        rtk-rewrite.sh        RTK binary
-       │                    │                     │                    │
-       │  "git status"      │                     │                    │
-       │ ──────────────────►│                     │                    │
-       │                    │  PreToolUse trigger  │                    │
-       │                    │ ───────────────────►│                    │
-       │                    │                     │  rewrite command   │
-       │                    │                     │  → rtk git status  │
-       │                    │◄────────────────────│                    │
-       │                    │  updated command     │                    │
-       │                    │                                          │
-       │  execute: rtk git status                                      │
-       │ ─────────────────────────────────────────────────────────────►│
-       │                                                               │  filter
-       │  "3 modified, 1 untracked ✓"                                  │
-       │◄──────────────────────────────────────────────────────────────│
+  Claude Code          settings.json        RTK binary (native hook)
+       │                    │                      │
+       │  "git status"      │                      │
+       │ ──────────────────►│                      │
+       │                    │  PreToolUse trigger  │
+       │                    │ ────────────────────►│
+       │                    │                      │  rewrite command
+       │                    │                      │  → rtk git status
+       │                    │◄─────────────────────│  updated command
+       │                    │                      │
+       │  execute: rtk git status                       │
+       │ ──────────────────────────────────────────────►│
+       │                                                  │  filter
+       │  "3 modified, 1 untracked ✓"                     │
+       │◄─────────────────────────────────────────────────│
 ```
 
 **Backup Safety**:
@@ -247,7 +246,6 @@ rtk vitest run
 rtk init -g --uninstall
 
 # What gets removed:
-#   - Hook: ~/.claude/hooks/rtk-rewrite.sh
 #   - Context: ~/.claude/RTK.md
 #   - Reference: @RTK.md line from ~/.claude/CLAUDE.md
 #   - Registration: RTK hook entry from settings.json

@@ -36,30 +36,14 @@ git status --short && git branch --show-current
 
 ```bash
 # Hook configuration check
-if [ -f ".claude/hooks/rtk-rewrite.sh" ]; then
-    echo "✅ OK: rtk-rewrite.sh hook present"
-    # Check if hook is executable
-    if [ -x ".claude/hooks/rtk-rewrite.sh" ]; then
-        echo "✅ OK: hook is executable"
+if [ -f ".claude/settings.json" ]; then
+    if grep -q '"rtk hook claude' ".claude/settings.json" 2>/dev/null; then
+        echo "✅ OK: RTK native hook configured in settings.json"
     else
-        echo "⚠️ WARNING: hook not executable (chmod +x needed)"
+        echo "⚠️ WARNING: RTK hook not found in settings.json"
     fi
 else
-    echo "❌ MISSING: rtk-rewrite.sh hook"
-fi
-```
-
-```bash
-# Hook rtk-suggest.sh check
-if [ -f ".claude/hooks/rtk-suggest.sh" ]; then
-    echo "✅ OK: rtk-suggest.sh hook present"
-    if [ -x ".claude/hooks/rtk-suggest.sh" ]; then
-        echo "✅ OK: hook is executable"
-    else
-        echo "⚠️ WARNING: hook not executable (chmod +x needed)"
-    fi
-else
-    echo "❌ MISSING: rtk-suggest.sh hook"
+    echo "⚠️ WARNING: settings.json not found"
 fi
 ```
 
@@ -158,10 +142,10 @@ multiSelect: true
 options:
   - label: "cargo install --path ."
     description: "Installer RTK localement depuis le repo"
-  - label: "chmod +x .claude/hooks/bash/*.sh"
-    description: "Rendre les hooks exécutables"
+  - label: "rtk init -g --auto-patch"
+    description: "Réinstaller les hooks natifs RTK"
   - label: "Tout corriger (recommandé)"
-    description: "Install RTK + fix hooks permissions"
+    description: "Install RTK + réinstaller hooks"
 ```
 
 **Adaptations selon contexte** :
@@ -177,13 +161,13 @@ options:
     description: "Installer RTK via Homebrew (macOS/Linux)"
 ```
 
-### Si hooks manquants/non exécutables
+### Si hooks manquants/non configurés
 ```
 options:
-  - label: "chmod +x .claude/hooks/*.sh"
-    description: "Rendre tous les hooks exécutables"
-  - label: "Copier hooks depuis template"
-    description: "Si hooks manquants, copier depuis repository principal"
+  - label: "rtk init -g"
+    description: "Réinstaller les hooks natifs RTK"
+  - label: "rtk init --show"
+    description: "Vérifier l'état des hooks"
 ```
 
 ### Si rtk gain échoue
@@ -205,11 +189,11 @@ cargo install --path .
 which rtk && rtk --version
 ```
 
-### Fix 2 : Rendre hooks exécutables
+### Fix 2 : Réinstaller les hooks natifs
 ```bash
-chmod +x .claude/hooks/*.sh
-# Vérifier permissions
-ls -la .claude/hooks/*.sh
+rtk init -g --auto-patch
+# Vérifier installation
+rtk init --show
 ```
 
 ### Fix 3 : Tout corriger (recommandé)
@@ -217,8 +201,8 @@ ls -la .claude/hooks/*.sh
 # Install RTK
 cargo install --path .
 
-# Fix hooks permissions
-chmod +x .claude/hooks/*.sh
+# Réinstaller les hooks
+rtk init -g --auto-patch
 
 # Verify
 which rtk && rtk --version && rtk gain --history | head -3
@@ -319,18 +303,18 @@ rtk gain --help  # Should work
 echo $CLAUDE_CODE_HOOK_BASH_TEMPLATE
 # Should print hook template path - if empty, not in Claude Code
 
-# Check hooks exist and executable
-ls -la .claude/hooks/*.sh
-# Should show -rwxr-xr-x (executable)
+# Check if native hook is configured
+rtk init --show
+# Should show "✅ Hook: installed"
 ```
 
 **Fix**:
 ```bash
-# Make hooks executable
-chmod +x .claude/hooks/*.sh
+# Reinstall native hooks
+rtk init -g --auto-patch
 
-# Verify hooks load in new Claude Code session
-# (restart Claude Code session after chmod)
+# Verify in new Claude Code session
+# (restart Claude Code session after reinstall)
 ```
 
 ## Version Compatibility Matrix

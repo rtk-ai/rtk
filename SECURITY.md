@@ -52,7 +52,7 @@ The following files are considered **high-risk** and trigger mandatory 2-reviewe
 - **`src/summary.rs`** - Command output aggregation (data exfiltration risk)
 - **`src/tracking.rs`** - SQLite database operations (privacy/telemetry concerns)
 - **`src/discover/registry.rs`** - Rewrite logic for all commands (command injection risk via rewrite rules)
-- **`hooks/rtk-rewrite.sh`** / **`.claude/hooks/rtk-rewrite.sh`** - Thin delegator hook (executes in Claude Code context, intercepts all commands)
+- **`src/hooks/hook_cmd.rs`** - Native hook processor (executes in Claude Code context, intercepts all commands)
 
 ### Tier 2: Input Validation
 - **`src/pnpm_cmd.rs`** - Package name validation (prevents injection via malicious names)

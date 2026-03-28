@@ -6,8 +6,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
-use super::integrity;
-
 // Embedded Cursor hook script (preToolUse format)
 const CURSOR_REWRITE_HOOK: &str = include_str!("../../hooks/cursor/rtk-rewrite.sh");
 
@@ -519,11 +517,6 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         fs::remove_file(&hook_path)
             .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
         removed.push(format!("Hook: {}", hook_path.display()));
-    }
-
-    // 1b. Remove integrity hash file
-    if integrity::remove_hash(&hook_path)? {
-        removed.push("Integrity hash: removed".to_string());
     }
 
     // 2. Remove RTK.md

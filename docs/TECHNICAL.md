@@ -71,9 +71,8 @@ This is the full lifecycle of a command through RTK, from LLM agent to filtered 
 The user runs `rtk init` to set up hooks for their LLM agent. This:
 
 1. Writes a thin shell hook script (e.g., `~/.claude/hooks/rtk-rewrite.sh`)
-2. Stores its SHA-256 hash for integrity verification
-3. Patches the agent's settings file (e.g., `settings.json`) to register the hook
-4. Writes RTK awareness instructions (e.g., `RTK.md`) for prompt-level guidance
+2. Patches the agent's settings file (e.g., `settings.json`) to register the hook
+3. Writes RTK awareness instructions (e.g., `RTK.md`) for prompt-level guidance
 
 RTK supports 7 agents, each with its own installation mode. The hook scripts are embedded in the binary and written at install time.
 
@@ -101,8 +100,7 @@ Once the rewritten command reaches RTK:
 1. **Telemetry**: `telemetry::maybe_ping()` fires a non-blocking daily usage ping
 2. **Clap parsing**: `Cli::try_parse()` matches against the `Commands` enum
 3. **Hook check**: `hook_check::maybe_warn()` warns if the installed hook is outdated (rate-limited to 1/day)
-4. **Integrity check**: `integrity::runtime_check()` verifies the hook's SHA-256 hash for operational commands
-5. **Routing**: A `match cli.command` dispatches to the specialized filter module
+4. **Routing**: A `match cli.command` dispatches to the specialized filter module
 
 If Clap parsing fails (command not in the enum), the fallback path runs instead.
 
@@ -182,7 +180,7 @@ Start here, then drill down into each README for file-level details.
 |-----------|-------------|-------------------------------|
 | `main.rs` | CLI entry point, `Commands` enum, routing match | _(no README — read the file directly)_ |
 | [`core/`](../src/core/README.md) | Shared infrastructure | Tracking DB schema, config system, tee recovery, TOML filter engine, utility functions |
-| [`hooks/`](../src/hooks/README.md) | Hook system | Installation flow (`rtk init`), integrity verification, rewrite command, trust model |
+| [`hooks/`](../src/hooks/README.md) | Hook system | Installation flow (`rtk init`), rewrite command, trust model |
 | [`analytics/`](../src/analytics/README.md) | Token savings analytics | `rtk gain` dashboard, Claude Code economics, ccusage parsing |
 | [`cmds/`](../src/cmds/README.md) | **Command filters (9 ecosystems)** | Common filter pattern, cross-command routing, token savings table, **links to each ecosystem** |
 | [`discover/`](../src/discover/README.md) | History analysis + rewrite registry | Rewrite patterns, session providers, compound command splitting |
@@ -221,7 +219,7 @@ RTK supports the following LLM agents through hook integrations:
 | Codex CLI | Awareness doc | AGENTS.md integration | N/A (prompt) |
 | OpenCode | TS plugin | `tool.execute.before` event | Yes (in-place mutation) |
 
-> **Details**: [`hooks/README.md`](../hooks/README.md) has the full JSON schemas for each agent. [`src/hooks/README.md`](../src/hooks/README.md) covers installation, integrity verification, and the rewrite command.
+> **Details**: [`hooks/README.md`](../hooks/README.md) has the full JSON schemas for each agent. [`src/hooks/README.md`](../src/hooks/README.md) covers installation, the rewrite command, and trust management.
 
 ---
 

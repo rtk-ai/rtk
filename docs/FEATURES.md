@@ -1224,9 +1224,8 @@ rtk init -g --uninstall         # Desinstaller
 
 | Fichier | Description |
 |---------|-------------|
-| `~/.claude/hooks/rtk-rewrite.sh` | Script hook (delegue a `rtk rewrite`) |
+| `~/.claude/settings.json` | Configuration du hook natif `rtk hook claude` |
 | `~/.claude/RTK.md` | Instructions minimales pour le LLM |
-| `~/.claude/settings.json` | Enregistrement du hook PreToolUse |
 
 ### `rtk rewrite` -- Recriture de commande
 
