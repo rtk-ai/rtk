@@ -665,6 +665,17 @@ fn patch_settings_json(
         return Ok(PatchResult::AlreadyPresent);
     }
 
+    // Check for legacy hook - migrate if found
+    if legacy_hook_present(&root) {
+        if verbose > 0 {
+            eprintln!("Migrating legacy rtk-rewrite.sh hook to native rtk hook claude...");
+        }
+        remove_hook_from_json(&mut root);
+        if verbose > 0 {
+            eprintln!("  Legacy hook removed");
+        }
+    }
+
     // Handle mode
     match mode {
         PatchMode::Skip => {
@@ -803,6 +814,26 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
             // Exact match OR command contains "rtk hook"
             cmd == hook_command || cmd.contains("rtk hook")
         })
+}
+
+/// Check if legacy rtk-rewrite.sh hook exists in settings.json
+/// Used for migration to native "rtk hook claude" command
+fn legacy_hook_present(root: &serde_json::Value) -> bool {
+    let pre_tool_use_array = match root
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    pre_tool_use_array
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd.contains("rtk-rewrite.sh"))
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -2684,6 +2715,81 @@ More notes
         assert!(!hook_already_present(&json_content, hook_command));
     }
 
+    // Tests for legacy_hook_present()
+    #[test]
+    fn test_legacy_hook_present_detects_old_format() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                    }]
+                }]
+            }
+        });
+
+        assert!(legacy_hook_present(&json_content));
+    }
+
+    #[test]
+    fn test_legacy_hook_present_various_paths() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "~/.claude/hooks/rtk-rewrite.sh"
+                    }]
+                }]
+            }
+        });
+
+        assert!(legacy_hook_present(&json_content));
+    }
+
+    #[test]
+    fn test_legacy_hook_present_empty() {
+        let json_content = serde_json::json!({});
+        assert!(!legacy_hook_present(&json_content));
+    }
+
+    #[test]
+    fn test_legacy_hook_present_new_format_not_detected() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "rtk hook claude"
+                    }]
+                }]
+            }
+        });
+
+        assert!(!legacy_hook_present(&json_content));
+    }
+
+    #[test]
+    fn test_legacy_hook_present_other_hooks_not_detected() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/some/other/hook.sh"
+                    }]
+                }]
+            }
+        });
+
+        assert!(!legacy_hook_present(&json_content));
+    }
+
     // Tests for insert_hook_entry()
     #[test]
     fn test_insert_hook_entry_empty_root() {
@@ -2987,5 +3093,91 @@ More notes
         assert!(CURSOR_REWRITE_HOOK.contains("\"permission\": \"allow\""));
         assert!(CURSOR_REWRITE_HOOK.contains("\"updated_input\""));
         assert!(!CURSOR_REWRITE_HOOK.contains("hookSpecificOutput"));
+    }
+
+    // Integration test: migration from legacy rtk-rewrite.sh to native rtk hook claude
+    #[test]
+    fn test_migration_legacy_to_native_hook() {
+        // Start with legacy hook format
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                    }]
+                }]
+            }
+        });
+
+        // Verify legacy hook is detected
+        assert!(legacy_hook_present(&json_content));
+        assert!(!hook_already_present(&json_content, "rtk hook claude"));
+
+        // Simulate migration: remove old hook, add new one
+        let removed = remove_hook_from_json(&mut json_content);
+        assert!(removed, "Legacy hook should be removed");
+
+        // Verify old hook is gone
+        assert!(!legacy_hook_present(&json_content));
+
+        // Add new hook
+        insert_hook_entry(&mut json_content, "rtk hook claude");
+
+        // Verify new hook is present
+        assert!(hook_already_present(&json_content, "rtk hook claude"));
+        assert!(!legacy_hook_present(&json_content));
+
+        // Verify the new hook command is correct
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(command, "rtk hook claude");
+    }
+
+    #[test]
+    fn test_migration_preserves_other_hooks() {
+        // Start with legacy RTK hook + other hooks
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/some/other/hook.sh"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                        }]
+                    }
+                ]
+            }
+        });
+
+        // Simulate migration
+        remove_hook_from_json(&mut json_content);
+        insert_hook_entry(&mut json_content, "rtk hook claude");
+
+        // Verify both hooks exist
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 2);
+
+        // Find the commands
+        let commands: Vec<&str> = pre_tool_use
+            .iter()
+            .filter_map(|entry| entry.get("hooks")?.as_array())
+            .flatten()
+            .filter_map(|hook| hook.get("command")?.as_str())
+            .collect();
+
+        assert!(commands.contains(&"/some/other/hook.sh"));
+        assert!(commands.contains(&"rtk hook claude"));
+        assert!(!commands.iter().any(|c| c.contains("rtk-rewrite.sh")));
     }
 }
