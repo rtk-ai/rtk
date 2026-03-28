@@ -15,7 +15,7 @@ pub struct RtkRule {
 
 // Patterns ordered to match RULES indices exactly.
 pub const PATTERNS: &[&str] = &[
-    r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+    r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree|checkout|switch|remote|config|ls-files|tag|merge|rebase|reset|clean|clone|init|submodule|cherry-pick|revert|rm|mv|bisect|blame|reflog|shortlog|describe|archive|bundle|notes)",
     r"^gh\s+(pr|issue|run|repo|api|release)",
     r"^cargo\s+(build|test|clippy|check|fmt|install)",
     r"^pnpm\s+(list|ls|outdated|install)",
@@ -33,7 +33,7 @@ pub const PATTERNS: &[&str] = &[
     r"^(npx\s+|pnpm\s+)?playwright",
     r"^(npx\s+|pnpm\s+)?prisma",
     r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
-    r"^kubectl\s+(get|logs|describe|apply)",
+    r"^kubectl\s+(get|logs|describe|apply|create|delete|edit|scale|rollout|top|port-forward|config|exec|run|patch|label|annotate|explain|auth)",
     r"^tree(\s|$)",
     r"^diff\s+",
     r"^curl\s+",
@@ -88,6 +88,8 @@ pub const PATTERNS: &[&str] = &[
     r"^trunk\s+build",
     r"^uv\s+(sync|pip\s+install)\b",
     r"^yamllint\b",
+    // jq — TOML filter exists (src/filters/jq.toml) but was missing from discover
+    r"^jq\b",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -653,6 +655,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // jq — TOML filter exists (src/filters/jq.toml) but was missing from discover
+    RtkRule {
+        rtk_cmd: "rtk jq",
+        rewrite_prefixes: &["jq"],
+        category: "System",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 /// Commands to ignore (shell builtins, trivial, already rtk).
@@ -706,6 +717,8 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "while ",
     "if ",
     "case ",
+    "ln ",
+    "ln\t",
 ];
 
 pub const IGNORED_EXACT: &[&str] = &[
