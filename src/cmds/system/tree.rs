@@ -6,39 +6,10 @@
 //! Token optimization: automatically excludes noise directories via -I pattern
 //! unless -a flag is present (respecting user intent).
 
+use super::constants::NOISE_DIRS;
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, resolved_command, tool_exists};
 use anyhow::{Context, Result};
-
-/// Noise directories commonly excluded from LLM context
-const NOISE_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
-    "target",
-    "__pycache__",
-    ".next",
-    "dist",
-    "build",
-    ".cache",
-    ".turbo",
-    ".vercel",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".tox",
-    ".venv",
-    "venv",
-    "env",
-    ".env",
-    "coverage",
-    ".nyc_output",
-    ".DS_Store",
-    "Thumbs.db",
-    ".idea",
-    ".vscode",
-    ".vs",
-    "*.egg-info",
-    ".eggs",
-];
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();

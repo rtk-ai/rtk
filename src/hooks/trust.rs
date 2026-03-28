@@ -12,6 +12,7 @@
 //! - `RTK_TRUST_PROJECT_FILTERS=1` overrides for CI pipelines
 
 use super::integrity;
+use crate::core::constants::{RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,7 +48,7 @@ pub enum TrustStatus {
 
 fn store_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("Cannot determine local data directory")?;
-    Ok(data_dir.join("rtk").join("trusted_filters.json"))
+    Ok(data_dir.join(RTK_DATA_DIR).join(TRUSTED_FILTERS_JSON))
 }
 
 fn read_store() -> Result<TrustStore> {
