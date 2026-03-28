@@ -228,6 +228,27 @@ pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 
     }
 }
 
+/// Extract exit code from an ExitStatus (for `.status()` calls, not `.output()`).
+/// Returns the actual exit code, or `128 + signal` per Unix convention when
+/// terminated by a signal. Falls back to 1 on non-Unix platforms.
+pub fn exit_code_from_status(status: &std::process::ExitStatus, label: &str) -> i32 {
+    match status.code() {
+        Some(code) => code,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = status.signal() {
+                    eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
+                    return 128 + sig;
+                }
+            }
+            eprintln!("[rtk] {}: process terminated by signal", label);
+            1
+        }
+    }
+}
+
 /// Return the last `n` lines of output with a label, for use as a fallback
 /// when filter parsing fails. Logs a diagnostic to stderr.
 pub fn fallback_tail(output: &str, label: &str, n: usize) -> String {

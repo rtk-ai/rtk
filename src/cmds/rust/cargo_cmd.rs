@@ -18,7 +18,7 @@ pub enum CargoCommand {
     Nextest,
 }
 
-pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
+pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         CargoCommand::Build => run_build(args, verbose),
         CargoCommand::Test => run_test(args, verbose),
@@ -70,7 +70,12 @@ fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<Str
 
 /// Generic cargo command runner with filtering.
 /// Builds the Command with restored `--` separator, then delegates to shared runner.
-fn run_cargo_filtered<F>(subcommand: &str, args: &[String], verbose: u8, filter_fn: F) -> Result<()>
+fn run_cargo_filtered<F>(
+    subcommand: &str,
+    args: &[String],
+    verbose: u8,
+    filter_fn: F,
+) -> Result<i32>
 where
     F: Fn(&str) -> String,
 {
@@ -95,27 +100,27 @@ where
     )
 }
 
-fn run_build(args: &[String], verbose: u8) -> Result<()> {
+fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("build", args, verbose, filter_cargo_build)
 }
 
-fn run_test(args: &[String], verbose: u8) -> Result<()> {
+fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("test", args, verbose, filter_cargo_test)
 }
 
-fn run_clippy(args: &[String], verbose: u8) -> Result<()> {
+fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
 }
 
-fn run_check(args: &[String], verbose: u8) -> Result<()> {
+fn run_check(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("check", args, verbose, filter_cargo_build)
 }
 
-fn run_install(args: &[String], verbose: u8) -> Result<()> {
+fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("install", args, verbose, filter_cargo_install)
 }
 
-fn run_nextest(args: &[String], verbose: u8) -> Result<()> {
+fn run_nextest(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest)
 }
 
@@ -968,7 +973,7 @@ fn filter_cargo_clippy(output: &str) -> String {
 }
 
 /// Runs an unsupported cargo subcommand by passing it through directly
-pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -985,10 +990,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
         &format!("rtk cargo {} (passthrough)", args_str),
     );
 
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+    Ok(crate::core::utils::exit_code_from_status(&status, "cargo"))
 }
 
 #[cfg(test)]

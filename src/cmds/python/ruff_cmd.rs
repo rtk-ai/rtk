@@ -34,7 +34,7 @@ struct RuffDiagnostic {
     fix: Option<RuffFix>,
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let is_check = args.is_empty()
         || args[0] == "check"
         || (!args[0].starts_with('-') && args[0] != "format" && args[0] != "version");

@@ -1,7 +1,7 @@
 //! Filters pip and uv package manager output.
 
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, tool_exists};
+use crate::core::utils::{exit_code_from_output, resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -13,7 +13,7 @@ struct Package {
     latest_version: Option<String>,
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Auto-detect uv vs pip
@@ -27,7 +27,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     // Detect subcommand
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
 
-    let (cmd_str, filtered) = match subcommand {
+    let (cmd_str, filtered, exit_code) = match subcommand {
         "list" => run_list(base_cmd, &args[1..], verbose)?,
         "outdated" => run_outdated(base_cmd, &args[1..], verbose)?,
         "install" | "uninstall" | "show" => {
@@ -47,10 +47,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    Ok(())
+    Ok(exit_code)
 }
 
-fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
+fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
     let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
@@ -78,14 +78,11 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
     let filtered = filter_pip_list(&stdout);
     println!("{}", filtered);
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok((raw, filtered))
+    let exit_code = exit_code_from_output(&output, "pip");
+    Ok((raw, filtered, exit_code))
 }
 
-fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
+fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
     let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
@@ -113,14 +110,11 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
     let filtered = filter_pip_outdated(&stdout);
     println!("{}", filtered);
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok((raw, filtered))
+    let exit_code = exit_code_from_output(&output, "pip");
+    Ok((raw, filtered, exit_code))
 }
 
-fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
+fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
     let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
@@ -146,11 +140,8 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
     print!("{}", stdout);
     eprint!("{}", stderr);
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok((raw.clone(), raw))
+    let exit_code = exit_code_from_output(&output, "pip");
+    Ok((raw.clone(), raw, exit_code))
 }
 
 /// Filter pip list JSON output

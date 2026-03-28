@@ -46,7 +46,7 @@ fn looks_like_test_path(arg: &str) -> bool {
         || path.contains("_spec.rb")
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let (tool, effective_args) = select_runner(args);
     let mut cmd = ruby_exec(tool);
     for arg in &effective_args {

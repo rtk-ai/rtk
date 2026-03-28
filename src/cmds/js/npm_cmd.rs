@@ -73,7 +73,7 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "restart",
 ];
 
-pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
+pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
     let mut cmd = resolved_command("npm");
 
     // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
