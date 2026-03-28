@@ -169,6 +169,7 @@ enum Commands {
     },
 
     /// PostgreSQL client with compact output (strip borders, compress tables)
+    #[command(disable_help_flag = true)]
     Psql {
         /// psql arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
