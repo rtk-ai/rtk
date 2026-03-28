@@ -55,6 +55,8 @@ pub const PATTERNS: &[&str] = &[
     r"^aws\s+",
     // PostgreSQL
     r"^psql(\s|$)",
+    // Chezmoi dotfile manager
+    r"^chezmoi\s+(diff|apply|status|managed|add|re-add|update|unmanaged|doctor)",
     // TOML-filtered commands
     r"^ansible-playbook\b",
     r"^brew\s+(install|upgrade)\b",
@@ -394,6 +396,24 @@ pub const RULES: &[RtkRule] = &[
         category: "Infra",
         savings_pct: 75.0,
         subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Chezmoi dotfile manager
+    RtkRule {
+        rtk_cmd: "rtk chezmoi",
+        rewrite_prefixes: &["chezmoi"],
+        category: "Dotfiles",
+        savings_pct: 80.0,
+        subcmd_savings: &[
+            ("diff", 85.0),
+            ("apply", 90.0),
+            ("managed", 70.0),
+            ("add", 85.0),
+            ("re-add", 85.0),
+            ("update", 90.0),
+            ("unmanaged", 70.0),
+            ("doctor", 80.0),
+        ],
         subcmd_status: &[],
     },
     // TOML-filtered commands
