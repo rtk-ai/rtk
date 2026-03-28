@@ -340,7 +340,7 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        /// Target Codex CLI (installs AGENTS.md + RTK.md; macOS/Linux add Codex hooks, Windows stays prompt-only)
         #[arg(long)]
         codex: bool,
 
@@ -690,6 +690,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
+    Codex,
 }
 
 #[derive(Subcommand)]
@@ -2060,6 +2062,9 @@ fn main() -> Result<()> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+            }
+            HookCommands::Codex => {
+                hooks::hook_cmd::run_codex()?;
             }
         },
 

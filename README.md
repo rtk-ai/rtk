@@ -108,10 +108,10 @@ rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 
 # 2. Restart your AI tool, then test
-git status  # Automatically rewritten to rtk git status
+git status  # Hook rewrites it or suggests `rtk git status`, depending on the tool
 ```
 
-The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+Hooks either transparently rewrite Bash commands (for example `git status` -> `rtk git status`) or, when a harness cannot update the command input yet, block the raw command and tell the model to retry with the exact `rtk ...` replacement.
 
 **Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
@@ -305,12 +305,14 @@ RTK supports 10 AI coding tools. Each integration transparently rewrites shell c
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook (`rtk hook gemini`) |
-| **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Codex** | `rtk init -g --codex` | PreToolUse deny-with-suggestion (`.codex/hooks.json` + `.codex/config.toml`) |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Mistral Vibe** | Planned (#800) | Blocked on upstream BeforeToolCallback |
+
+Codex on Windows currently falls back to prompt-only setup because upstream Codex does not run lifecycle hooks there.
 
 ### Claude Code (default)
 
@@ -354,9 +356,20 @@ Creates `~/.gemini/hooks/rtk-hook-gemini.sh` + patches `~/.gemini/settings.json`
 
 ```bash
 rtk init -g --codex
+rtk init --codex
+rtk init -g --codex --uninstall
 ```
 
-Creates `~/.codex/RTK.md` + `~/.codex/AGENTS.md` with `@RTK.md` reference. Codex reads these as global instructions.
+On macOS and Linux, global install writes `${CODEX_HOME:-~/.codex}/RTK.md`, `${CODEX_HOME:-~/.codex}/AGENTS.md`, `${CODEX_HOME:-~/.codex}/config.toml`, and `${CODEX_HOME:-~/.codex}/hooks.json`. Project-scoped install writes the same files under `./.codex/`.
+
+RTK enables `features.codex_hooks = true` and installs a `PreToolUse` Bash hook that runs `rtk hook codex`.
+
+Codex does not support transparent `updatedInput` rewrites yet, so supported raw Bash commands are denied with the exact `rtk ...` replacement instead of being silently rewritten.
+
+Notes:
+- If `CODEX_HOME` is set, `rtk init -g --codex` uses that directory instead of `~/.codex`.
+- On Windows, RTK falls back to `RTK.md` + `AGENTS.md` instructions only because Codex lifecycle hooks are currently disabled upstream.
+- Project-scoped `.codex/` installs only activate when Codex trusts the project.
 
 ### Windsurf
 
@@ -457,7 +470,7 @@ FAILED: 2/15 tests
 ### Uninstall
 
 ```bash
-rtk init -g --uninstall     # Remove hook, RTK.md, settings.json entry
+rtk init -g --uninstall     # Remove RTK-managed hook, RTK.md, and harness config entry
 cargo uninstall rtk          # Remove binary
 brew uninstall rtk           # If installed via Homebrew
 ```

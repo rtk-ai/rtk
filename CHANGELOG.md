@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+* **codex:** add native Codex hook integration with `PreToolUse` deny-and-retry, `CODEX_HOME` support, and Windows prompt-only fallback
+
 ### Bug Fixes
 
 * **diff:** correct truncation overflow count in condense_unified_diff ([#833](https://github.com/rtk-ai/rtk/pull/833)) ([5399f83](https://github.com/rtk-ai/rtk/commit/5399f83))

@@ -46,6 +46,32 @@ pub fn run_copilot() -> Result<()> {
     }
 }
 
+/// Run the Codex CLI PreToolUse hook.
+/// Codex currently supports deny/block for Bash commands but fails open on
+/// updatedInput and permissionDecision:allow, so this adapter is deny-only.
+pub fn run_codex() -> Result<()> {
+    let mut input = String::new();
+    io::stdin()
+        .read_to_string(&mut input)
+        .context("Failed to read stdin")?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    let Some(command) = detect_codex_command(&v) else {
+        return Ok(());
+    };
+
+    handle_codex(&command)
+}
+
 fn detect_format(v: &Value) -> HookFormat {
     // VS Code Copilot Chat / Claude Code: snake_case keys
     if let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) {
@@ -104,6 +130,24 @@ fn get_rewritten(cmd: &str) -> Option<String> {
     Some(rewritten)
 }
 
+fn deny_reason(rewritten: &str) -> String {
+    format!(
+        "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
+        rewritten
+    )
+}
+
+fn detect_codex_command(v: &Value) -> Option<String> {
+    (v.get("tool_name").and_then(|t| t.as_str()) == Some("Bash"))
+        .then(|| {
+            v.pointer("/tool_input/command")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+                .map(str::to_string)
+        })
+        .flatten()
+}
+
 fn handle_vscode(cmd: &str) -> Result<()> {
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
@@ -130,10 +174,24 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
 
     let output = json!({
         "permissionDecision": "deny",
-        "permissionDecisionReason": format!(
-            "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
-            rewritten
-        )
+        "permissionDecisionReason": deny_reason(&rewritten)
+    });
+    println!("{output}");
+    Ok(())
+}
+
+fn handle_codex(cmd: &str) -> Result<()> {
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+
+    let output = json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": deny_reason(&rewritten)
+        }
     });
     println!("{output}");
     Ok(())
@@ -212,6 +270,13 @@ mod tests {
         json!({ "toolName": "bash", "toolArgs": args })
     }
 
+    fn codex_input(cmd: &str) -> Value {
+        json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        })
+    }
+
     #[test]
     fn test_detect_vscode_bash() {
         assert!(matches!(
@@ -248,6 +313,26 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_codex_bash() {
+        assert_eq!(
+            detect_codex_command(&codex_input("git status")),
+            Some("git status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_codex_non_bash_is_passthrough() {
+        let v = json!({ "tool_name": "Edit", "tool_input": { "command": "git status" } });
+        assert_eq!(detect_codex_command(&v), None);
+    }
+
+    #[test]
+    fn test_detect_codex_empty_command_is_passthrough() {
+        let v = json!({ "tool_name": "Bash", "tool_input": { "command": "" } });
+        assert_eq!(detect_codex_command(&v), None);
+    }
+
+    #[test]
     fn test_get_rewritten_supported() {
         assert!(get_rewritten("git status").is_some());
     }
@@ -265,6 +350,32 @@ mod tests {
     #[test]
     fn test_get_rewritten_heredoc() {
         assert!(get_rewritten("cat <<'EOF'\nhello\nEOF").is_none());
+    }
+
+    #[test]
+    fn test_deny_reason_format() {
+        assert_eq!(
+            deny_reason("rtk git status"),
+            "Token savings: use `rtk git status` instead (rtk saves 60-90% tokens)"
+        );
+    }
+
+    #[test]
+    fn test_codex_deny_output_format() {
+        let output = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": deny_reason("rtk git status")
+            }
+        });
+        let json: Value = serde_json::from_str(&output.to_string()).unwrap();
+        assert_eq!(json["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(json["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecisionReason"],
+            "Token savings: use `rtk git status` instead (rtk saves 60-90% tokens)"
+        );
     }
 
     // --- Gemini format ---
