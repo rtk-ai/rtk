@@ -124,6 +124,14 @@ fn get_or_create_salt() -> String {
             }
             if let Ok(mut f) = std::fs::File::create(&salt_path) {
                 let _ = f.write_all(salt.as_bytes());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &salt_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
             }
             salt
         })
