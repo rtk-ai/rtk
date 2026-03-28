@@ -725,3 +725,129 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
 
     Ok(())
 }
+
+pub fn show_quality(tracker: &Tracker) -> Result<()> {
+    let retries = tracker
+        .get_retry_commands()
+        .context("Failed to load retry data")?;
+    let low_savings = tracker
+        .get_low_savings_commands()
+        .context("Failed to load low-savings data")?;
+    let pf_summary = tracker
+        .get_parse_failure_summary()
+        .context("Failed to load parse failure data")?;
+    let gross = tracker
+        .get_gross_savings()
+        .context("Failed to load gross savings")?;
+
+    println!("{}", styled("RTK Filter Quality Report", true));
+    println!("{}", "═".repeat(60));
+    println!();
+
+    if retries.is_empty() {
+        println!("{}", styled("Retry Detection", true));
+        println!("{}", "─".repeat(60));
+        println!("  No retries detected (commands re-run within 60s).");
+        println!();
+    } else {
+        println!(
+            "{}",
+            styled("Retry Detection (commands re-run within 60s)", true)
+        );
+        println!("{}", "─".repeat(60));
+        for r in &retries {
+            let rate = if r.total_runs > 0 {
+                (r.retry_count as f64 / r.total_runs as f64) * 100.0
+            } else {
+                0.0
+            };
+            let retry_word = if r.retry_count == 1 {
+                "retry "
+            } else {
+                "retries"
+            };
+            println!(
+                "  {:<20} {} {} / {} runs  ({:.1}% retry rate)",
+                r.base_cmd, r.retry_count, retry_word, r.total_runs, rate
+            );
+        }
+        println!();
+    }
+
+    if low_savings.is_empty() {
+        println!("{}", styled("Low Savings", true));
+        println!("{}", "─".repeat(60));
+        println!("  All filters achieving 30%+ savings.");
+        println!();
+    } else {
+        println!(
+            "{}",
+            styled("Low Savings (below 30% — excludes proxy/passthrough)", true)
+        );
+        println!("{}", "─".repeat(60));
+        for ls in &low_savings {
+            println!(
+                "  {:<20} {:.0}% avg savings  (expected 60%+)    {} runs",
+                ls.rtk_cmd, ls.avg_savings_pct, ls.runs
+            );
+        }
+        println!();
+    }
+
+    if pf_summary.total > 0 {
+        println!(
+            "{}",
+            styled(
+                "Parse Failures (filters that fell back to raw output)",
+                true
+            )
+        );
+        println!("{}", "─".repeat(60));
+        for (cmd, count) in &pf_summary.top_commands {
+            let cmd_display = if cmd.len() > 30 {
+                format!("{}...", &cmd[..27])
+            } else {
+                cmd.clone()
+            };
+            println!("  {:<30} {} failures", cmd_display, count);
+        }
+        println!();
+    }
+
+    let retry_overhead: i64 = retries.iter().map(|r| r.retry_count as i64 * 800).sum();
+    let net = gross - retry_overhead;
+    println!("{}", styled("Net Savings", true));
+    println!("{}", "─".repeat(60));
+    println!(
+        "  Gross savings:     {} tokens saved",
+        format_tokens(gross as usize)
+    );
+    if retry_overhead > 0 {
+        println!(
+            "  Retry overhead:    ~{} tokens (est. from {} retried commands)",
+            format_tokens(retry_overhead as usize),
+            retries.iter().map(|r| r.retry_count).sum::<usize>()
+        );
+    }
+    println!(
+        "  Net savings:       {} tokens",
+        format_tokens(net.max(0) as usize)
+    );
+    if gross > 0 {
+        let efficiency = (net.max(0) as f64 / gross as f64) * 100.0;
+        println!("  Efficiency:        {:.0}%", efficiency);
+    }
+    println!();
+
+    let has_issues = !retries.is_empty() || !low_savings.is_empty() || pf_summary.total > 0;
+    if has_issues {
+        println!(
+            "{}",
+            "Review the sections above for potential filter quality improvements.".yellow()
+        );
+    } else {
+        println!("{}", "No quality issues detected. ✓".green());
+    }
+
+    Ok(())
+}

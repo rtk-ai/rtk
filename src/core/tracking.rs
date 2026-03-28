@@ -477,6 +477,111 @@ impl Tracker {
         })
     }
 
+    /// Detect commands re-run within 60 seconds (possible retries).
+    pub fn get_retry_commands(&self) -> Result<Vec<RetryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "WITH base AS (
+               SELECT
+                 CASE
+                   WHEN original_cmd LIKE 'git %' THEN
+                     CASE
+                       WHEN instr(substr(original_cmd, 5), ' ') > 0
+                       THEN substr(original_cmd, 1, instr(substr(original_cmd, 5), ' ') + 3)
+                       ELSE original_cmd
+                     END
+                   ELSE
+                     CASE
+                       WHEN instr(original_cmd, ' ') > 0
+                       THEN substr(original_cmd, 1, instr(original_cmd, ' ') - 1)
+                       ELSE original_cmd
+                     END
+                 END AS base_cmd,
+                 timestamp,
+                 LAG(timestamp) OVER (
+                   PARTITION BY
+                     CASE
+                       WHEN original_cmd LIKE 'git %' THEN
+                         CASE
+                           WHEN instr(substr(original_cmd, 5), ' ') > 0
+                           THEN substr(original_cmd, 1, instr(substr(original_cmd, 5), ' ') + 3)
+                           ELSE original_cmd
+                         END
+                       ELSE
+                         CASE
+                           WHEN instr(original_cmd, ' ') > 0
+                           THEN substr(original_cmd, 1, instr(original_cmd, ' ') - 1)
+                           ELSE original_cmd
+                         END
+                     END
+                   ORDER BY timestamp
+                 ) AS prev_ts
+               FROM commands
+             )
+             SELECT base_cmd,
+                    COUNT(*) AS total_runs,
+                    SUM(CASE
+                          WHEN prev_ts IS NOT NULL
+                           AND (strftime('%s', timestamp) - strftime('%s', prev_ts)) < 60
+                          THEN 1 ELSE 0
+                        END) AS retry_count
+             FROM base
+             GROUP BY base_cmd
+             HAVING retry_count > 0
+             ORDER BY retry_count DESC
+             LIMIT 10",
+        )?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(RetryRecord {
+                    base_cmd: row.get(0)?,
+                    total_runs: row.get::<_, i64>(1)? as usize,
+                    retry_count: row.get::<_, i64>(2)? as usize,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    /// Find commands with consistently low token savings (<30%).
+    pub fn get_low_savings_commands(&self) -> Result<Vec<LowSavingsRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd, COUNT(*) AS runs, AVG(savings_pct) AS avg_savings
+             FROM commands
+             WHERE savings_pct < 30.0
+               AND input_tokens > 50
+               AND rtk_cmd NOT LIKE '%proxy%'
+               AND rtk_cmd NOT LIKE '%fallback%'
+             GROUP BY rtk_cmd
+             HAVING runs >= 3
+             ORDER BY avg_savings ASC
+             LIMIT 10",
+        )?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(LowSavingsRecord {
+                    rtk_cmd: row.get(0)?,
+                    runs: row.get::<_, i64>(1)? as usize,
+                    avg_savings_pct: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    /// Get the total gross savings from all tracked commands.
+    pub fn get_gross_savings(&self) -> Result<i64> {
+        let total: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(saved_tokens), 0) FROM commands",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(total)
+    }
+
     /// Get overall summary statistics across all recorded commands.
     ///
     /// Returns aggregated metrics including:
@@ -993,6 +1098,22 @@ pub struct ParseFailureSummary {
     pub recovery_rate: f64,
     pub top_commands: Vec<(String, usize)>,
     pub recent: Vec<ParseFailureRecord>,
+}
+
+/// A command detected as potentially retried (re-run within 60 seconds).
+#[derive(Debug)]
+pub struct RetryRecord {
+    pub base_cmd: String,
+    pub total_runs: usize,
+    pub retry_count: usize,
+}
+
+/// A command with consistently low token savings.
+#[derive(Debug)]
+pub struct LowSavingsRecord {
+    pub rtk_cmd: String,
+    pub runs: usize,
+    pub avg_savings_pct: f64,
 }
 
 /// Record a parse failure without ever crashing.

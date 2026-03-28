@@ -404,6 +404,9 @@ enum Commands {
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
+        /// Show filter quality analysis (retry detection, low-savings commands)
+        #[arg(short = 'Q', long)]
+        quality: bool,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -1684,7 +1687,15 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             failures,
+            quality,
         } => {
+            if quality {
+                let tracker = crate::core::tracking::Tracker::new()
+                    .context("Failed to initialize tracking database")?;
+                analytics::gain::show_quality(&tracker)?;
+                return Ok(());
+            }
+
             analytics::gain::run(
                 project, // added: pass project flag
                 graph,
