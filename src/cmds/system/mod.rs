@@ -1,5 +1,6 @@
 //! General-purpose system command filters.
 
+pub mod codex_cmd;
 pub mod deps;
 pub mod env_cmd;
 pub mod find_cmd;

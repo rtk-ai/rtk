@@ -165,6 +165,11 @@ rtk gh issue list               # Compact issue listing
 rtk gh run list                 # Workflow run status
 ```
 
+### AI Review
+```bash
+rtk codex review --base main    # Keep only the final Codex review text
+```
+
 ### Test Runners
 ```bash
 rtk test cargo test             # Show failures only (-90%)
