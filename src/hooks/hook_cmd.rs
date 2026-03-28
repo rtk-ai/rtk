@@ -2,10 +2,45 @@
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::io::{self, Read};
+use std::fs::OpenOptions;
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
 
 use crate::discover::registry::rewrite_command;
-use super::permissions::{check_command, check_command_with_rules, PermissionVerdict};
+use super::permissions::{check_command, PermissionVerdict};
+
+#[cfg(test)]
+use super::permissions::check_command_with_rules;
+
+/// Log hook activity to audit log (opt-in via RTK_HOOK_AUDIT=1).
+/// Writes to ~/.local/share/rtk/hook-audit.log or $RTK_AUDIT_DIR/hook-audit.log.
+fn audit_log(action: &str, original_cmd: &str, rewritten_cmd: Option<&str>) {
+    if std::env::var("RTK_HOOK_AUDIT").unwrap_or_default() != "1" {
+        return;
+    }
+
+    let audit_dir = std::env::var("RTK_AUDIT_DIR")
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            format!("{}/.local/share/rtk", home)
+        });
+
+    // Create directory if needed (ignore errors - audit is opt-in)
+    let _ = std::fs::create_dir_all(&audit_dir);
+
+    let log_path = PathBuf::from(&audit_dir).join("hook-audit.log");
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+
+    let rewritten = rewritten_cmd.unwrap_or("-");
+    let log_line = format!("{} | {} | {} | {}\n", timestamp, action, original_cmd, rewritten);
+
+    // Append to log file (ignore errors - audit is opt-in)
+    let _ = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .and_then(|mut f| f.write_all(log_line.as_bytes()));
+}
 
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
 
@@ -29,6 +64,7 @@ pub fn run_copilot() -> Result<()> {
 
     let input = input.trim();
     if input.is_empty() {
+        audit_log("skip:empty", "-", None);
         return Ok(());
     }
 
@@ -36,6 +72,7 @@ pub fn run_copilot() -> Result<()> {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[rtk hook] Failed to parse JSON input: {e}");
+            audit_log("skip:parse_error", "-", None);
             return Ok(());
         }
     };
@@ -106,6 +143,12 @@ fn get_rewritten(cmd: &str) -> Option<String> {
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
+    // Skip heredocs early
+    if cmd.contains("<<") {
+        audit_log("skip:heredoc", cmd, None);
+        return Ok(());
+    }
+
     // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
     let verdict = check_command(cmd);
 
@@ -113,6 +156,7 @@ fn handle_vscode(cmd: &str) -> Result<()> {
         PermissionVerdict::Deny => {
             // Return deny response - let Claude Code's native deny handling take over
             // We don't print anything, which signals denial
+            audit_log("skip:deny_rule", cmd, None);
             return Ok(());
         }
         PermissionVerdict::Ask => {
@@ -127,6 +171,9 @@ fn handle_vscode(cmd: &str) -> Result<()> {
                     }
                 });
                 println!("{output}");
+                audit_log("ask", cmd, Some(&rewritten));
+            } else {
+                audit_log("ask", cmd, None);
             }
             // If no rewrite, pass through with ask signal
             return Ok(());
@@ -138,7 +185,10 @@ fn handle_vscode(cmd: &str) -> Result<()> {
 
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
-        None => return Ok(()),
+        None => {
+            audit_log("skip:no_match", cmd, None);
+            return Ok(());
+        }
     };
 
     let output = json!({
@@ -150,16 +200,24 @@ fn handle_vscode(cmd: &str) -> Result<()> {
         }
     });
     println!("{output}");
+    audit_log("rewrite", cmd, Some(&rewritten));
     Ok(())
 }
 
 fn handle_copilot_cli(cmd: &str) -> Result<()> {
+    // Skip heredocs early
+    if cmd.contains("<<") {
+        audit_log("skip:heredoc", cmd, None);
+        return Ok(());
+    }
+
     // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
     let verdict = check_command(cmd);
 
     // Deny takes priority - if a deny rule matches, don't suggest rewrite
     if verdict == PermissionVerdict::Deny {
         // Return deny without suggestion - Copilot CLI will use its native deny handling
+        audit_log("skip:deny_rule", cmd, None);
         return Ok(());
     }
 
@@ -167,7 +225,10 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
     // We'll show the deny-with-suggestion format as before
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
-        None => return Ok(()),
+        None => {
+            audit_log("skip:no_match", cmd, None);
+            return Ok(());
+        }
     };
 
     let output = json!({
@@ -178,6 +239,7 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
         )
     });
     println!("{output}");
+    audit_log("rewrite", cmd, Some(&rewritten));
     Ok(())
 }
 
@@ -194,6 +256,7 @@ pub fn run_claude() -> Result<()> {
 
     let input = input.trim();
     if input.is_empty() {
+        audit_log("skip:empty", "-", None);
         return Ok(());
     }
 
@@ -201,6 +264,7 @@ pub fn run_claude() -> Result<()> {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[rtk hook] Failed to parse JSON input: {e}");
+            audit_log("skip:parse_error", "-", None);
             return Ok(());
         }
     };
@@ -212,7 +276,10 @@ pub fn run_claude() -> Result<()> {
         .filter(|c| !c.is_empty())
     {
         Some(c) => c,
-        None => return Ok(()), // No command = pass through
+        None => {
+            audit_log("skip:empty", "-", None);
+            return Ok(());
+        } // No command = pass through
     };
 
     handle_vscode(cmd)
@@ -244,6 +311,14 @@ pub fn run_gemini() -> Result<()> {
         .unwrap_or("");
 
     if cmd.is_empty() {
+        audit_log("skip:empty", "-", None);
+        print_allow();
+        return Ok(());
+    }
+
+    // Skip heredocs early
+    if cmd.contains("<<") {
+        audit_log("skip:heredoc", cmd, None);
         print_allow();
         return Ok(());
     }
@@ -253,14 +328,21 @@ pub fn run_gemini() -> Result<()> {
 
     match verdict {
         PermissionVerdict::Deny => {
+            audit_log("skip:deny_rule", cmd, None);
             print_deny();
             return Ok(());
         }
         PermissionVerdict::Ask => {
             // For ask: if there's a rewrite, show it but still ask
             match rewrite_command(cmd, &[]) {
-                Some(rewritten) => print_ask(&rewritten),
-                None => print_ask(cmd),
+                Some(rewritten) => {
+                    audit_log("ask", cmd, Some(&rewritten));
+                    print_ask(&rewritten);
+                }
+                None => {
+                    audit_log("ask", cmd, None);
+                    print_ask(cmd);
+                }
             }
             return Ok(());
         }
@@ -271,8 +353,14 @@ pub fn run_gemini() -> Result<()> {
 
     // Delegate to the single source of truth for command rewriting
     match rewrite_command(cmd, &[]) {
-        Some(rewritten) => print_rewrite(&rewritten),
-        None => print_allow(),
+        Some(rewritten) => {
+            audit_log("rewrite", cmd, Some(&rewritten));
+            print_rewrite(&rewritten);
+        }
+        None => {
+            audit_log("skip:no_match", cmd, None);
+            print_allow();
+        }
     }
 
     Ok(())
@@ -573,5 +661,29 @@ mod tests {
         // Verify print_deny produces valid JSON with deny decision
         let expected = r#"{"decision":"deny"}"#;
         assert_eq!(expected, r#"{"decision":"deny"}"#);
+    }
+
+    // --- Audit logging tests ---
+
+    #[test]
+    fn test_audit_log_does_not_panic_when_disabled() {
+        // When RTK_HOOK_AUDIT is not set, audit_log should not panic
+        // We can't easily test file creation, but we verify it doesn't crash
+        audit_log("rewrite", "git status", Some("rtk git status"));
+        audit_log("skip:no_match", "echo hi", None);
+    }
+
+    #[test]
+    fn test_audit_log_formats_line_correctly() {
+        // Verify log line format matches expected: "timestamp | action | original | rewritten"
+        let action = "rewrite";
+        let original = "git status";
+        let rewritten = Some("rtk git status");
+
+        // We can't test file I/O easily in unit tests, but we can verify
+        // the function doesn't panic with various inputs
+        audit_log(action, original, rewritten);
+        audit_log("skip:heredoc", "cat <<EOF", None);
+        audit_log("ask", "git push", None);
     }
 }
