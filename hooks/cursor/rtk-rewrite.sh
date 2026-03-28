@@ -20,30 +20,25 @@ if ! command -v rtk &>/dev/null; then
 fi
 
 # Version guard: rtk rewrite was added in 0.23.0.
-RTK_VERSION=$(rtk --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-if [ -n "$RTK_VERSION" ]; then
-  MAJOR=$(echo "$RTK_VERSION" | cut -d. -f1)
-  MINOR=$(echo "$RTK_VERSION" | cut -d. -f2)
-  if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 23 ]; then
-    echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.23.0). Upgrade: cargo install rtk" >&2
-    exit 0
-  fi
+if ! rtk rewrite --help &>/dev/null; then
+  echo "[rtk] WARNING: rtk is too old (need >= 0.23.0). Upgrade: cargo install rtk" >&2
+  exit 0
 fi
 
-INPUT=$(cat)
-CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+INPUT="$(cat)"
+CMD="$(echo "$INPUT" | jq -r '.tool_input.command // empty')"
 
-if [ -z "$CMD" ]; then
+if [[ -z "$CMD" ]]; then
   echo '{}'
   exit 0
 fi
 
 # Delegate all rewrite logic to the Rust binary.
 # rtk rewrite exits 1 when there's no rewrite — hook passes through silently.
-REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null) || { echo '{}'; exit 0; }
+REWRITTEN="$(rtk rewrite "$CMD" 2>/dev/null)" || { echo '{}'; exit 0; }
 
 # No change — nothing to do.
-if [ "$CMD" = "$REWRITTEN" ]; then
+if [[ "$CMD" == "$REWRITTEN" ]]; then
   echo '{}'
   exit 0
 fi
