@@ -65,8 +65,6 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = resolved_command("go");
     cmd.arg("build");
 
@@ -78,40 +76,16 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go build {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go build. Is Go installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = exit_code_from_output(&output, "go");
-    let filtered = filter_go_build(&raw);
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "go_build", exit_code) {
-        if !filtered.is_empty() {
-            println!("{}\n{}", filtered, hint);
-        } else {
-            println!("{}", hint);
-        }
-    } else if !filtered.is_empty() {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("go build {}", args.join(" ")),
-        &format!("rtk go build {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    Ok(exit_code)
+    crate::core::runner::run_filtered(
+        cmd,
+        "go build",
+        &args.join(" "),
+        filter_go_build,
+        crate::core::runner::RunOptions::with_tee("go_build"),
+    )
 }
 
 pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = resolved_command("go");
     cmd.arg("vet");
 
@@ -123,35 +97,13 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: go vet {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go vet. Is Go installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = exit_code_from_output(&output, "go");
-    let filtered = filter_go_vet(&raw);
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "go_vet", exit_code) {
-        if !filtered.is_empty() {
-            println!("{}\n{}", filtered, hint);
-        } else {
-            println!("{}", hint);
-        }
-    } else if !filtered.is_empty() {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("go vet {}", args.join(" ")),
-        &format!("rtk go vet {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    Ok(exit_code)
+    crate::core::runner::run_filtered(
+        cmd,
+        "go vet",
+        &args.join(" "),
+        filter_go_vet,
+        crate::core::runner::RunOptions::with_tee("go_vet"),
+    )
 }
 
 pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
