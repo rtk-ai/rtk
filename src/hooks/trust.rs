@@ -139,14 +139,6 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
     }
 }
 
-/// Store current SHA-256 hash as trusted (computes hash from file).
-#[allow(dead_code)]
-pub fn trust_filter(filter_path: &Path) -> Result<()> {
-    let hash = integrity::compute_hash(filter_path)
-        .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
-    trust_filter_with_hash(filter_path, &hash)
-}
-
 /// Store a pre-computed SHA-256 hash as trusted (avoids TOCTOU re-read).
 pub fn trust_filter_with_hash(filter_path: &Path, hash: &str) -> Result<()> {
     let key = canonical_key(filter_path)?;

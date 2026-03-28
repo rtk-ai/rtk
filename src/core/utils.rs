@@ -60,27 +60,6 @@ pub fn strip_ansi(text: &str) -> String {
 ///
 /// # Returns
 /// `(stdout: String, stderr: String, exit_code: i32)`
-///
-/// # Examples
-/// ```no_run
-/// use rtk::utils::execute_command;
-/// let (stdout, stderr, code) = execute_command("echo", &["test"]).unwrap();
-/// assert_eq!(code, 0);
-/// ```
-#[allow(dead_code)]
-pub fn execute_command(cmd: &str, args: &[&str]) -> Result<(String, String, i32)> {
-    let output = resolved_command(cmd)
-        .args(args)
-        .output()
-        .context(format!("Failed to execute {}", cmd))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
-
-    Ok((stdout, stderr, exit_code))
-}
-
 /// Formats a token count with K/M suffixes for readability.
 ///
 /// # Arguments
@@ -440,21 +419,6 @@ mod tests {
     fn test_strip_ansi_complex() {
         let input = "\x1b[32mGreen\x1b[0m normal \x1b[31mRed\x1b[0m";
         assert_eq!(strip_ansi(input), "Green normal Red");
-    }
-
-    #[test]
-    fn test_execute_command_success() {
-        let result = execute_command("echo", &["test"]);
-        assert!(result.is_ok());
-        let (stdout, _, code) = result.unwrap();
-        assert_eq!(code, 0);
-        assert!(stdout.contains("test"));
-    }
-
-    #[test]
-    fn test_execute_command_failure() {
-        let result = execute_command("nonexistent_command_xyz_12345", &[]);
-        assert!(result.is_err());
     }
 
     #[test]
