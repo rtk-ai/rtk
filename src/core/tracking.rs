@@ -1161,42 +1161,6 @@ pub fn args_display(args: &[OsString]) -> String {
         .join(" ")
 }
 
-/// Track a command execution (legacy function, use [`TimedExecution`] for new code).
-///
-/// # Deprecation Notice
-///
-/// This function is deprecated. Use [`TimedExecution`] instead for automatic
-/// timing and cleaner API.
-///
-/// # Arguments
-///
-/// - `original_cmd`: Standard command (e.g., "ls -la")
-/// - `rtk_cmd`: RTK command used (e.g., "rtk ls")
-/// - `input`: Standard command output (for token estimation)
-/// - `output`: RTK command output (for token estimation)
-///
-/// # Migration
-///
-/// ```no_run
-/// # use rtk::tracking::{track, TimedExecution};
-/// // Old (deprecated)
-/// track("ls -la", "rtk ls", "input", "output");
-///
-/// // New (preferred)
-/// let timer = TimedExecution::start();
-/// timer.track("ls -la", "rtk ls", "input", "output");
-/// ```
-#[deprecated(note = "Use TimedExecution instead")]
-#[allow(dead_code)]
-pub fn track(original_cmd: &str, rtk_cmd: &str, input: &str, output: &str) {
-    let input_tokens = estimate_tokens(input);
-    let output_tokens = estimate_tokens(output);
-
-    if let Ok(tracker) = Tracker::new() {
-        let _ = tracker.record(original_cmd, rtk_cmd, input_tokens, output_tokens, 0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

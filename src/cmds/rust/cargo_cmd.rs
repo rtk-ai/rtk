@@ -1,5 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
+use crate::core::runner;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
@@ -67,13 +68,12 @@ fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<Str
     result
 }
 
-/// Generic cargo command runner with filtering
+/// Generic cargo command runner with filtering.
+/// Builds the Command with restored `--` separator, then delegates to shared runner.
 fn run_cargo_filtered<F>(subcommand: &str, args: &[String], verbose: u8, filter_fn: F) -> Result<()>
 where
     F: Fn(&str) -> String,
 {
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
@@ -86,39 +86,13 @@ where
         eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to run cargo {}", subcommand))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_fn(&raw);
-
-    if let Some(hint) =
-        crate::core::tee::tee_and_hint(&raw, &format!("cargo_{}", subcommand), exit_code)
-    {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("cargo {} {}", subcommand, restored_args.join(" ")),
-        &format!("rtk cargo {} {}", subcommand, restored_args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        &format!("cargo {}", subcommand),
+        &restored_args.join(" "),
+        filter_fn,
+        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+    )
 }
 
 fn run_build(args: &[String], verbose: u8) -> Result<()> {
