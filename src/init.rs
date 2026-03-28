@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
+use crate::config;
 use crate::integrity;
 
 // Embedded hook script (guards before set -euo pipefail)
@@ -279,9 +280,14 @@ pub fn run(
         install_cursor_hooks(verbose)?;
     }
 
-    // Telemetry notice (shown once during init)
     println!();
-    println!("  [info] Anonymous telemetry is enabled (opt-out: RTK_TELEMETRY_DISABLED=1)");
+    let env_disabled = std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1";
+    let config_disabled = matches!(config::telemetry_enabled(), Some(false));
+    if env_disabled || config_disabled {
+        println!("  [info] Anonymous telemetry is disabled");
+    } else {
+        println!("  [info] Anonymous telemetry is enabled by default (opt-out: RTK_TELEMETRY_DISABLED=1)");
+    }
     println!("  [info] See: https://github.com/rtk-ai/rtk#privacy--telemetry");
 
     Ok(())
