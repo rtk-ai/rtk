@@ -55,8 +55,8 @@ The shared wrapper in [`core/runner.rs`](../core/runner.rs) encapsulates the six
  +----------+                                          |
                                                        v
                                                  +-----------+
-                                                 | Exit code |
-                                                 | (on fail) |
+                                                 | Ok(code)  |
+                                                 | returned  |
                                                  +-----------+
 ```
 
@@ -67,7 +67,7 @@ The shared wrapper in [`core/runner.rs`](../core/runner.rs) encapsulates the six
 3. **Print** — filtered output printed; if tee enabled, appends recovery hint on failure
 4. **Stderr passthrough** — when `filter_stdout_only`: stderr printed via `eprintln!()` unconditionally
 5. **Track** — `timer.track()` records raw vs filtered for token savings
-6. **Exit code** — `std::process::exit(code)` on failure, `Ok(())` on success
+6. **Exit code** — returns `Ok(exit_code)` to caller; `main.rs` calls `process::exit(code)` once
 
 **`RunOptions` builder:**
 
@@ -78,10 +78,10 @@ The shared wrapper in [`core/runner.rs`](../core/runner.rs) encapsulates the six
 | `RunOptions::stdout_only()` | Stdout-only to filter, stderr passthrough, no tee |
 | `RunOptions::stdout_only().tee("label")` | Stdout-only + tee recovery |
 
-**Example:**
+**Example — filtered command (recommended):**
 
 ```rust
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("mycmd");
     for arg in args { cmd.arg(arg); }
     if verbose > 0 { eprintln!("Running: mycmd {}", args.join(" ")); }
@@ -91,6 +91,31 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         filter_mycmd_output,
         runner::RunOptions::stdout_only().tee("mycmd"),
     )
+}
+```
+
+Exit code handling is **fully automatic** when using `run_filtered()` — the wrapper extracts the exit code (including Unix signal handling via 128+signal), tracks savings, and returns `Ok(exit_code)`. Module authors just return the result.
+
+**Example — passthrough command (no filtering):**
+
+```rust
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    let status = resolved_command("mycmd").args(args)
+        .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
+        .status().context("Failed to run mycmd")?;
+    Ok(exit_code_from_status(&status, "mycmd"))
+}
+```
+
+**Example — manual execution (custom logic):**
+
+```rust
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let output = resolved_command("mycmd").args(args)
+        .output().context("Failed to run mycmd")?;
+    let exit_code = exit_code_from_output(&output, "mycmd");
+    // ... custom filtering, tracking ...
+    Ok(exit_code)
 }
 ```
 
@@ -109,7 +134,25 @@ These behaviors must be uniform across all command modules. Full audit details i
 
 ### Exit Code Propagation
 
-Modules must capture the underlying command's exit code, propagate it via `std::process::exit()` only on failure, and return `Ok(())` on success. When the process is killed by signal (`.code()` returns `None`), default to exit code 1.
+All module `run()` functions return `Result<i32>` where the `i32` is the underlying command's exit code. `main.rs` calls `std::process::exit(code)` once at the single exit point — **modules never call `process::exit()` directly**.
+
+| Return value | Meaning | Who exits |
+|--------------|---------|-----------|
+| `Ok(0)` | Command succeeded | `main.rs` exits 0 |
+| `Ok(N)` | Command failed with code N | `main.rs` exits N |
+| `Err(e)` | RTK itself failed (not the command) | `main.rs` prints error, exits 1 |
+
+**How exit codes are extracted:**
+
+| Execution style | Helper | Signal handling |
+|----------------|--------|-----------------|
+| `cmd.output()` (filtered) | `exit_code_from_output(&output, "tool")` | 128+signal on Unix |
+| `cmd.status()` (passthrough) | `exit_code_from_status(&status, "tool")` | 128+signal on Unix |
+| `run_filtered()` (wrapper) | Automatic — no manual code needed | Built-in |
+
+**When using `run_filtered()`**: exit code handling is fully automatic. The wrapper extracts the exit code, handles signals, and returns `Ok(exit_code)`. Module authors just return the wrapper's result — no exit code logic needed.
+
+**When doing manual execution**: use `exit_code_from_output()` or `exit_code_from_status()` and return `Ok(exit_code)`. Never call `process::exit()`, never use `.code().unwrap_or(1)` (loses signal info).
 
 ### Filter Failure Passthrough
 
@@ -125,7 +168,7 @@ Modules must capture stderr and include it in the raw string passed to `timer.tr
 
 ### Tracking Completeness
 
-All modules must call `timer.track()` on every path — success, failure, and fallback. Never exit before tracking.
+All modules must call `timer.track()` on every path — success, failure, and fallback. Since modules return `Ok(exit_code)` instead of calling `process::exit()`, tracking always runs before the program exits.
 
 ### Verbose Flag
 
@@ -140,14 +183,15 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
 
 1. **Create module** in `src/cmds/<ecosystem>/mycmd_cmd.rs`:
    - Write the `filter_mycmd()` function (pure: `&str -> String`, no side effects)
-   - Write `run()` using `runner::run_filtered()` — build the `Command`, choose `RunOptions`, delegate
+   - Write `pub fn run(...) -> Result<i32>` using `runner::run_filtered()` — build the `Command`, choose `RunOptions`, delegate
    - Use `RunOptions::stdout_only()` when the filter parses structured stdout (JSON, NDJSON) — stderr would corrupt parsing
    - Use `RunOptions::default()` when filtering combined text output
    - Add `.tee("label")` when the filter parses structured output (enables raw output recovery on failure)
+   - **Exit codes**: handled automatically by `run_filtered()` — just return its result
 2. **Register module**:
    - Add `pub mod mycmd_cmd;` to the ecosystem's `mod.rs`
    - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`
-   - Add routing match arm in `main.rs` to call `mycmd_cmd::run()`
+   - Add routing match arm in `main.rs`: `Commands::Mycmd { args } => mycmd_cmd::run(&args, cli.verbose)?,`
 3. **Add rewrite pattern** — Entry in `src/discover/rules.rs` (PATTERNS + RULES arrays at matching index) so hooks auto-rewrite the command
 4. **Write tests** — Real fixture, snapshot test, token savings >= 60% (see [testing rules](../../.claude/rules/cli-testing.md))
 5. **Update docs** — Ecosystem README, CHANGELOG.md

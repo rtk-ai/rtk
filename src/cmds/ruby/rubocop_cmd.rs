@@ -50,7 +50,7 @@ struct RubocopSummary {
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = ruby_exec("rubocop");
 
     let is_autocorrect = args

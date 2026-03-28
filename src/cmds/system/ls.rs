@@ -1,7 +1,7 @@
 //! Filters directory listings into a compact tree format.
 
 use crate::core::tracking;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{exit_code_from_output, resolved_command};
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
 
@@ -33,7 +33,7 @@ const NOISE_DIRS: &[&str] = &[
     ".eggs",
 ];
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Separate flags from paths
@@ -88,7 +88,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprint!("{}", stderr);
-        std::process::exit(output.status.code().unwrap_or(1));
+        return Ok(exit_code_from_output(&output, "ls"));
     }
 
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -128,7 +128,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    Ok(())
+    Ok(0)
 }
 
 /// Format bytes into human-readable size

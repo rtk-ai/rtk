@@ -80,7 +80,7 @@ pub(crate) fn detect_major_version() -> u32 {
     }
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let version = detect_major_version();
@@ -148,18 +148,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues, exit 2+ = config/build error
-    // None = killed by signal (OOM, SIGKILL) — always fatal
-    match output.status.code() {
-        Some(0) | Some(1) => Ok(()),
-        Some(code) => {
-            std::process::exit(code);
-        }
-        None => {
-            eprintln!("golangci-lint: killed by signal");
-            std::process::exit(130);
-        }
-    }
+    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
+    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
+    // RTK treats exit 1 as success: lint issues are reported in filtered output,
+    // but the exit code should not fail CI — the linter ran successfully.
+    let exit_code = crate::core::utils::exit_code_from_output(&output, "golangci-lint");
+    Ok(if exit_code == 1 { 0 } else { exit_code })
 }
 
 /// Filter golangci-lint JSON output - group by linter and file

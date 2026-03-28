@@ -5,7 +5,7 @@ use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Try next directly first, fallback to npx if not found
     let next_exists = tool_exists("next");
 

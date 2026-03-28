@@ -6,7 +6,7 @@ use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Try tsc directly first, fallback to npx if not found
     let tsc_exists = tool_exists("tsc");
 
@@ -33,10 +33,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &args.join(" "),
         |raw| filter_tsc_output(raw),
         runner::RunOptions::with_tee("tsc"),
-    )?;
-
-    // Preserve tsc exit code for CI/CD compatibility (always exit, even on success)
-    std::process::exit(0);
+    )
 }
 
 /// Filter TypeScript compiler output - group errors by file, show every error

@@ -1,7 +1,7 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -39,7 +39,7 @@ struct PackageResult {
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
 }
 
-pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
@@ -64,7 +64,7 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
     )
 }
 
-pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = resolved_command("go");
@@ -86,10 +86,7 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    let exit_code = exit_code_from_output(&output, "go");
     let filtered = filter_go_build(&raw);
 
     if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "go_build", exit_code) {
@@ -109,15 +106,10 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    Ok(exit_code)
 }
 
-pub fn run_vet(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = resolved_command("go");
@@ -139,10 +131,7 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    let exit_code = exit_code_from_output(&output, "go");
     let filtered = filter_go_vet(&raw);
 
     if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "go_vet", exit_code) {
@@ -162,15 +151,10 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    Ok(exit_code)
 }
 
-pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
+pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         anyhow::bail!("go: no subcommand specified");
     }
@@ -214,12 +198,7 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
         &raw, // No filtering for unsupported commands
     );
 
-    // Preserve exit code
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    Ok(exit_code_from_output(&output, "go"))
 }
 
 /// Detect golangci-lint major version when invoked via `go tool`.
