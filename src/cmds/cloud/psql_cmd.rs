@@ -3,9 +3,8 @@
 //! Detects table and expanded display formats, strips borders/padding,
 //! and produces compact tab-separated or key=value output.
 
-use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command};
-use anyhow::{Context, Result};
+use crate::core::utils::resolved_command;
+use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 
@@ -20,8 +19,6 @@ lazy_static! {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = resolved_command("psql");
     for arg in args {
         cmd.arg(arg);
@@ -31,38 +28,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: psql {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run psql (is PostgreSQL client installed?)")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let exit_code = exit_code_from_output(&output, "psql");
-
-    if !stderr.is_empty() {
-        eprint!("{}", stderr);
-    }
-
-    if exit_code != 0 {
-        return Ok(exit_code);
-    }
-
-    let filtered = filter_psql_output(&stdout);
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&stdout, "psql", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("psql {}", args.join(" ")),
-        &format!("rtk psql {}", args.join(" ")),
-        &stdout,
-        &filtered,
-    );
-
-    Ok(0)
+    crate::core::runner::run_filtered(
+        cmd,
+        "psql",
+        &args.join(" "),
+        filter_psql_output,
+        crate::core::runner::RunOptions::stdout_only().tee("psql"),
+    )
 }
 
 fn filter_psql_output(output: &str) -> String {
