@@ -2064,7 +2064,7 @@ fn main() -> Result<()> {
                 hooks::hook_cmd::run_copilot()?;
             }
             HookCommands::Claude => {
-                hook_cmd::run_claude()?;
+                hooks::hook_cmd::run_claude()?;
             }
         },
 
