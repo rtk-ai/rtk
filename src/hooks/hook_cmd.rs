@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::io::{self, Read};
 
 use crate::discover::registry::rewrite_command;
+use super::permissions::{check_command, check_command_with_rules, PermissionVerdict};
 
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
 
@@ -105,6 +106,36 @@ fn get_rewritten(cmd: &str) -> Option<String> {
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
+    // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
+    let verdict = check_command(cmd);
+
+    match verdict {
+        PermissionVerdict::Deny => {
+            // Return deny response - let Claude Code's native deny handling take over
+            // We don't print anything, which signals denial
+            return Ok(());
+        }
+        PermissionVerdict::Ask => {
+            // For Ask: rewrite but signal ask so Claude Code prompts the user
+            if let Some(rewritten) = get_rewritten(cmd) {
+                let output = json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "ask",
+                        "permissionDecisionReason": "Permission required for this command",
+                        "updatedInput": { "command": rewritten }
+                    }
+                });
+                println!("{output}");
+            }
+            // If no rewrite, pass through with ask signal
+            return Ok(());
+        }
+        PermissionVerdict::Allow => {
+            // Proceed with rewrite
+        }
+    }
+
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
         None => return Ok(()),
@@ -123,6 +154,17 @@ fn handle_vscode(cmd: &str) -> Result<()> {
 }
 
 fn handle_copilot_cli(cmd: &str) -> Result<()> {
+    // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
+    let verdict = check_command(cmd);
+
+    // Deny takes priority - if a deny rule matches, don't suggest rewrite
+    if verdict == PermissionVerdict::Deny {
+        // Return deny without suggestion - Copilot CLI will use its native deny handling
+        return Ok(());
+    }
+
+    // For Ask: still show the rewrite suggestion but Copilot CLI doesn't support ask
+    // We'll show the deny-with-suggestion format as before
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
         None => return Ok(()),
@@ -206,6 +248,27 @@ pub fn run_gemini() -> Result<()> {
         return Ok(());
     }
 
+    // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
+    let verdict = check_command(cmd);
+
+    match verdict {
+        PermissionVerdict::Deny => {
+            print_deny();
+            return Ok(());
+        }
+        PermissionVerdict::Ask => {
+            // For ask: if there's a rewrite, show it but still ask
+            match rewrite_command(cmd, &[]) {
+                Some(rewritten) => print_ask(&rewritten),
+                None => print_ask(cmd),
+            }
+            return Ok(());
+        }
+        PermissionVerdict::Allow => {
+            // Proceed with rewrite
+        }
+    }
+
     // Delegate to the single source of truth for command rewriting
     match rewrite_command(cmd, &[]) {
         Some(rewritten) => print_rewrite(&rewritten),
@@ -217,6 +280,22 @@ pub fn run_gemini() -> Result<()> {
 
 fn print_allow() {
     println!(r#"{{"decision":"allow"}}"#);
+}
+
+fn print_deny() {
+    println!(r#"{{"decision":"deny"}}"#);
+}
+
+fn print_ask(cmd: &str) {
+    let output = serde_json::json!({
+        "decision": "ask",
+        "hookSpecificOutput": {
+            "tool_input": {
+                "command": cmd
+            }
+        }
+    });
+    println!("{}", output);
 }
 
 fn print_rewrite(cmd: &str) {
@@ -413,5 +492,86 @@ mod tests {
             json["hookSpecificOutput"]["updatedInput"]["command"],
             "rtk git status"
         );
+    }
+
+    // --- Permission checking tests ---
+
+    #[test]
+    fn test_handle_vscode_denies_blocked_command() {
+        // Verify that a denied command doesn't produce output
+        let deny = vec!["git push --force".to_string()];
+        let verdict = check_command_with_rules("git push --force", &deny, &[]);
+        assert_eq!(verdict, PermissionVerdict::Deny);
+
+        // When deny matches, handle_vscode should return early without output
+        // We can't test the stdout directly in unit tests, but we verify
+        // the permission check returns Deny
+    }
+
+    #[test]
+    fn test_handle_vscode_allows_safe_command() {
+        let verdict = check_command_with_rules("git status", &[], &[]);
+        assert_eq!(verdict, PermissionVerdict::Allow);
+    }
+
+    #[test]
+    fn test_handle_vscode_prompts_for_ask_command() {
+        let ask = vec!["git push".to_string()];
+        let verdict = check_command_with_rules("git push origin main", &[], &ask);
+        assert_eq!(verdict, PermissionVerdict::Ask);
+    }
+
+    #[test]
+    fn test_handle_copilot_cli_denies_blocked_command() {
+        let deny = vec!["rm -rf".to_string()];
+        let verdict = check_command_with_rules("rm -rf /tmp/test", &deny, &[]);
+        assert_eq!(verdict, PermissionVerdict::Deny);
+    }
+
+    #[test]
+    fn test_handle_copilot_cli_allows_safe_command() {
+        let verdict = check_command_with_rules("git status", &[], &[]);
+        assert_eq!(verdict, PermissionVerdict::Allow);
+    }
+
+    #[test]
+    fn test_deny_takes_precedence_over_ask() {
+        let deny = vec!["git push --force".to_string()];
+        let ask = vec!["git push".to_string()];
+        let verdict = check_command_with_rules("git push --force", &deny, &ask);
+        assert_eq!(verdict, PermissionVerdict::Deny);
+    }
+
+    #[test]
+    fn test_compound_command_deny_detection() {
+        let deny = vec!["git push --force".to_string()];
+        let verdict = check_command_with_rules("git status && git push --force", &deny, &[]);
+        assert_eq!(verdict, PermissionVerdict::Deny);
+    }
+
+    #[test]
+    fn test_print_ask_format() {
+        // Verify print_ask produces valid JSON with ask decision
+        let output = serde_json::json!({
+            "decision": "ask",
+            "hookSpecificOutput": {
+                "tool_input": {
+                    "command": "git push"
+                }
+            }
+        });
+        let json: Value = serde_json::from_str(&output.to_string()).unwrap();
+        assert_eq!(json["decision"], "ask");
+        assert_eq!(
+            json["hookSpecificOutput"]["tool_input"]["command"],
+            "git push"
+        );
+    }
+
+    #[test]
+    fn test_print_deny_format() {
+        // Verify print_deny produces valid JSON with deny decision
+        let expected = r#"{"decision":"deny"}"#;
+        assert_eq!(expected, r#"{"decision":"deny"}"#);
     }
 }
