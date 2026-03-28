@@ -1,37 +1,10 @@
 //! Filters directory listings into a compact tree format.
 
+use super::constants::NOISE_DIRS;
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, resolved_command};
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
-
-/// Noise directories commonly excluded from LLM context
-const NOISE_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
-    "target",
-    "__pycache__",
-    ".next",
-    "dist",
-    "build",
-    ".cache",
-    ".turbo",
-    ".vercel",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".tox",
-    ".venv",
-    "venv",
-    "coverage",
-    ".nyc_output",
-    ".DS_Store",
-    "Thumbs.db",
-    ".idea",
-    ".vscode",
-    ".vs",
-    "*.egg-info",
-    ".eggs",
-];
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
