@@ -1,0 +1,66 @@
+[filters.bq-query]
+description = "Compact bq query — strip progress, gcloud noise, convert table to CSV format, truncate large results"
+match_command = "^bq\\s+query\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Waiting on bqjob",
+  "^Current status:",
+  "^Updates are available",
+  "^\\s*\\$ gcloud components",
+  "^\\+-+\\+-*"
+]
+replace = [
+  { pattern = "^\\s*\\|\\s*", replacement = "" },
+  { pattern = "\\s*\\|\\s*$", replacement = "" },
+  { pattern = "\\s*\\|\\s*", replacement = ", " }
+]
+max_lines = 100
+truncate_lines_at = 200
+
+[[tests.bq-query]]
+name = "strips gcloud noise and converts ascii table to csv"
+input = """
+
+Updates are available for some Google Cloud CLI components.  To install them,
+please run:
+  $ gcloud components update
+
+Waiting on bqjob_r1234abcd (0s) Current status: DONE
++----------+----------+
+| test_col | greeting |
++----------+----------+
+|        1 | hello    |
++----------+----------+
+"""
+expected = """test_col, greeting
+1, hello"""
+
+[[tests.bq-query]]
+name = "clean output passes through and converts to csv"
+input = """+----+-------+
+| id | name  |
++----+-------+
+|  1 | alice |
++----+-------+"""
+expected = """id, name
+1, alice"""
+
+[[tests.bq-query]]
+name = "processes complex nested json structs commonly found in LTA or GA4 logs"
+input = """
++------------+-----------+-------------------------------------------------------------+
+| event_date |   event   |                        event_params                         |
++------------+-----------+-------------------------------------------------------------+
+| 2026-03-28 | page_view | [{"key": "page_title", "value": {"string_value": "Home"}},  |
+|            |           |  {"key": "uid", "value": {"int_value": "998877"}}]          |
++------------+-----------+-------------------------------------------------------------+
+"""
+expected = """event_date, event, event_params
+2026-03-28, page_view, [{"key": "page_title", "value": {"string_value": "Home"}},
+, , {"key": "uid", "value": {"int_value": "998877"}}]"""
+
+[[tests.bq-query]]
+name = "empty input produces nothing"
+input = ""
+expected = ""

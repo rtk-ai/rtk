@@ -10,6 +10,7 @@ pub struct RtkRule {
     pub subcmd_status: &'static [(&'static str, RtkStatus)],
 }
 
+
 pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
@@ -639,6 +640,15 @@ pub const RULES: &[RtkRule] = &[
         category: "Files",
         savings_pct: 60.0,
         subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^bq\s+(query|show|ls|head|extract|load|mk|rm|cp)\b",
+        rtk_cmd: "rtk bq",
+        rewrite_prefixes: &["bq"],
+        category: "Infra",
+        savings_pct: 65.0,
+        subcmd_savings: &[("query", 70.0), ("show", 60.0)],
         subcmd_status: &[],
     },
 ];
