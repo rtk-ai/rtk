@@ -72,6 +72,7 @@ emoji = true
 max_width = 120
 
 [tee]
+# All fields are optional — omitting any field uses its default value.
 enabled = true
 mode = "failures"  # failures | always | never
 max_files = 20
