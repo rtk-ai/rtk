@@ -18,6 +18,12 @@ const CURSOR_REWRITE_HOOK: &str = include_str!("../../hooks/cursor/rtk-rewrite.s
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 
+// Embedded Factory Droid hook script (PreToolUse format)
+const DROID_REWRITE_HOOK: &str = include_str!("../../hooks/droid/rtk-rewrite.sh");
+
+// Embedded Factory Droid RTK awareness instructions
+const RTK_SLIM_DROID: &str = include_str!("../../hooks/droid/rtk-awareness.md");
+
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
@@ -528,8 +534,15 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
-pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
+/// Full uninstall for Claude, Gemini, Codex, Cursor, or Droid artifacts.
+pub fn uninstall(
+    global: bool,
+    gemini: bool,
+    codex: bool,
+    cursor: bool,
+    droid: bool,
+    verbose: u8,
+) -> Result<()> {
     if codex {
         return uninstall_codex(global, verbose);
     }
@@ -571,6 +584,21 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
             println!("\nRestart Gemini CLI to apply changes.");
         } else {
             println!("RTK Gemini support was not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    if droid {
+        let droid_removed = uninstall_droid(verbose)?;
+        removed.extend(droid_removed);
+        if !removed.is_empty() {
+            println!("RTK uninstalled (Factory Droid):");
+            for item in &removed {
+                println!("  - {}", item);
+            }
+            println!("\nRestart Factory Droid to apply changes.");
+        } else {
+            println!("RTK Factory Droid support was not installed (nothing to remove)");
         }
         return Ok(());
     }
@@ -2310,6 +2338,223 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
 
     if verbose > 0 && !removed.is_empty() {
         eprintln!("Gemini artifacts removed");
+    }
+
+    Ok(removed)
+}
+
+// ─── Factory Droid support ───────────────────────────────────────
+
+/// Resolve the Factory config directory (~/.factory)
+fn resolve_droid_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Cannot determine home directory")?;
+    Ok(home.join(".factory"))
+}
+
+/// Entry point for `rtk init --droid`
+pub fn run_droid(global: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Factory Droid support is global-only. Use: rtk init -g --droid");
+    }
+
+    let droid_dir = resolve_droid_dir()?;
+    fs::create_dir_all(&droid_dir).with_context(|| {
+        format!(
+            "Failed to create Factory config dir: {}",
+            droid_dir.display()
+        )
+    })?;
+
+    let rtk_md_path = droid_dir.join("RTK.md");
+    let agents_md_path = droid_dir.join("AGENTS.md");
+
+    // 1. Install hook script
+    let hook_dir = droid_dir.join("hooks");
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("Failed to create hook dir: {}", hook_dir.display()))?;
+    let hook_path = hook_dir.join("rtk-rewrite.sh");
+    write_if_changed(&hook_path, DROID_REWRITE_HOOK, "Droid hook", verbose)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
+
+    // 2. Write RTK.md
+    write_if_changed(&rtk_md_path, RTK_SLIM_DROID, "RTK.md", verbose)?;
+
+    // 3. Patch AGENTS.md (add @RTK.md reference)
+    let added_ref = patch_agents_md(&agents_md_path, verbose)?;
+
+    // 4. Patch ~/.factory/settings.json
+    patch_droid_settings(&droid_dir, &hook_path, patch_mode, verbose)?;
+
+    println!("\nFactory Droid hook installed (global).\n");
+    println!("  Hook:      {}", hook_path.display());
+    println!("  RTK.md:    {}", rtk_md_path.display());
+    if added_ref {
+        println!("  AGENTS.md: @RTK.md reference added");
+    } else {
+        println!("  AGENTS.md: @RTK.md reference already present");
+    }
+    println!("  Restart Factory Droid. Test with: git status\n");
+    Ok(())
+}
+
+/// Patch ~/.factory/settings.json with the PreToolUse hook
+fn patch_droid_settings(
+    droid_dir: &Path,
+    hook_path: &Path,
+    patch_mode: PatchMode,
+    verbose: u8,
+) -> Result<()> {
+    let settings_path = droid_dir.join("settings.json");
+    let hook_cmd = hook_path.to_string_lossy().to_string();
+
+    // Read or create settings.json
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Check if hook already registered
+    if let Some(hooks) = settings.pointer("/hooks/PreToolUse") {
+        if let Some(arr) = hooks.as_array() {
+            if arr.iter().any(|h| {
+                h.pointer("/hooks/0/command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|c| c.contains("rtk"))
+            }) {
+                if verbose > 0 {
+                    eprintln!("Factory Droid settings.json already has RTK hook");
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    // Ask user before patching
+    if patch_mode == PatchMode::Skip {
+        println!(
+            "\nManual setup needed: add RTK hook to {}\n\
+             See: https://github.com/rtk-ai/rtk#factory-ai-droid",
+            settings_path.display()
+        );
+        return Ok(());
+    }
+
+    if patch_mode == PatchMode::Ask {
+        print!("Patch {} with RTK hook? [y/N] ", settings_path.display());
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Skipped. Add hook manually later.");
+            return Ok(());
+        }
+    }
+
+    // Build hook entry matching Factory Droid format
+    let hook_entry = serde_json::json!({
+        "matcher": "Execute",
+        "hooks": [{
+            "type": "command",
+            "command": hook_cmd
+        }]
+    });
+
+    let hooks = settings
+        .as_object_mut()
+        .context("settings.json is not an object")?
+        .entry("hooks")
+        .or_insert(serde_json::json!({}));
+
+    let pre_tool_use = hooks
+        .as_object_mut()
+        .context("hooks is not an object")?
+        .entry("PreToolUse")
+        .or_insert(serde_json::json!([]));
+
+    pre_tool_use
+        .as_array_mut()
+        .context("PreToolUse is not an array")?
+        .push(hook_entry);
+
+    // Write atomically
+    let content = serde_json::to_string_pretty(&settings)?;
+    let tmp = NamedTempFile::new_in(droid_dir)?;
+    fs::write(tmp.path(), &content)?;
+    tmp.persist(&settings_path)
+        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Patched {}", settings_path.display());
+    }
+
+    Ok(())
+}
+
+/// Remove Factory Droid artifacts during uninstall
+fn uninstall_droid(verbose: u8) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    let droid_dir = match resolve_droid_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(removed),
+    };
+
+    // Remove hook
+    let hook_path = droid_dir.join("hooks").join("rtk-rewrite.sh");
+    if hook_path.exists() {
+        fs::remove_file(&hook_path)
+            .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
+        removed.push(format!("Droid hook: {}", hook_path.display()));
+    }
+
+    // Remove RTK.md
+    let rtk_md_path = droid_dir.join("RTK.md");
+    if rtk_md_path.exists() {
+        fs::remove_file(&rtk_md_path)
+            .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
+        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    }
+
+    // Remove @RTK.md reference from AGENTS.md
+    let agents_md_path = droid_dir.join("AGENTS.md");
+    if remove_rtk_reference_from_agents(&agents_md_path, verbose)? {
+        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
+    }
+
+    // Remove hook from settings.json
+    let settings_path = droid_dir.join("settings.json");
+    if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)?;
+        if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(arr) = settings
+                .pointer_mut("/hooks/PreToolUse")
+                .and_then(|v| v.as_array_mut())
+            {
+                let before = arr.len();
+                arr.retain(|h| {
+                    !h.pointer("/hooks/0/command")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|c| c.contains("rtk"))
+                });
+                if arr.len() < before {
+                    let new_content = serde_json::to_string_pretty(&settings)?;
+                    fs::write(&settings_path, new_content)?;
+                    removed.push("Droid settings.json: removed RTK hook entry".to_string());
+                }
+            }
+        }
+    }
+
+    if verbose > 0 && !removed.is_empty() {
+        eprintln!("Factory Droid artifacts removed");
     }
 
     Ok(removed)

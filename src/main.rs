@@ -347,6 +347,10 @@ enum Commands {
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
+
+        /// Initialize for Factory AI Droid instead of Claude Code
+        #[arg(long)]
+        droid: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -1653,12 +1657,13 @@ fn main() -> Result<()> {
             uninstall,
             codex,
             copilot,
+            droid,
         } => {
             if show {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                hooks::init::uninstall(global, gemini, codex, cursor, droid, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1670,6 +1675,15 @@ fn main() -> Result<()> {
                 hooks::init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
             } else if copilot {
                 hooks::init::run_copilot(cli.verbose)?;
+            } else if droid {
+                let patch_mode = if auto_patch {
+                    hooks::init::PatchMode::Auto
+                } else if no_patch {
+                    hooks::init::PatchMode::Skip
+                } else {
+                    hooks::init::PatchMode::Ask
+                };
+                hooks::init::run_droid(global, patch_mode, cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;

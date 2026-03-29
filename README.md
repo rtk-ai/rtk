@@ -103,6 +103,7 @@ rtk gain        # Should show token savings stats
 rtk init -g                     # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
+rtk init -g --droid             # Factory AI Droid
 rtk init -g --agent cursor      # Cursor
 rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
@@ -296,7 +297,7 @@ After install, **restart Claude Code**.
 
 ## Supported AI Tools
 
-RTK supports 10 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports 11 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -306,6 +307,7 @@ RTK supports 10 AI coding tools. Each integration transparently rewrites shell c
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook (`rtk hook gemini`) |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Factory AI Droid** | `rtk init -g --droid` | PreToolUse hook (Execute matcher) |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
@@ -357,6 +359,15 @@ rtk init -g --codex
 ```
 
 Creates `~/.codex/RTK.md` + `~/.codex/AGENTS.md` with `@RTK.md` reference. Codex reads these as global instructions.
+
+### Factory AI Droid
+
+```bash
+rtk init -g --droid
+rtk init -g --droid --uninstall
+```
+
+Creates `~/.factory/hooks/rtk-rewrite.sh` + patches `~/.factory/settings.json` with PreToolUse hook (Execute matcher).
 
 ### Windsurf
 
