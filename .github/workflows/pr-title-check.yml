@@ -12,19 +12,15 @@ jobs:
   check-title:
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@v5
+      - name: Validate PR title format
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          types: |
-            feat
-            fix
-            chore
-            docs
-            ci
-            refactor
-            perf
-            test
-            build
-            style
-          requireScope: false
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if ! echo "$PR_TITLE" | grep -qE '^(feat|fix|chore)(\(.+\))?: .+'; then
+            echo "::error::PR title must match: feat|fix|chore[(scope)]: description"
+            echo "Examples:"
+            echo "  feat(filter): add pyright support"
+            echo "  fix(git): log filter drops merge commits"
+            echo "  chore(proxy): remove deprecated flags"
+            exit 1
+          fi
