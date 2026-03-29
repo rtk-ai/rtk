@@ -492,28 +492,8 @@ fn filter_pnpm_install(output: &str) -> String {
     }
 }
 
-/// Runs an unsupported pnpm subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("pnpm passthrough: {:?}", args);
-    }
-    let status = resolved_command("pnpm")
-        .args(args)
-        .status()
-        .context("Failed to run pnpm")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("pnpm {}", args_str),
-        &format!("rtk pnpm {} (passthrough)", args_str),
-    );
-
-    if !status.success() {
-        return Ok(crate::core::utils::exit_code_from_status(&status, "pnpm"));
-    }
-    Ok(0)
+    crate::core::runner::run_passthrough("pnpm", args, verbose)
 }
 
 #[cfg(test)]

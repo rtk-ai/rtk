@@ -7,7 +7,7 @@ use regex::Regex;
 use std::process::{Command, Stdio};
 
 /// Run a command and provide a heuristic summary
-pub fn run(command: &str, verbose: u8) -> Result<()> {
+pub fn run(command: &str, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -33,10 +33,12 @@ pub fn run(command: &str, verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
+    let exit_code = crate::core::utils::exit_code_from_output(&output, command);
+
     let summary = summarize_output(&raw, command, output.status.success());
     println!("{}", summary);
     timer.track(command, "rtk summary", &raw, &summary);
-    Ok(())
+    Ok(exit_code)
 }
 
 fn summarize_output(output: &str, command: &str, success: bool) -> String {

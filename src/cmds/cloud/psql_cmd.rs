@@ -3,9 +3,9 @@
 //! Detects table and expanded display formats, strips borders/padding,
 //! and produces compact tab-separated or key=value output.
 
-use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command};
-use anyhow::{Context, Result};
+use crate::core::runner::{self, RunOptions};
+use crate::core::utils::resolved_command;
+use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 
@@ -19,11 +19,11 @@ lazy_static! {
     static ref RECORD_HEADER: Regex = Regex::new(r"^-\[ RECORD (\d+) \]-").unwrap();
 }
 
-/// Not using run_filtered: on failure, psql error messages containing `|` chars
-/// would be misinterpreted as table data by the table/expanded format parser.
+// Edge cases vs previous manual implementation:
+// - On failure: stderr is no longer eprinted on the success path (only on failure via early_exit)
+// - On success: tracking raw includes stderr (previously stdout-only, but stderr is empty on success)
+// - Tee hint uses merged stdout+stderr as raw (was stdout-only)
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = resolved_command("psql");
     for arg in args {
         cmd.arg(arg);
@@ -33,39 +33,15 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: psql {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run psql (is PostgreSQL client installed?)")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let exit_code = exit_code_from_output(&output, "psql");
-
-    if !stderr.is_empty() {
-        eprint!("{}", stderr);
-    }
-
-    // Early exit: don't pass psql error messages through table/expanded format parser
-    if exit_code != 0 {
-        return Ok(exit_code);
-    }
-
-    let filtered = filter_psql_output(&stdout);
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&stdout, "psql", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("psql {}", args.join(" ")),
-        &format!("rtk psql {}", args.join(" ")),
-        &stdout,
-        &filtered,
-    );
-
-    Ok(0)
+    runner::run_filtered(
+        cmd,
+        "psql",
+        &args.join(" "),
+        filter_psql_output,
+        RunOptions::stdout_only()
+            .tee("psql")
+            .early_exit_on_failure(),
+    )
 }
 
 fn filter_psql_output(output: &str) -> String {

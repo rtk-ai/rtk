@@ -1,9 +1,8 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
 use crate::core::runner;
-use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::OnceLock;
@@ -972,25 +971,8 @@ fn filter_cargo_clippy(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Runs an unsupported cargo subcommand by passing it through directly
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("cargo passthrough: {:?}", args);
-    }
-    let status = resolved_command("cargo")
-        .args(args)
-        .status()
-        .context("Failed to run cargo")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("cargo {}", args_str),
-        &format!("rtk cargo {} (passthrough)", args_str),
-    );
-
-    Ok(crate::core::utils::exit_code_from_status(&status, "cargo"))
+    crate::core::runner::run_passthrough("cargo", args, verbose)
 }
 
 #[cfg(test)]
