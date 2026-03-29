@@ -3,6 +3,7 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
+use super::lexer::{tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
@@ -49,12 +50,24 @@ lazy_static! {
         .iter()
         .map(|r| Regex::new(r.pattern).expect("invalid regex"))
         .collect();
-    static ref ENV_PREFIX: Regex =
-        Regex::new(r"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=[^\s]*\s+)+").unwrap();
+    static ref ENV_PREFIX: Regex = {
+        let double_quoted = r#""(?:[^"\\]|\\.)*""#;
+        let single_quoted = r#"'(?:[^'\\]|\\.)*'"#;
+        let unquoted = r#"[^\s]*"#;
+        let env_value = format!("(?:{}|{}|{})", double_quoted, single_quoted, unquoted);
+        let env_assign = format!(r#"[A-Z_][A-Z0-9_]*={}"#, env_value);
+        Regex::new(&format!(r#"^(?:sudo\s+|env\s+|{}\s+)+"#, env_assign)).unwrap()
+    };
     // Git global options that appear before the subcommand: -C <path>, -c <key=val>,
     // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
     static ref GIT_GLOBAL_OPT: Regex =
         Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
+    static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(.+)$").unwrap();
+    static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(.+)$").unwrap();
+    static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(.+)$").unwrap();
+    static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(.+)$").unwrap();
+    static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(.+)$").unwrap();
+    static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(.+)$").unwrap();
 }
 
 /// Classify a single (already-split) command.
@@ -190,86 +203,43 @@ fn extract_base_command(cmd: &str) -> &str {
     }
 }
 
-/// Split a command chain on `&&`, `||`, `;` outside quotes.
-/// For pipes `|`, only keep the first command.
-/// Lines with `<<` (heredoc) or `$((` are returned whole.
 pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return vec![];
     }
 
-    // Heredoc or arithmetic expansion: treat as single command
     if trimmed.contains("<<") || trimmed.contains("$((") {
         return vec![trimmed];
     }
 
+    let tokens = tokenize(trimmed);
     let mut results = Vec::new();
-    let mut start = 0;
-    let bytes = trimmed.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut pipe_seen = false;
+    let mut seg_start: usize = 0;
 
-    while i < len {
-        let b = bytes[i];
-        match b {
-            b'\'' if !in_double => {
-                in_single = !in_single;
-                i += 1;
-            }
-            b'"' if !in_single => {
-                in_double = !in_double;
-                i += 1;
-            }
-            b'|' if !in_single && !in_double => {
-                if i + 1 < len && bytes[i + 1] == b'|' {
-                    // ||
-                    let segment = trimmed[start..i].trim();
-                    if !segment.is_empty() {
-                        results.push(segment);
-                    }
-                    i += 2;
-                    start = i;
-                } else {
-                    // pipe: keep only first command
-                    let segment = trimmed[start..i].trim();
-                    if !segment.is_empty() {
-                        results.push(segment);
-                    }
-                    pipe_seen = true;
-                    break;
-                }
-            }
-            b'&' if !in_single && !in_double && i + 1 < len && bytes[i + 1] == b'&' => {
-                let segment = trimmed[start..i].trim();
+    for tok in &tokens {
+        match tok.kind {
+            TokenKind::Operator => {
+                let segment = trimmed[seg_start..tok.offset].trim();
                 if !segment.is_empty() {
                     results.push(segment);
                 }
-                i += 2;
-                start = i;
+                seg_start = tok.offset + tok.value.len();
             }
-            b';' if !in_single && !in_double => {
-                let segment = trimmed[start..i].trim();
+            TokenKind::Pipe => {
+                let segment = trimmed[seg_start..tok.offset].trim();
                 if !segment.is_empty() {
                     results.push(segment);
                 }
-                i += 1;
-                start = i;
+                return results;
             }
-            _ => {
-                i += 1;
-            }
+            _ => {}
         }
     }
 
-    if !pipe_seen && start < len {
-        let segment = trimmed[start..].trim();
-        if !segment.is_empty() {
-            results.push(segment);
-        }
+    let segment = trimmed[seg_start..].trim();
+    if !segment.is_empty() {
+        results.push(segment);
     }
 
     results
@@ -330,32 +300,40 @@ pub fn strip_disabled_prefix(cmd: &str) -> &str {
     trimmed[prefix_len..].trim_start()
 }
 
-lazy_static! {
-    // Match trailing shell redirections:
-    // Alt 1: N>&M or N>&- (fd redirect/close): 2>&1, 1>&2, 2>&-
-    // Alt 2: &>file or &>>file (bash redirect both): &>/dev/null
-    // Alt 3: N>file or N>>file (fd to file): 2>/dev/null, >/tmp/out, 1>>log
-    // Note: [^(\\s] excludes process substitutions like >(tee) from false-positive matching
-    static ref TRAILING_REDIRECT: Regex =
-        Regex::new(r"\s+(?:[0-9]?>&[0-9-]|&>>?\S+|[0-9]?>>?\s*[^(\s]\S*)\s*$").unwrap();
-}
-
-/// Strip trailing stderr/stdout redirects from a command segment (#530).
-/// Returns (command_without_redirects, redirect_suffix).
 fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
-    if let Some(m) = TRAILING_REDIRECT.find(cmd) {
-        // Verify redirect is not inside quotes (single-pass count)
-        let before = &cmd[..m.start()];
-        let (sq, dq) = before.chars().fold((0u32, 0u32), |(s, d), c| match c {
-            '\'' => (s + 1, d),
-            '"' => (s, d + 1),
-            _ => (s, d),
-        });
-        if sq % 2 == 0 && dq % 2 == 0 {
-            return (&cmd[..m.start()], &cmd[m.start()..]);
+    let tokens = tokenize(cmd);
+    if tokens.is_empty() {
+        return (cmd, "");
+    }
+
+    let mut redir_boundary = tokens.len();
+    let mut i = tokens.len();
+    while i > 0 {
+        i -= 1;
+        match tokens[i].kind {
+            TokenKind::Redirect => {
+                redir_boundary = i;
+            }
+            TokenKind::Arg => {
+                if i > 0 && tokens[i - 1].kind == TokenKind::Redirect {
+                    redir_boundary = i - 1;
+                    i -= 1;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
         }
     }
-    (cmd, "")
+
+    if redir_boundary >= tokens.len() {
+        return (cmd, "");
+    }
+
+    let cut = tokens[redir_boundary].offset;
+    let cmd_part = cmd[..cut].trim_end();
+    let redir_part = &cmd[cmd_part.len()..];
+    (cmd_part, redir_part)
 }
 
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
@@ -390,131 +368,73 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
 fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut result = String::with_capacity(len + 32);
+    let tokens = tokenize(cmd);
+    let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
-    let mut seg_start = 0;
-    let mut i = 0;
-    let mut in_single = false;
-    let mut in_double = false;
+    let mut seg_start: usize = 0;
 
-    while i < len {
-        let b = bytes[i];
-        match b {
-            b'\'' if !in_double => {
-                in_single = !in_single;
-                i += 1;
-            }
-            b'"' if !in_single => {
-                in_double = !in_double;
-                i += 1;
-            }
-            b'|' if !in_single && !in_double => {
-                if i + 1 < len && bytes[i + 1] == b'|' {
-                    // `||` operator — rewrite left, continue
-                    let seg = cmd[seg_start..i].trim();
-                    let rewritten =
-                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
-                    if rewritten != seg {
-                        any_changed = true;
-                    }
-                    result.push_str(&rewritten);
-                    result.push_str(" || ");
-                    i += 2;
-                    while i < len && bytes[i] == b' ' {
-                        i += 1;
-                    }
-                    seg_start = i;
-                } else {
-                    // `|` pipe — rewrite first segment only, pass through the rest unchanged
-                    let seg = cmd[seg_start..i].trim();
-                    // Skip rewriting `find`/`fd` in pipes — rtk find outputs a grouped
-                    // format that is incompatible with pipe consumers like xargs, grep,
-                    // wc, sort, etc. which expect one path per line (#439).
-                    let is_pipe_incompatible = seg.starts_with("find ")
-                        || seg == "find"
-                        || seg.starts_with("fd ")
-                        || seg == "fd";
-                    let rewritten = if is_pipe_incompatible {
-                        seg.to_string()
-                    } else {
-                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string())
-                    };
-                    if rewritten != seg {
-                        any_changed = true;
-                    }
-                    result.push_str(&rewritten);
-                    // Preserve the space before the pipe that was lost by trim()
-                    result.push(' ');
-                    result.push_str(cmd[i..].trim_start());
-                    return if any_changed { Some(result) } else { None };
-                }
-            }
-            b'&' if !in_single && !in_double && i + 1 < len && bytes[i + 1] == b'&' => {
-                // `&&` operator — rewrite left, continue
-                let seg = cmd[seg_start..i].trim();
+    for tok in &tokens {
+        match tok.kind {
+            TokenKind::Operator => {
+                let seg = cmd[seg_start..tok.offset].trim();
                 let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                result.push_str(" && ");
-                i += 2;
-                while i < len && bytes[i] == b' ' {
-                    i += 1;
-                }
-                seg_start = i;
-            }
-            b'&' if !in_single && !in_double => {
-                // #346: redirect detection — 2>&1 / >&2 (> before &) or &>file / &>>file (> after &)
-                let is_redirect =
-                    (i > 0 && bytes[i - 1] == b'>') || (i + 1 < len && bytes[i + 1] == b'>');
-                if is_redirect {
-                    i += 1;
+                if tok.value == ";" {
+                    result.push(';');
+                    let after = tok.offset + tok.value.len();
+                    if after < cmd.len() {
+                        result.push(' ');
+                    }
                 } else {
-                    // single `&` background execution operator
-                    let seg = cmd[seg_start..i].trim();
-                    let rewritten =
-                        rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
-                    if rewritten != seg {
-                        any_changed = true;
-                    }
-                    result.push_str(&rewritten);
-                    result.push_str(" & ");
-                    i += 1;
-                    while i < len && bytes[i] == b' ' {
-                        i += 1;
-                    }
-                    seg_start = i;
+                    result.push(' ');
+                    result.push_str(&tok.value);
+                    result.push(' ');
+                }
+                seg_start = tok.offset + tok.value.len();
+                while seg_start < cmd.len() && cmd.as_bytes().get(seg_start) == Some(&b' ') {
+                    seg_start += 1;
                 }
             }
-            b';' if !in_single && !in_double => {
-                // `;` separator
-                let seg = cmd[seg_start..i].trim();
+            TokenKind::Pipe => {
+                let seg = cmd[seg_start..tok.offset].trim();
+                let is_pipe_incompatible = seg.starts_with("find ")
+                    || seg == "find"
+                    || seg.starts_with("fd ")
+                    || seg == "fd";
+                let rewritten = if is_pipe_incompatible {
+                    seg.to_string()
+                } else {
+                    rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string())
+                };
+                if rewritten != seg {
+                    any_changed = true;
+                }
+                result.push_str(&rewritten);
+                result.push(' ');
+                result.push_str(cmd[tok.offset..].trim_start());
+                return if any_changed { Some(result) } else { None };
+            }
+            TokenKind::Shellism if tok.value == "&" => {
+                let seg = cmd[seg_start..tok.offset].trim();
                 let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                result.push(';');
-                i += 1;
-                while i < len && bytes[i] == b' ' {
-                    i += 1;
+                result.push_str(" & ");
+                seg_start = tok.offset + tok.value.len();
+                while seg_start < cmd.len() && cmd.as_bytes().get(seg_start) == Some(&b' ') {
+                    seg_start += 1;
                 }
-                if i < len {
-                    result.push(' ');
-                }
-                seg_start = i;
             }
-            _ => {
-                i += 1;
-            }
+            _ => {}
         }
     }
 
-    // Last (or only) segment
-    let seg = cmd[seg_start..len].trim();
+    let seg = cmd[seg_start..].trim();
     let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
     if rewritten != seg {
         any_changed = true;
@@ -528,45 +448,17 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
     }
 }
 
-/// Rewrite `head -N file` → `rtk read file --max-lines N`.
-/// Returns `None` if the command doesn't match this pattern (fall through to generic logic).
-fn rewrite_head_numeric(cmd: &str) -> Option<String> {
-    // Match: head -<digits> <file>  (with optional env prefix)
-    lazy_static! {
-        static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(.+)$").expect("valid regex");
-        static ref HEAD_LINES: Regex =
-            Regex::new(r"^head\s+--lines=(\d+)\s+(.+)$").expect("valid regex");
+fn rewrite_line_range(cmd: &str) -> Option<String> {
+    for re in [&*HEAD_N, &*HEAD_LINES] {
+        if let Some(caps) = re.captures(cmd) {
+            let n = caps.get(1)?.as_str();
+            let file = caps.get(2)?.as_str();
+            return Some(format!("rtk read {} --max-lines {}", file, n));
+        }
     }
-    if let Some(caps) = HEAD_N.captures(cmd) {
-        let n = caps.get(1)?.as_str();
-        let file = caps.get(2)?.as_str();
-        return Some(format!("rtk read {} --max-lines {}", file, n));
-    }
-    if let Some(caps) = HEAD_LINES.captures(cmd) {
-        let n = caps.get(1)?.as_str();
-        let file = caps.get(2)?.as_str();
-        return Some(format!("rtk read {} --max-lines {}", file, n));
-    }
-    // head with any other flag (e.g. -c, -q): skip rewriting to avoid clap errors
     if cmd.starts_with("head -") {
         return None;
     }
-    None
-}
-
-/// Rewrite `tail` numeric line forms to `rtk read ... --tail-lines N`.
-/// Returns `None` when the pattern is unsupported (caller falls through / skips rewrite).
-fn rewrite_tail_lines(cmd: &str) -> Option<String> {
-    lazy_static! {
-        static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(.+)$").expect("valid regex");
-        static ref TAIL_N_SPACE: Regex =
-            Regex::new(r"^tail\s+-n\s+(\d+)\s+(.+)$").expect("valid regex");
-        static ref TAIL_LINES_EQ: Regex =
-            Regex::new(r"^tail\s+--lines=(\d+)\s+(.+)$").expect("valid regex");
-        static ref TAIL_LINES_SPACE: Regex =
-            Regex::new(r"^tail\s+--lines\s+(\d+)\s+(.+)$").expect("valid regex");
-    }
-
     for re in [
         &*TAIL_N,
         &*TAIL_N_SPACE,
@@ -579,8 +471,6 @@ fn rewrite_tail_lines(cmd: &str) -> Option<String> {
             return Some(format!("rtk read {} --tail-lines {}", file, n));
         }
     }
-
-    // Unknown tail form: skip rewrite to preserve native behavior.
     None
 }
 
@@ -602,18 +492,8 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
         return Some(trimmed.to_string());
     }
 
-    // Special case: `head -N file` / `head --lines=N file` → `rtk read file --max-lines N`
-    // Must intercept before generic prefix replacement, which would produce `rtk read -20 file`.
-    // Only intercept when head has a flag (-N, --lines=N, -c, etc.); plain `head file` falls
-    // through to the generic rewrite below and produces `rtk read file` as expected.
-    if cmd_part.starts_with("head -") {
-        return rewrite_head_numeric(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
-    }
-
-    // tail has several forms that are not compatible with generic prefix replacement.
-    // Only rewrite recognized numeric line forms; otherwise skip rewrite.
-    if cmd_part.starts_with("tail ") {
-        return rewrite_tail_lines(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+    if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
+        return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
@@ -1292,6 +1172,54 @@ mod tests {
         assert_eq!(
             rewrite_command("SOME_VAR=1 git status", &[]),
             Some("SOME_VAR=1 rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_quoted_value_with_spaces() {
+        assert_eq!(
+            rewrite_command(
+                r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#,
+                &[]
+            ),
+            Some(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" rtk git push"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_single_quoted_value_with_spaces() {
+        assert_eq!(
+            rewrite_command("EDITOR='vim -u NONE' git commit", &[]),
+            Some("EDITOR='vim -u NONE' rtk git commit".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_quoted_plus_unquoted() {
+        assert_eq!(
+            rewrite_command(r#"FOO="bar baz" BAR=1 git status"#, &[]),
+            Some(r#"FOO="bar baz" BAR=1 rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_escaped_quotes_in_value() {
+        assert_eq!(
+            rewrite_command(r#"FOO="he said \"hello\"" git status"#, &[]),
+            Some(r#"FOO="he said \"hello\"" rtk git status"#.into())
+        );
+    }
+
+    #[test]
+    fn test_classify_env_quoted_value_stripped() {
+        assert_eq!(
+            classify_command(r#"GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git push"#),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
         );
     }
 
