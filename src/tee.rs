@@ -118,11 +118,15 @@ fn write_tee_file(
     let filename = format!("{}_{}.log", epoch, slug);
     let filepath = tee_dir.join(filename);
 
-    // Truncate at max_file_size
+    // Truncate at max_file_size (safe for multi-byte UTF-8)
     let content = if raw.len() > max_file_size {
+        let mut end = max_file_size;
+        while end > 0 && !raw.is_char_boundary(end) {
+            end -= 1;
+        }
         format!(
             "{}\n\n--- truncated at {} bytes ---",
-            &raw[..max_file_size],
+            &raw[..end],
             max_file_size
         )
     } else {
@@ -350,6 +354,27 @@ mod tests {
         assert!(hint.starts_with("[full output: "));
         assert!(hint.ends_with(']'));
         assert!(hint.contains("123_cargo_test.log"));
+    }
+
+    #[test]
+    fn test_write_tee_file_truncation_multibyte_utf8() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        // Create content with multi-byte UTF-8 characters (emoji = 4 bytes each)
+        // 96 ASCII chars + emoji at byte 96-99 = 100 bytes total
+        let mut content = "x".repeat(96);
+        content.push('\u{1F600}'); // 4-byte emoji
+        content.push_str(&"y".repeat(100)); // pad to exceed limit
+        assert!(content.len() > 100);
+
+        // Truncate at byte 98, which falls inside the 4-byte emoji
+        let result = write_tee_file(&content, "test", tmpdir.path(), 98, 20);
+        assert!(result.is_some());
+
+        let path = result.unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        // Should NOT panic, and should truncate before the emoji (at byte 96)
+        assert!(written.contains("--- truncated at 98 bytes ---"));
+        assert!(!written.contains('\u{1F600}'));
     }
 
     #[test]
