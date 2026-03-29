@@ -426,6 +426,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^pyright(\s|$)",
+        rtk_cmd: "rtk pyright",
+        rewrite_prefixes: &["pyright"],
+        category: "Python",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^ruff\s+(check|format)",
         rtk_cmd: "rtk ruff",
         rewrite_prefixes: &["ruff"],
