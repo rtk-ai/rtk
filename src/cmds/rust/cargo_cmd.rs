@@ -886,14 +886,84 @@ fn filter_cargo_test(output: &str) -> String {
 
 /// Filter cargo clippy output - group warnings by lint rule
 fn filter_cargo_clippy(output: &str) -> String {
-    let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct ClippyDiagnostic {
+        rule: String,
+        message: String,
+    }
+
+    impl ClippyDiagnostic {
+        fn display(&self) -> String {
+            if self.message.is_empty() || self.message == self.rule {
+                self.rule.clone()
+            } else if self.rule.is_empty() {
+                self.message.clone()
+            } else {
+                format!("{}: {}", self.rule, self.message)
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ClippyDiagnosticSummary {
+        occurrences: usize,
+        locations: Vec<String>,
+    }
+
+    fn parse_clippy_diagnostic(line: &str, is_error: bool) -> ClippyDiagnostic {
+        let (severity, fallback_line) = if is_error {
+            ("error", line.strip_prefix("error").unwrap_or(line))
+        } else {
+            ("warning", line.strip_prefix("warning").unwrap_or(line))
+        };
+
+        if let Some(rest) = fallback_line.strip_prefix(':') {
+            let trimmed = rest.trim();
+
+            if let Some((message, rule)) = trimmed.rsplit_once(" [") {
+                if let Some(rule) = rule.strip_suffix(']') {
+                    return ClippyDiagnostic {
+                        rule: rule.trim().to_string(),
+                        message: message.trim().to_string(),
+                    };
+                }
+            }
+
+            return ClippyDiagnostic {
+                rule: trimmed.to_string(),
+                message: trimmed.to_string(),
+            };
+        }
+
+        if let Some(rest) = fallback_line.strip_prefix('[') {
+            if let Some((rule, message)) = rest.split_once("]:") {
+                return ClippyDiagnostic {
+                    rule: rule.trim().to_string(),
+                    message: message.trim().to_string(),
+                };
+            }
+
+            if let Some(rule) = rest.strip_suffix(']') {
+                return ClippyDiagnostic {
+                    rule: rule.trim().to_string(),
+                    message: String::new(),
+                };
+            }
+        }
+
+        ClippyDiagnostic {
+            rule: severity.to_string(),
+            message: line.trim().to_string(),
+        }
+    }
+
+    let mut by_rule: HashMap<ClippyDiagnostic, ClippyDiagnosticSummary> = HashMap::new();
     let mut error_count = 0;
     let mut warning_count = 0;
-    let mut error_details: Vec<String> = Vec::new();
 
     // Parse clippy output lines
     // Format: "warning: description\n  --> file:line:col\n  |\n  | code\n"
-    let mut current_rule = String::new();
+    let mut current_rule: Option<ClippyDiagnostic> = None;
 
     for line in output.lines() {
         // Skip compilation lines
@@ -922,29 +992,20 @@ fn filter_cargo_clippy(output: &str) -> String {
             let is_error = line.starts_with("error");
             if is_error {
                 error_count += 1;
-                error_details.push(truncate(line.trim(), 160));
             } else {
                 warning_count += 1;
             }
 
-            // Extract rule name from brackets
-            current_rule = if let Some(bracket_start) = line.rfind('[') {
-                if let Some(bracket_end) = line.rfind(']') {
-                    line[bracket_start + 1..bracket_end].to_string()
-                } else {
-                    line.to_string()
-                }
-            } else {
-                // No bracket: use the message itself as the rule
-                let prefix = if is_error { "error: " } else { "warning: " };
-                line.strip_prefix(prefix).unwrap_or(line).to_string()
-            };
+            let diagnostic = parse_clippy_diagnostic(line, is_error);
+            by_rule.entry(diagnostic.clone()).or_default().occurrences += 1;
+            current_rule = Some(diagnostic);
         } else if line.trim_start().starts_with("--> ") {
             let location = line.trim_start().trim_start_matches("--> ").to_string();
-            if !current_rule.is_empty() {
+            if let Some(current_rule) = current_rule.as_ref() {
                 by_rule
                     .entry(current_rule.clone())
                     .or_default()
+                    .locations
                     .push(location);
             }
         }
@@ -961,28 +1022,31 @@ fn filter_cargo_clippy(output: &str) -> String {
     ));
     result.push_str("═══════════════════════════════════════\n");
 
-    if !error_details.is_empty() {
-        result.push_str("\nError details:\n");
-        for (idx, detail) in error_details.iter().take(5).enumerate() {
-            result.push_str(&format!("  {}. {}\n", idx + 1, detail));
-        }
-        if error_details.len() > 5 {
-            result.push_str(&format!("  ... +{} more errors\n", error_details.len() - 5));
-        }
-        result.push('\n');
-    }
-
     // Sort rules by frequency
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
-    rule_counts.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    rule_counts.sort_by(|a, b| {
+        b.1.occurrences
+            .cmp(&a.1.occurrences)
+            .then_with(|| a.0.display().cmp(&b.0.display()))
+    });
 
-    for (rule, locations) in rule_counts.iter().take(15) {
-        result.push_str(&format!("  {} ({}x)\n", rule, locations.len()));
-        for loc in locations.iter().take(3) {
+    for (rule, summary) in rule_counts.iter().take(15) {
+        let occurrence_label = if summary.occurrences == 1 {
+            "occurrence"
+        } else {
+            "occurrences"
+        };
+        result.push_str(&format!(
+            "  {} ({} {})\n",
+            rule.display(),
+            summary.occurrences,
+            occurrence_label
+        ));
+        for loc in summary.locations.iter().take(3) {
             result.push_str(&format!("    {}\n", loc));
         }
-        if locations.len() > 3 {
-            result.push_str(&format!("    ... +{} more\n", locations.len() - 3));
+        if summary.locations.len() > 3 {
+            result.push_str(&format!("    ... +{} more\n", summary.locations.len() - 3));
         }
     }
 
@@ -1400,21 +1464,38 @@ warning: `rtk` (bin) generated 2 warnings
 "#;
         let result = filter_cargo_clippy(output);
         assert!(result.contains("0 errors, 2 warnings"));
-        assert!(result.contains("unused_variables"));
-        assert!(result.contains("clippy::too_many_arguments"));
+        assert!(result.contains("unused_variables: unused variable: `x`"));
+        assert!(result.contains("clippy::too_many_arguments: this function has too many arguments"));
+        assert!(result.contains("src/main.rs:10:9"));
     }
 
     #[test]
-    fn test_filter_cargo_clippy_includes_error_details() {
+    fn test_filter_cargo_clippy_includes_error_message_in_grouped_output() {
         let output = r#"    Checking rtk v0.5.0
-error: struct literals are not allowed here
+error: failed to resolve: use of undeclared crate [E0433]
+ --> src/main.rs:5:5
 warning: unused variable: `x` [unused_variables]
     Finished dev [unoptimized + debuginfo] target(s) in 1.53s
 "#;
         let result = filter_cargo_clippy(output);
         assert!(result.contains("cargo clippy: 1 errors, 1 warnings"));
-        assert!(result.contains("Error details:"));
-        assert!(result.contains("struct literals are not allowed here"));
+        assert!(result.contains("E0433: failed to resolve: use of undeclared crate"));
+        assert!(result.contains("src/main.rs:5:5"));
+        assert!(!result.contains("Error details:"));
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_supports_bracket_prefixed_diagnostics() {
+        let output = r#"warning[dead_code]: field `value` is never read
+ --> src/main.rs:2:5
+  |
+2 |     value: String,
+  |     ^^^^^
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(result.contains("cargo clippy: 0 errors, 1 warnings"));
+        assert!(result.contains("dead_code: field `value` is never read"));
+        assert!(result.contains("src/main.rs:2:5"));
     }
 
     #[test]
