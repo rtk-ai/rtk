@@ -4,9 +4,7 @@
 //! Focuses on extracting essential information from JSON outputs.
 
 use crate::core::tracking;
-use crate::core::utils::{
-    exit_code_from_output, exit_code_from_status, ok_confirmation, resolved_command, truncate,
-};
+use crate::core::utils::{exit_code_from_output, ok_confirmation, resolved_command, truncate};
 use crate::git;
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -1240,54 +1238,18 @@ fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
     run_passthrough("gh", "api", args)
 }
 
-/// Pass through a command with base args + extra args, tracking as passthrough.
+// Edge case: error context is now "Failed to run {cmd}" (loses subcommand detail)
 fn run_passthrough_with_extra(cmd: &str, base_args: &[&str], extra_args: &[String]) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut command = resolved_command(cmd);
-    for arg in base_args {
-        command.arg(arg);
-    }
-    for arg in extra_args {
-        command.arg(arg);
-    }
-
-    let status =
-        command
-            .status()
-            .context(format!("Failed to run {} {}", cmd, base_args.join(" ")))?;
-
-    let full_cmd = format!(
-        "{} {} {}",
-        cmd,
-        base_args.join(" "),
-        tracking::args_display(&extra_args.iter().map(|s| s.into()).collect::<Vec<_>>())
-    );
-    timer.track_passthrough(&full_cmd, &format!("rtk {} (passthrough)", full_cmd));
-
-    Ok(exit_code_from_status(&status, "gh"))
+    let mut os_args: Vec<std::ffi::OsString> =
+        base_args.iter().map(std::ffi::OsString::from).collect();
+    os_args.extend(extra_args.iter().map(std::ffi::OsString::from));
+    crate::core::runner::run_passthrough(cmd, &os_args, 0)
 }
 
 fn run_passthrough(cmd: &str, subcommand: &str, args: &[String]) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
-    let mut command = resolved_command(cmd);
-    command.arg(subcommand);
-    for arg in args {
-        command.arg(arg);
-    }
-
-    let status = command
-        .status()
-        .context(format!("Failed to run {} {}", cmd, subcommand))?;
-
-    let args_str = tracking::args_display(&args.iter().map(|s| s.into()).collect::<Vec<_>>());
-    timer.track_passthrough(
-        &format!("{} {} {}", cmd, subcommand, args_str),
-        &format!("rtk {} {} {} (passthrough)", cmd, subcommand, args_str),
-    );
-
-    Ok(exit_code_from_status(&status, "gh"))
+    let mut os_args: Vec<std::ffi::OsString> = vec![std::ffi::OsString::from(subcommand)];
+    os_args.extend(args.iter().map(std::ffi::OsString::from));
+    crate::core::runner::run_passthrough(cmd, &os_args, 0)
 }
 
 #[cfg(test)]

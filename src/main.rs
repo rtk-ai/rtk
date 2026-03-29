@@ -1573,8 +1573,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Summary { command } => {
             let cmd = command.join(" ");
-            summary::run(&cmd, cli.verbose)?;
-            0
+            summary::run(&cmd, cli.verbose)?
         }
 
         Commands::Grep {

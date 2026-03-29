@@ -1,7 +1,7 @@
 //! Filters Docker and kubectl output into compact summaries.
 
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use crate::core::utils::{exit_code_from_output, resolved_command};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 
@@ -587,25 +587,8 @@ fn compact_ports(ports: &str) -> String {
     }
 }
 
-/// Runs an unsupported docker subcommand by passing it through directly
 pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("docker passthrough: {:?}", args);
-    }
-    let status = resolved_command("docker")
-        .args(args)
-        .status()
-        .context("Failed to run docker")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("docker {}", args_str),
-        &format!("rtk docker {} (passthrough)", args_str),
-    );
-
-    Ok(exit_code_from_status(&status, "docker"))
+    crate::core::runner::run_passthrough("docker", args, verbose)
 }
 
 /// Run `docker compose ps` with compact output
@@ -729,47 +712,14 @@ pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-/// Runs an unsupported docker compose subcommand by passing it through directly
 pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("docker compose passthrough: {:?}", args);
-    }
-    let status = resolved_command("docker")
-        .arg("compose")
-        .args(args)
-        .status()
-        .context("Failed to run docker compose")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("docker compose {}", args_str),
-        &format!("rtk docker compose {} (passthrough)", args_str),
-    );
-
-    Ok(exit_code_from_status(&status, "docker"))
+    let mut combined = vec![OsString::from("compose")];
+    combined.extend_from_slice(args);
+    crate::core::runner::run_passthrough("docker", &combined, verbose)
 }
 
-/// Runs an unsupported kubectl subcommand by passing it through directly
 pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("kubectl passthrough: {:?}", args);
-    }
-    let status = resolved_command("kubectl")
-        .args(args)
-        .status()
-        .context("Failed to run kubectl")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("kubectl {}", args_str),
-        &format!("rtk kubectl {} (passthrough)", args_str),
-    );
-
-    Ok(exit_code_from_status(&status, "kubectl"))
+    crate::core::runner::run_passthrough("kubectl", args, verbose)
 }
 
 #[cfg(test)]

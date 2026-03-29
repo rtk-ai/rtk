@@ -463,8 +463,6 @@ fn print_manual_instructions(hook_path: &Path, include_opencode: bool) {
     }
 }
 
-/// Remove RTK hook entry from settings.json
-/// Returns true if hook was found and removed
 fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
     let hooks = match root
         .get_mut("hooks")
@@ -479,19 +477,18 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         None => return false,
     };
 
-    // Find and remove RTK entry
     let original_len = pre_tool_use_array.len();
     pre_tool_use_array.retain(|entry| {
         if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
                     if command.contains(REWRITE_HOOK_FILE) {
-                        return false; // Remove this entry
+                        return false;
                     }
                 }
             }
         }
-        true // Keep this entry
+        true
     });
 
     pre_tool_use_array.len() < original_len
@@ -876,7 +873,6 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            // Exact match OR both contain rtk-rewrite.sh
             cmd == hook_command
                 || (cmd.contains(REWRITE_HOOK_FILE) && hook_command.contains(REWRITE_HOOK_FILE))
         })
@@ -1529,26 +1525,22 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
     }
 }
 
-/// Resolve ~/.claude directory with proper home expansion
-fn resolve_claude_dir() -> Result<PathBuf> {
+fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
     dirs::home_dir()
-        .map(|h| h.join(CLAUDE_DIR))
+        .map(|h| h.join(subdir))
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
-/// Resolve ~/.codex directory with proper home expansion
-fn resolve_codex_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".codex"))
-        .context("Cannot determine home directory. Is $HOME set?")
+fn resolve_claude_dir() -> Result<PathBuf> {
+    resolve_home_subdir(CLAUDE_DIR)
 }
-/// Resolve OpenCode config directory (~/.config/opencode)
-/// OpenCode uses ~/.config/opencode on all platforms (XDG convention),
-/// NOT the macOS-native ~/Library/Application Support/.
+
+fn resolve_codex_dir() -> Result<PathBuf> {
+    resolve_home_subdir(".codex")
+}
+
 fn resolve_opencode_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".config").join("opencode"))
-        .context("Cannot determine home directory. Is $HOME set?")
+    resolve_home_subdir(".config/opencode")
 }
 
 /// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
@@ -1596,11 +1588,8 @@ fn remove_opencode_plugin(verbose: u8) -> Result<Vec<PathBuf>> {
 
 // ─── Cursor Agent support ─────────────────────────────────────────────
 
-/// Resolve ~/.cursor directory
 fn resolve_cursor_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".cursor"))
-        .context("Cannot determine home directory. Is $HOME set?")
+    resolve_home_subdir(".cursor")
 }
 
 /// Install Cursor hooks: hook script + hooks.json
@@ -2123,10 +2112,8 @@ const GEMINI_HOOK_SCRIPT: &str = r#"#!/bin/bash
 exec rtk hook gemini
 "#;
 
-/// Resolve the Gemini config directory (~/.gemini)
 fn resolve_gemini_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Cannot determine home directory")?;
-    Ok(home.join(".gemini"))
+    resolve_home_subdir(".gemini")
 }
 
 /// Entry point for `rtk init --gemini`
@@ -2195,7 +2182,6 @@ fn patch_gemini_settings(
         serde_json::json!({})
     };
 
-    // Check if hook already registered
     let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
     if let Some(hooks) = settings.pointer(&before_tool_pointer) {
         if let Some(arr) = hooks.as_array() {
