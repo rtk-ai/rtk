@@ -1,6 +1,7 @@
 //! Filters golangci-lint output, grouping issues by rule.
 
 use crate::core::config;
+use crate::core::runner;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
@@ -114,7 +115,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     }
 
-    let exit_code = crate::core::runner::run_filtered(
+    let exit_code = runner::run_filtered(
         cmd,
         "golangci-lint",
         &args.join(" "),

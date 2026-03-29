@@ -3,7 +3,7 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
-use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, PATTERNS, RULES};
+use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -43,10 +43,11 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
 }
 
 lazy_static! {
-    static ref REGEX_SET: RegexSet = RegexSet::new(PATTERNS).expect("invalid regex patterns");
-    static ref COMPILED: Vec<Regex> = PATTERNS
+    static ref REGEX_SET: RegexSet =
+        RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns");
+    static ref COMPILED: Vec<Regex> = RULES
         .iter()
-        .map(|p| Regex::new(p).expect("invalid regex"))
+        .map(|r| Regex::new(r.pattern).expect("invalid regex"))
         .collect();
     static ref ENV_PREFIX: Regex =
         Regex::new(r"^(?:sudo\s+|env\s+|[A-Z_][A-Z0-9_]*=[^\s]*\s+)+").unwrap();
@@ -886,15 +887,6 @@ mod tests {
                 estimated_savings_pct: 80.0,
                 status: RtkStatus::Existing,
             }
-        );
-    }
-
-    #[test]
-    fn test_patterns_rules_length_match() {
-        assert_eq!(
-            PATTERNS.len(),
-            RULES.len(),
-            "PATTERNS and RULES must be aligned"
         );
     }
 
@@ -2103,25 +2095,14 @@ mod tests {
         );
     }
 
-    // --- Ensure PATTERNS and RULES stay aligned after modifications ---
-
     #[test]
-    fn test_patterns_rules_aligned_after_aws_psql() {
-        // If this fails, someone added a PATTERN without a matching RULE (or vice versa)
-        assert_eq!(
-            PATTERNS.len(),
-            RULES.len(),
-            "PATTERNS[{}] != RULES[{}] — they must stay 1:1",
-            PATTERNS.len(),
-            RULES.len()
-        );
-    }
-
-    // --- All RULES have non-empty rtk_cmd and at least one rewrite_prefix ---
-
-    #[test]
-    fn test_all_rules_have_valid_rtk_cmd() {
+    fn test_all_rules_are_complete() {
         for rule in RULES {
+            assert!(
+                !rule.pattern.is_empty(),
+                "Rule '{}' has empty pattern",
+                rule.rtk_cmd
+            );
             assert!(!rule.rtk_cmd.is_empty(), "Rule with empty rtk_cmd found");
             assert!(
                 rule.rtk_cmd.starts_with("rtk "),
@@ -2172,15 +2153,15 @@ mod tests {
         );
     }
 
-    // --- Every PATTERN compiles to a valid Regex ---
-
     #[test]
     fn test_all_patterns_are_valid_regex() {
         use regex::Regex;
-        for (i, pattern) in PATTERNS.iter().enumerate() {
+        for (i, rule) in RULES.iter().enumerate() {
             assert!(
-                Regex::new(pattern).is_ok(),
-                "PATTERNS[{i}] = '{pattern}' is not a valid regex"
+                Regex::new(rule.pattern).is_ok(),
+                "RULES[{i}] ({}) has invalid pattern '{}'",
+                rule.rtk_cmd,
+                rule.pattern
             );
         }
     }
