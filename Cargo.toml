@@ -25,7 +25,6 @@ dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 chrono = "0.4"
-thiserror = "1.0"
 tempfile = "3"
 sha2 = "0.10"
 ureq = "2"
@@ -34,6 +33,7 @@ getrandom = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"
 which = "8"
+automod = "1"
 
 [build-dependencies]
 toml = "0.8"
