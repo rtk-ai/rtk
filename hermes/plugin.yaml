@@ -1,0 +1,5 @@
+name: rtk-rewrite
+version: 1.1.0
+description: Rewrites terminal commands via RTK for lower token usage, with safe guards and Hermes-specific controls
+provides_hooks:
+  - pre_tool_call
