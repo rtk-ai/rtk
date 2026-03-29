@@ -29,12 +29,7 @@ pub fn run(compiler: &str, args: &[String], verbose: u8) -> Result<()> {
 
     println!("{}", filtered);
 
-    timer.track(
-        &format!("{} {}", compiler, args.join(" ")),
-        &format!("rtk {} {}", compiler, args.join(" ")),
-        &raw,
-        &filtered,
-    );
+    timer.track(compiler, &format!("rtk {}", compiler), &raw, &filtered);
 
     if !output.status.success() {
         std::process::exit(output.status.code().unwrap_or(1));
