@@ -7,8 +7,14 @@ strip_lines_matching = [
   "^Waiting on bqjob",
   "^Current status:",
   "^Updates are available",
+  "^please run:",
   "^\\s*\\$ gcloud components",
   "^\\+-+\\+-*"
+]
+match_output = [
+  { pattern = "BigQuery error|Error processing job", message = "bq: query failed (see stderr for details)" },
+  { pattern = "Not found:", message = "bq: table or dataset not found" },
+  { pattern = "Access Denied:", message = "bq: access denied" },
 ]
 replace = [
   { pattern = "^\\s*\\|\\s*", replacement = "" },
@@ -17,6 +23,7 @@ replace = [
 ]
 max_lines = 100
 truncate_lines_at = 200
+on_empty = "bq: no results"
 
 [[tests.bq-query]]
 name = "strips gcloud noise and converts ascii table to csv"
@@ -61,6 +68,11 @@ expected = """event_date, event, event_params
 , , {"key": "uid", "value": {"int_value": "998877"}}]"""
 
 [[tests.bq-query]]
-name = "empty input produces nothing"
+name = "returns short message on BigQuery error"
+input = """BigQuery error in query operation: Error processing job 'project:bqjob_abc123': Not found: Table project:dataset.table"""
+expected = "bq: query failed (see stderr for details)"
+
+[[tests.bq-query]]
+name = "empty input shows no-results message"
 input = ""
-expected = ""
+expected = "bq: no results"

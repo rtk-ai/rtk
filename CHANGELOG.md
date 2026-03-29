@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+* **filters:** add `bq query`, `bq show`, and `bq ls` TOML filters with noise reduction and ASCII-to-CSV compression ([#896](https://github.com/rtk-ai/rtk/pull/896))
+
 ### Bug Fixes
 
 * **wc:** `wc` filter was never invoked by the hook — removed `"wc "` from `IGNORED_PREFIXES` and added registry entry so `wc` commands are rewritten to `rtk wc`

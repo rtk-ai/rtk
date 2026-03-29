@@ -5,15 +5,23 @@ strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
   "^Updates are available",
+  "^please run:",
   "^\\s*\\$ gcloud components",
   "^-+-+-*-"
 ]
+match_output = [
+  { pattern = "Not found:", message = "bq: table or dataset not found" },
+  { pattern = "Access Denied:", message = "bq: access denied" },
+]
 replace = [
-  { pattern = "^\\s*", replacement = "" },
-  { pattern = "\\s\\s+", replacement = ", " } # since bq show doesn't use | separators, but spaces
+  { pattern = "^\\s*", replacement = "" },           # strip leading whitespace
+  { pattern = "\\s\\s+", replacement = ", " },        # 2+ spaces → CSV separator
+  { pattern = ",\\s*$", replacement = "" },           # strip trailing comma from alignment padding
+  { pattern = "^(\\|-)", replacement = ", $1" }       # prefix schema continuation rows with ", "
 ]
 max_lines = 100
 truncate_lines_at = 200
+on_empty = "bq: no output"
 
 [[tests.bq-show]]
 name = "strips gcloud noise and converts to csv"
@@ -45,6 +53,6 @@ expected = """Last modified, Schema, Type, Total Rows, Total Bytes, Expiration, 
 , |- event_date: date"""
 
 [[tests.bq-show]]
-name = "empty input produces nothing"
+name = "empty input shows no-output message"
 input = ""
-expected = ""
+expected = "bq: no output"

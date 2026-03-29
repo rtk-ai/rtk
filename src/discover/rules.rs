@@ -10,7 +10,6 @@ pub struct RtkRule {
     pub subcmd_status: &'static [(&'static str, RtkStatus)],
 }
 
-
 pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
