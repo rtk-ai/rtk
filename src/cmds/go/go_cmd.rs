@@ -216,7 +216,7 @@ fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
 
 /// Run `go tool golangci-lint` and filter its output via the golangci JSON filter.
 /// Reusing parts of golangci_cmd.
-fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<()> {
+fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let version = detect_go_tool_golangci_version();
@@ -277,20 +277,10 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    // golangci-lint: exit 0 = clean, exit 1 = lint issues, exit 2+ = config/build error
-    match output.status.code() {
-        Some(0) | Some(1) => Ok(()),
-        Some(code) => {
-            if !stderr.trim().is_empty() {
-                eprintln!("{}", stderr.trim());
-            }
-            std::process::exit(code);
-        }
-        None => {
-            eprintln!("go tool golangci-lint: killed by signal");
-            std::process::exit(130);
-        }
-    }
+    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
+    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
+    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
+    Ok(if exit_code == 1 { 0 } else { exit_code })
 }
 
 /// Parse go test -json output (NDJSON format)
