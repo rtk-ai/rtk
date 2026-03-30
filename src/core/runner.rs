@@ -108,10 +108,15 @@ where
         eprintln!("{}", stderr.trim());
     }
 
+    let raw_for_tracking = if opts.filter_stdout_only {
+        stdout.as_ref()
+    } else {
+        raw.as_str()
+    };
     timer.track(
         &format!("{} {}", tool_name, args_display),
         &format!("rtk {} {}", tool_name, args_display),
-        &raw,
+        raw_for_tracking,
         &filtered,
     );
 

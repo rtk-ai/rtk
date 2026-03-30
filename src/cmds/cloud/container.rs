@@ -39,7 +39,10 @@ where
         label,
         |stdout| match serde_json::from_str::<Value>(stdout) {
             Ok(json) => filter_fn(&json),
-            Err(_) => stdout.to_string(),
+            Err(e) => {
+                eprintln!("[rtk] kubectl: JSON parse failed: {}", e);
+                stdout.to_string()
+            }
         },
         RunOptions::stdout_only()
             .early_exit_on_failure()
