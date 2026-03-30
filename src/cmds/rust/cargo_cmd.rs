@@ -1,5 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
+use crate::core::runner;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
@@ -17,7 +18,7 @@ pub enum CargoCommand {
     Nextest,
 }
 
-pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
+pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         CargoCommand::Build => run_build(args, verbose),
         CargoCommand::Test => run_test(args, verbose),
@@ -67,13 +68,17 @@ fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<Str
     result
 }
 
-/// Generic cargo command runner with filtering
-fn run_cargo_filtered<F>(subcommand: &str, args: &[String], verbose: u8, filter_fn: F) -> Result<()>
+/// Generic cargo command runner with filtering.
+/// Builds the Command with restored `--` separator, then delegates to shared runner.
+fn run_cargo_filtered<F>(
+    subcommand: &str,
+    args: &[String],
+    verbose: u8,
+    filter_fn: F,
+) -> Result<i32>
 where
     F: Fn(&str) -> String,
 {
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
@@ -86,62 +91,36 @@ where
         eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to run cargo {}", subcommand))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_fn(&raw);
-
-    if let Some(hint) =
-        crate::core::tee::tee_and_hint(&raw, &format!("cargo_{}", subcommand), exit_code)
-    {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("cargo {} {}", subcommand, restored_args.join(" ")),
-        &format!("rtk cargo {} {}", subcommand, restored_args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        &format!("cargo {}", subcommand),
+        &restored_args.join(" "),
+        filter_fn,
+        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+    )
 }
 
-fn run_build(args: &[String], verbose: u8) -> Result<()> {
+fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("build", args, verbose, filter_cargo_build)
 }
 
-fn run_test(args: &[String], verbose: u8) -> Result<()> {
+fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("test", args, verbose, filter_cargo_test)
 }
 
-fn run_clippy(args: &[String], verbose: u8) -> Result<()> {
+fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
 }
 
-fn run_check(args: &[String], verbose: u8) -> Result<()> {
+fn run_check(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("check", args, verbose, filter_cargo_build)
 }
 
-fn run_install(args: &[String], verbose: u8) -> Result<()> {
+fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("install", args, verbose, filter_cargo_install)
 }
 
-fn run_nextest(args: &[String], verbose: u8) -> Result<()> {
+fn run_nextest(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest)
 }
 
@@ -994,7 +973,7 @@ fn filter_cargo_clippy(output: &str) -> String {
 }
 
 /// Runs an unsupported cargo subcommand by passing it through directly
-pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -1011,10 +990,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
         &format!("rtk cargo {} (passthrough)", args_str),
     );
 
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+    Ok(crate::core::utils::exit_code_from_status(&status, "cargo"))
 }
 
 #[cfg(test)]

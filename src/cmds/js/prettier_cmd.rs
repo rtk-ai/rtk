@@ -1,15 +1,11 @@
 //! Filters Prettier output to show only files that need formatting.
 
-use crate::core::tracking;
 use crate::core::utils::package_manager_exec;
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = package_manager_exec("prettier");
 
-    // Add user arguments
     for arg in args {
         cmd.arg(arg);
     }
@@ -18,50 +14,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: prettier {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run prettier (try: npm install -g prettier)")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    // #221: If prettier is not installed or produced no meaningful output,
-    // show stderr as-is instead of a misleading "All files formatted" message.
-    let has_output = stdout.lines().any(|l| !l.trim().is_empty());
-    if !has_output && !output.status.success() {
-        let msg = stderr.trim();
-        if msg.is_empty() {
-            eprintln!("Error: prettier not found or produced no output");
-        } else {
-            eprintln!("{}", msg);
-        }
-        timer.track(
-            &format!("prettier {}", args.join(" ")),
-            &format!("rtk prettier {}", args.join(" ")),
-            &raw,
-            &raw,
-        );
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let filtered = filter_prettier_output(&raw);
-
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("prettier {}", args.join(" ")),
-        &format!("rtk prettier {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    crate::core::runner::run_filtered(
+        cmd,
+        "prettier",
+        &args.join(" "),
+        filter_prettier_output,
+        crate::core::runner::RunOptions::stdout_only(),
+    )
 }
 
 /// Filter Prettier output - show only files that need formatting

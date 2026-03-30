@@ -7,7 +7,7 @@
 //! unless -a flag is present (respecting user intent).
 
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, tool_exists};
+use crate::core::utils::{exit_code_from_output, resolved_command, tool_exists};
 use anyhow::{Context, Result};
 
 /// Noise directories commonly excluded from LLM context
@@ -40,7 +40,7 @@ const NOISE_DIRS: &[&str] = &[
     ".eggs",
 ];
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Check if tree is installed
@@ -76,7 +76,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprint!("{}", stderr);
-        std::process::exit(output.status.code().unwrap_or(1));
+        return Ok(exit_code_from_output(&output, "tree"));
     }
 
     let raw = String::from_utf8_lossy(&output.stdout).to_string();
@@ -98,7 +98,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     print!("{}", filtered);
     timer.track("tree", "rtk tree", &raw, &filtered);
 
-    Ok(())
+    Ok(0)
 }
 
 fn filter_tree_output(raw: &str) -> String {

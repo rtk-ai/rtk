@@ -1,7 +1,7 @@
 //! Runs code formatters (Prettier, Ruff) and shows only files that changed.
 
 use crate::core::tracking;
-use crate::core::utils::{package_manager_exec, resolved_command};
+use crate::core::utils::{exit_code_from_output, package_manager_exec, resolved_command};
 use crate::prettier_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -52,7 +52,7 @@ fn detect_formatter_in_dir(args: &[String], dir: &Path) -> String {
     "ruff".to_string()
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Detect formatter
@@ -137,12 +137,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    Ok(exit_code_from_output(&output, "format"))
 }
 
 /// Filter black output - show files that need formatting

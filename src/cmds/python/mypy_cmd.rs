@@ -1,14 +1,12 @@
 //! Filters mypy type-checking output, grouping errors by file.
 
-use crate::core::tracking;
+use crate::core::runner;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("mypy") {
         resolved_command("mypy")
     } else {
@@ -25,30 +23,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: mypy {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run mypy. Is it installed? Try: pip install mypy")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-    let clean = strip_ansi(&raw);
-
-    let filtered = filter_mypy_output(&clean);
-
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("mypy {}", args.join(" ")),
-        &format!("rtk mypy {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "mypy",
+        &args.join(" "),
+        |raw| filter_mypy_output(&strip_ansi(raw)),
+        runner::RunOptions::default(),
+    )
 }
 
 struct MypyError {

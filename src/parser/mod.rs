@@ -7,7 +7,6 @@
 //!
 //! The three-tier system ensures RTK never returns false data silently.
 
-pub mod error;
 pub mod formatter;
 pub mod types;
 
