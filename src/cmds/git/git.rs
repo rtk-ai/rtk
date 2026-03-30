@@ -40,7 +40,7 @@ pub fn run(
     max_lines: Option<usize>,
     verbose: u8,
     global_args: &[String],
-) -> Result<i32> {
+) -> Result<()> {
     match cmd {
         GitCommand::Diff => run_diff(args, max_lines, verbose, global_args),
         GitCommand::Log => run_log(args, max_lines, verbose, global_args),
@@ -64,7 +64,7 @@ fn run_diff(
     max_lines: Option<usize>,
     verbose: u8,
     global_args: &[String],
-) -> Result<i32> {
+) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // Check if user wants stat output
@@ -91,7 +91,7 @@ fn run_diff(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!("{}", stderr);
-            return Ok(exit_code_from_output(&output, "git"));
+            std::process::exit(output.status.code().unwrap_or(1));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -104,7 +104,7 @@ fn run_diff(
             &stdout,
         );
 
-        return Ok(0);
+        return Ok(());
     }
 
     // Default RTK behavior: stat first, then compacted diff
@@ -130,7 +130,7 @@ fn run_diff(
             &raw,
             &raw,
         );
-        return Ok(exit_code_from_output(&output, "git"));
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     if verbose > 0 {
@@ -166,7 +166,7 @@ fn run_diff(
         &final_output,
     );
 
-    Ok(0)
+    Ok(())
 }
 
 fn run_show(
@@ -174,7 +174,7 @@ fn run_show(
     max_lines: Option<usize>,
     verbose: u8,
     global_args: &[String],
-) -> Result<i32> {
+) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // If user wants --stat or --format only, pass through
@@ -200,7 +200,7 @@ fn run_show(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!("{}", stderr);
-            return Ok(exit_code_from_output(&output, "git"));
+            std::process::exit(output.status.code().unwrap_or(1));
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
         if wants_blob_show {
@@ -216,7 +216,7 @@ fn run_show(
             &stdout,
         );
 
-        return Ok(0);
+        return Ok(());
     }
 
     // Get raw output for tracking
@@ -240,7 +240,7 @@ fn run_show(
     if !summary_output.status.success() {
         let stderr = String::from_utf8_lossy(&summary_output.stderr);
         eprintln!("{}", stderr);
-        return Ok(exit_code_from_output(&summary_output, "git"));
+        std::process::exit(summary_output.status.code().unwrap_or(1));
     }
     let summary = String::from_utf8_lossy(&summary_output.stdout);
     println!("{}", summary.trim());
@@ -285,7 +285,7 @@ fn run_show(
         &final_output,
     );
 
-    Ok(0)
+    Ok(())
 }
 
 fn is_blob_show_arg(arg: &str) -> bool {
@@ -388,7 +388,7 @@ fn run_log(
     _max_lines: Option<usize>,
     verbose: u8,
     global_args: &[String],
-) -> Result<i32> {
+) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = git_cmd(global_args);
@@ -446,7 +446,8 @@ fn run_log(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!("{}", stderr);
-        return Ok(exit_code_from_output(&output, "git"));
+        // Propagate git's exit code
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -466,7 +467,7 @@ fn run_log(
         &filtered,
     );
 
-    Ok(0)
+    Ok(())
 }
 
 /// Filter git log output: truncate long messages, cap lines
@@ -741,7 +742,7 @@ fn filter_status_with_args(output: &str) -> String {
     }
 }
 
-fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     // If user provided flags, apply minimal filtering
@@ -766,7 +767,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
                 &raw,
                 &raw,
             );
-            return Ok(exit_code_from_output(&output, "git"));
+            std::process::exit(output.status.code().unwrap_or(1));
         }
 
         if verbose > 0 || !stderr.is_empty() {
@@ -784,7 +785,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             &filtered,
         );
 
-        return Ok(0);
+        return Ok(());
     }
 
     // Default RTK compact mode (no args provided)
@@ -807,7 +808,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         let message = "Not a git repository".to_string();
         eprintln!("{}", message);
         timer.track("git status", "rtk git status", &raw_output, &message);
-        return Ok(exit_code_from_output(&output, "git"));
+        std::process::exit(output.status.code().unwrap_or(128));
     }
 
     let formatted = format_status_output(&stdout);
@@ -817,10 +818,10 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     // Track for statistics
     timer.track("git status", "rtk git status", &raw_output, &formatted);
 
-    Ok(0)
+    Ok(())
 }
 
-fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = git_cmd(global_args);
@@ -885,10 +886,11 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
-        return Ok(exit_code_from_output(&output, "git"));
+        // Propagate git's exit code
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
-    Ok(0)
+    Ok(())
 }
 
 fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
@@ -900,7 +902,7 @@ fn build_commit_command(args: &[String], global_args: &[String]) -> Command {
     cmd
 }
 
-fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let original_cmd = format!("git commit {}", args.join(" "));
@@ -938,31 +940,29 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         println!("{}", compact);
 
         timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
+    } else if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
+        println!("ok (nothing to commit)");
+        timer.track(
+            &original_cmd,
+            "rtk git commit",
+            &raw_output,
+            "ok (nothing to commit)",
+        );
     } else {
-        if stderr.contains("nothing to commit") || stdout.contains("nothing to commit") {
-            println!("ok (nothing to commit)");
-            timer.track(
-                &original_cmd,
-                "rtk git commit",
-                &raw_output,
-                "ok (nothing to commit)",
-            );
-        } else {
-            if !stderr.trim().is_empty() {
-                eprint!("{}", stderr);
-            }
-            if !stdout.trim().is_empty() {
-                eprint!("{}", stdout);
-            }
-            timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
-            return Ok(exit_code_from_output(&output, "git"));
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
         }
+        if !stdout.trim().is_empty() {
+            eprint!("{}", stdout);
+        }
+        timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
-    Ok(0)
+    Ok(())
 }
 
-fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -1018,13 +1018,13 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
-        return Ok(exit_code_from_output(&output, "git"));
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
-    Ok(0)
+    Ok(())
 }
 
-fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -1104,13 +1104,13 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
-        return Ok(exit_code_from_output(&output, "git"));
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
-    Ok(0)
+    Ok(())
 }
 
-fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -1184,9 +1184,9 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             if !stderr.trim().is_empty() {
                 eprintln!("{}", stderr);
             }
-            return Ok(exit_code_from_output(&output, "git"));
+            std::process::exit(output.status.code().unwrap_or(1));
         }
-        return Ok(0);
+        return Ok(());
     }
 
     // Write operation: action flags, or positional args without list flags (= branch creation)
@@ -1224,9 +1224,9 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             if !stdout.trim().is_empty() {
                 eprintln!("{}", stdout);
             }
-            return Ok(exit_code_from_output(&output, "git"));
+            std::process::exit(output.status.code().unwrap_or(1));
         }
-        return Ok(0);
+        return Ok(());
     }
 
     // List mode: show compact branch list
@@ -1255,7 +1255,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
             &raw,
             &raw,
         );
-        return Ok(exit_code_from_output(&output, "git"));
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     let filtered = filter_branch_output(&stdout);
@@ -1268,7 +1268,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         &filtered,
     );
 
-    Ok(0)
+    Ok(())
 }
 
 fn filter_branch_output(output: &str) -> String {
@@ -1325,7 +1325,7 @@ fn filter_branch_output(output: &str) -> String {
     result.join("\n")
 }
 
-fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -1348,7 +1348,7 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
         if !stderr.trim().is_empty() {
             eprintln!("{}", stderr);
         }
-        return Ok(exit_code_from_output(&output, "git"));
+        std::process::exit(output.status.code().unwrap_or(1));
     }
 
     // Count new refs from stderr (git fetch outputs to stderr)
@@ -1366,7 +1366,7 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
     println!("{}", msg);
     timer.track("git fetch", "rtk git fetch", &raw, &msg);
 
-    Ok(0)
+    Ok(())
 }
 
 fn run_stash(
@@ -1374,7 +1374,7 @@ fn run_stash(
     args: &[String],
     verbose: u8,
     global_args: &[String],
-) -> Result<i32> {
+) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -1394,7 +1394,7 @@ fn run_stash(
                 let msg = "No stashes";
                 println!("{}", msg);
                 timer.track("git stash list", "rtk git stash list", &raw, msg);
-                return Ok(0);
+                return Ok(());
             }
 
             let filtered = filter_stash_list(&stdout);
@@ -1455,7 +1455,7 @@ fn run_stash(
             );
 
             if !output.status.success() {
-                return Ok(exit_code_from_output(&output, "git"));
+                std::process::exit(output.status.code().unwrap_or(1));
             }
         }
         Some(sub) => {
@@ -1490,7 +1490,7 @@ fn run_stash(
             );
 
             if !output.status.success() {
-                return Ok(exit_code_from_output(&output, "git"));
+                std::process::exit(output.status.code().unwrap_or(1));
             }
         }
         None => {
@@ -1526,12 +1526,12 @@ fn run_stash(
             timer.track("git stash", "rtk git stash", &combined, &msg);
 
             if !output.status.success() {
-                return Ok(exit_code_from_output(&output, "git"));
+                std::process::exit(output.status.code().unwrap_or(1));
             }
         }
     }
 
-    Ok(0)
+    Ok(())
 }
 
 fn filter_stash_list(output: &str) -> String {
@@ -1555,7 +1555,7 @@ fn filter_stash_list(output: &str) -> String {
     result.join("\n")
 }
 
-fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -1598,9 +1598,9 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
             if !stderr.trim().is_empty() {
                 eprintln!("{}", stderr);
             }
-            return Ok(exit_code_from_output(&output, "git"));
+            std::process::exit(output.status.code().unwrap_or(1));
         }
-        return Ok(0);
+        return Ok(());
     }
 
     // Default: list mode
@@ -1616,7 +1616,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     println!("{}", filtered);
     timer.track("git worktree list", "rtk git worktree", &raw, &filtered);
 
-    Ok(0)
+    Ok(())
 }
 
 fn filter_worktree_list(output: &str) -> String {
@@ -1647,7 +1647,7 @@ fn filter_worktree_list(output: &str) -> String {
 }
 
 /// Runs an unsupported git subcommand by passing it through directly
-pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -1665,9 +1665,9 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
     );
 
     if !status.success() {
-        return Ok(exit_code_from_status(&status, "git"));
+        std::process::exit(status.code().unwrap_or(1));
     }
-    Ok(0)
+    Ok(())
 }
 
 #[cfg(test)]
