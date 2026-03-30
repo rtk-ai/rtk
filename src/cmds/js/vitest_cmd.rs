@@ -262,7 +262,7 @@ fn run_vitest(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    let exit_code = output.status.code().unwrap_or(1);
+    let exit_code = crate::core::utils::exit_code_from_output(&output, "vitest");
     if let Some(hint) = crate::core::tee::tee_and_hint(&combined, "vitest_run", exit_code) {
         println!("{}\n{}", filtered, hint);
     } else {

@@ -316,7 +316,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         }
     };
 
-    let exit_code = output.status.code().unwrap_or(1);
+    let exit_code = crate::core::utils::exit_code_from_output(&output, "playwright");
     if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "playwright", exit_code) {
         println!("{}\n{}", filtered, hint);
     } else {

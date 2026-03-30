@@ -56,7 +56,7 @@ fn run_generate(args: &[String], verbose: u8) -> Result<i32> {
         .output()
         .context("Failed to run prisma generate (try: npm install -g prisma)")?;
 
-    let exit_code = output.status.code().unwrap_or(1);
+    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
@@ -113,7 +113,7 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
 
     let output = cmd.output().context("Failed to run prisma migrate")?;
 
-    let exit_code = output.status.code().unwrap_or(1);
+    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
@@ -157,7 +157,7 @@ fn run_db_push(args: &[String], verbose: u8) -> Result<i32> {
 
     let output = cmd.output().context("Failed to run prisma db push")?;
 
-    let exit_code = output.status.code().unwrap_or(1);
+    let exit_code = crate::core::utils::exit_code_from_output(&output, "prisma");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
