@@ -47,16 +47,6 @@ To apply, you should have:
 
 ## What Maintainers Do
 
-### 🔧 Core Maintainers
-
-Core Maintainers are responsible for the core of RTK. They have a broader scope and higher responsibilities and permissions, including:
-
-- Maintaining core functionalities and architecture
-- Reviewing and merging PRs for release with the core team
-- Defining project direction and standards with the core team
-- Ensuring consistency across the entire project
-- Refactoring for optimization, standardization & conformity
-
 ### 🌱 Ecosystem Maintainers
 
 Ecosystem Maintainers are responsible for specific environments inside the `cmds/` folder (e.g. `git`, `system`, etc.). They own and manage their ecosystem end-to-end:
@@ -67,6 +57,16 @@ Ecosystem Maintainers are responsible for specific environments inside the `cmds
 - Help shape and grow their specific domain
 - Handle issues and PRs related to their environment *(security and quality review from core maintainers still required for release)*
 
+### 🔧 Core Maintainers (once we've fully integrated some Ecosystem Maintainers)
+
+Core Maintainers are responsible for the core of RTK. They have a broader scope and higher responsibilities and permissions, including:
+
+- Maintaining core functionalities and architecture
+- Reviewing and merging PRs for release with the core team
+- Defining project direction and standards with the core team
+- Ensuring consistency across the entire project
+- Refactoring for optimization, standardization & conformity
+  
 ---
 
 If you enjoy contributing and want to help RTK scale in a healthy way, we'd be excited to have you onboard 🚀
