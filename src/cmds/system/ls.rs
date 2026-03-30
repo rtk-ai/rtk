@@ -214,7 +214,7 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
     }
 
     // Summary line (separate so caller can suppress when piped)
-    let mut summary = format!("\n📊 {} files, {} dirs", files.len(), dirs.len());
+    let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
     if !by_ext.is_empty() {
         let mut ext_counts: Vec<_> = by_ext.iter().collect();
         ext_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -302,7 +302,7 @@ mod tests {
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n\
                      -rw-r--r--  1 user  staff   100 Jan  1 12:00 Cargo.toml\n";
         let (_entries, summary) = compact_ls(input, false);
-        assert!(summary.contains("📊 3 files, 1 dirs"));
+        assert!(summary.contains("Summary: 3 files, 1 dirs"));
         assert!(summary.contains(".rs"));
         assert!(summary.contains(".toml"));
     }
@@ -340,8 +340,8 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
         let (entries, summary) = compact_ls(input, false);
-        assert!(!entries.contains("📊"), "entries must not contain summary");
-        assert!(summary.contains("📊"), "summary must contain the icon");
+        assert!(!entries.contains("Summary:"), "entries must not contain summary");
+        assert!(summary.contains("Summary:"), "summary must contain the icon");
     }
 
     #[test]
