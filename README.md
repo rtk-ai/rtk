@@ -201,6 +201,18 @@ rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
 ```
 
+### AWS
+```bash
+rtk aws sts get-caller-identity # One-line identity
+rtk aws ec2 describe-instances  # Compact instance list
+rtk aws lambda list-functions   # Name/runtime/memory (strips secrets)
+rtk aws logs get-log-events     # Timestamped messages only
+rtk aws cloudformation describe-stack-events  # Failures first
+rtk aws dynamodb scan           # Unwraps type annotations
+rtk aws iam list-roles          # Strips policy documents
+rtk aws s3 ls                   # Truncated with tee recovery
+```
+
 ### Containers
 ```bash
 rtk docker ps                   # Compact container list
@@ -419,6 +431,7 @@ Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://githu
 | `rspec` / `bundle exec rspec` | `rtk rspec` |
 | `rubocop` / `bundle exec rubocop` | `rtk rubocop` |
 | `bundle install/update` | `rtk bundle ...` |
+| `aws sts/ec2/lambda/...` | `rtk aws ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
