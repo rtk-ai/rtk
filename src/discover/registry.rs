@@ -41,7 +41,6 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         _ => 150,
     }
 }
-
 lazy_static! {
     static ref REGEX_SET: RegexSet = RegexSet::new(PATTERNS).expect("invalid regex patterns");
     static ref COMPILED: Vec<Regex> = PATTERNS
@@ -2183,6 +2182,32 @@ mod tests {
                 "PATTERNS[{i}] = '{pattern}' is not a valid regex"
             );
         }
+    }
+
+    // ── Yarn rewrite tests ──
+
+    #[test]
+    fn test_rewrite_yarn_test() {
+        assert_eq!(
+            rewrite_command("yarn test", &[]),
+            Some("rtk yarn test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_run_lint() {
+        assert_eq!(
+            rewrite_command("yarn run lint", &[]),
+            Some("rtk yarn run lint".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_workspace() {
+        assert_eq!(
+            rewrite_command("yarn workspace @scope/app run build", &[]),
+            Some("rtk yarn workspace @scope/app run build".into())
+        );
     }
 
     // --- #196: gh --json/--jq/--template passthrough ---

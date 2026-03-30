@@ -210,6 +210,17 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
+/// Filter vitest output post-hoc (for use by yarn_cmd and other wrappers).
+/// Runs the full VitestParser pipeline on already-captured stdout.
+pub(crate) fn filter_vitest_output(stdout: &str) -> String {
+    let parse_result = VitestParser::parse(stdout);
+    match parse_result {
+        ParseResult::Full(data) => data.format(FormatMode::Compact),
+        ParseResult::Degraded(data, _) => data.format(FormatMode::Compact),
+        ParseResult::Passthrough(raw) => raw,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum VitestCommand {
     Run,

@@ -438,7 +438,7 @@ fn filter_pylint_json(output: &str) -> String {
 }
 
 /// Filter generic linter output (fallback for non-ESLint linters)
-fn filter_generic_lint(output: &str) -> String {
+pub(crate) fn filter_generic_lint(output: &str) -> String {
     let mut warnings = 0;
     let mut errors = 0;
     let mut issues: Vec<String> = Vec::new();

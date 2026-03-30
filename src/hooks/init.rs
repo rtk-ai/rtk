@@ -140,6 +140,7 @@ rtk gh api              # Compact API responses (26%)
 rtk pnpm list           # Compact dependency tree (70%)
 rtk pnpm outdated       # Compact outdated packages (80%)
 rtk pnpm install        # Compact install output (90%)
+rtk yarn workspace <pkg> <script>  # Strip boilerplate, route to filters (70%)
 rtk npm run <script>    # Compact npm script output
 rtk npx <cmd>           # Compact npx command output
 rtk prisma              # Prisma without ASCII art (88%)
@@ -197,7 +198,7 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 | Build | next, tsc, lint, prettier | 70-87% |
 | Git | status, log, diff, add, commit | 59-80% |
 | GitHub | gh pr, gh run, gh issue | 26-87% |
-| Package Managers | pnpm, npm, npx | 70-90% |
+| Package Managers | pnpm, yarn, npm, npx | 70-90% |
 | Files | ls, read, grep, find | 60-75% |
 | Infrastructure | docker, kubectl | 85% |
 | Network | curl, wget | 65-70% |
@@ -2412,6 +2413,7 @@ mod tests {
             "rtk playwright",
             "rtk prisma",
             "rtk pnpm",
+            "rtk yarn",
             "rtk npm",
             "rtk curl",
             "rtk git",

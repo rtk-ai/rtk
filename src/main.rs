@@ -13,7 +13,7 @@ use cmds::git::{diff_cmd, gh_cmd, git, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    vitest_cmd, yarn_cmd,
 };
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
@@ -501,6 +501,13 @@ enum Commands {
     /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
     Npx {
         /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Yarn commands with compact output (strip boilerplate, route scripts to filters)
+    Yarn {
+        /// Yarn arguments (e.g., workspace my-app run test)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1863,6 +1870,10 @@ fn main() -> Result<()> {
             npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
         }
 
+        Commands::Yarn { args } => {
+            yarn_cmd::run(&args, cli.verbose, cli.skip_env)?;
+        }
+
         Commands::Curl { args } => {
             curl_cmd::run(&args, cli.verbose)?;
         }
@@ -2259,6 +2270,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
             | Commands::Npx { .. }
+            | Commands::Yarn { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
