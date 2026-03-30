@@ -236,6 +236,13 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
         Some(prs) => prs,
         None => return String::new(),
     };
+    if prs.is_empty() {
+        return if ultra_compact {
+            "No PRs\n".to_string()
+        } else {
+            "No Pull Requests\n".to_string()
+        };
+    }
     let mut out = String::new();
     out.push_str(if ultra_compact {
         "PRs\n"
@@ -515,6 +522,9 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
         Some(issues) => issues,
         None => return String::new(),
     };
+    if issues.is_empty() {
+        return "No Issues\n".to_string();
+    }
     let mut out = String::new();
     out.push_str("Issues\n");
     for issue in issues.iter().take(20) {
