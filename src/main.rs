@@ -1199,28 +1199,7 @@ enum GtCommands {
 /// Split a string into shell-like tokens, respecting single and double quotes.
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
 fn shell_split(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let chars = input.chars();
-    let mut in_single = false;
-    let mut in_double = false;
-
-    for c in chars {
-        match c {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            ' ' | '\t' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(c),
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
+    discover::lexer::shell_split(input)
 }
 
 fn main() {
@@ -1573,8 +1552,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Summary { command } => {
             let cmd = command.join(" ");
-            summary::run(&cmd, cli.verbose)?;
-            0
+            summary::run(&cmd, cli.verbose)?
         }
 
         Commands::Grep {

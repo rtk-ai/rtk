@@ -1,4 +1,1 @@
-//! Rust ecosystem filters.
-
-pub mod cargo_cmd;
-pub mod runner;
+automod::dir!(pub "src/cmds/rust");
