@@ -51,6 +51,8 @@ pub const PATTERNS: &[&str] = &[
     r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
     r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
     r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
+    // AWS CDK
+    r"^(npx\s+)?cdk\s+(diff|synth|deploy|destroy|bootstrap)",
     // AWS CLI
     r"^aws\s+",
     // PostgreSQL
@@ -378,6 +380,18 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
+    },
+    // AWS CDK
+    RtkRule {
+        rtk_cmd: "rtk cdk",
+        rewrite_prefixes: &["npx cdk", "cdk"],
+        category: "Infra",
+        savings_pct: 75.0,
+        subcmd_savings: &[("diff", 80.0), ("synth", 80.0), ("deploy", 70.0)],
+        subcmd_status: &[
+            ("destroy", RtkStatus::Passthrough),
+            ("bootstrap", RtkStatus::Passthrough),
+        ],
     },
     // AWS CLI
     RtkRule {

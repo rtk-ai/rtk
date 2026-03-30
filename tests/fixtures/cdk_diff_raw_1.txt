@@ -1,0 +1,221 @@
+﻿yarn run v1.22.22
+node.exe : warning package.json: No license field
+Au caractère C:\nvm4w\nodejs\cdk.ps1:16 : 5
++     & "$basedir/node$exe"  "$basedir/node_modules/aws-cdk/bin/cdk" $a ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning package.json: No license field:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\tsx bin/app.ts
+Bundling asset SampleApp-RssBatch/CollectRSSLambda/Code/Stage...
+Unable to find image 'public.ecr.aws/sam/build-python3.14:latest' locally
+latest: Pulling from sam/build-python3.14
+d46c1d150629: Pulling fs layer
+c120fd0529f1: Pulling fs layer
+b84914748a8d: Pulling fs layer
+edac8acafecf: Pulling fs layer
+160338069757: Pulling fs layer
+0cbecd4ac666: Pulling fs layer
+9dbffe5588e6: Pulling fs layer
+fe41a65ee243: Pulling fs layer
+f92e2ba22480: Pulling fs layer
+d9b29677bc05: Pulling fs layer
+9e07f3746457: Pulling fs layer
+66785e26af30: Pulling fs layer
+0b5238c127b2: Pulling fs layer
+c05b121a2e83: Pulling fs layer
+b2d648c3f80c: Pulling fs layer
+6ea72e7926ea: Pulling fs layer
+fe41a65ee243: Download complete
+d46c1d150629: Download complete
+9e07f3746457: Download complete
+b2d648c3f80c: Download complete
+66785e26af30: Download complete
+9dbffe5588e6: Download complete
+9e07f3746457: Pull complete
+66785e26af30: Pull complete
+160338069757: Download complete
+f92e2ba22480: Download complete
+0b5238c127b2: Download complete
+0b5238c127b2: Pull complete
+0cbecd4ac666: Download complete
+d9b29677bc05: Download complete
+6ea72e7926ea: Download complete
+c120fd0529f1: Download complete
+b84914748a8d: Download complete
+c05b121a2e83: Download complete
+b2d648c3f80c: Pull complete
+c05b121a2e83: Pull complete
+c120fd0529f1: Pull complete
+edac8acafecf: Download complete
+edac8acafecf: Pull complete
+6ea72e7926ea: Pull complete
+fe41a65ee243: Pull complete
+160338069757: Pull complete
+b84914748a8d: Pull complete
+0cbecd4ac666: Pull complete
+9dbffe5588e6: Pull complete
+f92e2ba22480: Pull complete
+d46c1d150629: Pull complete
+d9b29677bc05: Pull complete
+Digest: sha256:4faaa8583bba450565196531bc7cd9a7e3a75a299bf890093e4b0903a6b31743
+Status: Downloaded newer image for public.ecr.aws/sam/build-python3.14:latest
+WARNING: The directory '/.cache/pip' or its parent directory is not owned or is not writable by the current user. The cache has been disabled. Check the permissions and owner of that directory. If executing pip with sudo, you should use sudo's -H flag.
+Collecting feedparser (from -r requirements.txt (line 1))
+  Downloading feedparser-6.0.12-py3-none-any.whl.metadata (2.7 kB)
+Collecting beautifulsoup4 (from -r requirements.txt (line 2))
+  Downloading beautifulsoup4-4.14.3-py3-none-any.whl.metadata (3.8 kB)
+Collecting aiohttp (from -r requirements.txt (line 3))
+  Downloading aiohttp-3.13.3-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl.metadata (8.1 kB)
+Collecting aiohttp-retry (from -r requirements.txt (line 4))
+  Downloading aiohttp_retry-2.9.1-py3-none-any.whl.metadata (8.8 kB)
+Collecting sgmllib3k (from feedparser->-r requirements.txt (line 1))
+  Downloading sgmllib3k-1.0.0.tar.gz (5.8 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting soupsieve>=1.6.1 (from beautifulsoup4->-r requirements.txt (line 2))
+  Downloading soupsieve-2.8.3-py3-none-any.whl.metadata (4.6 kB)
+Collecting typing-extensions>=4.0.0 (from beautifulsoup4->-r requirements.txt (line 2))
+  Downloading typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting aiohappyeyeballs>=2.5.0 (from aiohttp->-r requirements.txt (line 3))
+  Downloading aiohappyeyeballs-2.6.1-py3-none-any.whl.metadata (5.9 kB)
+Collecting aiosignal>=1.4.0 (from aiohttp->-r requirements.txt (line 3))
+  Downloading aiosignal-1.4.0-py3-none-any.whl.metadata (3.7 kB)
+Collecting attrs>=17.3.0 (from aiohttp->-r requirements.txt (line 3))
+  Downloading attrs-25.4.0-py3-none-any.whl.metadata (10 kB)
+Collecting frozenlist>=1.1.1 (from aiohttp->-r requirements.txt (line 3))
+  Downloading frozenlist-1.8.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl.metadata (20 kB)
+Collecting multidict<7.0,>=4.5 (from aiohttp->-r requirements.txt (line 3))
+  Downloading multidict-6.7.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl.metadata (5.3 kB)
+Collecting propcache>=0.2.0 (from aiohttp->-r requirements.txt (line 3))
+  Downloading propcache-0.4.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl.metadata (13 kB)
+Collecting yarl<2.0,>=1.17.0 (from aiohttp->-r requirements.txt (line 3))
+  Downloading yarl-1.23.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl.metadata (79 kB)
+Collecting idna>=2.0 (from yarl<2.0,>=1.17.0->aiohttp->-r requirements.txt (line 3))
+  Downloading idna-3.11-py3-none-any.whl.metadata (8.4 kB)
+Downloading feedparser-6.0.12-py3-none-any.whl (81 kB)
+Downloading beautifulsoup4-4.14.3-py3-none-any.whl (107 kB)
+Downloading aiohttp-3.13.3-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl (1.7 MB)
+   ÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöüÔöü 1.7/1.7 MB 14.8 MB/s  0:00:00
+Downloading multidict-6.7.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl (252 kB)
+Downloading yarl-1.23.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl (99 kB)
+Downloading aiohttp_retry-2.9.1-py3-none-any.whl (10.0 kB)
+Downloading aiohappyeyeballs-2.6.1-py3-none-any.whl (15 kB)
+Downloading aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
+Downloading attrs-25.4.0-py3-none-any.whl (67 kB)
+Downloading frozenlist-1.8.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl (232 kB)
+Downloading idna-3.11-py3-none-any.whl (71 kB)
+Downloading propcache-0.4.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl (206 kB)
+Downloading soupsieve-2.8.3-py3-none-any.whl (37 kB)
+Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+Building wheels for collected packages: sgmllib3k
+  Building wheel for sgmllib3k (pyproject.toml): started
+  Building wheel for sgmllib3k (pyproject.toml): finished with status 'done'
+  Created wheel for sgmllib3k: filename=sgmllib3k-1.0.0-py3-none-any.whl size=6091 sha256=da3751afa962fd77258521b44f25109fd9c5ab41c0487639659b2bd060d3489c
+  Stored in directory: /tmp/pip-ephem-wheel-cache-ougwyiu2/wheels/e3/43/83/0f6e317d0698ac38ee6a5b6e214019c167057916a11bad91ab
+Successfully built sgmllib3k
+Installing collected packages: sgmllib3k, typing-extensions, soupsieve, propcache, multidict, idna, frozenlist, feedparser, attrs, aiohappyeyeballs, yarl, beautifulsoup4, aiosignal, aiohttp, aiohttp-retry
+
+Successfully installed aiohappyeyeballs-2.6.1 aiohttp-3.13.3 aiohttp-retry-2.9.1 aiosignal-1.4.0 attrs-25.4.0 beautifulsoup4-4.14.3 feedparser-6.0.12 frozenlist-1.8.0 idna-3.11 multidict-6.7.1 propcache-0.4.1 sgmllib3k-1.0.0 soupsieve-2.8.3 
+typing-extensions-4.15.0 yarl-1.23.0
+
+[notice] A new release of pip is available: 25.3 -> 26.0.1
+[notice] To update, run: pip install --upgrade pip
+Bundling asset SampleApp-RssBatch/StoreTaskTokenLambda/Code/Stage...
+warning package.json: No license field
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\store-task-token\handler.ts --target=node22 --platform=node 
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-ae0e8c5f7a86d7d58e8fa87869b0d2862cba7c5ca3fbae914b1c86392227af19-building\index.js --external:@aws-sdk/*
+
+  ...8e8fa87869b0d2862cba7c5ca3fbae914b1c86392227af19-building\index.js  1.9kb
+
+Bundling asset SampleApp-RssBatch/BatchCallbackLambda/Code/Stage...
+warning package.json: No license field
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-callback\handler.ts --target=node22 --platform=node 
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-917e0be5203bd1448bd1b0831ddc5586ad658926a5746a85c9c5b86e72017d6a-building\index.js --external:@aws-sdk/*
+
+  ...8bd1b0831ddc5586ad658926a5746a85c9c5b86e72017d6a-building\index.js  3.4kb
+
+Bundling asset SampleApp-RssBatch/ProcessBatchResultsLambda/Code/Stage...
+WARNING: The directory '/.cache/pip' or its parent directory is not owned or is not writable by the current user. The cache has been disabled. Check the permissions and owner of that directory. If executing pip with sudo, you should use sudo's -H flag.
+
+[notice] A new release of pip is available: 25.3 -> 26.0.1
+[notice] To update, run: pip install --upgrade pip
+Done in 66.49s.
+start: Building SampleApp-RssBatch Template
+success: Built SampleApp-RssBatch Template
+start: Publishing SampleApp-RssBatch Template (123456789012-us-east-1-5fd8c0e9)
+success: Published SampleApp-RssBatch Template (123456789012-us-east-1-5fd8c0e9)
+Hold on while we create a read-only change set to get a diff with accurate replacement information (use --no-change-set to use a less accurate but faster template-only diff)
+
+Stack SampleApp-RssBatch
+Resources
+[~] Custom::AWS PopulateFeedTable/Resource PopulateFeedTableFCA8F2DB may be replaced
+ Ôö£ÔöÇ [~] Create (may cause replacement)
+ Ôöé   ÔööÔöÇ [~] .Fn::Join:
+ Ôöé       ÔööÔöÇ @@ -5,6 +5,6 @@
+ Ôöé          [ ]     {
+ Ôöé          [ ]       "Ref": "FeedInitFunctionBDD3CB88"
+ Ôöé          [ ]     },
+ Ôöé          [-]     "\",\"InvocationType\":\"RequestResponse\"},\"physicalResourceId\":{\"id\":\"PopulateFeedTable-8b30a5aee38442b2\"}}"
+ Ôöé          [+]     "\",\"InvocationType\":\"RequestResponse\"},\"physicalResourceId\":{\"id\":\"PopulateFeedTable-70f2f13f2165f7de\"}}"
+ Ôöé          [ ]   ]
+ Ôöé          [ ] ]
+ ÔööÔöÇ [~] Update (may cause replacement)
+     ÔööÔöÇ [~] .Fn::Join:
+         ÔööÔöÇ @@ -5,6 +5,6 @@
+            [ ]     {
+            [ ]       "Ref": "FeedInitFunctionBDD3CB88"
+            [ ]     },
+            [-]     "\",\"InvocationType\":\"RequestResponse\"},\"physicalResourceId\":{\"id\":\"PopulateFeedTable-8b30a5aee38442b2\"}}"
+            [+]     "\",\"InvocationType\":\"RequestResponse\"},\"physicalResourceId\":{\"id\":\"PopulateFeedTable-70f2f13f2165f7de\"}}"
+            [ ]   ]
+            [ ] ]
+[~] AWS::Lambda::Function CollectRSSLambda CollectRSSLambda
+ ÔööÔöÇ [~] Code
+     ÔööÔöÇ [~] .S3Key:
+         Ôö£ÔöÇ [-] 76ce6425ec357997f182cc7370fd6cf0aa8c7c3f7559feca7e9de72232a2008a.zip
+         ÔööÔöÇ [+] e83d32d44b93a5871e77d2b8586d9c5755097bcc11006b0cc914495e2306fcb3.zip
+[~] AWS::Lambda::Function ProcessBatchResultsLambda ProcessBatchResultsLambda
+ ÔööÔöÇ [~] Code
+     ÔööÔöÇ [~] .S3Key:
+         Ôö£ÔöÇ [-] 891f967309fb7f5936e53784f423df3061ecd529ab331eb9ea4d88a52e0d47c8.zip
+         ÔööÔöÇ [+] 3abbe79759e53b9fd31898d57deff1c9ec8792cba0b556bd2da396cd4cdbb651.zip
+
+
+
+Ô£¿  Number of stacks with differences: 1
+
+
+NOTICES         (What's this? https://github.com/aws/aws-cdk/wiki/CLI-Notices)
+
+37013	(cli) cdk watch triggers deployment unexpectedly or not at all
+
+	Overview: Do not use 'cdk watch' with this version of the cdk cli.
+	          Upgrade to ^2.1106.0.
+
+	Affected versions: cli: >=2.1103.0 <2.1106.0
+
+	More information at: https://github.com/aws/aws-cdk/issues/37013
+
+
+34892	CDK CLI collects telemetry data on command usage starting at version 2.1100.0 (unless opted out)
+
+	Overview: We do not collect customer content and we anonymize the
+	          telemetry we do collect. See the attached issue for more
+	          information on what data is collected, why, and how to
+	          opt-out. Telemetry will NOT be collected for any CDK CLI
+	          version prior to version 2.1100.0 - regardless of
+	          opt-in/out. You can also view the telemetry we collect by
+	          logging it to a local file, by adding
+	          `--telemetry-file=my/local/file` to any `cdk` command.
+
+	Affected versions: cli: >=2.1100.0 <2.1106.1
+
+	More information at: https://github.com/aws/aws-cdk/issues/34892
+
+
+If you donÔÇÖt want to see a notice anymore, use "cdk acknowledge <id>". For example, "cdk acknowledge 37013".

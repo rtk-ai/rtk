@@ -1,0 +1,9 @@
+---
+source: src/cmds/cloud/cdk_cmd.rs
+expression: output
+---
+Ô£à  SampleApp-RssBatch
+Resources: 4/7 complete
+
+Ô£¿  Deployment time: 42.04s
+Ô£¿  Total time: 43.44s

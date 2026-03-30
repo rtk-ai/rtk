@@ -1,0 +1,59 @@
+Bundling asset InfraStack/ApiLambda/Code/Stage...
+
+  cdk.out/bundling-temp-abc123/index.js  150.2kb
+
+⚡ Done in 245ms
+Bundling asset InfraStack/AuthLambda/Code/Stage...
+
+  cdk.out/bundling-temp-def456/index.js  89.7kb
+
+⚡ Done in 198ms
+Bundling asset InfraStack/WorkerLambda/Code/Stage...
+
+  cdk.out/bundling-temp-ghi789/index.js  203.4kb
+
+⚡ Done in 312ms
+
+✨  Synthesis time: 4.23s
+
+InfraStack: deploying... [1/1]
+InfraStack: creating CloudFormation changeset...
+ 0/12 | 10:30:01 AM | REVIEW_IN_PROGRESS   | AWS::CloudFormation::Stack | InfraStack User Initiated
+ 0/12 | 10:30:05 AM | CREATE_IN_PROGRESS   | AWS::CloudFormation::Stack | InfraStack User Initiated
+ 0/12 | 10:30:08 AM | CREATE_IN_PROGRESS   | AWS::DynamoDB::Table    | ApiTable (InfraStackApiTableB7E24CF1)
+ 0/12 | 10:30:08 AM | CREATE_IN_PROGRESS   | AWS::IAM::Role          | ApiLambda/ServiceRole (InfraStackApiLambdaServiceRoleABC123)
+ 0/12 | 10:30:08 AM | CREATE_IN_PROGRESS   | AWS::IAM::Role          | AuthLambda/ServiceRole (InfraStackAuthLambdaServiceRoleJKL012)
+ 0/12 | 10:30:08 AM | CREATE_IN_PROGRESS   | AWS::IAM::Role          | WorkerLambda/ServiceRole (InfraStackWorkerLambdaServiceRolePQR678)
+ 0/12 | 10:30:09 AM | CREATE_IN_PROGRESS   | AWS::SNS::Topic         | NotificationTopic (InfraStackNotificationTopicSTU901)
+ 1/12 | 10:30:15 AM | CREATE_COMPLETE      | AWS::SNS::Topic         | NotificationTopic (InfraStackNotificationTopicSTU901)
+ 2/12 | 10:30:20 AM | CREATE_COMPLETE      | AWS::DynamoDB::Table    | ApiTable (InfraStackApiTableB7E24CF1)
+ 3/12 | 10:30:22 AM | CREATE_COMPLETE      | AWS::IAM::Role          | ApiLambda/ServiceRole (InfraStackApiLambdaServiceRoleABC123)
+ 3/12 | 10:30:22 AM | CREATE_IN_PROGRESS   | AWS::IAM::Policy        | ApiLambda/ServiceRole/DefaultPolicy (InfraStackApiLambdaServiceRoleDefaultPolicyDEF456)
+ 4/12 | 10:30:23 AM | CREATE_COMPLETE      | AWS::IAM::Role          | AuthLambda/ServiceRole (InfraStackAuthLambdaServiceRoleJKL012)
+ 4/12 | 10:30:23 AM | CREATE_IN_PROGRESS   | AWS::Lambda::Function   | AuthLambda (InfraStackAuthLambdaGHI789)
+ 5/12 | 10:30:24 AM | CREATE_COMPLETE      | AWS::IAM::Role          | WorkerLambda/ServiceRole (InfraStackWorkerLambdaServiceRolePQR678)
+ 5/12 | 10:30:24 AM | CREATE_IN_PROGRESS   | AWS::Lambda::Function   | WorkerLambda (InfraStackWorkerLambdaMNO345)
+ 6/12 | 10:30:35 AM | CREATE_COMPLETE      | AWS::IAM::Policy        | ApiLambda/ServiceRole/DefaultPolicy (InfraStackApiLambdaServiceRoleDefaultPolicyDEF456)
+ 6/12 | 10:30:35 AM | CREATE_IN_PROGRESS   | AWS::Lambda::Function   | ApiLambda (InfraStackApiLambdaDEF456)
+ 7/12 | 10:30:40 AM | CREATE_COMPLETE      | AWS::Lambda::Function   | AuthLambda (InfraStackAuthLambdaGHI789)
+ 8/12 | 10:30:42 AM | CREATE_COMPLETE      | AWS::Lambda::Function   | WorkerLambda (InfraStackWorkerLambdaMNO345)
+ 9/12 | 10:30:48 AM | CREATE_COMPLETE      | AWS::Lambda::Function   | ApiLambda (InfraStackApiLambdaDEF456)
+ 9/12 | 10:30:48 AM | CREATE_IN_PROGRESS   | AWS::CloudWatch::Alarm  | Alarm (InfraStackAlarmVWX234)
+10/12 | 10:30:52 AM | CREATE_COMPLETE      | AWS::CloudWatch::Alarm  | Alarm (InfraStackAlarmVWX234)
+10/12 | 10:30:52 AM | CREATE_IN_PROGRESS   | AWS::CDK::Metadata      | CDKMetadata/Default (CDKMetadata)
+11/12 | 10:30:55 AM | CREATE_COMPLETE      | AWS::CDK::Metadata      | CDKMetadata/Default (CDKMetadata)
+12/12 | 10:30:57 AM | CREATE_COMPLETE      | AWS::CloudFormation::Stack | InfraStack
+
+ ✅  InfraStack
+
+✨  Deployment time: 56.2s
+
+Outputs:
+InfraStack.ApiEndpoint = https://abc123.execute-api.us-east-1.amazonaws.com
+InfraStack.AuthEndpoint = https://def456.execute-api.us-east-1.amazonaws.com
+
+Stack ARN:
+arn:aws:cloudformation:us-east-1:123456789012:stack/InfraStack/abc-123-def-456
+
+✨  Total time: 60.43s
+

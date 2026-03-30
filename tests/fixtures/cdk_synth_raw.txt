@@ -1,0 +1,133 @@
+yarn run v1.22.22
+node.exe : warning package.json: No license field
+Au caractère C:\nodejs\cdk.ps1:16 : 5
++     & "$basedir/node$exe"  "$basedir/node_modules/aws-cdk/bin/cdk" $a ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning package.json: No license field:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+$ D:\projects\SampleApp\node_modules\.bin\tsx bin/cdk-backend.ts
+⚠️  amplify_outputs.json is older than 7 days. Consider running 'npx ampx generate outputs' to refresh.
+Bundling asset CdkBackendStack/StatusUpdaterLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workflow\status-updater.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-67e3ef8bbf7e62fb01b1bd8ae1534e17b15934c0141e0a520af0a4415ca1bce1-building\index.js
+
+  ...b1bd8ae1534e17b15934c0141e0a520af0a4415ca1bce1-building\index.js  5.5mb
+
+Bundling asset CdkBackendStack/CheckQuotaLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\check-quota\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-86224dfea4bf525da7a7914649ee2144ba786d3067e4f1ae40eba18800590f67-building\index.js
+
+  ...a7914649ee2144ba786d3067e4f1ae40eba18800590f67-building\index.js  5.5mb
+
+Bundling asset CdkBackendStack/RefundQuotaLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\refund-quota\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-5971989bda1ea134e95126556db731245c4030f832be49968233e28dead45b80-building\index.js
+
+  ...5126556db731245c4030f832be49968233e28dead45b80-building\index.js  5.5mb
+
+Bundling asset CdkBackendStack/PreparePayloadLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workflow\prepare-payload\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-2a68b182670678d1fc99204c4165220adde0b6331c3839070d80f062c05416b0-building\index.js
+
+  ...c99204c4165220adde0b6331c3839070d80f062c05416b0-building\index.js  13.4kb
+
+Bundling asset CdkBackendStack/MergeParallelLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workflow\merge-parallel\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-b09a10e4a61270f1e7c91deb77ad433606c44b0e9594aae281ad617983febc71-building\index.js
+
+  ...e7c91deb77ad433606c44b0e9594aae281ad617983febc71-building\index.js  1.7kb
+
+Bundling asset CdkBackendStack/PushNotificationsStack/PrepareNotificationLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\push-notifications\prepare-notification.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-a7c9ce439010b227b9e94a5f5418d473ea1fb7876293ead65fd868c661ea79c6-building\index.js --external:@aws-sdk/client-sqs
+
+  ...9e94a5f5418d473ea1fb7876293ead65fd868c661ea79c6-building\index.js  33.2kb
+
+[WARNING] aws-cdk-lib.aws_iam.GrantOnPrincipalOptions#scope is deprecated.
+  The scope argument is currently unused.
+  This API will be removed in the next major release.
+Bundling asset CdkBackendStack/PushNotificationsStack/SendNotificationLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\push-notifications\send-notification.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-1494d4a7170f0d75ab192bfe4742faf3d386f9b39d5f8962616261b3d37da6e3-building\index.js --external:@aws-sdk/client-dynamodb --external:@aws-sdk/lib-dynamodb --external:@aws-sdk/client-sqs
+
+  ...92bfe4742faf3d386f9b39d5f8962616261b3d37da6e3-building\index.js  1001.9kb
+
+Bundling asset CdkBackendStack/PushNotificationsStack/CheckReceiptsLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\push-notifications\check-receipts.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-2a5213912bf12b508c2f37d70ee916047a8c684a45c0d2d16bc68df1ad010703-building\index.js --external:@aws-sdk/client-dynamodb --external:@aws-sdk/lib-dynamodb
+
+  ...f37d70ee916047a8c684a45c0d2d16bc68df1ad010703-building\index.js  1000.5kb
+
+Bundling asset CdkBackendStack/ResetQuotaStack/ResetQuotaLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\resetQuota\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-3d23ecf5c27d9db8e7646ca291830098217887455c1c12713138fbf652c11b28-building\index.js --external:@aws-sdk/client-ssm
+
+  ...646ca291830098217887455c1c12713138fbf652c11b28-building\index.js  5.5mb
+
+Bundling asset CdkBackendStack/WorkflowStack/PromptLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\haiku-prompt\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-1232f49c1bf0a3070f06ca4524ff51f24eea95d57b9aaf809a7e0dadcfa80ecf-building\index.js --external:@aws-sdk/client-bedrock-runtime --loader:.md=text
+
+  ...06ca4524ff51f24eea95d57b9aaf809a7e0dadcfa80ecf-building\index.js  5.2mb
+
+Bundling asset CdkBackendStack/WorkflowStack/GeminiImageLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\gemini-image\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-09d802a8fa9b9e882f4233035f93fa8dd65d24aaa5017302414e2ebd3dc084e3-building\index.js --external:@aws-sdk/client-s3 --keep-names
+
+  ...4233035f93fa8dd65d24aaa5017302414e2ebd3dc084e3-building\index.js  5.0mb
+
+WARN AWS_SOLUTIONS_CONSTRUCTS_WARNING:  An override has been provided for the property: dynamoDbStreamParameters[startingPosition]. Default value: 'LATEST'. You provided: 'TRIM_HORIZON'.
+Bundling asset CdkBackendStack/BatchWorkflowStack/BatchSubmitLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-submit\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-bcf4fb382ee767437b8991dd33a4d4b5a77445503e679092ddb64943d6a5ba6a-building\index.js --external:@aws-sdk/client-s3 --keep-names
+
+  ...8991dd33a4d4b5a77445503e679092ddb64943d6a5ba6a-building\index.js  5.0mb
+
+Bundling asset CdkBackendStack/BatchWorkflowStack/BatchCollectLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-collect\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-48952094757ffe9e7b3f5f9d4ab5a0d58ce720c55cd731eabb3f1da862463cdd-building\index.js --external:@aws-sdk/client-s3 --keep-names
+
+  ...3f5f9d4ab5a0d58ce720c55cd731eabb3f1da862463cdd-building\index.js  4.4mb
+
+Bundling asset CdkBackendStack/BatchWorkflowStack/BatchPollLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-poll\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-0289cde6ed040395144ea6ff9be2fb38b35af478a73429dcfeb5bfc1703e170c-building\index.js --external:@aws-sdk/client-sfn --external:@aws-sdk/client-sqs
+
+  ...4ea6ff9be2fb38b35af478a73429dcfeb5bfc1703e170c-building\index.js  6.8mb
+
+WARN AWS_SOLUTIONS_CONSTRUCTS_WARNING:  An override has been provided for the property: dynamoDbStreamParameters[startingPosition]. Default value: 'LATEST'. You provided: 'TRIM_HORIZON'.
+Done in 5.64s.
+Successfully synthesized to D:\projects\SampleApp\cdk-backend\cdk.out
+Supply a stack id (CdkBackendStack/PushNotificationsStack, CdkBackendStack/ResetQuotaStack, CdkBackendStack/WorkflowStack, CdkBackendStack/BatchWorkflowStack, CdkBackendStack) to display its template.
+4 feature flags are not configured. Run 'cdk flags --unstable=flags' to learn more.
+
+NOTICES         (What's this? https://github.com/aws/aws-cdk/wiki/CLI-Notices)
+
+37013	(cli) cdk watch triggers deployment unexpectedly or not at all
+
+	Overview: Do not use 'cdk watch' with this version of the cdk cli.
+	          Upgrade to ^2.1106.0.
+
+	Affected versions: cli: >=2.1103.0 <2.1106.0
+
+	More information at: https://github.com/aws/aws-cdk/issues/37013
+
+
+34892	CDK CLI collects telemetry data on command usage starting at version 2.1100.0 (unless opted out)
+
+	Overview: We do not collect customer content and we anonymize the
+	          telemetry we do collect. See the attached issue for more
+	          information on what data is collected, why, and how to
+	          opt-out. Telemetry will NOT be collected for any CDK CLI
+	          version prior to version 2.1100.0 - regardless of
+	          opt-in/out. You can also view the telemetry we collect by
+	          logging it to a local file, by adding
+	          `--telemetry-file=my/local/file` to any `cdk` command.
+
+	Affected versions: cli: >=2.1100.0 <2.1106.1
+
+	More information at: https://github.com/aws/aws-cdk/issues/34892
+
+
+If you don't want to see a notice anymore, use "cdk acknowledge <id>". For example, "cdk acknowledge 37013".

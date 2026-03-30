@@ -1,0 +1,81 @@
+---
+source: src/cmds/cloud/cdk_cmd.rs
+expression: output
+---
+Stack CdkBackendStack/PushNotificationsStack
+Resources
+[~] AWS::Lambda::Function PushNotificationsStack/PrepareNotificationLambda PrepareNotificationLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] 0afbc113e7c243e1e3ba1a74ecd701b60601672f05b750fde0c1b211822eba4d.zip
+         └── [+] df60cee9d3e19433ea66325e1a662f28d7782e7d966caf067b91bd8f944bd190.zip
+Stack CdkBackendStack/ResetQuotaStack
+Resources
+[~] AWS::Lambda::Function ResetQuotaStack/ResetQuotaLambda ResetQuotaLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] e348fe5ed9a59afa305e345f67e5c0406974ebaed601ef7e566c1bfb2dd7a939.zip
+         └── [+] 59ee62c714aa2a4d71e6208cf58f8c21aa2d13f68068f8a5f509eeee7c081271.zip
+Stack CdkBackendStack/WorkflowStack
+Resources
+[~] AWS::Lambda::Function WorkflowStack/PromptLambda PromptLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] d8c048a306bb272f16c81618d871f8b666143c294e63b4e559d7971306fb84e2.zip
+         └── [+] e4fac3bbe923368939f864a00cececa3cc726719bf29d0a159dd48f2c1b4748a.zip
+[~] AWS::Lambda::Function WorkflowStack/GeminiImageLambda GeminiImageLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] 14d941c93213cc4a54e956d05995bd8a9662e6f9b5421a0a23c41e1873b47a1a.zip
+         └── [+] 337a0a587642ec41c47becbe093c870cc00c3dc4fb48cbffc240a3990780d745.zip
+Stack CdkBackendStack/BatchWorkflowStack
+Resources
+[~] AWS::Lambda::Function BatchWorkflowStack/BatchSubmitLambda BatchSubmitLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] 367bc9d3c12f4637952f83c07d03ff88d66a3536751f69e4ed36f6f67ddd11a2.zip
+         └── [+] 190be3b3e86efe5e694ca15b2d57d89239fed12619a1e868c95eb74f224b6fe8.zip
+[~] AWS::Lambda::Function BatchWorkflowStack/BatchCollectLambda BatchCollectLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] 43bca22ec3d3950f6fdf4da14b62274e81c4f950ce0cf3f005e81c905afc2d62.zip
+         └── [+] 3f815ea087596c6360573f84cbc8d06c3a52f260ebcaa286bf060a68a63478b4.zip
+[~] AWS::Lambda::Function BatchWorkflowStack/BatchPollLambda BatchPollLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] a7bb185ce4d34ff5d1cc5e1e96178c131971bee1e5c154bd4d71e6cc5814a4b3.zip
+         └── [+] 8a715c70416b843a1d8c6c66b50dc9fb3ad2eb301898f03b58ffc91ffe588f27.zip
+Stack CdkBackendStack
+Resources
+[~] AWS::Lambda::Function StatusUpdaterLambda StatusUpdaterLambda
+ ├── [~] Code
+ │   └── [~] .S3Key:
+ │       ├── [-] c93e313789c9867ae227a947e0445cfebf24186350e0cf655cd4d74234562bfb.zip
+ │       └── [+] d0b52efc00aa05e55688631bbda014725bd79249dc2757aceddcc13329468c1c.zip
+ └── [~] Metadata
+     └── [~] .aws:asset:path:
+         ├── [-] asset.c93e313789c9867ae227a947e0445cfebf24186350e0cf655cd4d74234562bfb
+         └── [+] asset.d0b52efc00aa05e55688631bbda014725bd79249dc2757aceddcc13329468c1c
+[~] AWS::Lambda::Function CheckQuotaLambda CheckQuotaLambda
+ ├── [~] Code
+ │   └── [~] .S3Key:
+ │       ├── [-] eab24d4f670d031bde2bb87bed19c5e1545e6e42663f7fe494aa5a49cf4860db.zip
+ │       └── [+] 2a15176866cb9252285027155523375b741faa231209800fd56db54f0750b8d3.zip
+ └── [~] Metadata
+     └── [~] .aws:asset:path:
+         ├── [-] asset.eab24d4f670d031bde2bb87bed19c5e1545e6e42663f7fe494aa5a49cf4860db
+         └── [+] asset.2a15176866cb9252285027155523375b741faa231209800fd56db54f0750b8d3
+[~] AWS::Lambda::Function RefundQuotaLambda RefundQuotaLambda
+ ├── [~] Code
+ │   └── [~] .S3Key:
+ │       ├── [-] 5a0622564bca54b572d895b4f1c76005d8f418fd6254baeed8a299208b97c8d7.zip
+ │       └── [+] 4a81f6a8bbe04ec28d0f7850555961ed5c36218cb30c6878fc4a76af7d350506.zip
+ └── [~] Metadata
+     └── [~] .aws:asset:path:
+         ├── [-] asset.5a0622564bca54b572d895b4f1c76005d8f418fd6254baeed8a299208b97c8d7
+         └── [+] asset.4a81f6a8bbe04ec28d0f7850555961ed5c36218cb30c6878fc4a76af7d350506
+Stack CdkBackendStack-MonitoringStackNestedStackMonitoringStackNestedStackResourceC34BBBCF-1VCCCYW052S0W
+There were no differences
+✨  Number of stacks with differences: 5
+
+Summary: 0 added, 10 changed, 0 removed
