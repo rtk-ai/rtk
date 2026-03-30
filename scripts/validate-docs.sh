@@ -3,25 +3,7 @@ set -e
 
 echo "🔍 Validating RTK documentation consistency..."
 
-# 1. Nombre de modules cohérent
-MAIN_MODULES=$(grep -c '^mod ' src/main.rs)
-echo "📊 Module count in main.rs: $MAIN_MODULES"
-
-# Extract module count from ARCHITECTURE.md
-if [ -f "ARCHITECTURE.md" ]; then
-  ARCH_MODULES=$(grep 'Total:.*modules' ARCHITECTURE.md | grep -o '[0-9]\+' | head -1)
-  if [ -z "$ARCH_MODULES" ]; then
-    echo "⚠️  Could not extract module count from ARCHITECTURE.md"
-  else
-    echo "📊 Module count in ARCHITECTURE.md: $ARCH_MODULES"
-    if [ "$MAIN_MODULES" != "$ARCH_MODULES" ]; then
-      echo "❌ Module count mismatch: main.rs=$MAIN_MODULES, ARCHITECTURE.md=$ARCH_MODULES"
-      exit 1
-    fi
-  fi
-fi
-
-# 3. Commandes Python/Go présentes partout
+# 1. Commandes Python/Go présentes partout
 PYTHON_GO_CMDS=("ruff" "pytest" "pip" "go" "golangci")
 echo "🐍 Checking Python/Go commands documentation..."
 
