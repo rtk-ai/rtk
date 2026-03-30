@@ -1,5 +1,6 @@
 //! Reads user settings from config.toml.
 
+use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -42,7 +43,7 @@ impl Default for TrackingConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            history_days: 90,
+            history_days: DEFAULT_HISTORY_DAYS as u32,
             database_path: None,
         }
     }
@@ -168,7 +169,7 @@ impl Config {
 
 fn get_config_path() -> Result<PathBuf> {
     let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(config_dir.join("rtk").join("config.toml"))
+    Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
 }
 
 pub fn show_config() -> Result<()> {
