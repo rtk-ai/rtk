@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # rtk-economics.sh
 # Combine ccusage (tokens spent) with rtk (tokens saved) for economic analysis
 

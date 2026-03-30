@@ -1,5 +1,7 @@
 # Parser Infrastructure
 
+> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview
+
 ## Overview
 
 The parser infrastructure provides a unified, three-tier parsing system for tool outputs with graceful degradation:
@@ -37,85 +39,13 @@ This ensures RTK **never returns false data silently** while maintaining maximum
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Usage Example
+## Usage Pattern
 
-### 1. Define Tool-Specific Parser
+1. **Implement `OutputParser`** for a tool — try JSON (Tier 1), fall back to regex (Tier 2), then passthrough (Tier 3)
+2. **In command module**: call `Parser::parse()`, then `data.format(FormatMode::from_verbosity(verbose))`
+3. **Degradation warnings**: print `[RTK:DEGRADED]` in verbose mode, `[RTK:PASSTHROUGH]` on full fallback
 
-```rust
-use crate::parser::{OutputParser, ParseResult, TestResult};
-
-struct VitestParser;
-
-impl OutputParser for VitestParser {
-    type Output = TestResult;
-
-    fn parse(input: &str) -> ParseResult<TestResult> {
-        // Tier 1: Try JSON parsing
-        match serde_json::from_str::<VitestJsonOutput>(input) {
-            Ok(json) => {
-                let result = TestResult {
-                    total: json.num_total_tests,
-                    passed: json.num_passed_tests,
-                    failed: json.num_failed_tests,
-                    // ... map fields
-                };
-                ParseResult::Full(result)
-            }
-            Err(e) => {
-                // Tier 2: Try regex extraction
-                if let Some(stats) = extract_stats_regex(input) {
-                    ParseResult::Degraded(
-                        stats,
-                        vec![format!("JSON parse failed: {}", e)]
-                    )
-                } else {
-                    // Tier 3: Passthrough
-                    ParseResult::Passthrough(truncate_output(input, 2000))
-                }
-            }
-        }
-    }
-}
-```
-
-### 2. Use Parser in Command Module
-
-```rust
-use crate::parser::{OutputParser, TokenFormatter, FormatMode};
-
-pub fn run_vitest(args: &[String], verbose: u8) -> Result<()> {
-    let mut cmd = Command::new("pnpm");
-    cmd.arg("vitest").arg("--reporter=json");
-    // ... add args
-
-    let output = cmd.output()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse output
-    let result = VitestParser::parse(&stdout);
-
-    // Format based on verbosity
-    let mode = FormatMode::from_verbosity(verbose);
-    let formatted = match result {
-        ParseResult::Full(data) => data.format(mode),
-        ParseResult::Degraded(data, warnings) => {
-            if verbose > 0 {
-                for warn in warnings {
-                    eprintln!("[RTK:DEGRADED] {}", warn);
-                }
-            }
-            data.format(mode)
-        }
-        ParseResult::Passthrough(raw) => {
-            eprintln!("[RTK:PASSTHROUGH] Parser failed, showing truncated output");
-            raw
-        }
-    };
-
-    println!("{}", formatted);
-    Ok(())
-}
-```
+See `src/parser/types.rs` for the `OutputParser` trait and `ParseResult` enum.
 
 ## Canonical Types
 
@@ -178,69 +108,11 @@ For build tools (next, webpack, vite, cargo, etc.)
 
 ### Existing Module → Parser Trait
 
-**Before:**
-```rust
-fn run_vitest(args: &[String]) -> Result<()> {
-    let output = Command::new("vitest").output()?;
-    let filtered = filter_vitest_output(&output.stdout);
-    println!("{}", filtered);
-    Ok(())
-}
-```
-
-**After:**
-```rust
-fn run_vitest(args: &[String], verbose: u8) -> Result<()> {
-    let output = Command::new("vitest")
-        .arg("--reporter=json")
-        .output()?;
-
-    let result = VitestParser::parse(&output.stdout);
-    let mode = FormatMode::from_verbosity(verbose);
-
-    match result {
-        ParseResult::Full(data) | ParseResult::Degraded(data, _) => {
-            println!("{}", data.format(mode));
-        }
-        ParseResult::Passthrough(raw) => {
-            println!("{}", raw);
-        }
-    }
-    Ok(())
-}
-```
+Replace direct `filter_*_output()` calls with `Parser::parse()` + `FormatMode`. Key change: add `--reporter=json` flag injection, match on `ParseResult` (Full/Degraded/Passthrough), format with `data.format(mode)`. Degraded and Passthrough tiers handle tool version changes gracefully.
 
 ## Testing
 
-### Unit Tests
-```bash
-cargo test parser::tests
-```
-
-### Integration Tests
-```bash
-# Test with real tool outputs
-echo '{"testResults": [...]}' | cargo run -- vitest parse
-```
-
-### Tier Validation
-```rust
-#[test]
-fn test_vitest_json_parsing() {
-    let json = include_str!("fixtures/vitest-v1.json");
-    let result = VitestParser::parse(json);
-    assert_eq!(result.tier(), 1); // Full parse
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_vitest_regex_fallback() {
-    let text = "Test Files  2 passed (2)\n Tests  13 passed (13)";
-    let result = VitestParser::parse(text);
-    assert_eq!(result.tier(), 2); // Degraded
-    assert!(!result.warnings().is_empty());
-}
-```
+Run `cargo test parser::tests`. Each parser should have tier validation tests: assert `result.tier() == 1` for valid JSON fixtures, `tier() == 2` for regex fallback inputs, and `tier() == 3` for completely malformed output.
 
 ## Benefits
 

@@ -1,3 +1,5 @@
+//! Matches shell commands against known RTK rewrite rules to decide how to handle them.
+
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
@@ -613,6 +615,16 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
         return rewrite_tail_lines(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
     }
 
+    // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
+    // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
+    // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
+    if cmd_part.starts_with("cat ") {
+        let args = cmd_part["cat ".len()..].trim_start();
+        if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
+            return None;
+        }
+    }
+
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
@@ -1160,6 +1172,26 @@ mod tests {
         assert_eq!(
             rewrite_command("cat src/main.rs", &[]),
             Some("rtk read src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cat_with_incompatible_flags_skipped() {
+        // cat flags with different semantics than rtk read — skip rewrite
+        assert_eq!(rewrite_command("cat -A file.cpp", &[]), None);
+        assert_eq!(rewrite_command("cat -v file.txt", &[]), None);
+        assert_eq!(rewrite_command("cat -e file.txt", &[]), None);
+        assert_eq!(rewrite_command("cat -t file.txt", &[]), None);
+        assert_eq!(rewrite_command("cat -s file.txt", &[]), None);
+        assert_eq!(rewrite_command("cat --show-all file.txt", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_cat_with_compatible_flags() {
+        // cat -n (line numbers) maps to rtk read -n — allow rewrite
+        assert_eq!(
+            rewrite_command("cat -n file.txt", &[]),
+            Some("rtk read -n file.txt".into())
         );
     }
 
@@ -2345,5 +2377,51 @@ mod tests {
         assert_eq!(strip_git_global_opts("git --no-pager log"), "git log");
         assert_eq!(strip_git_global_opts("git status"), "git status");
         assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
+    }
+
+    // --- #wc: wc filter was silently ignored by the hook ---
+
+    #[test]
+    fn test_classify_wc_supported() {
+        // BUG: "wc " was in IGNORED_PREFIXES despite wc_cmd.rs having a full filter.
+        // This test documents the bug: it must FAIL before the fix and PASS after.
+        assert_eq!(
+            classify_command("wc -l src/main.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk wc",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_wc_multi_file() {
+        assert_eq!(
+            classify_command("wc src/*.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk wc",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wc() {
+        assert_eq!(
+            rewrite_command("wc -l src/main.rs", &[]),
+            Some("rtk wc -l src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wc_multi_file() {
+        assert_eq!(
+            rewrite_command("wc src/*.rs", &[]),
+            Some("rtk wc src/*.rs".into())
+        );
     }
 }
