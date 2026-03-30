@@ -1,0 +1,6 @@
+---
+source: src/cmds/cloud/cdk_cmd.rs
+expression: output
+---
+Successfully synthesized to D:\projects\SampleApp\cdk-backend\cdk.out
+Stacks: CdkBackendStack/PushNotificationsStack, CdkBackendStack/ResetQuotaStack, CdkBackendStack/WorkflowStack, CdkBackendStack/BatchWorkflowStack, CdkBackendStack

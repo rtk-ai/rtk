@@ -1,0 +1,21 @@
+---
+source: src/cmds/cloud/cdk_cmd.rs
+expression: output
+---
+Resources: 44 total
+  IAM::Role x10
+  IAM::Policy x9
+  Lambda::Function x7
+  Logs::LogGroup x6
+  CDK::Metadata
+  DynamoDB::Table
+  Events::Rule
+  Lambda::Permission
+  S3::Bucket
+  S3::BucketPolicy
+  SQS::Queue
+  SQS::QueuePolicy
+  SSM::Parameter
+  SSM::Parameter::Value<String>
+  Scheduler::Schedule
+  StepFunctions::StateMachine

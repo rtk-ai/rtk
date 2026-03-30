@@ -7,7 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, cdk_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -635,6 +635,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// AWS CDK commands with compact output
+    Cdk {
+        #[command(subcommand)]
+        command: CdkCommands,
+    },
+
     /// Go commands with compact output
     Go {
         #[command(subcommand)]
@@ -1003,6 +1009,31 @@ enum DotnetCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported dotnet subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum CdkCommands {
+    /// CDK diff with compact output (80% token reduction)
+    Diff {
+        /// Additional cdk diff arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// CDK synth with compact output (80% token reduction)
+    Synth {
+        /// Additional cdk synth arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// CDK deploy with compact output (70% token reduction)
+    Deploy {
+        /// Additional cdk deploy arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported cdk subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1972,6 +2003,25 @@ fn main() -> Result<()> {
                 "playwright" => {
                     playwright_cmd::run(&args[1..], cli.verbose)?;
                 }
+                "cdk" => {
+                    // Route to cdk_cmd based on subcommand
+                    if args.len() > 1 {
+                        let cdk_rest: Vec<String> = args[2..].to_vec();
+                        match args[1].as_str() {
+                            "diff" => cdk_cmd::run_diff(&cdk_rest, cli.verbose)?,
+                            "synth" | "synthesize" => cdk_cmd::run_synth(&cdk_rest, cli.verbose)?,
+                            "deploy" => cdk_cmd::run_deploy(&cdk_rest, cli.verbose)?,
+                            _ => {
+                                let os_args: Vec<OsString> =
+                                    args[1..].iter().map(OsString::from).collect();
+                                cdk_cmd::run_other(&os_args, cli.verbose)?;
+                            }
+                        }
+                    } else {
+                        let os_args: Vec<OsString> = vec![];
+                        cdk_cmd::run_other(&os_args, cli.verbose)?;
+                    }
+                }
                 _ => {
                     // Generic passthrough with npm boilerplate filter
                     npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
@@ -2006,6 +2056,21 @@ fn main() -> Result<()> {
         Commands::Pip { args } => {
             pip_cmd::run(&args, cli.verbose)?;
         }
+
+        Commands::Cdk { command } => match command {
+            CdkCommands::Diff { args } => {
+                cdk_cmd::run_diff(&args, cli.verbose)?;
+            }
+            CdkCommands::Synth { args } => {
+                cdk_cmd::run_synth(&args, cli.verbose)?;
+            }
+            CdkCommands::Deploy { args } => {
+                cdk_cmd::run_deploy(&args, cli.verbose)?;
+            }
+            CdkCommands::Other(args) => {
+                cdk_cmd::run_other(&args, cli.verbose)?;
+            }
+        },
 
         Commands::Go { command } => match command {
             GoCommands::Test { args } => {
@@ -2266,6 +2331,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
+            | Commands::Cdk { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }

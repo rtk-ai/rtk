@@ -1,0 +1,1217 @@
+﻿yarn run v1.22.22
+node.exe : warning package.json: No license field
+Au caractère C:\nvm4w\nodejs\cdk.ps1:16 : 5
++     & "$basedir/node$exe"  "$basedir/node_modules/aws-cdk/bin/cdk" $a ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning package.json: No license field:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\tsx bin/app.ts
+Bundling asset SampleApp-RssBatch/StoreTaskTokenLambda/Code/Stage...
+warning package.json: No license field
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\store-task-token\handler.ts --target=node22 --platform=node 
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-ae0e8c5f7a86d7d58e8fa87869b0d2862cba7c5ca3fbae914b1c86392227af19-building\index.js --external:@aws-sdk/*
+
+  ...8e8fa87869b0d2862cba7c5ca3fbae914b1c86392227af19-building\index.js  1.9kb
+
+Bundling asset SampleApp-RssBatch/BatchCallbackLambda/Code/Stage...
+warning package.json: No license field
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-callback\handler.ts --target=node22 --platform=node 
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-917e0be5203bd1448bd1b0831ddc5586ad658926a5746a85c9c5b86e72017d6a-building\index.js --external:@aws-sdk/*
+
+  ...8bd1b0831ddc5586ad658926a5746a85c9c5b86e72017d6a-building\index.js  3.4kb
+
+Done in 1.27s.
+Resources:
+  RssBatchBucket7D1FF398:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: sampleapp-rss-batch
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 30
+            Status: Enabled
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+        - Key: aws-cdk:auto-delete-objects
+          Value: "true"
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/RssBatchBucket/Resource
+  RssBatchBucketPolicyB32E7B81:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: RssBatchBucket7D1FF398
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:DeleteObject*
+              - s3:GetBucket*
+              - s3:List*
+              - s3:PutBucketPolicy
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092
+                  - Arn
+            Resource:
+              - Fn::GetAtt:
+                  - RssBatchBucket7D1FF398
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - RssBatchBucket7D1FF398
+                        - Arn
+                    - /*
+        Version: "2012-10-17"
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/RssBatchBucket/Policy/Resource
+  RssBatchBucketAutoDeleteObjectsCustomResource86370C6A:
+    Type: Custom::S3AutoDeleteObjects
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+          - CustomS3AutoDeleteObjectsCustomResourceProviderHandler9D90184F
+          - Arn
+      BucketName:
+        Ref: RssBatchBucket7D1FF398
+    DependsOn:
+      - RssBatchBucketPolicyB32E7B81
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/RssBatchBucket/AutoDeleteObjectsCustomResource/Default
+  CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+      ManagedPolicyArns:
+        - Fn::Sub: arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/Custom::S3AutoDeleteObjectsCustomResourceProvider/Role
+  CustomS3AutoDeleteObjectsCustomResourceProviderHandler9D90184F:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: cdk-hnb659fds-assets-123456789012-us-east-1
+        S3Key: faa95a81ae7d7373f3e1f242268f904eb748d8d0fdd306e8a6fe515a1905a7d6.zip
+      Timeout: 900
+      MemorySize: 128
+      Handler: index.handler
+      Role:
+        Fn::GetAtt:
+          - CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092
+          - Arn
+      Runtime: nodejs22.x
+      Description:
+        Fn::Join:
+          - ""
+          - - "Lambda function for auto-deleting objects in "
+            - Ref: RssBatchBucket7D1FF398
+            - " S3 bucket."
+    DependsOn:
+      - CustomS3AutoDeleteObjectsCustomResourceProviderRole3B1BD092
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/Custom::S3AutoDeleteObjectsCustomResourceProvider/Handler
+      aws:asset:path: asset.faa95a81ae7d7373f3e1f242268f904eb748d8d0fdd306e8a6fe515a1905a7d6
+      aws:asset:property: Code
+  FeedTable1849209D:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TableName: sampleapp-feed-table
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/FeedTable/Resource
+  FeedInitFunctionServiceRole3C883FA4:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/FeedInitFunction/ServiceRole/Resource
+  FeedInitFunctionServiceRoleDefaultPolicy7663E5D0:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - FeedTable1849209D
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: FeedInitFunctionServiceRoleDefaultPolicy7663E5D0
+      Roles:
+        - Ref: FeedInitFunctionServiceRole3C883FA4
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/FeedInitFunction/ServiceRole/DefaultPolicy/Resource
+  FeedInitFunctionBDD3CB88:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile:
+          Fn::Join:
+            - ""
+            - - |-
+                
+                				const { DynamoDBClient, BatchWriteItemCommand } = require('@aws-sdk/client-dynamodb');
+                				const client = new DynamoDBClient();
+                				const batches = {"Batch0":{"RequestItems":{"
+              - Ref: FeedTable1849209D
+              - "\":[{\"PutRequest\":{\"Item\":{\"PK\":{\"S\":\"RSS_FEED\"},\"SK\":{\"S\":\"1\"},\"Name\":{\"S\":\"Sample Feed A\"},\"URL\":{\"S\":\"https://example.com/feed-a.xml\"}}}},{\"PutRequest\":{\"Item\":{\"PK\":{\"S\":\"RSS_FEED\"},\"SK\":{\"S\":\"2\"},\"Name\":{\"S\":\"Sample Feed B\"},\"URL\":{\"S\":\"https://example.com/feed-b.xml\"}}}}]}}};
+
+                \t\t\t\texports.handler = async (event) => {
+
+                \t\t\t\t\tfor (const batchKey of Object.keys(batches)) {
+
+                \t\t\t\t\t\tlet params = batches[batchKey];
+
+                \t\t\t\t\t\tlet attempts = 0;
+
+                \t\t\t\t\t\twhile (Object.keys(params.RequestItems).length > 0 && attempts < 5) {
+
+                \t\t\t\t\t\t\tconst result = await client.send(new BatchWriteItemCommand(params));
+
+                \t\t\t\t\t\t\tconst unprocessed = result.UnprocessedItems || {};
+
+                \t\t\t\t\t\t\tif (Object.keys(unprocessed).length === 0) break;
+
+                \t\t\t\t\t\t\tparams = { RequestItems: unprocessed };
+
+                \t\t\t\t\t\t\tattempts++;
+
+                \t\t\t\t\t\t\tawait new Promise(r => setTimeout(r, 200 * Math.pow(2, attempts)));
+
+                \t\t\t\t\t\t}
+
+                \t\t\t\t\t}
+
+                \t\t\t\t\treturn 'Done';
+
+                \t\t\t\t};
+
+                \t\t\t"
+      Handler: index.handler
+      Role:
+        Fn::GetAtt:
+          - FeedInitFunctionServiceRole3C883FA4
+          - Arn
+      Runtime: nodejs22.x
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    DependsOn:
+      - FeedInitFunctionServiceRoleDefaultPolicy7663E5D0
+      - FeedInitFunctionServiceRole3C883FA4
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/FeedInitFunction/Resource
+  FeedInitFunctionLogGroup4E4D9755:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+          - ""
+          - - /aws/lambda/
+            - Ref: FeedInitFunctionBDD3CB88
+      RetentionInDays: 731
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/FeedInitFunction/LogGroup/Resource
+  PopulateFeedTableFCA8F2DB:
+    Type: Custom::AWS
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+          - AWS679f53fac002430cb0da5b7982bd22872D164C4C
+          - Arn
+      Create:
+        Fn::Join:
+          - ""
+          - - '{"service":"Lambda","action":"invoke","parameters":{"FunctionName":"'
+            - Ref: FeedInitFunctionBDD3CB88
+            - '","InvocationType":"RequestResponse"},"physicalResourceId":{"id":"PopulateFeedTable-8b30a5aee38442b2"}}'
+      Update:
+        Fn::Join:
+          - ""
+          - - '{"service":"Lambda","action":"invoke","parameters":{"FunctionName":"'
+            - Ref: FeedInitFunctionBDD3CB88
+            - '","InvocationType":"RequestResponse"},"physicalResourceId":{"id":"PopulateFeedTable-8b30a5aee38442b2"}}'
+      InstallLatestAwsSdk: false
+    DependsOn:
+      - PopulateFeedTableCustomResourcePolicy1068CAFF
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/PopulateFeedTable/Resource/Default
+  PopulateFeedTableCustomResourcePolicy1068CAFF:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: lambda:InvokeFunction
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - FeedInitFunctionBDD3CB88
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: PopulateFeedTableCustomResourcePolicy1068CAFF
+      Roles:
+        - Ref: AWS679f53fac002430cb0da5b7982bd2287ServiceRoleC1EA0FF2
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/PopulateFeedTable/CustomResourcePolicy/Resource
+  AWS679f53fac002430cb0da5b7982bd2287ServiceRoleC1EA0FF2:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource
+  AWS679f53fac002430cb0da5b7982bd22872D164C4C:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: cdk-hnb659fds-assets-123456789012-us-east-1
+        S3Key: 56f7467bbde8a5efebcf57ae9e460027607099bab9f844669dcf5d800172ee5a.zip
+      Handler: index.handler
+      Role:
+        Fn::GetAtt:
+          - AWS679f53fac002430cb0da5b7982bd2287ServiceRoleC1EA0FF2
+          - Arn
+      Runtime: nodejs22.x
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+      Timeout: 120
+    DependsOn:
+      - AWS679f53fac002430cb0da5b7982bd2287ServiceRoleC1EA0FF2
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/AWS679f53fac002430cb0da5b7982bd2287/Resource
+      aws:asset:path: asset.56f7467bbde8a5efebcf57ae9e460027607099bab9f844669dcf5d800172ee5a
+      aws:asset:is-bundled: false
+      aws:asset:property: Code
+  AWS679f53fac002430cb0da5b7982bd2287LogGroup449FB7C2:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+          - ""
+          - - /aws/lambda/
+            - Ref: AWS679f53fac002430cb0da5b7982bd22872D164C4C
+      RetentionInDays: 731
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/AWS679f53fac002430cb0da5b7982bd2287/LogGroup/Resource
+  FeedTableParamFB58D27E:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /sampleapp/tables/FeedTable
+      Tags:
+        ApplicationName: sampleapp
+      Type: String
+      Value:
+        Ref: FeedTable1849209D
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/FeedTableParam/Resource
+  BedrockBatchRole468B3A82:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+        Version: "2012-10-17"
+      Description: Role for Bedrock batch inference jobs (RSS enrichment)
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BedrockBatchRole/Resource
+  BedrockBatchRoleDefaultPolicy14C97418:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:Abort*
+              - s3:DeleteObject*
+              - s3:GetBucket*
+              - s3:GetObject*
+              - s3:List*
+              - s3:PutObject
+              - s3:PutObjectLegalHold
+              - s3:PutObjectRetention
+              - s3:PutObjectTagging
+              - s3:PutObjectVersionTagging
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - RssBatchBucket7D1FF398
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - RssBatchBucket7D1FF398
+                        - Arn
+                    - /*
+          - Action: bedrock:InvokeModel
+            Effect: Allow
+            Resource:
+              - arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0
+              - arn:aws:bedrock:us-east-1:*:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0
+              - arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/*
+        Version: "2012-10-17"
+      PolicyName: BedrockBatchRoleDefaultPolicy14C97418
+      Roles:
+        - Ref: BedrockBatchRole468B3A82
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BedrockBatchRole/DefaultPolicy/Resource
+  CollectRSSLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sampleapp-collect-rss
+      RetentionInDays: 30
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/CollectRSSLogs/Resource
+  CollectRSSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/CollectRSSLambda/ServiceRole/Resource
+  CollectRSSLambdaServiceRoleDefaultPolicy9893EAFF:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - bedrock:CreateModelInvocationJob
+              - xray:PutTelemetryRecords
+              - xray:PutTraceSegments
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:UpdateItem
+            Effect: Allow
+            Resource:
+              - arn:aws:dynamodb:us-east-1:123456789012:table/ItemMetadata-abcdefghijklmnopqrstuvwxyz-NONE
+              - arn:aws:dynamodb:us-east-1:123456789012:table/ProcessedItem-abcdefghijklmnopqrstuvwxyz-NONE
+              - arn:aws:dynamodb:us-east-1:123456789012:table/ProcessedItem-abcdefghijklmnopqrstuvwxyz-NONE/index/*
+          - Action:
+              - dynamodb:BatchGetItem
+              - dynamodb:ConditionCheckItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:GetRecords
+              - dynamodb:GetShardIterator
+              - dynamodb:Query
+              - dynamodb:Scan
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - FeedTable1849209D
+                - Arn
+          - Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:PutObject
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: RssBatchBucket7D1FF398
+                    - /*
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: RssBatchBucket7D1FF398
+          - Action: ssm:GetParameter
+            Effect: Allow
+            Resource: arn:aws:ssm:us-east-1:123456789012:parameter/amplify/sampleapp/APP_SECRET_PARAMETER
+          - Action:
+              - bedrock:GetModelInvocationJob
+              - bedrock:TagResource
+            Effect: Allow
+            Resource: arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/*
+          - Action: iam:PassRole
+            Condition:
+              StringEquals:
+                iam:PassedToService: bedrock.amazonaws.com
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - BedrockBatchRole468B3A82
+                - Arn
+        Version: "2012-10-17"
+      PolicyName: CollectRSSLambdaServiceRoleDefaultPolicy9893EAFF
+      Roles:
+        - Ref: CollectRSSRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/CollectRSSLambda/ServiceRole/DefaultPolicy/Resource
+  CollectRSSLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Architectures:
+        - arm64
+      Code:
+        S3Bucket: cdk-hnb659fds-assets-123456789012-us-east-1
+        S3Key: e83d32d44b93a5871e77d2b8586d9c5755097bcc11006b0cc914495e2306fcb3.zip
+      Environment:
+        Variables:
+          LOG_LEVEL: WARNING
+          S3_BUCKET:
+            Ref: RssBatchBucket7D1FF398
+          BEDROCK_BATCH_ROLE_ARN:
+            Fn::GetAtt:
+              - BedrockBatchRole468B3A82
+              - Arn
+          DYNAMODB_FEED_TABLE:
+            Ref: FeedTable1849209D
+          DYNAMODB_PROCESSED_TABLE: ProcessedItem-abcdefghijklmnopqrstuvwxyz-NONE
+          DYNAMODB_METADATA_TABLE: ItemMetadata-abcdefghijklmnopqrstuvwxyz-NONE
+          BEDROCK_LLM_ID: arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/sample-profile-id
+          MAX_ARTICLES_PER_FEED: "20"
+      FunctionName: SampleApp-CollectRSS
+      Handler: handler.lambda_handler
+      LoggingConfig:
+        LogGroup:
+          Ref: CollectRSSLogs
+      MemorySize: 256
+      Role:
+        Fn::GetAtt:
+          - CollectRSSRole
+          - Arn
+      Runtime: python3.13
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+      Timeout: 900
+      TracingConfig:
+        Mode: PassThrough
+    DependsOn:
+      - CollectRSSLambdaServiceRoleDefaultPolicy9893EAFF
+      - CollectRSSRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/CollectRSSLambda/Resource
+      aws:asset:path: asset.e83d32d44b93a5871e77d2b8586d9c5755097bcc11006b0cc914495e2306fcb3
+      aws:asset:is-bundled: true
+      aws:asset:property: Code
+  StoreTaskTokenLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sampleapp-store-task-token
+      RetentionInDays: 30
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/StoreTaskTokenLogs/Resource
+  StoreTaskTokenRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/StoreTaskTokenLambda/ServiceRole/Resource
+  StoreTaskTokenLambdaServiceRoleDefaultPolicy06B5CDD0:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - xray:PutTelemetryRecords
+              - xray:PutTraceSegments
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:PutObject
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: RssBatchBucket7D1FF398
+                    - /*
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: RssBatchBucket7D1FF398
+        Version: "2012-10-17"
+      PolicyName: StoreTaskTokenLambdaServiceRoleDefaultPolicy06B5CDD0
+      Roles:
+        - Ref: StoreTaskTokenRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/StoreTaskTokenLambda/ServiceRole/DefaultPolicy/Resource
+  StoreTaskTokenLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Architectures:
+        - arm64
+      Code:
+        S3Bucket: cdk-hnb659fds-assets-123456789012-us-east-1
+        S3Key: eb236f464edf4faf9b21d3086b7ff6d7d297020a00d565772e51fa1a0ac34f61.zip
+      Environment:
+        Variables:
+          LOG_LEVEL: warn
+          S3_BUCKET:
+            Ref: RssBatchBucket7D1FF398
+      FunctionName: SampleApp-StoreTaskToken
+      Handler: index.lambda_handler
+      LoggingConfig:
+        LogGroup:
+          Ref: StoreTaskTokenLogs
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+          - StoreTaskTokenRole
+          - Arn
+      Runtime: nodejs22.x
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+      Timeout: 30
+      TracingConfig:
+        Mode: PassThrough
+    DependsOn:
+      - StoreTaskTokenLambdaServiceRoleDefaultPolicy06B5CDD0
+      - StoreTaskTokenRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/StoreTaskTokenLambda/Resource
+      aws:asset:path: asset.eb236f464edf4faf9b21d3086b7ff6d7d297020a00d565772e51fa1a0ac34f61
+      aws:asset:is-bundled: true
+      aws:asset:property: Code
+  BatchCallbackLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sampleapp-batch-callback
+      RetentionInDays: 30
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BatchCallbackLogs/Resource
+  BatchCallbackRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BatchCallbackLambda/ServiceRole/Resource
+  BatchCallbackLambdaServiceRoleDefaultPolicyE128FEC4:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - xray:PutTelemetryRecords
+              - xray:PutTraceSegments
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: RssBatchBucket7D1FF398
+                    - /*
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: RssBatchBucket7D1FF398
+          - Action: bedrock:GetModelInvocationJob
+            Effect: Allow
+            Resource: arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/*
+          - Action:
+              - states:SendTaskFailure
+              - states:SendTaskSuccess
+            Effect: Allow
+            Resource:
+              Ref: RssBatchStateMachineDA0594EE
+        Version: "2012-10-17"
+      PolicyName: BatchCallbackLambdaServiceRoleDefaultPolicyE128FEC4
+      Roles:
+        - Ref: BatchCallbackRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BatchCallbackLambda/ServiceRole/DefaultPolicy/Resource
+  BatchCallbackLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Architectures:
+        - arm64
+      Code:
+        S3Bucket: cdk-hnb659fds-assets-123456789012-us-east-1
+        S3Key: 1bb6c98818d32bf7b41366eb2f1fabc6fcc8d359061bba4240e935b8a70364b3.zip
+      Environment:
+        Variables:
+          LOG_LEVEL: warn
+          S3_BUCKET:
+            Ref: RssBatchBucket7D1FF398
+      FunctionName: SampleApp-BatchCallback
+      Handler: index.lambda_handler
+      LoggingConfig:
+        LogGroup:
+          Ref: BatchCallbackLogs
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+          - BatchCallbackRole
+          - Arn
+      Runtime: nodejs22.x
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+      Timeout: 60
+      TracingConfig:
+        Mode: Active
+    DependsOn:
+      - BatchCallbackLambdaServiceRoleDefaultPolicyE128FEC4
+      - BatchCallbackRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BatchCallbackLambda/Resource
+      aws:asset:path: asset.1bb6c98818d32bf7b41366eb2f1fabc6fcc8d359061bba4240e935b8a70364b3
+      aws:asset:is-bundled: true
+      aws:asset:property: Code
+  ProcessBatchResultsLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/sampleapp-process-batch-results
+      RetentionInDays: 30
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/ProcessBatchResultsLogs/Resource
+  ProcessBatchResultsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/ProcessBatchResultsLambda/ServiceRole/Resource
+  ProcessBatchResultsLambdaServiceRoleDefaultPolicyBBC5E94E:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - xray:PutTelemetryRecords
+              - xray:PutTraceSegments
+            Effect: Allow
+            Resource: "*"
+          - Action:
+              - dynamodb:BatchWriteItem
+              - dynamodb:DeleteItem
+              - dynamodb:DescribeTable
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:UpdateItem
+            Effect: Allow
+            Resource:
+              - arn:aws:dynamodb:us-east-1:123456789012:table/ItemMetadata-abcdefghijklmnopqrstuvwxyz-NONE
+              - arn:aws:dynamodb:us-east-1:123456789012:table/ItemMetadata-abcdefghijklmnopqrstuvwxyz-NONE/index/*
+              - arn:aws:dynamodb:us-east-1:123456789012:table/ProcessedItem-abcdefghijklmnopqrstuvwxyz-NONE
+              - arn:aws:dynamodb:us-east-1:123456789012:table/ProcessedItem-abcdefghijklmnopqrstuvwxyz-NONE/index/*
+          - Action:
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:PutObject
+            Effect: Allow
+            Resource:
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: RssBatchBucket7D1FF398
+                    - /*
+              - Fn::Join:
+                  - ""
+                  - - "arn:aws:s3:::"
+                    - Ref: RssBatchBucket7D1FF398
+        Version: "2012-10-17"
+      PolicyName: ProcessBatchResultsLambdaServiceRoleDefaultPolicyBBC5E94E
+      Roles:
+        - Ref: ProcessBatchResultsRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/ProcessBatchResultsLambda/ServiceRole/DefaultPolicy/Resource
+  ProcessBatchResultsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Architectures:
+        - arm64
+      Code:
+        S3Bucket: cdk-hnb659fds-assets-123456789012-us-east-1
+        S3Key: 3abbe79759e53b9fd31898d57deff1c9ec8792cba0b556bd2da396cd4cdbb651.zip
+      Environment:
+        Variables:
+          LOG_LEVEL: WARNING
+          S3_BUCKET:
+            Ref: RssBatchBucket7D1FF398
+          DYNAMODB_PROCESSED_TABLE: ProcessedItem-abcdefghijklmnopqrstuvwxyz-NONE
+          DYNAMODB_METADATA_TABLE: ItemMetadata-abcdefghijklmnopqrstuvwxyz-NONE
+      FunctionName: SampleApp-ProcessBatchResults
+      Handler: handler.lambda_handler
+      LoggingConfig:
+        LogGroup:
+          Ref: ProcessBatchResultsLogs
+      MemorySize: 256
+      Role:
+        Fn::GetAtt:
+          - ProcessBatchResultsRole
+          - Arn
+      Runtime: python3.13
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+      Timeout: 300
+      TracingConfig:
+        Mode: PassThrough
+    DependsOn:
+      - ProcessBatchResultsLambdaServiceRoleDefaultPolicyBBC5E94E
+      - ProcessBatchResultsRole
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/ProcessBatchResultsLambda/Resource
+      aws:asset:path: asset.3abbe79759e53b9fd31898d57deff1c9ec8792cba0b556bd2da396cd4cdbb651
+      aws:asset:is-bundled: true
+      aws:asset:property: Code
+  RssBatchStateMachineRole6443524C:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+        Version: "2012-10-17"
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/RssBatchStateMachine/Role/Resource
+  RssBatchStateMachineRoleDefaultPolicy40DEBD3D:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: lambda:InvokeFunction
+            Effect: Allow
+            Resource:
+              - Fn::GetAtt:
+                  - CollectRSSLambda
+                  - Arn
+              - Fn::GetAtt:
+                  - ProcessBatchResultsLambda
+                  - Arn
+              - Fn::GetAtt:
+                  - StoreTaskTokenLambda
+                  - Arn
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - CollectRSSLambda
+                        - Arn
+                    - :*
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - ProcessBatchResultsLambda
+                        - Arn
+                    - :*
+              - Fn::Join:
+                  - ""
+                  - - Fn::GetAtt:
+                        - StoreTaskTokenLambda
+                        - Arn
+                    - :*
+          - Action:
+              - xray:GetSamplingRules
+              - xray:GetSamplingTargets
+              - xray:PutTelemetryRecords
+              - xray:PutTraceSegments
+            Effect: Allow
+            Resource: "*"
+        Version: "2012-10-17"
+      PolicyName: RssBatchStateMachineRoleDefaultPolicy40DEBD3D
+      Roles:
+        - Ref: RssBatchStateMachineRole6443524C
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/RssBatchStateMachine/Role/DefaultPolicy/Resource
+  RssBatchStateMachineDA0594EE:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString:
+        Fn::Join:
+          - ""
+          - - '{"StartAt":"Step-CollectRSS","States":{"Step-CollectRSS":{"Next":"Step-StoreTaskToken","Retry":[{"ErrorEquals":["Lambda.ClientExecutionTimeoutException","Lambda.ServiceException","Lambda.AWSLambdaException","Lambda.SdkClientException"],"IntervalSeconds":2,"MaxAttempts":6,"BackoffRate":2},{"ErrorEquals":["Lambda.ServiceException","Lambda.TooManyRequestsException","Lambda.AWSLambdaException"],"IntervalSeconds":2,"MaxAttempts":2,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"ResultPath":"$.errorInfo","Next":"FormatError-CollectRSS"}],"Type":"Task","ResultPath":"$.stepResults.CollectRSS","ResultSelector":{"output.$":"$.Payload"},"Resource":"arn:'
+            - Ref: AWS::Partition
+            - :states:::lambda:invoke","Parameters":{"FunctionName":"
+            - Fn::GetAtt:
+                - CollectRSSLambda
+                - Arn
+            - '","Payload":{"executionId.$":"$$.Execution.Id","s3Prefix.$":"$.s3Prefix","jobArn.$":"$.jobArn","stepResults.$":"$.stepResults"}}},"Step-StoreTaskToken":{"Next":"Step-ProcessBatchResults","Retry":[{"ErrorEquals":["Lambda.ClientExecutionTimeoutException","Lambda.ServiceException","Lambda.AWSLambdaException","Lambda.SdkClientException"],"IntervalSeconds":2,"MaxAttempts":6,"BackoffRate":2},{"ErrorEquals":["Lambda.ServiceException","Lambda.TooManyRequestsException","Lambda.AWSLambdaException"],"IntervalSeconds":2,"MaxAttempts":2,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"ResultPath":"$.errorInfo","Next":"FormatError-StoreTaskToken"}],"Type":"Task","TimeoutSeconds":172800,"HeartbeatSeconds":86400,"ResultPath":"$.stepResults.StoreTaskToken","ResultSelector":{"output.$":"$"},"Resource":"arn:'
+            - Ref: AWS::Partition
+            - :states:::lambda:invoke.waitForTaskToken","Parameters":{"FunctionName":"
+            - Fn::GetAtt:
+                - StoreTaskTokenLambda
+                - Arn
+            - '","Payload":{"executionId.$":"$$.Execution.Id","s3Prefix.$":"$.stepResults.CollectRSS.output.s3Prefix","jobArn.$":"$.stepResults.CollectRSS.output.jobArn","taskToken.$":"$$.Task.Token","stepResults.$":"$.stepResults"}}},"Step-ProcessBatchResults":{"Next":"WorkflowSucceeded","Retry":[{"ErrorEquals":["Lambda.ClientExecutionTimeoutException","Lambda.ServiceException","Lambda.AWSLambdaException","Lambda.SdkClientException"],"IntervalSeconds":2,"MaxAttempts":6,"BackoffRate":2},{"ErrorEquals":["Lambda.ServiceException","Lambda.TooManyRequestsException","Lambda.AWSLambdaException"],"IntervalSeconds":2,"MaxAttempts":2,"BackoffRate":2}],"Catch":[{"ErrorEquals":["States.ALL"],"ResultPath":"$.errorInfo","Next":"FormatError-ProcessBatchResults"}],"Type":"Task","ResultPath":"$.stepResults.ProcessBatchResults","ResultSelector":{"output.$":"$.Payload"},"Resource":"arn:'
+            - Ref: AWS::Partition
+            - :states:::lambda:invoke","Parameters":{"FunctionName":"
+            - Fn::GetAtt:
+                - ProcessBatchResultsLambda
+                - Arn
+            - "\",\"Payload\":{\"executionId.$\":\"$$.Execution.Id\",\"s3Prefix.$\":\"$.s3Prefix\",\"jobArn.$\":\"$.jobArn\",\"stepResults.$\":\"$.stepResults\"}}},\"WorkflowSucceeded\":{\"Type\":\"Succeed\"},\"FormatError-ProcessBatchResults\":{\"Type\":\"Pass\",\"Parameters\":{\"s3Prefix.$\":\"$.s3Prefix\",\"jobArn.$\":\"$.jobArn\",\"stepResults.$\":\"$.stepResults\",\"failedStep\":\"ProcessBatchResults\",\"errorMessage.$\":\"States.Format('Step ProcessBatchResults failed: {}', States.JsonToString($.errorInfo))\",\"errorInfo.$\":\"$.errorInfo\"},\"Next\":\"WorkflowFailed\"},\"WorkflowFailed\":{\"Type\":\"Fail\",\"Error\":\"WorkflowError\",\"Cause\":\"RSS batch workflow step failed\"},\"FormatError-CollectRSS\":{\"Type\":\"Pass\",\"Parameters\":{\"s3Prefix.$\":\"$.s3Prefix\",\"jobArn.$\":\"$.jobArn\",\"stepResults.$\":\"$.stepResults\",\"failedStep\":\"CollectRSS\",\"errorMessage.$\":\"States.Format('Step CollectRSS failed: {}', States.JsonToString($.errorInfo))\",\"errorInfo.$\":\"$.errorInfo\"},\"Next\":\"WorkflowFailed\"},\"FormatError-StoreTaskToken\":{\"Type\":\"Pass\",\"Parameters\":{\"s3Prefix.$\":\"$.s3Prefix\",\"jobArn.$\":\"$.jobArn\",\"stepResults.$\":\"$.stepResults\",\"failedStep\":\"StoreTaskToken\",\"errorMessage.$\":\"States.Format('Step StoreTaskToken failed: {}', States.JsonToString($.errorInfo))\",\"errorInfo.$\":\"$.errorInfo\"},\"Next\":\"WorkflowFailed\"}},\"TimeoutSeconds\":259200}"
+      RoleArn:
+        Fn::GetAtt:
+          - RssBatchStateMachineRole6443524C
+          - Arn
+      StateMachineName: SampleApp-RssBatch
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+      TracingConfiguration:
+        Enabled: true
+    DependsOn:
+      - RssBatchStateMachineRoleDefaultPolicy40DEBD3D
+      - RssBatchStateMachineRole6443524C
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/RssBatchStateMachine/Resource
+  BedrockBatchJobCompletion2F0E167B:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.bedrock
+        detail-type:
+          - Batch Inference Job State Change
+        detail:
+          status:
+            - Completed
+            - Failed
+            - Stopped
+            - Expired
+          batchJobName:
+            - prefix: rss-enrichment-
+      Name: sampleapp-bedrock-batch-completion
+      State: ENABLED
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+      Targets:
+        - Arn:
+            Fn::GetAtt:
+              - BatchCallbackLambda
+              - Arn
+          DeadLetterConfig:
+            Arn:
+              Fn::GetAtt:
+                - BatchCallbackDLQ35932C63
+                - Arn
+          Id: Target0
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BedrockBatchJobCompletion/Resource
+  BedrockBatchJobCompletionAllowEventRuleSampleAppRssBatchBatchCallbackLambda7ACB8F3376BECB49:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Fn::GetAtt:
+          - BatchCallbackLambda
+          - Arn
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - BedrockBatchJobCompletion2F0E167B
+          - Arn
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BedrockBatchJobCompletion/AllowEventRuleSampleAppRssBatchBatchCallbackLambda7ACB8F33
+  BatchCallbackDLQ35932C63:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      QueueName: sampleapp-batch-callback-dlq
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BatchCallbackDLQ/Resource
+  BatchCallbackDLQPolicy89F0DCFB:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: sqs:SendMessage
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  Fn::GetAtt:
+                    - BedrockBatchJobCompletion2F0E167B
+                    - Arn
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Resource:
+              Fn::GetAtt:
+                - BatchCallbackDLQ35932C63
+                - Arn
+            Sid: AllowEventRuleSampleAppRssBatchBedrockBatchJobCompletion7817E435
+        Version: "2012-10-17"
+      Queues:
+        - Ref: BatchCallbackDLQ35932C63
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/BatchCallbackDLQ/Policy/Resource
+  SchedulerRole59E73443:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+        Version: "2012-10-17"
+      Tags:
+        - Key: ApplicationName
+          Value: sampleapp
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/SchedulerRole/Resource
+  SchedulerRoleDefaultPolicy66F774B8:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action: states:StartExecution
+            Effect: Allow
+            Resource:
+              Ref: RssBatchStateMachineDA0594EE
+        Version: "2012-10-17"
+      PolicyName: SchedulerRoleDefaultPolicy66F774B8
+      Roles:
+        - Ref: SchedulerRole59E73443
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/SchedulerRole/DefaultPolicy/Resource
+  DailyRssSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        MaximumWindowInMinutes: 30
+        Mode: FLEXIBLE
+      Name: sampleapp-rss-batch-daily
+      ScheduleExpression: cron(22 23 ? * * *)
+      Target:
+        Arn:
+          Ref: RssBatchStateMachineDA0594EE
+        Input: '{"s3Prefix":"","jobArn":"","stepResults":{}}'
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 7200
+          MaximumRetryAttempts: 3
+        RoleArn:
+          Fn::GetAtt:
+            - SchedulerRole59E73443
+            - Arn
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/DailyRssSchedule
+  CDKMetadata:
+    Type: AWS::CDK::Metadata
+    Properties:
+      Analytics: v2:deflate64:H4sIAAAAAAAA/+1ZbW/bNhD+LeXHgNHSZF+Wb07nDsWSTrW9AYNhGDR5kRlTpMsjnXmC/vtA6sVyqnkplhStG8AwJR559zxH8Ugez5PzH8+Ss1fsHk+5WJ0quUiKsWN8Rdk9zgu8SIorz1fgpgVZxIf3LAdySU4IJRZys2EqNUryLbkkAtBZsyWUMO/Mz6DAwW+LO+AOyaWzHihR8hb4lisYeQVILqdFOStpQZgQ111RlNBo5YTMyhl9c6srILQqKqMtqoio26yS142vGEJJxVaz3IhFUkzYQsG0IC6UHUJrZp100uhfYUsuC6J3Irddh8cxKSlBY93hFguplNTZjRGhKh38OU+Ho/lo+OH34XhywHMVgwivpIrlC8GS4q3XPICaFsR67WRrccm0UGDrN14ZOyHBnznkxm7H8u8WnczBeNeMnFGNQJnsF2v8un69rY11vLJZ893T2C80hPHct/kQTBdowNOjdp8Ls3wpHXDnbb9GZxmXOgvuZIiTpTU+W+5D+A/SoDfSGp2Ddn3c689w2G01bb/A4xK+DEe/ME6/Zr7RsdSZAmd0ZwZ6L0UDN87P1Nu1wUdy/uLzjglxA44J5ljNM8ThWb9o54IUbC4RpdEllSxPipGJAZMh+hzEVYx9ays1l2umBpwb345i1SZ0GERGNRaSM80yEDHmySr279VtB7Zu28CbmLQx0UTKdr1wjvHlO62khlbWju9B4Rek8Fw4BCC3ct2pekZ/Rb0P1R02dgRfyWG935v06Af06Am+jP7X5pwXvk/EN+5YgjVaHwoDiKbDxIzinuuBnk+rhRg75iDsCDvnUuzU7RbavpafY+4JAfZWP7f+b7X6+/L7C5rnR1OdlmLYKakyGSbFdX2wmxbtGa891AU1j6sMOSIHugqfF2cHUkbfbu/ovMZdJcWLOUMEh8kgFBQxD8lIK3WWMstycGCnRUjSVc8dixhb/cGUh04msO3V5NLm2gi4w+R9LDqn+v+fDwHt7PZJEh//nltZeC1UFBQE/nJgNVM3RlSZ1Gq/1U0CVr9j4fY1UwnbnA0c3Qg9nlY5o+hg3RDBpHjLpKJhiOnYcw4gaIydN4wvpQ6pJOy8dogLuJU65uCvjNj2MqgBDnVIk4vqZqHdXIaY3bujfQJBDCpdGuU+67ljuMLkOsaad3pjVkBhE1aLpAiXGjGBv3fhEKUpc8GlwblovOU7Vzgm1aS6VthV7O2mh3sKpp+joSXKbBYuUHYUA9aS4kdMig8efMD9MZR9IT4FK43oBN3Yg8b/9o4m9sa9/XqnQUmRLyF8TTYJDq5fSvrGozP5CCpObYoyQqwrH7RJrdlIATZc+NC4iowdy6TOaFfLjPLYa27rSkwG97ivqaRhrUju8IfN+Xny+qfk7NUdSnlaT8xkVJX/ANX2rPdBGwAA
+    Metadata:
+      aws:cdk:path: SampleApp-RssBatch/CDKMetadata/Default
+Parameters:
+  BootstrapVersion:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /cdk-bootstrap/hnb659fds/version
+    Description: Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]
+
+4 feature flags are not configured. Run 'cdk flags --unstable=flags' to learn more.
+
+NOTICES         (What's this? https://github.com/aws/aws-cdk/wiki/CLI-Notices)
+
+37013	(cli) cdk watch triggers deployment unexpectedly or not at all
+
+	Overview: Do not use 'cdk watch' with this version of the cdk cli.
+	          Upgrade to ^2.1106.0.
+
+	Affected versions: cli: >=2.1103.0 <2.1106.0
+
+	More information at: https://github.com/aws/aws-cdk/issues/37013
+
+
+34892	CDK CLI collects telemetry data on command usage starting at version 2.1100.0 (unless opted out)
+
+	Overview: We do not collect customer content and we anonymize the
+	          telemetry we do collect. See the attached issue for more
+	          information on what data is collected, why, and how to
+	          opt-out. Telemetry will NOT be collected for any CDK CLI
+	          version prior to version 2.1100.0 - regardless of
+	          opt-in/out. You can also view the telemetry we collect by
+	          logging it to a local file, by adding
+	          `--telemetry-file=my/local/file` to any `cdk` command.
+
+	Affected versions: cli: >=2.1100.0 <2.1106.1
+
+	More information at: https://github.com/aws/aws-cdk/issues/34892
+
+
+If you donÔÇÖt want to see a notice anymore, use "cdk acknowledge <id>". For example, "cdk acknowledge 37013".

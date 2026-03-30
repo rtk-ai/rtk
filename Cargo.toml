@@ -39,6 +39,7 @@ which = "8"
 toml = "0.8"
 
 [dev-dependencies]
+insta = "1"
 
 [profile.release]
 opt-level = 3

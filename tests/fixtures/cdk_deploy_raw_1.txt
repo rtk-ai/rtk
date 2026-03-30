@@ -1,0 +1,88 @@
+﻿yarn run v1.22.22
+node.exe : warning package.json: No license field
+Au caractère C:\nvm4w\nodejs\cdk.ps1:16 : 5
++     & "$basedir/node$exe"  "$basedir/node_modules/aws-cdk/bin/cdk" $a ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning package.json: No license field:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\tsx bin/app.ts
+Bundling asset SampleApp-RssBatch/StoreTaskTokenLambda/Code/Stage...
+warning package.json: No license field
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\store-task-token\handler.ts --target=node22 --platform=node 
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-ae0e8c5f7a86d7d58e8fa87869b0d2862cba7c5ca3fbae914b1c86392227af19-building\index.js --external:@aws-sdk/*
+
+  ...8e8fa87869b0d2862cba7c5ca3fbae914b1c86392227af19-building\index.js  1.9kb
+
+Bundling asset SampleApp-RssBatch/BatchCallbackLambda/Code/Stage...
+warning package.json: No license field
+$ D:\projects\SampleApp\cdk-backend\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-callback\handler.ts --target=node22 --platform=node 
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-917e0be5203bd1448bd1b0831ddc5586ad658926a5746a85c9c5b86e72017d6a-building\index.js --external:@aws-sdk/*
+
+  ...8bd1b0831ddc5586ad658926a5746a85c9c5b86e72017d6a-building\index.js  3.4kb
+
+Done in 1.27s.
+
+Ô£¿  Synthesis time: 1.4s
+
+SampleApp-RssBatch: start: Building CollectRSSLambda/Code
+SampleApp-RssBatch: success: Built CollectRSSLambda/Code
+SampleApp-RssBatch: start: Building ProcessBatchResultsLambda/Code
+SampleApp-RssBatch: success: Built ProcessBatchResultsLambda/Code
+SampleApp-RssBatch: start: Building SampleApp-RssBatch Template
+SampleApp-RssBatch: success: Built SampleApp-RssBatch Template
+SampleApp-RssBatch: start: Publishing SampleApp-RssBatch Template (123456789012-us-east-1-0a3e4814)
+SampleApp-RssBatch: start: Publishing CollectRSSLambda/Code (123456789012-us-east-1-20788540)
+SampleApp-RssBatch: start: Publishing ProcessBatchResultsLambda/Code (123456789012-us-east-1-1824a9cc)
+SampleApp-RssBatch: success: Published ProcessBatchResultsLambda/Code (123456789012-us-east-1-1824a9cc)
+SampleApp-RssBatch: success: Published SampleApp-RssBatch Template (123456789012-us-east-1-0a3e4814)
+SampleApp-RssBatch: success: Published CollectRSSLambda/Code (123456789012-us-east-1-20788540)
+SampleApp-RssBatch: deploying... [1/1]
+SampleApp-RssBatch: creating CloudFormation changeset...
+SampleApp-RssBatch | 0/6 | 17:20:49 | UPDATE_IN_PROGRESS   | AWS::CloudFormation::Stack       | SampleApp-RssBatch User Initiated
+SampleApp-RssBatch | 0/6 | 17:20:55 | UPDATE_IN_PROGRESS   | AWS::Lambda::Function            | ProcessBatchResultsLambda 
+SampleApp-RssBatch | 0/6 | 17:20:55 | UPDATE_IN_PROGRESS   | AWS::Lambda::Function            | CollectRSSLambda 
+SampleApp-RssBatch | 1/6 | 17:21:04 | UPDATE_COMPLETE      | AWS::Lambda::Function            | ProcessBatchResultsLambda 
+SampleApp-RssBatch | 2/6 | 17:21:04 | UPDATE_COMPLETE      | AWS::Lambda::Function            | CollectRSSLambda 
+SampleApp-RssBatch | 3/6 | 17:21:06 | UPDATE_COMPLETE_CLEA | AWS::CloudFormation::Stack       | SampleApp-RssBatch 
+SampleApp-RssBatch | 4/6 | 17:21:08 | UPDATE_COMPLETE      | AWS::CloudFormation::Stack       | SampleApp-RssBatch 
+
+ Ô£à  SampleApp-RssBatch
+
+Ô£¿  Deployment time: 42.04s
+
+Stack ARN:
+arn:aws:cloudformation:us-east-1:123456789012:stack/SampleApp-RssBatch/aaa11111-2222-3333-4444-bbbbbbbbbbbb
+
+Ô£¿  Total time: 43.44s
+
+
+NOTICES         (What's this? https://github.com/aws/aws-cdk/wiki/CLI-Notices)
+
+37013	(cli) cdk watch triggers deployment unexpectedly or not at all
+
+	Overview: Do not use 'cdk watch' with this version of the cdk cli.
+	          Upgrade to ^2.1106.0.
+
+	Affected versions: cli: >=2.1103.0 <2.1106.0
+
+	More information at: https://github.com/aws/aws-cdk/issues/37013
+
+
+34892	CDK CLI collects telemetry data on command usage starting at version 2.1100.0 (unless opted out)
+
+	Overview: We do not collect customer content and we anonymize the
+	          telemetry we do collect. See the attached issue for more
+	          information on what data is collected, why, and how to
+	          opt-out. Telemetry will NOT be collected for any CDK CLI
+	          version prior to version 2.1100.0 - regardless of
+	          opt-in/out. You can also view the telemetry we collect by
+	          logging it to a local file, by adding
+	          `--telemetry-file=my/local/file` to any `cdk` command.
+
+	Affected versions: cli: >=2.1100.0 <2.1106.1
+
+	More information at: https://github.com/aws/aws-cdk/issues/34892
+
+
+If you donÔÇÖt want to see a notice anymore, use "cdk acknowledge <id>". For example, "cdk acknowledge 37013".

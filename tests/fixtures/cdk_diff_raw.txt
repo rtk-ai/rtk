@@ -1,0 +1,241 @@
+yarn run v1.22.22
+node.exe : warning package.json: No license field
+Au caractère C:\nodejs\cdk.ps1:16 : 5
++     & "$basedir/node$exe"  "$basedir/node_modules/aws-cdk/bin/cdk" $a ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning package.json: No license field:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+$ D:\projects\SampleApp\node_modules\.bin\tsx bin/cdk-backend.ts
+⚠️  amplify_outputs.json is older than 7 days. Consider running 'npx ampx generate outputs' to refresh.
+Bundling asset CdkBackendStack/StatusUpdaterLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workflow\status-updater.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-67e3ef8bbf7e62fb01b1bd8ae1534e17b15934c0141e0a520af0a4415ca1bce1-building\index.js
+
+  ...b1bd8ae1534e17b15934c0141e0a520af0a4415ca1bce1-building\index.js  5.5mb
+
+Bundling asset CdkBackendStack/CheckQuotaLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\check-quota\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-86224dfea4bf525da7a7914649ee2144ba786d3067e4f1ae40eba18800590f67-building\index.js
+
+  ...a7914649ee2144ba786d3067e4f1ae40eba18800590f67-building\index.js  5.5mb
+
+Bundling asset CdkBackendStack/RefundQuotaLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\refund-quota\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-5971989bda1ea134e95126556db731245c4030f832be49968233e28dead45b80-building\index.js
+
+  ...5126556db731245c4030f832be49968233e28dead45b80-building\index.js  5.5mb
+
+Bundling asset CdkBackendStack/PreparePayloadLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workflow\prepare-payload\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-2a68b182670678d1fc99204c4165220adde0b6331c3839070d80f062c05416b0-building\index.js
+
+  ...c99204c4165220adde0b6331c3839070d80f062c05416b0-building\index.js  13.4kb
+
+Bundling asset CdkBackendStack/MergeParallelLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workflow\merge-parallel\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-b09a10e4a61270f1e7c91deb77ad433606c44b0e9594aae281ad617983febc71-building\index.js
+
+  ...e7c91deb77ad433606c44b0e9594aae281ad617983febc71-building\index.js  1.7kb
+
+Bundling asset CdkBackendStack/PushNotificationsStack/PrepareNotificationLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\push-notifications\prepare-notification.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-a7c9ce439010b227b9e94a5f5418d473ea1fb7876293ead65fd868c661ea79c6-building\index.js --external:@aws-sdk/client-sqs
+
+  ...9e94a5f5418d473ea1fb7876293ead65fd868c661ea79c6-building\index.js  33.2kb
+
+[WARNING] aws-cdk-lib.aws_iam.GrantOnPrincipalOptions#scope is deprecated.
+  The scope argument is currently unused.
+  This API will be removed in the next major release.
+Bundling asset CdkBackendStack/PushNotificationsStack/SendNotificationLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\push-notifications\send-notification.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-1494d4a7170f0d75ab192bfe4742faf3d386f9b39d5f8962616261b3d37da6e3-building\index.js --external:@aws-sdk/client-dynamodb --external:@aws-sdk/lib-dynamodb --external:@aws-sdk/client-sqs
+
+  ...92bfe4742faf3d386f9b39d5f8962616261b3d37da6e3-building\index.js  1001.9kb
+
+Bundling asset CdkBackendStack/PushNotificationsStack/CheckReceiptsLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\push-notifications\check-receipts.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-2a5213912bf12b508c2f37d70ee916047a8c684a45c0d2d16bc68df1ad010703-building\index.js --external:@aws-sdk/client-dynamodb --external:@aws-sdk/lib-dynamodb
+
+  ...f37d70ee916047a8c684a45c0d2d16bc68df1ad010703-building\index.js  1000.5kb
+
+Bundling asset CdkBackendStack/ResetQuotaStack/ResetQuotaLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\resetQuota\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-3d23ecf5c27d9db8e7646ca291830098217887455c1c12713138fbf652c11b28-building\index.js --external:@aws-sdk/client-ssm
+
+  ...646ca291830098217887455c1c12713138fbf652c11b28-building\index.js  5.5mb
+
+Bundling asset CdkBackendStack/WorkflowStack/PromptLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\haiku-prompt\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-1232f49c1bf0a3070f06ca4524ff51f24eea95d57b9aaf809a7e0dadcfa80ecf-building\index.js --external:@aws-sdk/client-bedrock-runtime --loader:.md=text
+
+  ...06ca4524ff51f24eea95d57b9aaf809a7e0dadcfa80ecf-building\index.js  5.2mb
+
+Bundling asset CdkBackendStack/WorkflowStack/GeminiImageLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\gemini-image\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-09d802a8fa9b9e882f4233035f93fa8dd65d24aaa5017302414e2ebd3dc084e3-building\index.js --external:@aws-sdk/client-s3 --keep-names
+
+  ...4233035f93fa8dd65d24aaa5017302414e2ebd3dc084e3-building\index.js  5.0mb
+
+WARN AWS_SOLUTIONS_CONSTRUCTS_WARNING:  An override has been provided for the property: dynamoDbStreamParameters[startingPosition]. Default value: 'LATEST'. You provided: 'TRIM_HORIZON'.
+Bundling asset CdkBackendStack/BatchWorkflowStack/BatchSubmitLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-submit\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-bcf4fb382ee767437b8991dd33a4d4b5a77445503e679092ddb64943d6a5ba6a-building\index.js --external:@aws-sdk/client-s3 --keep-names
+
+  ...8991dd33a4d4b5a77445503e679092ddb64943d6a5ba6a-building\index.js  5.0mb
+
+Bundling asset CdkBackendStack/BatchWorkflowStack/BatchCollectLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-collect\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-48952094757ffe9e7b3f5f9d4ab5a0d58ce720c55cd731eabb3f1da862463cdd-building\index.js --external:@aws-sdk/client-s3 --keep-names
+
+  ...3f5f9d4ab5a0d58ce720c55cd731eabb3f1da862463cdd-building\index.js  4.4mb
+
+Bundling asset CdkBackendStack/BatchWorkflowStack/BatchPollLambda/Code/Stage...
+$ D:\projects\SampleApp\node_modules\.bin\esbuild --bundle D:\projects\SampleApp\cdk-backend\lib\workers\batch-poll\handler.ts --target=node22 --platform=node
+--outfile=D:\projects\SampleApp\cdk-backend\cdk.out\bundling-temp-0289cde6ed040395144ea6ff9be2fb38b35af478a73429dcfeb5bfc1703e170c-building\index.js --external:@aws-sdk/client-sfn --external:@aws-sdk/client-sqs
+
+  ...4ea6ff9be2fb38b35af478a73429dcfeb5bfc1703e170c-building\index.js  6.8mb
+
+WARN AWS_SOLUTIONS_CONSTRUCTS_WARNING:  An override has been provided for the property: dynamoDbStreamParameters[startingPosition]. Default value: 'LATEST'. You provided: 'TRIM_HORIZON'.
+Done in 5.62s.
+start: Building CdkBackendStackPushNotificationsStack714519F7 Template
+success: Built CdkBackendStackPushNotificationsStack714519F7 Template
+start: Publishing CdkBackendStackPushNotificationsStack714519F7 Template (123456789012-us-east-1-818b1815)
+success: Published CdkBackendStackPushNotificationsStack714519F7 Template (123456789012-us-east-1-818b1815)
+Hold on while we create a read-only change set to get a diff with accurate replacement information (use --no-change-set to use a less accurate but faster template-only diff)
+
+Stack CdkBackendStack/PushNotificationsStack
+Resources
+[~] AWS::Lambda::Function PushNotificationsStack/PrepareNotificationLambda PrepareNotificationLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] 0afbc113e7c243e1e3ba1a74ecd701b60601672f05b750fde0c1b211822eba4d.zip
+         └── [+] df60cee9d3e19433ea66325e1a662f28d7782e7d966caf067b91bd8f944bd190.zip
+
+
+start: Building CdkBackendStackResetQuotaStack3FE53801 Template
+success: Built CdkBackendStackResetQuotaStack3FE53801 Template
+start: Publishing CdkBackendStackResetQuotaStack3FE53801 Template (123456789012-us-east-1-2c6b2723)
+success: Published CdkBackendStackResetQuotaStack3FE53801 Template (123456789012-us-east-1-2c6b2723)
+Hold on while we create a read-only change set to get a diff with accurate replacement information (use --no-change-set to use a less accurate but faster template-only diff)
+
+Stack CdkBackendStack/ResetQuotaStack
+Resources
+[~] AWS::Lambda::Function ResetQuotaStack/ResetQuotaLambda ResetQuotaLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] e348fe5ed9a59afa305e345f67e5c0406974ebaed601ef7e566c1bfb2dd7a939.zip
+         └── [+] 59ee62c714aa2a4d71e6208cf58f8c21aa2d13f68068f8a5f509eeee7c081271.zip
+
+
+start: Building CdkBackendStackWorkflowStackBE836EDE Template
+success: Built CdkBackendStackWorkflowStackBE836EDE Template
+start: Publishing CdkBackendStackWorkflowStackBE836EDE Template (123456789012-us-east-1-3dab8de4)
+success: Published CdkBackendStackWorkflowStackBE836EDE Template (123456789012-us-east-1-3dab8de4)
+Hold on while we create a read-only change set to get a diff with accurate replacement information (use --no-change-set to use a less accurate but faster template-only diff)
+
+Stack CdkBackendStack/WorkflowStack
+Resources
+[~] AWS::Lambda::Function WorkflowStack/PromptLambda PromptLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] d8c048a306bb272f16c81618d871f8b666143c294e63b4e559d7971306fb84e2.zip
+         └── [+] e4fac3bbe923368939f864a00cececa3cc726719bf29d0a159dd48f2c1b4748a.zip
+[~] AWS::Lambda::Function WorkflowStack/GeminiImageLambda GeminiImageLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] 14d941c93213cc4a54e956d05995bd8a9662e6f9b5421a0a23c41e1873b47a1a.zip
+         └── [+] 337a0a587642ec41c47becbe093c870cc00c3dc4fb48cbffc240a3990780d745.zip
+
+
+start: Building CdkBackendStackBatchWorkflowStackD157CA9B Template
+success: Built CdkBackendStackBatchWorkflowStackD157CA9B Template
+start: Publishing CdkBackendStackBatchWorkflowStackD157CA9B Template (123456789012-us-east-1-5d952527)
+success: Published CdkBackendStackBatchWorkflowStackD157CA9B Template (123456789012-us-east-1-5d952527)
+Hold on while we create a read-only change set to get a diff with accurate replacement information (use --no-change-set to use a less accurate but faster template-only diff)
+
+Stack CdkBackendStack/BatchWorkflowStack
+Resources
+[~] AWS::Lambda::Function BatchWorkflowStack/BatchSubmitLambda BatchSubmitLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] 367bc9d3c12f4637952f83c07d03ff88d66a3536751f69e4ed36f6f67ddd11a2.zip
+         └── [+] 190be3b3e86efe5e694ca15b2d57d89239fed12619a1e868c95eb74f224b6fe8.zip
+[~] AWS::Lambda::Function BatchWorkflowStack/BatchCollectLambda BatchCollectLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] 43bca22ec3d3950f6fdf4da14b62274e81c4f950ce0cf3f005e81c905afc2d62.zip
+         └── [+] 3f815ea087596c6360573f84cbc8d06c3a52f260ebcaa286bf060a68a63478b4.zip
+[~] AWS::Lambda::Function BatchWorkflowStack/BatchPollLambda BatchPollLambda
+ └── [~] Code
+     └── [~] .S3Key:
+         ├── [-] a7bb185ce4d34ff5d1cc5e1e96178c131971bee1e5c154bd4d71e6cc5814a4b3.zip
+         └── [+] 8a715c70416b843a1d8c6c66b50dc9fb3ad2eb301898f03b58ffc91ffe588f27.zip
+
+
+Stack CdkBackendStack
+Resources
+[~] AWS::Lambda::Function StatusUpdaterLambda StatusUpdaterLambda
+ ├── [~] Code
+ │   └── [~] .S3Key:
+ │       ├── [-] c93e313789c9867ae227a947e0445cfebf24186350e0cf655cd4d74234562bfb.zip
+ │       └── [+] d0b52efc00aa05e55688631bbda014725bd79249dc2757aceddcc13329468c1c.zip
+ └── [~] Metadata
+     └── [~] .aws:asset:path:
+         ├── [-] asset.c93e313789c9867ae227a947e0445cfebf24186350e0cf655cd4d74234562bfb
+         └── [+] asset.d0b52efc00aa05e55688631bbda014725bd79249dc2757aceddcc13329468c1c
+[~] AWS::Lambda::Function CheckQuotaLambda CheckQuotaLambda
+ ├── [~] Code
+ │   └── [~] .S3Key:
+ │       ├── [-] eab24d4f670d031bde2bb87bed19c5e1545e6e42663f7fe494aa5a49cf4860db.zip
+ │       └── [+] 2a15176866cb9252285027155523375b741faa231209800fd56db54f0750b8d3.zip
+ └── [~] Metadata
+     └── [~] .aws:asset:path:
+         ├── [-] asset.eab24d4f670d031bde2bb87bed19c5e1545e6e42663f7fe494aa5a49cf4860db
+         └── [+] asset.2a15176866cb9252285027155523375b741faa231209800fd56db54f0750b8d3
+[~] AWS::Lambda::Function RefundQuotaLambda RefundQuotaLambda
+ ├── [~] Code
+ │   └── [~] .S3Key:
+ │       ├── [-] 5a0622564bca54b572d895b4f1c76005d8f418fd6254baeed8a299208b97c8d7.zip
+ │       └── [+] 4a81f6a8bbe04ec28d0f7850555961ed5c36218cb30c6878fc4a76af7d350506.zip
+ └── [~] Metadata
+     └── [~] .aws:asset:path:
+         ├── [-] asset.5a0622564bca54b572d895b4f1c76005d8f418fd6254baeed8a299208b97c8d7
+         └── [+] asset.4a81f6a8bbe04ec28d0f7850555961ed5c36218cb30c6878fc4a76af7d350506
+
+Stack CdkBackendStack-MonitoringStackNestedStackMonitoringStackNestedStackResourceC34BBBCF-1VCCCYW052S0W
+There were no differences
+
+
+✨  Number of stacks with differences: 5
+
+
+NOTICES         (What's this? https://github.com/aws/aws-cdk/wiki/CLI-Notices)
+
+37013	(cli) cdk watch triggers deployment unexpectedly or not at all
+
+	Overview: Do not use 'cdk watch' with this version of the cdk cli.
+	          Upgrade to ^2.1106.0.
+
+	Affected versions: cli: >=2.1103.0 <2.1106.0
+
+	More information at: https://github.com/aws/aws-cdk/issues/37013
+
+
+34892	CDK CLI collects telemetry data on command usage starting at version 2.1100.0 (unless opted out)
+
+	Overview: We do not collect customer content and we anonymize the
+	          telemetry we do collect. See the attached issue for more
+	          information on what data is collected, why, and how to
+	          opt-out. Telemetry will NOT be collected for any CDK CLI
+	          version prior to version 2.1100.0 - regardless of
+	          opt-in/out. You can also view the telemetry we collect by
+	          logging it to a local file, by adding
+	          `--telemetry-file=my/local/file` to any `cdk` command.
+
+	Affected versions: cli: >=2.1100.0 <2.1106.1
+
+	More information at: https://github.com/aws/aws-cdk/issues/34892
+
+
+If you don't want to see a notice anymore, use "cdk acknowledge <id>". For example, "cdk acknowledge 37013".

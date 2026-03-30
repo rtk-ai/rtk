@@ -1,0 +1,13 @@
+---
+source: src/cmds/cloud/cdk_cmd.rs
+expression: output
+---
+✅  InfraStack
+Resources: 12/24 complete
+
+Outputs:
+  InfraStack.ApiEndpoint = https://abc123.execute-api.us-east-1.amazonaws.com
+  InfraStack.AuthEndpoint = https://def456.execute-api.us-east-1.amazonaws.com
+
+✨  Deployment time: 56.2s
+✨  Total time: 60.43s
