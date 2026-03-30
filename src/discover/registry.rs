@@ -2010,6 +2010,131 @@ mod tests {
         );
     }
 
+    // --- Yarn rewrite/classify tests ---
+
+    #[test]
+    fn test_classify_yarn_build() {
+        assert!(matches!(
+            classify_command("yarn build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk yarn",
+                category: "PackageManager",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_yarn_install() {
+        assert!(matches!(
+            classify_command("yarn install"),
+            Classification::Supported {
+                rtk_equivalent: "rtk yarn",
+                category: "PackageManager",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_yarn_build() {
+        assert_eq!(
+            rewrite_command("yarn build", &[]),
+            Some("rtk yarn build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_install() {
+        assert_eq!(
+            rewrite_command("yarn install", &[]),
+            Some("rtk yarn install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_lint() {
+        // "yarn lint" matches the yarn pattern → rtk yarn lint
+        // (also matches lint pattern → rtk lint, but yarn pattern comes first)
+        let result = rewrite_command("yarn lint", &[]);
+        assert!(result.is_some());
+        let rewritten = result.unwrap();
+        assert!(
+            rewritten == "rtk yarn lint" || rewritten == "rtk lint",
+            "Expected 'rtk yarn lint' or 'rtk lint', got '{}'",
+            rewritten
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_tsc() {
+        let result = rewrite_command("yarn tsc --noEmit", &[]);
+        assert!(result.is_some());
+        let rewritten = result.unwrap();
+        assert!(
+            rewritten == "rtk yarn tsc --noEmit" || rewritten == "rtk tsc --noEmit",
+            "Expected 'rtk yarn tsc --noEmit' or 'rtk tsc --noEmit', got '{}'",
+            rewritten
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_vitest() {
+        let result = rewrite_command("yarn vitest run", &[]);
+        assert!(result.is_some());
+        let rewritten = result.unwrap();
+        assert!(
+            rewritten == "rtk yarn vitest run" || rewritten == "rtk vitest run",
+            "Expected 'rtk yarn vitest run' or 'rtk vitest run', got '{}'",
+            rewritten
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_check() {
+        assert_eq!(
+            rewrite_command("yarn check", &[]),
+            Some("rtk yarn check".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_add_package() {
+        assert_eq!(
+            rewrite_command("yarn add express", &[]),
+            Some("rtk yarn add express".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_with_flags() {
+        assert_eq!(
+            rewrite_command("yarn install --frozen-lockfile", &[]),
+            Some("rtk yarn install --frozen-lockfile".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yarn_compound() {
+        // Each segment is independently classified; "yarn lint" may match
+        // the lint pattern (→ "rtk lint") or the yarn pattern (→ "rtk yarn lint")
+        let result = rewrite_command("yarn build && yarn lint", &[]);
+        assert!(result.is_some());
+        let rewritten = result.unwrap();
+        assert!(rewritten.contains("rtk yarn build") || rewritten.contains("rtk yarn build"));
+        // Second segment: either rtk yarn lint or rtk lint is acceptable
+        assert!(rewritten.contains("rtk yarn lint") || rewritten.contains("rtk lint"));
+    }
+
+    #[test]
+    fn test_rewrite_yarn_with_redirect() {
+        // Redirects may or may not be stripped depending on the rewrite engine
+        let result = rewrite_command("yarn build 2>&1", &[]);
+        assert!(result.is_some());
+        let rewritten = result.unwrap();
+        assert!(rewritten.contains("rtk yarn build"));
+    }
+
     // --- Compound operator edge cases ---
 
     #[test]

@@ -20,18 +20,19 @@ pub const PATTERNS: &[&str] = &[
     r"^cargo\s+(build|test|clippy|check|fmt|install)",
     r"^pnpm\s+(list|ls|outdated|install)",
     r"^npm\s+(run|exec)",
+    r"^yarn\s+",
     r"^npx\s+",
     r"^(cat|head|tail)\s+",
     r"^(rg|grep)\s+",
     r"^ls(\s|$)",
     r"^find\s+",
-    r"^(npx\s+|pnpm\s+)?tsc(\s|$)",
-    r"^(npx\s+|pnpm\s+)?(eslint|biome|lint)(\s|$)",
-    r"^(npx\s+|pnpm\s+)?prettier",
-    r"^(npx\s+|pnpm\s+)?next\s+build",
-    r"^(pnpm\s+|npx\s+)?(vitest|jest|test)(\s|$)",
-    r"^(npx\s+|pnpm\s+)?playwright",
-    r"^(npx\s+|pnpm\s+)?prisma",
+    r"^(yarn\s+|npx\s+|pnpm\s+)?tsc(\s|$)",
+    r"^(yarn\s+|npx\s+|pnpm\s+)?(eslint|biome|lint)(\s|$)",
+    r"^(yarn\s+|npx\s+|pnpm\s+)?prettier",
+    r"^(yarn\s+|npx\s+|pnpm\s+)?next\s+build",
+    r"^(yarn\s+|pnpm\s+|npx\s+)?(vitest|jest|test)(\s|$)",
+    r"^(yarn\s+|npx\s+|pnpm\s+)?playwright",
+    r"^(yarn\s+|npx\s+|pnpm\s+)?prisma",
     r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
     r"^kubectl\s+(get|logs|describe|apply)",
     r"^tree(\s|$)",
@@ -138,6 +139,21 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        rtk_cmd: "rtk yarn",
+        rewrite_prefixes: &["yarn"],
+        category: "PackageManager",
+        savings_pct: 75.0,
+        subcmd_savings: &[
+            ("build", 85.0),
+            ("lint", 84.0),
+            ("vitest", 99.0),
+            ("tsc", 83.0),
+            ("check", 65.0),
+            ("install", 75.0),
+        ],
+        subcmd_status: &[],
+    },
+    RtkRule {
         rtk_cmd: "rtk npx",
         rewrite_prefixes: &["npx"],
         category: "PackageManager",
@@ -180,7 +196,7 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         // Longest prefixes first for correct matching
         rtk_cmd: "rtk tsc",
-        rewrite_prefixes: &["pnpm tsc", "npx tsc", "tsc"],
+        rewrite_prefixes: &["yarn tsc", "pnpm tsc", "npx tsc", "tsc"],
         category: "Build",
         savings_pct: 83.0,
         subcmd_savings: &[],
@@ -189,6 +205,8 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         rtk_cmd: "rtk lint",
         rewrite_prefixes: &[
+            "yarn lint",
+            "yarn eslint",
             "npx eslint",
             "pnpm lint",
             "npx biome",
@@ -203,7 +221,7 @@ pub const RULES: &[RtkRule] = &[
     },
     RtkRule {
         rtk_cmd: "rtk prettier",
-        rewrite_prefixes: &["npx prettier", "pnpm prettier", "prettier"],
+        rewrite_prefixes: &["yarn prettier", "npx prettier", "pnpm prettier", "prettier"],
         category: "Build",
         savings_pct: 70.0,
         subcmd_savings: &[],
@@ -212,7 +230,12 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         // "next build" is stripped to "rtk next" — the build subcommand is internal
         rtk_cmd: "rtk next",
-        rewrite_prefixes: &["npx next build", "pnpm next build", "next build"],
+        rewrite_prefixes: &[
+            "yarn next build",
+            "npx next build",
+            "pnpm next build",
+            "next build",
+        ],
         category: "Build",
         savings_pct: 87.0,
         subcmd_savings: &[],
@@ -220,7 +243,7 @@ pub const RULES: &[RtkRule] = &[
     },
     RtkRule {
         rtk_cmd: "rtk vitest",
-        rewrite_prefixes: &["pnpm vitest", "npx vitest", "vitest", "jest"],
+        rewrite_prefixes: &["yarn vitest", "pnpm vitest", "npx vitest", "vitest", "jest"],
         category: "Tests",
         savings_pct: 99.0,
         subcmd_savings: &[],
@@ -228,7 +251,12 @@ pub const RULES: &[RtkRule] = &[
     },
     RtkRule {
         rtk_cmd: "rtk playwright",
-        rewrite_prefixes: &["npx playwright", "pnpm playwright", "playwright"],
+        rewrite_prefixes: &[
+            "yarn playwright",
+            "npx playwright",
+            "pnpm playwright",
+            "playwright",
+        ],
         category: "Tests",
         savings_pct: 94.0,
         subcmd_savings: &[],
@@ -236,7 +264,7 @@ pub const RULES: &[RtkRule] = &[
     },
     RtkRule {
         rtk_cmd: "rtk prisma",
-        rewrite_prefixes: &["npx prisma", "pnpm prisma", "prisma"],
+        rewrite_prefixes: &["yarn prisma", "npx prisma", "pnpm prisma", "prisma"],
         category: "Build",
         savings_pct: 88.0,
         subcmd_savings: &[],

@@ -101,6 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+* **yarn:** add yarn command support with smart delegation to specialized filters (60-99% reduction)
+* **yarn:** auto-detect known tools (vitest, tsc, eslint, biome, next, prettier, playwright) and delegate to existing RTK filters
+* **yarn:** add generic filter for yarn Classic v1 and Berry v2+ boilerplate stripping
+* **yarn:** add install/add/remove filter — strip progress phases, info, warnings (75% reduction)
+* **yarn:** add discover/rewrite rules for yarn commands and yarn-prefixed tool invocations
 * **ruby:** add RSpec test runner filter with JSON parsing and text fallback (60%+ reduction)
 * **ruby:** add RuboCop linter filter with JSON parsing, grouped by cop/severity (60%+ reduction)
 * **ruby:** add Minitest filter for `rake test` / `rails test` with state machine parser (85-90% reduction)

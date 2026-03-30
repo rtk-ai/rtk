@@ -241,6 +241,17 @@ section "Npm / Npx (new)"
 assert_help    "rtk npm"                      rtk npm
 assert_help    "rtk npx"                      rtk npx
 
+# ── 8b. Yarn ──────────────────────────────────────────
+
+section "Yarn"
+
+assert_help    "rtk yarn"                     rtk yarn
+assert_help    "rtk yarn --help"              rtk yarn --help
+
+if command -v yarn >/dev/null 2>&1; then
+    assert_ok  "rtk yarn --version"           rtk yarn --version
+fi
+
 # ── 9. Pnpm ─────────────────────────────────────────
 
 section "Pnpm"
@@ -465,6 +476,7 @@ section "Global flags"
 
 assert_ok      "rtk -u ls ."                  rtk -u ls .
 assert_ok      "rtk --skip-env npm --help"    rtk --skip-env npm --help
+assert_ok      "rtk --skip-env yarn --help"   rtk --skip-env yarn --help
 
 # ── 32. CcEconomics ─────────────────────────────────
 

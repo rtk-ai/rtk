@@ -423,6 +423,7 @@ Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://githu
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
 | `pnpm list/outdated` | `rtk pnpm ...` |
+| `yarn build/lint/install` | `rtk yarn ...` |
 
 Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
 

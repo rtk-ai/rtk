@@ -13,7 +13,7 @@ use cmds::git::{diff_cmd, gh_cmd, git, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
-    vitest_cmd,
+    vitest_cmd, yarn_cmd,
 };
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
@@ -494,6 +494,13 @@ enum Commands {
     /// npm run with filtered output (strip boilerplate)
     Npm {
         /// npm run arguments (script name + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// yarn with filtered output (strip boilerplate, route to specialized filters)
+    Yarn {
+        /// yarn arguments (subcommand/script + options)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1863,6 +1870,10 @@ fn main() -> Result<()> {
             npm_cmd::run(&args, cli.verbose, cli.skip_env)?;
         }
 
+        Commands::Yarn { args } => {
+            yarn_cmd::run(&args, cli.verbose, cli.skip_env)?;
+        }
+
         Commands::Curl { args } => {
             curl_cmd::run(&args, cli.verbose)?;
         }
@@ -2258,6 +2269,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Playwright { .. }
             | Commands::Cargo { .. }
             | Commands::Npm { .. }
+            | Commands::Yarn { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
