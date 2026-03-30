@@ -6,6 +6,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
+use super::constants::{
+    BEFORE_TOOL_KEY, CLAUDE_DIR, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON,
+};
 use super::integrity;
 use crate::core::config;
 
@@ -52,6 +56,12 @@ schema_version = 1
 # strip_lines_matching = ["^\\s*$"]
 # max_lines = 40
 "#;
+
+const RTK_MD: &str = "RTK.md";
+const CLAUDE_MD: &str = "CLAUDE.md";
+const AGENTS_MD: &str = "AGENTS.md";
+const RTK_MD_REF: &str = "@RTK.md";
+const GEMINI_MD: &str = "GEMINI.md";
 
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -301,7 +311,7 @@ fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     let hook_dir = claude_dir.join("hooks");
     fs::create_dir_all(&hook_dir)
         .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
-    let hook_path = hook_dir.join("rtk-rewrite.sh");
+    let hook_path = hook_dir.join(REWRITE_HOOK_FILE);
     Ok((hook_dir, hook_path))
 }
 
@@ -453,10 +463,11 @@ fn print_manual_instructions(hook_path: &Path, include_opencode: bool) {
     }
 }
 
-/// Remove RTK hook entry from settings.json
-/// Returns true if hook was found and removed
 fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
-    let hooks = match root.get_mut("hooks").and_then(|h| h.get_mut("PreToolUse")) {
+    let hooks = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+    {
         Some(pre_tool_use) => pre_tool_use,
         None => return false,
     };
@@ -466,19 +477,18 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         None => return false,
     };
 
-    // Find and remove RTK entry
     let original_len = pre_tool_use_array.len();
     pre_tool_use_array.retain(|entry| {
         if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    if command.contains("rtk-rewrite.sh") {
-                        return false; // Remove this entry
+                    if command.contains(REWRITE_HOOK_FILE) {
+                        return false;
                     }
                 }
             }
         }
-        true // Keep this entry
+        true
     });
 
     pre_tool_use_array.len() < original_len
@@ -488,7 +498,7 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
 /// Backs up before modification, returns true if hook was found and removed
 fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join("settings.json");
+    let settings_path = claude_dir.join(SETTINGS_JSON);
 
     if !settings_path.exists() {
         if verbose > 0 {
@@ -576,7 +586,7 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     }
 
     // 1. Remove hook file
-    let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
+    let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
     if hook_path.exists() {
         fs::remove_file(&hook_path)
             .with_context(|| format!("Failed to remove hook: {}", hook_path.display()))?;
@@ -589,7 +599,7 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     }
 
     // 2. Remove RTK.md
-    let rtk_md_path = claude_dir.join("RTK.md");
+    let rtk_md_path = claude_dir.join(RTK_MD);
     if rtk_md_path.exists() {
         fs::remove_file(&rtk_md_path)
             .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
@@ -597,15 +607,15 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     }
 
     // 3. Remove @RTK.md reference from CLAUDE.md
-    let claude_md_path = claude_dir.join("CLAUDE.md");
+    let claude_md_path = claude_dir.join(CLAUDE_MD);
     if claude_md_path.exists() {
         let content = fs::read_to_string(&claude_md_path)
             .with_context(|| format!("Failed to read CLAUDE.md: {}", claude_md_path.display()))?;
 
-        if content.contains("@RTK.md") {
+        if content.contains(RTK_MD_REF) {
             let new_content = content
                 .lines()
-                .filter(|line| !line.trim().starts_with("@RTK.md"))
+                .filter(|line| !line.trim().starts_with(RTK_MD_REF))
                 .collect::<Vec<_>>()
                 .join("\n");
 
@@ -673,7 +683,7 @@ fn uninstall_codex(global: bool, verbose: u8) -> Result<()> {
 fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
     let mut removed = Vec::new();
 
-    let rtk_md_path = codex_dir.join("RTK.md");
+    let rtk_md_path = codex_dir.join(RTK_MD);
     if rtk_md_path.exists() {
         fs::remove_file(&rtk_md_path)
             .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
@@ -683,7 +693,7 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
         removed.push(format!("RTK.md: {}", rtk_md_path.display()));
     }
 
-    let agents_md_path = codex_dir.join("AGENTS.md");
+    let agents_md_path = codex_dir.join(AGENTS_MD);
     if remove_rtk_reference_from_agents(&agents_md_path, verbose)? {
         removed.push("AGENTS.md: removed @RTK.md reference".to_string());
     }
@@ -700,7 +710,7 @@ fn patch_settings_json(
     include_opencode: bool,
 ) -> Result<PatchResult> {
     let claude_dir = resolve_claude_dir()?;
-    let settings_path = claude_dir.join("settings.json");
+    let settings_path = claude_dir.join(SETTINGS_JSON);
     let hook_command = hook_path
         .to_str()
         .context("Hook path contains invalid UTF-8")?;
@@ -830,7 +840,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
         .expect("hooks must be an object");
 
     let pre_tool_use = hooks
-        .entry("PreToolUse")
+        .entry(PRE_TOOL_USE_KEY)
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
         .expect("PreToolUse must be an array");
@@ -850,7 +860,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
 fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
     let pre_tool_use_array = match root
         .get("hooks")
-        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
         .and_then(|p| p.as_array())
     {
         Some(arr) => arr,
@@ -863,9 +873,8 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
         .any(|cmd| {
-            // Exact match OR both contain rtk-rewrite.sh
             cmd == hook_command
-                || (cmd.contains("rtk-rewrite.sh") && hook_command.contains("rtk-rewrite.sh"))
+                || (cmd.contains(REWRITE_HOOK_FILE) && hook_command.contains(REWRITE_HOOK_FILE))
         })
 }
 
@@ -898,15 +907,15 @@ fn run_default_mode(
     }
 
     let claude_dir = resolve_claude_dir()?;
-    let rtk_md_path = claude_dir.join("RTK.md");
-    let claude_md_path = claude_dir.join("CLAUDE.md");
+    let rtk_md_path = claude_dir.join(RTK_MD);
+    let claude_md_path = claude_dir.join(CLAUDE_MD);
 
     // 1. Prepare hook directory and install hook
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
     // 2. Write RTK.md
-    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
+    write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, verbose)?;
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
@@ -994,7 +1003,7 @@ fn generate_project_filters_template(verbose: u8) -> Result<()> {
 /// Generate ~/.config/rtk/filters.toml template if not present.
 fn generate_global_filters_template(verbose: u8) -> Result<()> {
     let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
-    let rtk_dir = config_dir.join("rtk");
+    let rtk_dir = config_dir.join(crate::core::constants::RTK_DATA_DIR);
     let path = rtk_dir.join("filters.toml");
 
     if path.exists() {
@@ -1095,9 +1104,9 @@ fn run_hook_only_mode(
 /// Legacy mode: full 137-line injection into CLAUDE.md
 fn run_claude_md_mode(global: bool, verbose: u8, install_opencode: bool) -> Result<()> {
     let path = if global {
-        resolve_claude_dir()?.join("CLAUDE.md")
+        resolve_claude_dir()?.join(CLAUDE_MD)
     } else {
-        PathBuf::from("CLAUDE.md")
+        PathBuf::from(CLAUDE_MD)
     };
 
     if global {
@@ -1248,9 +1257,9 @@ fn run_windsurf_mode(verbose: u8) -> Result<()> {
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
-        (codex_dir.join("AGENTS.md"), codex_dir.join("RTK.md"))
+        (codex_dir.join(AGENTS_MD), codex_dir.join(RTK_MD))
     } else {
-        (PathBuf::from("AGENTS.md"), PathBuf::from("RTK.md"))
+        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
     };
 
     if global {
@@ -1264,7 +1273,7 @@ fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
         }
     }
 
-    write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, "RTK.md", verbose)?;
+    write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, verbose)?;
     let added_ref = patch_agents_md(&agents_md_path, verbose)?;
 
     println!("\nRTK configured for Codex CLI.\n");
@@ -1375,7 +1384,7 @@ fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
     }
 
     // Check if @RTK.md already present
-    if content.contains("@RTK.md") {
+    if content.contains(RTK_MD_REF) {
         if verbose > 0 {
             eprintln!("@RTK.md reference already present in CLAUDE.md");
         }
@@ -1422,7 +1431,7 @@ fn patch_agents_md(path: &Path, verbose: u8) -> Result<bool> {
         }
     }
 
-    if content.contains("@RTK.md") {
+    if content.contains(RTK_MD_REF) {
         if verbose > 0 {
             eprintln!("@RTK.md reference already present in AGENTS.md");
         }
@@ -1455,13 +1464,13 @@ fn remove_rtk_reference_from_agents(path: &Path, verbose: u8) -> Result<bool> {
 
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read AGENTS.md: {}", path.display()))?;
-    if !content.contains("@RTK.md") {
+    if !content.contains(RTK_MD_REF) {
         return Ok(false);
     }
 
     let new_content = content
         .lines()
-        .filter(|line| !line.trim().starts_with("@RTK.md"))
+        .filter(|line| !line.trim().starts_with(RTK_MD_REF))
         .collect::<Vec<_>>()
         .join("\n");
     let cleaned = clean_double_blanks(&new_content);
@@ -1516,26 +1525,22 @@ fn remove_rtk_block(content: &str) -> (String, bool) {
     }
 }
 
-/// Resolve ~/.claude directory with proper home expansion
-fn resolve_claude_dir() -> Result<PathBuf> {
+fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
     dirs::home_dir()
-        .map(|h| h.join(".claude"))
+        .map(|h| h.join(subdir))
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
-/// Resolve ~/.codex directory with proper home expansion
-fn resolve_codex_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".codex"))
-        .context("Cannot determine home directory. Is $HOME set?")
+fn resolve_claude_dir() -> Result<PathBuf> {
+    resolve_home_subdir(CLAUDE_DIR)
 }
-/// Resolve OpenCode config directory (~/.config/opencode)
-/// OpenCode uses ~/.config/opencode on all platforms (XDG convention),
-/// NOT the macOS-native ~/Library/Application Support/.
+
+fn resolve_codex_dir() -> Result<PathBuf> {
+    resolve_home_subdir(".codex")
+}
+
 fn resolve_opencode_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".config").join("opencode"))
-        .context("Cannot determine home directory. Is $HOME set?")
+    resolve_home_subdir(".config/opencode")
 }
 
 /// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
@@ -1583,11 +1588,8 @@ fn remove_opencode_plugin(verbose: u8) -> Result<Vec<PathBuf>> {
 
 // ─── Cursor Agent support ─────────────────────────────────────────────
 
-/// Resolve ~/.cursor directory
 fn resolve_cursor_dir() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".cursor"))
-        .context("Cannot determine home directory. Is $HOME set?")
+    resolve_home_subdir(".cursor")
 }
 
 /// Install Cursor hooks: hook script + hooks.json
@@ -1602,7 +1604,7 @@ fn install_cursor_hooks(verbose: u8) -> Result<()> {
     })?;
 
     // 1. Write hook script
-    let hook_path = hooks_dir.join("rtk-rewrite.sh");
+    let hook_path = hooks_dir.join(REWRITE_HOOK_FILE);
     let hook_changed = write_if_changed(&hook_path, CURSOR_REWRITE_HOOK, "Cursor hook", verbose)?;
 
     #[cfg(unix)]
@@ -1617,7 +1619,7 @@ fn install_cursor_hooks(verbose: u8) -> Result<()> {
     }
 
     // 2. Create or patch hooks.json
-    let hooks_json_path = cursor_dir.join("hooks.json");
+    let hooks_json_path = cursor_dir.join(HOOKS_JSON);
     let patched = patch_cursor_hooks_json(&hooks_json_path, verbose)?;
 
     // Report
@@ -1701,7 +1703,7 @@ fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
         entry
             .get("command")
             .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains("rtk-rewrite.sh"))
+            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
     })
 }
 
@@ -1743,7 +1745,7 @@ fn remove_cursor_hooks(verbose: u8) -> Result<Vec<String>> {
     let mut removed = Vec::new();
 
     // 1. Remove hook script
-    let hook_path = cursor_dir.join("hooks").join("rtk-rewrite.sh");
+    let hook_path = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
     if hook_path.exists() {
         fs::remove_file(&hook_path)
             .with_context(|| format!("Failed to remove Cursor hook: {}", hook_path.display()))?;
@@ -1751,7 +1753,7 @@ fn remove_cursor_hooks(verbose: u8) -> Result<Vec<String>> {
     }
 
     // 2. Remove RTK entry from hooks.json
-    let hooks_json_path = cursor_dir.join("hooks.json");
+    let hooks_json_path = cursor_dir.join(HOOKS_JSON);
     if hooks_json_path.exists() {
         let content = fs::read_to_string(&hooks_json_path)
             .with_context(|| format!("Failed to read {}", hooks_json_path.display()))?;
@@ -1796,7 +1798,7 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
         !entry
             .get("command")
             .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains("rtk-rewrite.sh"))
+            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
     });
 
     pre_tool_use.len() < original_len
@@ -1813,10 +1815,10 @@ pub fn show_config(codex: bool) -> Result<()> {
 
 fn show_claude_config() -> Result<()> {
     let claude_dir = resolve_claude_dir()?;
-    let hook_path = claude_dir.join("hooks").join("rtk-rewrite.sh");
-    let rtk_md_path = claude_dir.join("RTK.md");
-    let global_claude_md = claude_dir.join("CLAUDE.md");
-    let local_claude_md = PathBuf::from("CLAUDE.md");
+    let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+    let rtk_md_path = claude_dir.join(RTK_MD);
+    let global_claude_md = claude_dir.join(CLAUDE_MD);
+    let local_claude_md = PathBuf::from(CLAUDE_MD);
 
     println!("rtk Configuration:\n");
 
@@ -1900,7 +1902,7 @@ fn show_claude_config() -> Result<()> {
     // Check global CLAUDE.md
     if global_claude_md.exists() {
         let content = fs::read_to_string(&global_claude_md)?;
-        if content.contains("@RTK.md") {
+        if content.contains(RTK_MD_REF) {
             println!("[ok] Global (~/.claude/CLAUDE.md): @RTK.md reference");
         } else if content.contains("<!-- rtk-instructions") {
             println!(
@@ -1926,7 +1928,7 @@ fn show_claude_config() -> Result<()> {
     }
 
     // Check settings.json
-    let settings_path = claude_dir.join("settings.json");
+    let settings_path = claude_dir.join(SETTINGS_JSON);
     if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
         if !content.trim().is_empty() {
@@ -1962,8 +1964,8 @@ fn show_claude_config() -> Result<()> {
 
     // Check Cursor hooks
     if let Ok(cursor_dir) = resolve_cursor_dir() {
-        let cursor_hook = cursor_dir.join("hooks").join("rtk-rewrite.sh");
-        let cursor_hooks_json = cursor_dir.join("hooks.json");
+        let cursor_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        let cursor_hooks_json = cursor_dir.join(HOOKS_JSON);
 
         if cursor_hook.exists() {
             #[cfg(unix)]
@@ -2041,10 +2043,10 @@ fn show_claude_config() -> Result<()> {
 
 fn show_codex_config() -> Result<()> {
     let codex_dir = resolve_codex_dir()?;
-    let global_agents_md = codex_dir.join("AGENTS.md");
-    let global_rtk_md = codex_dir.join("RTK.md");
-    let local_agents_md = PathBuf::from("AGENTS.md");
-    let local_rtk_md = PathBuf::from("RTK.md");
+    let global_agents_md = codex_dir.join(AGENTS_MD);
+    let global_rtk_md = codex_dir.join(RTK_MD);
+    let local_agents_md = PathBuf::from(AGENTS_MD);
+    let local_rtk_md = PathBuf::from(RTK_MD);
 
     println!("rtk Configuration (Codex CLI):\n");
 
@@ -2056,7 +2058,7 @@ fn show_codex_config() -> Result<()> {
 
     if global_agents_md.exists() {
         let content = fs::read_to_string(&global_agents_md)?;
-        if content.contains("@RTK.md") {
+        if content.contains(RTK_MD_REF) {
             println!("[ok] Global AGENTS.md: @RTK.md reference");
         } else if content.contains("<!-- rtk-instructions") {
             println!("[!!] Global AGENTS.md: old inline RTK block");
@@ -2075,7 +2077,7 @@ fn show_codex_config() -> Result<()> {
 
     if local_agents_md.exists() {
         let content = fs::read_to_string(&local_agents_md)?;
-        if content.contains("@RTK.md") {
+        if content.contains(RTK_MD_REF) {
             println!("[ok] Local AGENTS.md: @RTK.md reference");
         } else if content.contains("<!-- rtk-instructions") {
             println!("[!!] Local AGENTS.md: old inline RTK block");
@@ -2110,10 +2112,8 @@ const GEMINI_HOOK_SCRIPT: &str = r#"#!/bin/bash
 exec rtk hook gemini
 "#;
 
-/// Resolve the Gemini config directory (~/.gemini)
 fn resolve_gemini_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Cannot determine home directory")?;
-    Ok(home.join(".gemini"))
+    resolve_home_subdir(".gemini")
 }
 
 /// Entry point for `rtk init --gemini`
@@ -2134,7 +2134,7 @@ pub fn run_gemini(global: bool, hook_only: bool, patch_mode: PatchMode, verbose:
     let hook_dir = gemini_dir.join("hooks");
     fs::create_dir_all(&hook_dir)
         .with_context(|| format!("Failed to create hook dir: {}", hook_dir.display()))?;
-    let hook_path = hook_dir.join("rtk-hook-gemini.sh");
+    let hook_path = hook_dir.join(GEMINI_HOOK_FILE);
     write_if_changed(&hook_path, GEMINI_HOOK_SCRIPT, "Gemini hook", verbose)?;
 
     #[cfg(unix)]
@@ -2146,9 +2146,9 @@ pub fn run_gemini(global: bool, hook_only: bool, patch_mode: PatchMode, verbose:
 
     // 2. Install GEMINI.md (RTK awareness for Gemini)
     if !hook_only {
-        let gemini_md_path = gemini_dir.join("GEMINI.md");
+        let gemini_md_path = gemini_dir.join(GEMINI_MD);
         // Reuse the same slim RTK awareness content
-        write_if_changed(&gemini_md_path, RTK_SLIM, "GEMINI.md", verbose)?;
+        write_if_changed(&gemini_md_path, RTK_SLIM, GEMINI_MD, verbose)?;
     }
 
     // 3. Patch ~/.gemini/settings.json
@@ -2157,7 +2157,7 @@ pub fn run_gemini(global: bool, hook_only: bool, patch_mode: PatchMode, verbose:
     println!("\nGemini CLI hook installed (global).\n");
     println!("  Hook: {}", hook_path.display());
     if !hook_only {
-        println!("  GEMINI.md: {}", gemini_dir.join("GEMINI.md").display());
+        println!("  GEMINI.md: {}", gemini_dir.join(GEMINI_MD).display());
     }
     println!("  Restart Gemini CLI. Test with: git status\n");
     Ok(())
@@ -2170,7 +2170,7 @@ fn patch_gemini_settings(
     patch_mode: PatchMode,
     verbose: u8,
 ) -> Result<()> {
-    let settings_path = gemini_dir.join("settings.json");
+    let settings_path = gemini_dir.join(SETTINGS_JSON);
     let hook_cmd = hook_path.to_string_lossy().to_string();
 
     // Read or create settings.json
@@ -2182,8 +2182,8 @@ fn patch_gemini_settings(
         serde_json::json!({})
     };
 
-    // Check if hook already registered
-    if let Some(hooks) = settings.pointer("/hooks/BeforeTool") {
+    let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
+    if let Some(hooks) = settings.pointer(&before_tool_pointer) {
         if let Some(arr) = hooks.as_array() {
             if arr.iter().any(|h| {
                 h.pointer("/hooks/0/command")
@@ -2238,7 +2238,7 @@ fn patch_gemini_settings(
     let before_tool = hooks
         .as_object_mut()
         .context("hooks is not an object")?
-        .entry("BeforeTool")
+        .entry(BEFORE_TOOL_KEY)
         .or_insert(serde_json::json!([]));
 
     before_tool
@@ -2269,7 +2269,7 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
     };
 
     // Remove hook
-    let hook_path = gemini_dir.join("hooks").join("rtk-hook-gemini.sh");
+    let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
     if hook_path.exists() {
         fs::remove_file(&hook_path)
             .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
@@ -2277,7 +2277,7 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
     }
 
     // Remove GEMINI.md
-    let gemini_md = gemini_dir.join("GEMINI.md");
+    let gemini_md = gemini_dir.join(GEMINI_MD);
     if gemini_md.exists() {
         fs::remove_file(&gemini_md)
             .with_context(|| format!("Failed to remove {}", gemini_md.display()))?;
@@ -2285,12 +2285,13 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
     }
 
     // Remove hook from settings.json
-    let settings_path = gemini_dir.join("settings.json");
+    let settings_path = gemini_dir.join(SETTINGS_JSON);
     if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)?;
         if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+            let bt_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
             if let Some(arr) = settings
-                .pointer_mut("/hooks/BeforeTool")
+                .pointer_mut(&bt_pointer)
                 .and_then(|v| v.as_array_mut())
             {
                 let before = arr.len();

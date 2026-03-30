@@ -1,11 +1,8 @@
-//! The master list of shell commands RTK knows how to rewrite.
-
 use super::report::RtkStatus;
 
-/// A rule mapping a shell command pattern to its RTK equivalent.
 pub struct RtkRule {
+    pub pattern: &'static str,
     pub rtk_cmd: &'static str,
-    /// Original command prefixes to replace with rtk_cmd (longest first for correct matching).
     pub rewrite_prefixes: &'static [&'static str],
     pub category: &'static str,
     pub savings_pct: f64,
@@ -13,85 +10,9 @@ pub struct RtkRule {
     pub subcmd_status: &'static [(&'static str, RtkStatus)],
 }
 
-// Patterns ordered to match RULES indices exactly.
-pub const PATTERNS: &[&str] = &[
-    r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
-    r"^gh\s+(pr|issue|run|repo|api|release)",
-    r"^cargo\s+(build|test|clippy|check|fmt|install)",
-    r"^pnpm\s+(list|ls|outdated|install)",
-    r"^npm\s+(run|exec)",
-    r"^npx\s+",
-    r"^(cat|head|tail)\s+",
-    r"^(rg|grep)\s+",
-    r"^ls(\s|$)",
-    r"^find\s+",
-    r"^(npx\s+|pnpm\s+)?tsc(\s|$)",
-    r"^(npx\s+|pnpm\s+)?(eslint|biome|lint)(\s|$)",
-    r"^(npx\s+|pnpm\s+)?prettier",
-    r"^(npx\s+|pnpm\s+)?next\s+build",
-    r"^(pnpm\s+|npx\s+)?(vitest|jest|test)(\s|$)",
-    r"^(npx\s+|pnpm\s+)?playwright",
-    r"^(npx\s+|pnpm\s+)?prisma",
-    r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
-    r"^kubectl\s+(get|logs|describe|apply)",
-    r"^tree(\s|$)",
-    r"^diff\s+",
-    r"^curl\s+",
-    r"^wget\s+",
-    r"^(python3?\s+-m\s+)?mypy(\s|$)",
-    // Python tooling
-    r"^ruff\s+(check|format)",
-    r"^(python\s+-m\s+)?pytest(\s|$)",
-    r"^(pip3?|uv\s+pip)\s+(list|outdated|install)",
-    // Go tooling
-    r"^go\s+(test|build|vet)",
-    r"^golangci-lint(\s|$)",
-    // Ruby tooling
-    r"^bundle\s+(install|update)\b",
-    r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
-    r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
-    r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
-    // AWS CLI
-    r"^aws\s+",
-    // PostgreSQL
-    r"^psql(\s|$)",
-    // TOML-filtered commands
-    r"^ansible-playbook\b",
-    r"^brew\s+(install|upgrade)\b",
-    r"^composer\s+(install|update|require)\b",
-    r"^df(\s|$)",
-    r"^dotnet\s+build\b",
-    r"^du\b",
-    r"^fail2ban-client\b",
-    r"^gcloud\b",
-    r"^hadolint\b",
-    r"^helm\b",
-    r"^iptables\b",
-    r"^make\b",
-    r"^markdownlint\b",
-    r"^mix\s+(compile|format)(\s|$)",
-    r"^mvn\s+(compile|package|clean|install)\b",
-    r"^ping\b",
-    r"^pio\s+run",
-    r"^poetry\s+(install|lock|update)\b",
-    r"^pre-commit\b",
-    r"^ps(\s|$)",
-    r"^quarto\s+render",
-    r"^rsync\b",
-    r"^shellcheck\b",
-    r"^shopify\s+theme\s+(push|pull)",
-    r"^sops\b",
-    r"^swift\s+(build|test)\b",
-    r"^systemctl\s+status\b",
-    r"^terraform\s+plan",
-    r"^tofu\s+(fmt|init|plan|validate)(\s|$)",
-    r"^trunk\s+build",
-    r"^uv\s+(sync|pip\s+install)\b",
-    r"^yamllint\b",
-];
-
 pub const RULES: &[RtkRule] = &[
     RtkRule {
+        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git"],
         category: "Git",
@@ -105,6 +26,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
         rtk_cmd: "rtk gh",
         rewrite_prefixes: &["gh"],
         category: "GitHub",
@@ -113,6 +35,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
         rtk_cmd: "rtk cargo",
         rewrite_prefixes: &["cargo"],
         category: "Cargo",
@@ -121,6 +44,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[("fmt", RtkStatus::Passthrough)],
     },
     RtkRule {
+        pattern: r"^pnpm\s+(list|ls|outdated|install)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
@@ -129,6 +53,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^npm\s+(run|exec)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
@@ -137,6 +62,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^npx\s+",
         rtk_cmd: "rtk npx",
         rewrite_prefixes: &["npx"],
         category: "PackageManager",
@@ -145,6 +71,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(cat|head|tail)\s+",
         rtk_cmd: "rtk read",
         rewrite_prefixes: &["cat", "head", "tail"],
         category: "Files",
@@ -153,6 +80,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(rg|grep)\s+",
         rtk_cmd: "rtk grep",
         rewrite_prefixes: &["rg", "grep"],
         category: "Files",
@@ -161,6 +89,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^ls(\s|$)",
         rtk_cmd: "rtk ls",
         rewrite_prefixes: &["ls"],
         category: "Files",
@@ -169,6 +98,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^find\s+",
         rtk_cmd: "rtk find",
         rewrite_prefixes: &["find"],
         category: "Files",
@@ -177,7 +107,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        // Longest prefixes first for correct matching
+        pattern: r"^(npx\s+|pnpm\s+)?tsc(\s|$)",
         rtk_cmd: "rtk tsc",
         rewrite_prefixes: &["pnpm tsc", "npx tsc", "tsc"],
         category: "Build",
@@ -186,6 +116,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(npx\s+|pnpm\s+)?(eslint|biome|lint)(\s|$)",
         rtk_cmd: "rtk lint",
         rewrite_prefixes: &[
             "npx eslint",
@@ -201,6 +132,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(npx\s+|pnpm\s+)?prettier",
         rtk_cmd: "rtk prettier",
         rewrite_prefixes: &["npx prettier", "pnpm prettier", "prettier"],
         category: "Build",
@@ -209,7 +141,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        // "next build" is stripped to "rtk next" — the build subcommand is internal
+        pattern: r"^(npx\s+|pnpm\s+)?next\s+build",
         rtk_cmd: "rtk next",
         rewrite_prefixes: &["npx next build", "pnpm next build", "next build"],
         category: "Build",
@@ -218,6 +150,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(pnpm\s+|npx\s+)?(vitest|jest|test)(\s|$)",
         rtk_cmd: "rtk vitest",
         rewrite_prefixes: &["pnpm vitest", "npx vitest", "vitest", "jest"],
         category: "Tests",
@@ -226,6 +159,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(npx\s+|pnpm\s+)?playwright",
         rtk_cmd: "rtk playwright",
         rewrite_prefixes: &["npx playwright", "pnpm playwright", "playwright"],
         category: "Tests",
@@ -234,6 +168,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(npx\s+|pnpm\s+)?prisma",
         rtk_cmd: "rtk prisma",
         rewrite_prefixes: &["npx prisma", "pnpm prisma", "prisma"],
         category: "Build",
@@ -242,6 +177,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
         rtk_cmd: "rtk docker",
         rewrite_prefixes: &["docker"],
         category: "Infra",
@@ -250,6 +186,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^kubectl\s+(get|logs|describe|apply)",
         rtk_cmd: "rtk kubectl",
         rewrite_prefixes: &["kubectl"],
         category: "Infra",
@@ -258,6 +195,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^tree(\s|$)",
         rtk_cmd: "rtk tree",
         rewrite_prefixes: &["tree"],
         category: "Files",
@@ -266,6 +204,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^diff\s+",
         rtk_cmd: "rtk diff",
         rewrite_prefixes: &["diff"],
         category: "Files",
@@ -274,6 +213,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^curl\s+",
         rtk_cmd: "rtk curl",
         rewrite_prefixes: &["curl"],
         category: "Network",
@@ -282,6 +222,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^wget\s+",
         rtk_cmd: "rtk wget",
         rewrite_prefixes: &["wget"],
         category: "Network",
@@ -290,6 +231,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",
         rtk_cmd: "rtk mypy",
         rewrite_prefixes: &["python3 -m mypy", "python -m mypy", "mypy"],
         category: "Build",
@@ -297,8 +239,8 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    // Python tooling
     RtkRule {
+        pattern: r"^ruff\s+(check|format)",
         rtk_cmd: "rtk ruff",
         rewrite_prefixes: &["ruff"],
         category: "Python",
@@ -307,6 +249,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(python\s+-m\s+)?pytest(\s|$)",
         rtk_cmd: "rtk pytest",
         rewrite_prefixes: &["python -m pytest", "pytest"],
         category: "Python",
@@ -315,6 +258,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install)",
         rtk_cmd: "rtk pip",
         rewrite_prefixes: &["pip3", "pip", "uv pip"],
         category: "Python",
@@ -322,8 +266,8 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[("list", 75.0), ("outdated", 80.0)],
         subcmd_status: &[],
     },
-    // Go tooling
     RtkRule {
+        pattern: r"^go\s+(test|build|vet)",
         rtk_cmd: "rtk go",
         rewrite_prefixes: &["go"],
         category: "Go",
@@ -332,6 +276,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^golangci-lint(\s|$)",
         rtk_cmd: "rtk golangci-lint",
         rewrite_prefixes: &["golangci-lint", "golangci"],
         category: "Go",
@@ -339,8 +284,8 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    // Ruby tooling
     RtkRule {
+        pattern: r"^bundle\s+(install|update)\b",
         rtk_cmd: "rtk bundle",
         rewrite_prefixes: &["bundle"],
         category: "Ruby",
@@ -349,6 +294,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
         rtk_cmd: "rtk rake",
         rewrite_prefixes: &[
             "bundle exec rails",
@@ -363,6 +309,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
         rtk_cmd: "rtk rspec",
         rewrite_prefixes: &["bundle exec rspec", "bin/rspec", "rspec"],
         category: "Tests",
@@ -371,6 +318,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
         rtk_cmd: "rtk rubocop",
         rewrite_prefixes: &["bundle exec rubocop", "rubocop"],
         category: "Build",
@@ -378,8 +326,8 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    // AWS CLI
     RtkRule {
+        pattern: r"^aws\s+",
         rtk_cmd: "rtk aws",
         rewrite_prefixes: &["aws"],
         category: "Infra",
@@ -387,8 +335,8 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    // PostgreSQL
     RtkRule {
+        pattern: r"^psql(\s|$)",
         rtk_cmd: "rtk psql",
         rewrite_prefixes: &["psql"],
         category: "Infra",
@@ -396,8 +344,8 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
-    // TOML-filtered commands
     RtkRule {
+        pattern: r"^ansible-playbook\b",
         rtk_cmd: "rtk ansible-playbook",
         rewrite_prefixes: &["ansible-playbook"],
         category: "Infra",
@@ -406,6 +354,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^brew\s+(install|upgrade)\b",
         rtk_cmd: "rtk brew",
         rewrite_prefixes: &["brew"],
         category: "PackageManager",
@@ -414,6 +363,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^composer\s+(install|update|require)\b",
         rtk_cmd: "rtk composer",
         rewrite_prefixes: &["composer"],
         category: "PackageManager",
@@ -422,6 +372,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^df(\s|$)",
         rtk_cmd: "rtk df",
         rewrite_prefixes: &["df"],
         category: "System",
@@ -430,6 +381,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^dotnet\s+build\b",
         rtk_cmd: "rtk dotnet",
         rewrite_prefixes: &["dotnet"],
         category: "Build",
@@ -438,6 +390,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^du\b",
         rtk_cmd: "rtk du",
         rewrite_prefixes: &["du"],
         category: "System",
@@ -446,6 +399,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^fail2ban-client\b",
         rtk_cmd: "rtk fail2ban-client",
         rewrite_prefixes: &["fail2ban-client"],
         category: "Infra",
@@ -454,6 +408,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^gcloud\b",
         rtk_cmd: "rtk gcloud",
         rewrite_prefixes: &["gcloud"],
         category: "Infra",
@@ -462,6 +417,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^hadolint\b",
         rtk_cmd: "rtk hadolint",
         rewrite_prefixes: &["hadolint"],
         category: "Build",
@@ -470,6 +426,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^helm\b",
         rtk_cmd: "rtk helm",
         rewrite_prefixes: &["helm"],
         category: "Infra",
@@ -478,6 +435,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^iptables\b",
         rtk_cmd: "rtk iptables",
         rewrite_prefixes: &["iptables"],
         category: "Infra",
@@ -486,6 +444,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^make\b",
         rtk_cmd: "rtk make",
         rewrite_prefixes: &["make"],
         category: "Build",
@@ -494,6 +453,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^markdownlint\b",
         rtk_cmd: "rtk markdownlint",
         rewrite_prefixes: &["markdownlint"],
         category: "Build",
@@ -502,6 +462,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^mix\s+(compile|format)(\s|$)",
         rtk_cmd: "rtk mix",
         rewrite_prefixes: &["mix"],
         category: "Build",
@@ -510,6 +471,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^mvn\s+(compile|package|clean|install)\b",
         rtk_cmd: "rtk mvn",
         rewrite_prefixes: &["mvn"],
         category: "Build",
@@ -518,6 +480,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^ping\b",
         rtk_cmd: "rtk ping",
         rewrite_prefixes: &["ping"],
         category: "Network",
@@ -526,6 +489,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^pio\s+run",
         rtk_cmd: "rtk pio",
         rewrite_prefixes: &["pio"],
         category: "Build",
@@ -534,6 +498,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^poetry\s+(install|lock|update)\b",
         rtk_cmd: "rtk poetry",
         rewrite_prefixes: &["poetry"],
         category: "Python",
@@ -542,6 +507,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^pre-commit\b",
         rtk_cmd: "rtk pre-commit",
         rewrite_prefixes: &["pre-commit"],
         category: "Build",
@@ -550,6 +516,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^ps(\s|$)",
         rtk_cmd: "rtk ps",
         rewrite_prefixes: &["ps"],
         category: "System",
@@ -558,6 +525,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^quarto\s+render",
         rtk_cmd: "rtk quarto",
         rewrite_prefixes: &["quarto"],
         category: "Build",
@@ -566,6 +534,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^rsync\b",
         rtk_cmd: "rtk rsync",
         rewrite_prefixes: &["rsync"],
         category: "Network",
@@ -574,6 +543,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^shellcheck\b",
         rtk_cmd: "rtk shellcheck",
         rewrite_prefixes: &["shellcheck"],
         category: "Build",
@@ -582,6 +552,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^shopify\s+theme\s+(push|pull)",
         rtk_cmd: "rtk shopify",
         rewrite_prefixes: &["shopify"],
         category: "Build",
@@ -590,6 +561,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^sops\b",
         rtk_cmd: "rtk sops",
         rewrite_prefixes: &["sops"],
         category: "Infra",
@@ -598,6 +570,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^swift\s+(build|test)\b",
         rtk_cmd: "rtk swift",
         rewrite_prefixes: &["swift"],
         category: "Build",
@@ -606,6 +579,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^systemctl\s+status\b",
         rtk_cmd: "rtk systemctl",
         rewrite_prefixes: &["systemctl"],
         category: "System",
@@ -614,6 +588,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^terraform\s+plan",
         rtk_cmd: "rtk terraform",
         rewrite_prefixes: &["terraform"],
         category: "Infra",
@@ -622,6 +597,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^tofu\s+(fmt|init|plan|validate)(\s|$)",
         rtk_cmd: "rtk tofu",
         rewrite_prefixes: &["tofu"],
         category: "Infra",
@@ -630,6 +606,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^trunk\s+build",
         rtk_cmd: "rtk trunk",
         rewrite_prefixes: &["trunk"],
         category: "Build",
@@ -638,6 +615,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^uv\s+(sync|pip\s+install)\b",
         rtk_cmd: "rtk uv",
         rewrite_prefixes: &["uv"],
         category: "Python",
@@ -646,6 +624,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^yamllint\b",
         rtk_cmd: "rtk yamllint",
         rewrite_prefixes: &["yamllint"],
         category: "Build",
@@ -655,7 +634,6 @@ pub const RULES: &[RtkRule] = &[
     },
 ];
 
-/// Commands to ignore (shell builtins, trivial, already rtk).
 pub const IGNORED_PREFIXES: &[&str] = &[
     "cd ",
     "cd\t",

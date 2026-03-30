@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::process::Command;
 
 use crate::core::tracking;
-use crate::core::utils::exit_code_from_output;
+use crate::core::utils::{exit_code_from_output, exit_code_from_status};
 
 pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
     if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
@@ -18,6 +18,8 @@ pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i3
 pub struct RunOptions<'a> {
     pub tee_label: Option<&'a str>,
     pub filter_stdout_only: bool,
+    pub skip_filter_on_failure: bool,
+    pub no_trailing_newline: bool,
 }
 
 impl<'a> RunOptions<'a> {
@@ -37,6 +39,16 @@ impl<'a> RunOptions<'a> {
 
     pub fn tee(mut self, label: &'a str) -> Self {
         self.tee_label = Some(label);
+        self
+    }
+
+    pub fn early_exit_on_failure(mut self) -> Self {
+        self.skip_filter_on_failure = true;
+        self
+    }
+
+    pub fn no_trailing_newline(mut self) -> Self {
+        self.no_trailing_newline = true;
         self
     }
 }
@@ -60,6 +72,22 @@ where
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
+    let exit_code = exit_code_from_output(&output, tool_name);
+
+    // On failure, skip filtering and return early (e.g. psql error messages
+    // containing '|' would be misinterpreted by the table parser)
+    if opts.skip_filter_on_failure && exit_code != 0 {
+        if !stderr.is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track(
+            &format!("{} {}", tool_name, args_display),
+            &format!("rtk {} {}", tool_name, args_display),
+            &raw,
+            stderr.as_ref(),
+        );
+        return Ok(exit_code);
+    }
 
     let text_to_filter = if opts.filter_stdout_only {
         &stdout
@@ -68,10 +96,10 @@ where
     };
     let filtered = filter_fn(text_to_filter);
 
-    let exit_code = exit_code_from_output(&output, tool_name);
-
     if let Some(label) = opts.tee_label {
         print_with_hint(&filtered, &raw, label, exit_code);
+    } else if opts.no_trailing_newline {
+        print!("{}", filtered);
     } else {
         println!("{}", filtered);
     }
@@ -80,12 +108,34 @@ where
         eprintln!("{}", stderr.trim());
     }
 
+    let raw_for_tracking = if opts.filter_stdout_only {
+        stdout.as_ref()
+    } else {
+        raw.as_str()
+    };
     timer.track(
         &format!("{} {}", tool_name, args_display),
         &format!("rtk {} {}", tool_name, args_display),
-        &raw,
+        raw_for_tracking,
         &filtered,
     );
 
     Ok(exit_code)
+}
+
+pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    if verbose > 0 {
+        eprintln!("{} passthrough: {:?}", tool, args);
+    }
+    let status = crate::core::utils::resolved_command(tool)
+        .args(args)
+        .status()
+        .with_context(|| format!("Failed to run {}", tool))?;
+    let args_str = tracking::args_display(args);
+    timer.track_passthrough(
+        &format!("{} {}", tool, args_str),
+        &format!("rtk {} {} (passthrough)", tool, args_str),
+    );
+    Ok(exit_code_from_status(&status, tool))
 }
