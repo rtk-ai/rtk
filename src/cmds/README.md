@@ -189,7 +189,7 @@ Adding a new filter or command requires changes in multiple places. For TOML-vs-
    - Add `.tee("label")` when the filter parses structured output (enables raw output recovery on failure)
    - **Exit codes**: handled automatically by `run_filtered()` — just return its result
 2. **Register module**:
-   - Add `pub mod mycmd_cmd;` to the ecosystem's `mod.rs`
+   - Ecosystem `mod.rs` files use `automod::dir!()` — any `.rs` file in the directory becomes a public module automatically. No manual `pub mod` needed, but be aware: WIP or helper files will also be exposed. Only commit command-ready modules.
    - Add variant to `Commands` enum in `main.rs` with `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]`
    - Add routing match arm in `main.rs`: `Commands::Mycmd { args } => mycmd_cmd::run(&args, cli.verbose)?,`
 3. **Add rewrite pattern** — Entry in `src/discover/rules.rs` (PATTERNS + RULES arrays at matching index) so hooks auto-rewrite the command
