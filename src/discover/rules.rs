@@ -22,7 +22,7 @@ pub const PATTERNS: &[&str] = &[
     r"^(cat|head|tail)\s+",
     r"^(rg|grep)\s+",
     r"^ls(\s|$)",
-    r"^find\s+",
+    r"^(find|fd)\s+",
     r"^(npx\s+|pnpm\s+)?tsc(\s|$)",
     r"^(npx\s+|pnpm\s+)?(eslint|biome|lint)(\s|$)",
     r"^(npx\s+|pnpm\s+)?prettier",
@@ -168,7 +168,7 @@ pub const RULES: &[RtkRule] = &[
     },
     RtkRule {
         rtk_cmd: "rtk find",
-        rewrite_prefixes: &["find"],
+        rewrite_prefixes: &["find", "fd"],
         category: "Files",
         savings_pct: 70.0,
         subcmd_savings: &[],
