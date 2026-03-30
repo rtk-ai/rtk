@@ -46,3 +46,5 @@ claudedocs
 
 # icm 
 .fastembed_cache/
+.omx/
+hooks/CLAUDE.md

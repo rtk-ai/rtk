@@ -142,13 +142,25 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     // gt passes unknown subcommands to git, so "gt status" = "git status".
     // Route known git commands to RTK's git filters for token savings.
     match subcommand.as_ref() {
-        "status" => crate::git::run(crate::git::GitCommand::Status, &rest, None, verbose, &[]),
-        "diff" => crate::git::run(crate::git::GitCommand::Diff, &rest, None, verbose, &[]),
-        "show" => crate::git::run(crate::git::GitCommand::Show, &rest, None, verbose, &[]),
-        "add" => crate::git::run(crate::git::GitCommand::Add, &rest, None, verbose, &[]),
-        "push" => crate::git::run(crate::git::GitCommand::Push, &rest, None, verbose, &[]),
-        "pull" => crate::git::run(crate::git::GitCommand::Pull, &rest, None, verbose, &[]),
-        "fetch" => crate::git::run(crate::git::GitCommand::Fetch, &rest, None, verbose, &[]),
+        "status" => {
+            crate::git::run(crate::git::GitCommand::Status, &rest, None, verbose, &[]).map(|_| 0)
+        }
+        "diff" => {
+            crate::git::run(crate::git::GitCommand::Diff, &rest, None, verbose, &[]).map(|_| 0)
+        }
+        "show" => {
+            crate::git::run(crate::git::GitCommand::Show, &rest, None, verbose, &[]).map(|_| 0)
+        }
+        "add" => crate::git::run(crate::git::GitCommand::Add, &rest, None, verbose, &[]).map(|_| 0),
+        "push" => {
+            crate::git::run(crate::git::GitCommand::Push, &rest, None, verbose, &[]).map(|_| 0)
+        }
+        "pull" => {
+            crate::git::run(crate::git::GitCommand::Pull, &rest, None, verbose, &[]).map(|_| 0)
+        }
+        "fetch" => {
+            crate::git::run(crate::git::GitCommand::Fetch, &rest, None, verbose, &[]).map(|_| 0)
+        }
         "stash" => {
             let stash_sub = rest.first().cloned();
             let stash_args = rest.get(1..).unwrap_or(&[]);
@@ -161,8 +173,11 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
                 verbose,
                 &[],
             )
+            .map(|_| 0)
         }
-        "worktree" => crate::git::run(crate::git::GitCommand::Worktree, &rest, None, verbose, &[]),
+        "worktree" => {
+            crate::git::run(crate::git::GitCommand::Worktree, &rest, None, verbose, &[]).map(|_| 0)
+        }
         _ => passthrough_gt(&subcommand, &rest, verbose),
     }
 }

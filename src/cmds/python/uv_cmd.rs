@@ -1,11 +1,12 @@
 use crate::cmds::js::lint_cmd;
 use crate::cmds::python::{pip_cmd, pytest_cmd, ruff_cmd};
 use crate::core::tracking;
+use crate::core::utils::exit_code_from_output;
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         anyhow::bail!("uv: no subcommand specified");
     }
@@ -18,7 +19,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 }
 
-fn run_run(args: &[String], verbose: u8) -> Result<()> {
+fn run_run(args: &[String], verbose: u8) -> Result<i32> {
     if let Some((tool, start_idx)) = routed_uv_run_tool(args) {
         let rest = &args[start_idx..];
         return run_routed_uv_tool(tool, rest, verbose);
@@ -27,7 +28,7 @@ fn run_run(args: &[String], verbose: u8) -> Result<()> {
     run_passthrough_with_prefix("run", args, verbose)
 }
 
-fn run_routed_uv_tool(tool: &str, args: &[String], verbose: u8) -> Result<()> {
+fn run_routed_uv_tool(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
     match tool {
         "pytest" => pytest_cmd::run(args, verbose),
         "ruff" => ruff_cmd::run(args, verbose),
@@ -72,7 +73,7 @@ fn is_python_executable(candidate: &str) -> bool {
     matches!(file_name, "python" | "python3")
 }
 
-fn run_sync(args: &[String], verbose: u8) -> Result<()> {
+fn run_sync(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("uv");
@@ -90,11 +91,7 @@ fn run_sync(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
     let filtered = filter_uv_sync_output(&raw);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
+    let exit_code = exit_code_from_output(&output, "uv sync");
 
     if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "uv_sync", exit_code) {
         println!("{}\n{}", filtered, hint);
@@ -109,21 +106,17 @@ fn run_sync(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    Ok(exit_code)
 }
 
-fn run_passthrough_with_prefix(prefix: &str, args: &[String], verbose: u8) -> Result<()> {
+fn run_passthrough_with_prefix(prefix: &str, args: &[String], verbose: u8) -> Result<i32> {
     let mut all_args = Vec::with_capacity(args.len() + 1);
     all_args.push(prefix.to_string());
     all_args.extend(args.iter().cloned());
     run_passthrough(&all_args, verbose)
 }
 
-fn run_passthrough(args: &[String], verbose: u8) -> Result<()> {
+fn run_passthrough(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = Command::new("uv");
@@ -153,11 +146,7 @@ fn run_passthrough(args: &[String], verbose: u8) -> Result<()> {
         &raw,
     );
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    Ok(exit_code_from_output(&output, "uv"))
 }
 
 fn filter_uv_sync_output(output: &str) -> String {

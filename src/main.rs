@@ -1422,11 +1422,13 @@ fn run_cli() -> Result<i32> {
                     &global_args,
                 )?,
                 GitCommands::Other(args) => git::run_passthrough(&args, &global_args, cli.verbose)?,
-            }
+            };
+            0
         }
 
         Commands::Gh { subcommand, args } => {
-            gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
+            gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?;
+            0
         }
 
         Commands::Aws { subcommand, args } => aws_cmd::run(&subcommand, &args, cli.verbose)?,
@@ -1917,9 +1919,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
-        Commands::Uv { args } => {
-            uv_cmd::run(&args, cli.verbose)?;
-        }
+        Commands::Uv { args } => uv_cmd::run(&args, cli.verbose)?,
 
         Commands::Go { command } => match command {
             GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,
