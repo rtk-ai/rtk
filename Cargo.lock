@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "rtk"
-version = "0.33.1"
+version = "0.34.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -900,6 +900,7 @@ dependencies = [
  "colored",
  "dirs",
  "flate2",
+ "getrandom 0.4.2",
  "hostname",
  "ignore",
  "lazy_static",
