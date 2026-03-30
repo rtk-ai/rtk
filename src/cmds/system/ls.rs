@@ -340,8 +340,14 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
         let (entries, summary) = compact_ls(input, false);
-        assert!(!entries.contains("Summary:"), "entries must not contain summary");
-        assert!(summary.contains("Summary:"), "summary must contain the icon");
+        assert!(
+            !entries.contains("Summary:"),
+            "entries must not contain summary"
+        );
+        assert!(
+            summary.contains("Summary:"),
+            "summary must contain the icon"
+        );
     }
 
     #[test]
