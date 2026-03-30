@@ -25,15 +25,20 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         c
     };
 
-    // Force short traceback and quiet mode for compact output
-    let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
-    let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
+    // --collect-only shows test tree, not test results — skip -q/--tb injection
+    let collect_only = args.iter().any(|a| a == "--collect-only" || a == "--co");
 
-    if !has_tb_flag {
-        cmd.arg("--tb=short");
-    }
-    if !has_quiet_flag {
-        cmd.arg("-q");
+    if !collect_only {
+        // Force short traceback and quiet mode for compact output
+        let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
+        let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
+
+        if !has_tb_flag {
+            cmd.arg("--tb=short");
+        }
+        if !has_quiet_flag {
+            cmd.arg("-q");
+        }
     }
 
     for arg in args {
@@ -41,7 +46,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: pytest --tb=short -q {}", args.join(" "));
+        eprintln!("Running: {:?}", cmd);
     }
 
     let output = cmd
@@ -52,7 +57,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    let filtered = filter_pytest_output(&stdout);
+    let filtered = if collect_only {
+        filter_collect_only_output(&stdout)
+    } else {
+        filter_pytest_output(&stdout)
+    };
 
     let exit_code = output
         .status
@@ -162,6 +171,52 @@ fn filter_pytest_output(output: &str) -> String {
 
     // Build compact output
     build_pytest_summary(&summary_line, &test_files, &failures)
+}
+
+/// Parse pytest --collect-only output, preserving the test tree
+fn filter_collect_only_output(output: &str) -> String {
+    let mut tree_lines: Vec<&str> = Vec::new();
+    let mut collected_count: Option<usize> = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        // Parse "collected N items" line
+        if trimmed.starts_with("collected ") {
+            if let Some(n) = trimmed
+                .strip_prefix("collected ")
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|n| n.parse::<usize>().ok())
+            {
+                collected_count = Some(n);
+            }
+            continue;
+        }
+
+        // Collect tree lines (indented or not, starting with <)
+        if trimmed.starts_with('<') {
+            tree_lines.push(line);
+            continue;
+        }
+    }
+
+    let count = collected_count.unwrap_or(0);
+
+    if count == 0 && tree_lines.is_empty() {
+        return "Pytest: 0 tests collected".to_string();
+    }
+
+    let mut result = format!("Pytest: {} tests collected", count);
+
+    if !tree_lines.is_empty() {
+        result.push('\n');
+        for line in &tree_lines {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    result.trim().to_string()
 }
 
 fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[String]) -> String {
@@ -356,6 +411,43 @@ collected 0 items
 
         let result = filter_pytest_output(output);
         assert!(result.contains("No tests collected"));
+    }
+
+    #[test]
+    fn test_filter_collect_only() {
+        let output = r#"=== test session starts ===
+collected 2 items
+
+<Dir project>
+  <Package tests>
+    <Module test_cli.py>
+      <Function test_default_greeting>
+      <Function test_name_argument>
+
+=== 2 tests collected in 0.04s ==="#;
+
+        let result = filter_collect_only_output(output);
+        assert!(
+            result.contains("2 tests collected"),
+            "Expected '2 tests collected', got: {}",
+            result
+        );
+        assert!(result.contains("<Function test_default_greeting>"));
+        assert!(result.contains("<Function test_name_argument>"));
+        assert!(result.contains("<Module test_cli.py>"));
+        assert!(!result.contains("No tests collected"));
+    }
+
+    #[test]
+    fn test_filter_collect_only_zero_items() {
+        let input = r#"=== test session starts ===
+platform linux -- Python 3.12.3
+collected 0 items
+
+=== no tests ran in 0.01s ==="#;
+
+        let result = filter_collect_only_output(input);
+        assert_eq!(result, "Pytest: 0 tests collected");
     }
 
     #[test]
