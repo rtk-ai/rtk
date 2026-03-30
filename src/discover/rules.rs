@@ -387,7 +387,10 @@ pub const RULES: &[RtkRule] = &[
         category: "Infra",
         savings_pct: 75.0,
         subcmd_savings: &[("diff", 80.0), ("synth", 80.0), ("deploy", 70.0)],
-        subcmd_status: &[],
+        subcmd_status: &[
+            ("destroy", RtkStatus::Passthrough),
+            ("bootstrap", RtkStatus::Passthrough),
+        ],
     },
     // AWS CLI
     RtkRule {

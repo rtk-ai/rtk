@@ -1022,6 +1022,7 @@ enum CdkCommands {
         args: Vec<String>,
     },
     /// CDK synth with compact output (80% token reduction)
+    #[command(alias = "synthesize")]
     Synth {
         /// Additional cdk synth arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
