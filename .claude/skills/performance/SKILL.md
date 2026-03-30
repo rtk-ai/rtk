@@ -8,6 +8,12 @@ triggers:
   - "benchmark"
   - "binary size"
   - "memory usage"
+allowed-tools:
+  - Bash
+  - Read
+  - Grep
+effort: medium
+tags: [performance, benchmark, startup, binary-size, memory, rtk]
 ---
 
 # RTK Performance Analysis

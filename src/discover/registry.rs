@@ -2287,4 +2287,50 @@ mod tests {
         assert_eq!(strip_git_global_opts("git status"), "git status");
         assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
     }
+
+    // --- #wc: wc filter was silently ignored by the hook ---
+
+    #[test]
+    fn test_classify_wc_supported() {
+        // BUG: "wc " was in IGNORED_PREFIXES despite wc_cmd.rs having a full filter.
+        // This test documents the bug: it must FAIL before the fix and PASS after.
+        assert_eq!(
+            classify_command("wc -l src/main.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk wc",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_wc_multi_file() {
+        assert_eq!(
+            classify_command("wc src/*.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk wc",
+                category: "Files",
+                estimated_savings_pct: 60.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wc() {
+        assert_eq!(
+            rewrite_command("wc -l src/main.rs", &[]),
+            Some("rtk wc -l src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_wc_multi_file() {
+        assert_eq!(
+            rewrite_command("wc src/*.rs", &[]),
+            Some("rtk wc src/*.rs".into())
+        );
+    }
 }
