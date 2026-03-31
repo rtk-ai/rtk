@@ -81,34 +81,73 @@ struct MonthlyEntry {
     metrics: CcusageMetrics,
 }
 
-// ── Public API ──
-
-/// Check if ccusage binary exists in PATH
-fn binary_exists() -> bool {
-    tool_exists("ccusage")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CcusageRunner {
+    Binary,
+    Bunx,
+    PnpmDlx,
+    YarnDlx,
+    Npx,
 }
 
-/// Build the ccusage command, falling back to npx if binary not in PATH
+impl CcusageRunner {
+    fn command_name(self) -> &'static str {
+        match self {
+            Self::Binary => "ccusage",
+            Self::Bunx => "bunx",
+            Self::PnpmDlx => "pnpm",
+            Self::YarnDlx => "yarn",
+            Self::Npx => "npx",
+        }
+    }
+
+    fn command_args(self) -> &'static [&'static str] {
+        match self {
+            Self::Binary => &[],
+            Self::Bunx => &["ccusage"],
+            Self::PnpmDlx => &["dlx", "ccusage"],
+            Self::YarnDlx => &["dlx", "ccusage"],
+            Self::Npx => &["--yes", "ccusage"],
+        }
+    }
+
+    fn build_command(self) -> Command {
+        let mut cmd = resolved_command(self.command_name());
+        cmd.args(self.command_args());
+        cmd
+    }
+}
+
+// ── Public API ──
+
+fn resolve_runner() -> Option<CcusageRunner> {
+    resolve_runner_with(tool_exists)
+}
+
+fn resolve_runner_with<F>(tool_exists: F) -> Option<CcusageRunner>
+where
+    F: Fn(&str) -> bool,
+{
+    [
+        CcusageRunner::Binary,
+        CcusageRunner::Bunx,
+        CcusageRunner::PnpmDlx,
+        CcusageRunner::YarnDlx,
+        CcusageRunner::Npx,
+    ]
+    .into_iter()
+    .find(|runner| tool_exists(runner.command_name()))
+}
+
+/// Build the ccusage command using the best available runner.
 fn build_command() -> Option<Command> {
-    if binary_exists() {
-        return Some(resolved_command("ccusage"));
-    }
+    resolve_runner().map(CcusageRunner::build_command)
+}
 
-    // Fallback: try npx
-    let npx_check = resolved_command("npx")
-        .arg("ccusage")
-        .arg("--help")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    if npx_check.map(|s| s.success()).unwrap_or(false) {
-        let mut cmd = resolved_command("npx");
-        cmd.arg("ccusage");
-        return Some(cmd);
-    }
-
-    None
+/// Check if ccusage CLI is available (binary or package runner)
+#[allow(dead_code)]
+pub fn is_available() -> bool {
+    build_command().is_some()
 }
 
 /// Fetch usage data from ccusage for the last 90 days
@@ -120,7 +159,9 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
     let mut cmd = match build_command() {
         Some(cmd) => cmd,
         None => {
-            eprintln!("[warn] ccusage not found. Install: npm i -g ccusage (or use npx ccusage)");
+            eprintln!(
+                "[warn] ccusage not found. Install: bun add -g ccusage, npm i -g ccusage, or use bunx/npx ccusage"
+            );
             return Ok(None);
         }
     };
@@ -321,5 +362,38 @@ mod tests {
         let periods = result.unwrap();
         assert_eq!(periods[0].metrics.cache_creation_tokens, 0); // default
         assert_eq!(periods[0].metrics.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn test_is_available() {
+        // Just smoke test - actual availability depends on system
+        let _available = is_available();
+        // No assertion - just ensure it doesn't panic
+    }
+
+    #[test]
+    fn test_resolve_runner_prefers_bunx_before_npx() {
+        let runner = resolve_runner_with(|tool| matches!(tool, "bunx" | "npx"));
+        assert_eq!(runner, Some(CcusageRunner::Bunx));
+    }
+
+    #[test]
+    fn test_resolve_runner_prefers_direct_binary_over_package_runners() {
+        let runner = resolve_runner_with(|tool| {
+            matches!(tool, "ccusage" | "bunx" | "pnpm" | "yarn" | "npx")
+        });
+        assert_eq!(runner, Some(CcusageRunner::Binary));
+    }
+
+    #[test]
+    fn test_resolve_runner_falls_back_to_last_available_runner() {
+        let runner = resolve_runner_with(|tool| tool == "npx");
+        assert_eq!(runner, Some(CcusageRunner::Npx));
+    }
+
+    #[test]
+    fn test_resolve_runner_returns_none_when_no_tool_available() {
+        let runner = resolve_runner_with(|_| false);
+        assert_eq!(runner, None);
     }
 }
