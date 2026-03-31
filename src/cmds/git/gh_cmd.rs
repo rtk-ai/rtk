@@ -209,7 +209,7 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
         "checks" => pr_checks(&args[1..], verbose, ultra_compact),
         "status" => pr_status(verbose, ultra_compact),
         "create" => pr_create(&args[1..], verbose),
-        "merge" => pr_merge(&args[1..], verbose),
+        "merge" => run_passthrough_with_extra("gh", &["pr", "merge"], &args[1..].to_vec()),
         "diff" => pr_diff(&args[1..], verbose),
         "comment" => pr_action("commented", args, verbose),
         "edit" => pr_action("edited", args, verbose),
@@ -779,34 +779,6 @@ fn pr_create(args: &[String], _verbose: u8) -> Result<i32> {
                 url.to_string()
             };
             ok_confirmation("created", &detail)
-        },
-        RunOptions::stdout_only().early_exit_on_failure(),
-    )
-}
-
-fn pr_merge(args: &[String], _verbose: u8) -> Result<i32> {
-    let pr_num = args
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-    let mut cmd = resolved_command("gh");
-    cmd.args(["pr", "merge"]);
-    for arg in args {
-        cmd.arg(arg);
-    }
-    runner::run_filtered(
-        cmd,
-        "gh",
-        "pr merge",
-        move |_stdout| {
-            let detail = if !pr_num.is_empty() {
-                format!("#{}", pr_num)
-            } else {
-                String::new()
-            };
-            ok_confirmation("merged", &detail)
         },
         RunOptions::stdout_only().early_exit_on_failure(),
     )
