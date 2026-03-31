@@ -36,8 +36,6 @@ impl std::fmt::Display for FilterLevel {
 
 pub trait FilterStrategy {
     fn filter(&self, content: &str, lang: &Language) -> String;
-    #[allow(dead_code)]
-    fn name(&self) -> &'static str;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,10 +151,6 @@ impl FilterStrategy for NoFilter {
     fn filter(&self, content: &str, _lang: &Language) -> String {
         content.to_string()
     }
-
-    fn name(&self) -> &'static str {
-        "none"
-    }
 }
 
 pub struct MinimalFilter;
@@ -233,10 +227,6 @@ impl FilterStrategy for MinimalFilter {
         // Normalize multiple blank lines to max 2
         let result = MULTIPLE_BLANK_LINES.replace_all(&result, "\n\n");
         result.trim().to_string()
-    }
-
-    fn name(&self) -> &'static str {
-        "minimal"
     }
 }
 
@@ -319,10 +309,6 @@ impl FilterStrategy for AggressiveFilter {
         }
 
         result.trim().to_string()
-    }
-
-    fn name(&self) -> &'static str {
-        "aggressive"
     }
 }
 

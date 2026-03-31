@@ -1,9 +1,9 @@
 //! Filters Ruff linter and formatter output.
 
 use crate::core::config;
-use crate::core::tracking;
+use crate::core::runner;
 use crate::core::utils::{resolved_command, truncate};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -34,10 +34,7 @@ struct RuffDiagnostic {
     fix: Option<RuffFix>,
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    // Detect subcommand: check, format, or version
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let is_check = args.is_empty()
         || args[0] == "check"
         || (!args[0].starts_with('-') && args[0] != "format" && args[0] != "version");
@@ -47,14 +44,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     let mut cmd = resolved_command("ruff");
 
     if is_check {
-        // Force JSON output for check command
         if !args.contains(&"--output-format".to_string()) {
             cmd.arg("check").arg("--output-format=json");
         } else {
             cmd.arg("check");
         }
 
-        // Add user arguments (skip "check" if it was the first arg)
         let start_idx = if !args.is_empty() && args[0] == "check" {
             1
         } else {
@@ -64,7 +59,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
             cmd.arg(arg);
         }
 
-        // Default to current directory if no path specified
         if args
             .iter()
             .skip(start_idx)
@@ -73,7 +67,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
             cmd.arg(".");
         }
     } else {
-        // Format or other commands - pass through
         for arg in args {
             cmd.arg(arg);
         }
@@ -83,38 +76,21 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: ruff {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run ruff. Is it installed? Try: pip install ruff")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let filtered = if is_check && !stdout.trim().is_empty() {
-        filter_ruff_check_json(&stdout)
-    } else if is_format {
-        filter_ruff_format(&raw)
-    } else {
-        // Fallback for other commands (version, etc.)
-        raw.trim().to_string()
-    };
-
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("ruff {}", args.join(" ")),
-        &format!("rtk ruff {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "ruff",
+        &args.join(" "),
+        move |stdout| {
+            if is_check && !stdout.trim().is_empty() {
+                filter_ruff_check_json(stdout)
+            } else if is_format {
+                filter_ruff_format(stdout)
+            } else {
+                stdout.trim().to_string()
+            }
+        },
+        runner::RunOptions::stdout_only(),
+    )
 }
 
 /// Filter ruff check JSON output - group by rule and file

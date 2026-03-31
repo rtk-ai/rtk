@@ -11,7 +11,7 @@ Owns: configuration loading, token tracking persistence, TOML filter engine, tee
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
 ## Purpose
-Core infrastructure shared by all RTK command modules. These are the foundational building blocks that every filter, tracker, and command handler depends on. This module group has no inward dependencies — it is a leaf in the dependency graph, ensuring clean layering across the codebase.
+Core infrastructure shared by all RTK command modules. Every filter, tracker, and command handler depends on these modules. No inward dependencies — leaf in the dependency graph (no circular imports possible).
 
 ## TOML Filter Pipeline
 
@@ -118,12 +118,6 @@ Consumers must call `timer.track()` on **all** code paths — success, failure, 
 ### Tee (`tee_and_hint`)
 
 Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to save raw output for LLM recovery on failure. Tee must be called before `std::process::exit()`.
-
-### Gaps (to be fixed)
-
-- `ls.rs`, `tree.rs` — exit before `track()` on error path (lost metrics)
-- `container.rs` — inconsistent tracking across subcommands
-- Many command modules still missing tee integration — see `src/cmds/README.md` for the full list
 
 ## Adding New Functionality
 Place new infrastructure code here if it meets **all** of these criteria: (1) it has no dependencies on command modules or hooks, (2) it is used by two or more other modules, and (3) it provides a general-purpose utility rather than command-specific logic. Follow the existing pattern of lazy-initialized resources (`lazy_static!` for regex, on-demand config loading) to preserve the <10ms startup target. Add `#[cfg(test)] mod tests` with unit tests in the same file.
