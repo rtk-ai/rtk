@@ -36,8 +36,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
-/// Filter TypeScript compiler output - group errors by file, show every error
-fn filter_tsc_output(output: &str) -> String {
+pub(crate) fn filter_tsc_output(output: &str) -> String {
     lazy_static::lazy_static! {
         // Pattern: src/file.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
         static ref TSC_ERROR: Regex = Regex::new(

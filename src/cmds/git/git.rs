@@ -512,7 +512,7 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
 /// need for rebase/squash operations.
-fn filter_log_output(
+pub(crate) fn filter_log_output(
     output: &str,
     limit: usize,
     user_set_limit: bool,
@@ -588,8 +588,7 @@ fn truncate_line(line: &str, width: usize) -> String {
     }
 }
 
-/// Format porcelain output into compact RTK status display
-fn format_status_output(porcelain: &str) -> String {
+pub(crate) fn format_status_output(porcelain: &str) -> String {
     let lines: Vec<&str> = porcelain.lines().collect();
 
     if lines.is_empty() {
@@ -1272,6 +1271,7 @@ fn filter_branch_output(output: &str) -> String {
     let mut current = String::new();
     let mut local: Vec<String> = Vec::new();
     let mut remote: Vec<String> = Vec::new();
+    let mut seen_remote: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in output.lines() {
         let line = line.trim();
@@ -1281,13 +1281,16 @@ fn filter_branch_output(output: &str) -> String {
 
         if let Some(branch) = line.strip_prefix("* ") {
             current = branch.to_string();
-        } else if line.starts_with("remotes/origin/") {
-            let branch = line.strip_prefix("remotes/origin/").unwrap_or(line);
-            // Skip HEAD pointer
-            if branch.starts_with("HEAD ") {
-                continue;
+        } else if let Some(rest) = line.strip_prefix("remotes/") {
+            if let Some(slash_pos) = rest.find('/') {
+                let branch = &rest[slash_pos + 1..];
+                if branch.starts_with("HEAD ") {
+                    continue;
+                }
+                if seen_remote.insert(branch.to_string()) {
+                    remote.push(branch.to_string());
+                }
             }
-            remote.push(branch.to_string());
         } else {
             local.push(line.to_string());
         }
@@ -1303,7 +1306,6 @@ fn filter_branch_output(output: &str) -> String {
     }
 
     if !remote.is_empty() {
-        // Filter out remotes that already exist locally
         let remote_only: Vec<&String> = remote
             .iter()
             .filter(|r| *r != &current && !local.contains(r))
@@ -1804,6 +1806,37 @@ mod tests {
         assert!(result.contains("* main"));
         assert!(result.contains("develop"));
         assert!(!result.contains("remote-only"));
+    }
+
+    #[test]
+    fn test_filter_branch_multi_remote() {
+        let output = "* main\n  develop\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n  remotes/origin/feature-x\n  remotes/upstream/main\n  remotes/upstream/release-v3\n  remotes/fork/main\n  remotes/fork/experiment\n";
+        let result = filter_branch_output(output);
+        assert!(result.contains("* main"));
+        assert!(result.contains("develop"));
+        assert!(result.contains("feature-x"), "origin branch shown: {}", result);
+        assert!(
+            result.contains("release-v3"),
+            "upstream branch shown: {}",
+            result
+        );
+        assert!(
+            result.contains("experiment"),
+            "fork branch shown: {}",
+            result
+        );
+        assert!(
+            !result.contains("remotes/"),
+            "remote prefix stripped: {}",
+            result
+        );
+        let main_count = result.matches("main").count();
+        assert!(
+            main_count <= 2,
+            "main deduplicated across remotes (found {} occurrences): {}",
+            main_count,
+            result
+        );
     }
 
     #[test]

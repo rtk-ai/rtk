@@ -284,8 +284,7 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     Ok(if exit_code == 1 { 0 } else { exit_code })
 }
 
-/// Parse go test -json output (NDJSON format)
-fn filter_go_test_json(output: &str) -> String {
+pub(crate) fn filter_go_test_json(output: &str) -> String {
     let mut packages: HashMap<String, PackageResult> = HashMap::new();
     let mut current_test_output: HashMap<(String, String), Vec<String>> = HashMap::new(); // (package, test) -> outputs
     let mut build_output: HashMap<String, Vec<String>> = HashMap::new(); // import_path -> error lines
@@ -465,8 +464,7 @@ fn filter_go_test_json(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Filter go build output - show only errors
-fn filter_go_build(output: &str) -> String {
+pub(crate) fn filter_go_build(output: &str) -> String {
     let mut errors: Vec<String> = Vec::new();
 
     for line in output.lines() {

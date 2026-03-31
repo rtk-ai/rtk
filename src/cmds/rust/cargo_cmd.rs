@@ -732,8 +732,7 @@ impl AggregatedTestResult {
     }
 }
 
-/// Filter cargo test output - show failures + summary only
-fn filter_cargo_test(output: &str) -> String {
+pub(crate) fn filter_cargo_test(output: &str) -> String {
     let mut failures: Vec<String> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
     let mut in_failure_section = false;
