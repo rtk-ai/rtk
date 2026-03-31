@@ -594,6 +594,40 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_yadm_status() {
+        assert_eq!(
+            classify_command("yadm status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_yadm_diff() {
+        assert_eq!(
+            classify_command("yadm diff"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yadm_status() {
+        assert_eq!(
+            rewrite_command("yadm status", &[]),
+            Some("rtk git status".to_string())
+        );
+    }
+
+    #[test]
     fn test_classify_git_diff_cached() {
         assert_eq!(
             classify_command("git diff --cached"),

@@ -12,9 +12,9 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
         rtk_cmd: "rtk git",
-        rewrite_prefixes: &["git"],
+        rewrite_prefixes: &["git", "yadm"],
         category: "Git",
         savings_pct: 70.0,
         subcmd_savings: &[
