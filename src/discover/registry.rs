@@ -529,7 +529,12 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let cmd_clean = stripped_cow.trim();
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
+    // #508: warn on stderr so agents learn to stop overusing it
     if has_rtk_disabled_prefix(cmd_part) {
+        eprintln!(
+            "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+             Remove RTK_DISABLED=1 to restore token savings."
+        );
         return None;
     }
 
@@ -1164,6 +1169,38 @@ mod tests {
         assert_eq!(
             rewrite_command("FOO=1 RTK_DISABLED=1 git status", &[]),
             None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_warns_on_stderr() {
+        // RTK_DISABLED=1 should still return None (no rewrite)
+        // and emit a warning on stderr (tested via subprocess below)
+        assert_eq!(rewrite_command("RTK_DISABLED=1 git status", &[]), None);
+
+        // Verify warning via subprocess: `rtk rewrite "RTK_DISABLED=1 git status"`
+        // should exit non-zero AND print warning to stderr
+        let rtk_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("rtk");
+        if !rtk_bin.exists() {
+            return; // Binary not built — skip subprocess check
+        }
+        let output = std::process::Command::new(&rtk_bin)
+            .args(["rewrite", "RTK_DISABLED=1 git status"])
+            .output()
+            .expect("Failed to run rtk");
+
+        assert!(
+            !output.status.success(),
+            "Should exit non-zero (no rewrite)"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("RTK_DISABLED=1 detected"),
+            "Should warn on stderr, got: {}",
+            stderr
         );
     }
 
