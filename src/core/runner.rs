@@ -77,8 +77,8 @@ where
     // On failure, skip filtering and return early (e.g. psql error messages
     // containing '|' would be misinterpreted by the table parser)
     if opts.skip_filter_on_failure && exit_code != 0 {
-        if !stderr.is_empty() {
-            eprint!("{}", stderr);
+        if !stderr.trim().is_empty() {
+            eprintln!("{}", stderr.trim());
         }
         timer.track(
             &format!("{} {}", tool_name, args_display),

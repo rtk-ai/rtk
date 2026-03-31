@@ -2370,4 +2370,33 @@ mod tests {
             Some("rtk wc src/*.rs".into())
         );
     }
+
+    #[test]
+    fn test_classify_command_substitution_passthrough() {
+        assert_eq!(
+            classify_command("git log $(git rev-parse HEAD~1)"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_command_substitution_passthrough() {
+        assert_eq!(
+            rewrite_command("git log $(git rev-parse HEAD~1)", &[]),
+            Some("rtk git log $(git rev-parse HEAD~1)".into())
+        );
+    }
+
+    #[test]
+    fn test_split_command_substitution_no_split() {
+        assert_eq!(
+            split_command_chain("git log $(git rev-parse HEAD~1)"),
+            vec!["git log $(git rev-parse HEAD~1)"]
+        );
+    }
 }

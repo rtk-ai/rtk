@@ -70,11 +70,11 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                     .is_some_and(|&nc| nc.is_ascii_alphabetic() || nc == '_')
                 {
                     let mut name = String::from("$");
-                    while chars
-                        .peek()
-                        .is_some_and(|&nc| nc.is_ascii_alphanumeric() || nc == '_')
-                    {
-                        let nc = chars.next().unwrap();
+                    while let Some(&nc) = chars.peek() {
+                        if !nc.is_ascii_alphanumeric() && nc != '_' {
+                            break;
+                        }
+                        chars.next();
                         byte_pos += nc.len_utf8();
                         name.push(nc);
                     }
@@ -107,7 +107,8 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 let start = byte_pos;
                 byte_pos += char_len;
                 if chars.peek() == Some(&'|') {
-                    byte_pos += chars.next().unwrap().len_utf8();
+                    chars.next();
+                    byte_pos += 1;
                     tokens.push(ParsedToken {
                         kind: TokenKind::Operator,
                         value: "||".into(),
@@ -137,18 +138,21 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 let start = byte_pos;
                 byte_pos += char_len;
                 if chars.peek() == Some(&'&') {
-                    byte_pos += chars.next().unwrap().len_utf8();
+                    chars.next();
+                    byte_pos += 1;
                     tokens.push(ParsedToken {
                         kind: TokenKind::Operator,
                         value: "&&".into(),
                         offset: start,
                     });
                 } else if chars.peek() == Some(&'>') {
-                    byte_pos += chars.next().unwrap().len_utf8();
+                    chars.next();
+                    byte_pos += 1;
                     let mut val = String::from("&>");
                     if chars.peek() == Some(&'>') {
+                        chars.next();
+                        byte_pos += 1;
                         val.push('>');
-                        byte_pos += chars.next().unwrap().len_utf8();
                     }
                     tokens.push(ParsedToken {
                         kind: TokenKind::Redirect,
@@ -181,17 +185,19 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 val.push('>');
                 byte_pos += char_len;
                 if chars.peek() == Some(&'>') {
+                    chars.next();
+                    byte_pos += 1;
                     val.push('>');
-                    byte_pos += chars.next().unwrap().len_utf8();
                 }
                 if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
                     val.push('&');
-                    byte_pos += chars.next().unwrap().len_utf8();
-                    while chars
-                        .peek()
-                        .is_some_and(|&c| c.is_ascii_digit() || c == '-')
-                    {
-                        let nc = chars.next().unwrap();
+                    while let Some(&nc) = chars.peek() {
+                        if !nc.is_ascii_digit() && nc != '-' {
+                            break;
+                        }
+                        chars.next();
                         val.push(nc);
                         byte_pos += nc.len_utf8();
                     }
@@ -209,8 +215,9 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 let mut val = String::from("<");
                 byte_pos += char_len;
                 if chars.peek() == Some(&'<') {
+                    chars.next();
+                    byte_pos += 1;
                     val.push('<');
-                    byte_pos += chars.next().unwrap().len_utf8();
                 }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Redirect,
@@ -249,18 +256,6 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
             offset,
         });
     }
-}
-
-#[allow(dead_code)]
-pub fn strip_quotes(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() >= 2
-        && ((chars[0] == '"' && chars[chars.len() - 1] == '"')
-            || (chars[0] == '\'' && chars[chars.len() - 1] == '\''))
-    {
-        return chars[1..chars.len() - 1].iter().collect();
-    }
-    s.to_string()
 }
 
 pub fn shell_split(input: &str) -> Vec<String> {
@@ -858,26 +853,6 @@ mod tests {
         assert!(tokens
             .iter()
             .any(|t| t.kind == TokenKind::Arg && t.value == "file"));
-    }
-
-    #[test]
-    fn test_strip_quotes_double() {
-        assert_eq!(strip_quotes("\"hello\""), "hello");
-    }
-
-    #[test]
-    fn test_strip_quotes_single() {
-        assert_eq!(strip_quotes("'hello'"), "hello");
-    }
-
-    #[test]
-    fn test_strip_quotes_none() {
-        assert_eq!(strip_quotes("hello"), "hello");
-    }
-
-    #[test]
-    fn test_strip_quotes_mismatched() {
-        assert_eq!(strip_quotes("\"hello'"), "\"hello'");
     }
 
     #[test]

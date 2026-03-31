@@ -22,7 +22,7 @@ To apply, you should have:
 
 ### ✍️ How to Apply
 
-1. Open a discussion in [rtk-ai/rtk Maintainers Applications · Discussions · GitHub]() titled **Maintainer Application: [Your GitHub Handle]**
+1. Open a discussion in [rtk-ai/rtk Maintainers Applications · Discussions · GitHub](https://github.com/rtk-ai/rtk/discussions/categories/maintainers-applications) titled **Maintainer Application: [Your GitHub Handle]**
 2. In your application, include:
    - The ecosystem(s) you're interested in
    - Your experience with those ecosystems
