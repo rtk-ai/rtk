@@ -21,6 +21,7 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const RTK_MD_REF: &str = "@RTK.md";
 const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 const CODEX_HOOK_TIMEOUT_SEC: u64 = 5;
 
@@ -31,6 +32,26 @@ struct CodexPaths {
     rtk_md: PathBuf,
     config_toml: PathBuf,
     hooks_json: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CodexVerifyStatus {
+    HooksConfigured,
+    PromptOnly,
+    ConfigTomlMissing,
+    ConfigTomlInvalid,
+    HooksDisabled,
+    HooksJsonMissing,
+    HooksJsonInvalid,
+    HookEntryMissing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexVerifyEntry {
+    pub(crate) scope: &'static str,
+    pub(crate) status: CodexVerifyStatus,
+    pub(crate) config_toml: PathBuf,
+    pub(crate) hooks_json: PathBuf,
 }
 
 fn codex_lifecycle_hooks_supported() -> bool {
@@ -1870,6 +1891,115 @@ fn codex_paths(global: bool) -> Result<CodexPaths> {
         rtk_md,
     })
 }
+
+fn codex_artifacts_present(paths: &CodexPaths) -> bool {
+    paths.rtk_md.exists()
+        || fs::read_to_string(&paths.agents_md)
+            .map(|content| content.contains(RTK_MD_REF))
+            .unwrap_or(false)
+        || fs::read_to_string(&paths.hooks_json)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .map(|root| codex_hook_already_present(&root))
+            .unwrap_or(false)
+}
+
+fn codex_verify_entry(
+    scope: &'static str,
+    paths: &CodexPaths,
+    hooks_supported: bool,
+) -> Result<Option<CodexVerifyEntry>> {
+    if !codex_artifacts_present(paths) {
+        return Ok(None);
+    }
+
+    if !hooks_supported {
+        return Ok(Some(CodexVerifyEntry {
+            scope,
+            status: CodexVerifyStatus::PromptOnly,
+            config_toml: paths.config_toml.clone(),
+            hooks_json: paths.hooks_json.clone(),
+        }));
+    }
+
+    if !paths.config_toml.exists() {
+        return Ok(Some(CodexVerifyEntry {
+            scope,
+            status: CodexVerifyStatus::ConfigTomlMissing,
+            config_toml: paths.config_toml.clone(),
+            hooks_json: paths.hooks_json.clone(),
+        }));
+    }
+
+    let config_content = fs::read_to_string(&paths.config_toml)
+        .with_context(|| format!("Failed to read {}", paths.config_toml.display()))?;
+    let Ok(config_root) = toml::from_str::<toml::Value>(&config_content) else {
+        return Ok(Some(CodexVerifyEntry {
+            scope,
+            status: CodexVerifyStatus::ConfigTomlInvalid,
+            config_toml: paths.config_toml.clone(),
+            hooks_json: paths.hooks_json.clone(),
+        }));
+    };
+
+    if !codex_hooks_enabled(&config_root) {
+        return Ok(Some(CodexVerifyEntry {
+            scope,
+            status: CodexVerifyStatus::HooksDisabled,
+            config_toml: paths.config_toml.clone(),
+            hooks_json: paths.hooks_json.clone(),
+        }));
+    }
+
+    if !paths.hooks_json.exists() {
+        return Ok(Some(CodexVerifyEntry {
+            scope,
+            status: CodexVerifyStatus::HooksJsonMissing,
+            config_toml: paths.config_toml.clone(),
+            hooks_json: paths.hooks_json.clone(),
+        }));
+    }
+
+    let hooks_content = fs::read_to_string(&paths.hooks_json)
+        .with_context(|| format!("Failed to read {}", paths.hooks_json.display()))?;
+    let Ok(hooks_root) = serde_json::from_str::<serde_json::Value>(&hooks_content) else {
+        return Ok(Some(CodexVerifyEntry {
+            scope,
+            status: CodexVerifyStatus::HooksJsonInvalid,
+            config_toml: paths.config_toml.clone(),
+            hooks_json: paths.hooks_json.clone(),
+        }));
+    };
+
+    let status = if codex_hook_already_present(&hooks_root) {
+        CodexVerifyStatus::HooksConfigured
+    } else {
+        CodexVerifyStatus::HookEntryMissing
+    };
+
+    Ok(Some(CodexVerifyEntry {
+        scope,
+        status,
+        config_toml: paths.config_toml.clone(),
+        hooks_json: paths.hooks_json.clone(),
+    }))
+}
+
+pub(crate) fn codex_verify_entries() -> Result<Vec<CodexVerifyEntry>> {
+    let hooks_supported = codex_lifecycle_hooks_supported();
+    let global_paths = codex_paths(true)?;
+    let local_paths = codex_paths(false)?;
+    let mut entries = Vec::new();
+
+    if let Some(entry) = codex_verify_entry("global", &global_paths, hooks_supported)? {
+        entries.push(entry);
+    }
+    if let Some(entry) = codex_verify_entry("local", &local_paths, hooks_supported)? {
+        entries.push(entry);
+    }
+
+    Ok(entries)
+}
 /// Resolve OpenCode config directory (~/.config/opencode)
 /// OpenCode uses ~/.config/opencode on all platforms (XDG convention),
 /// NOT the macOS-native ~/Library/Application Support/.
@@ -3188,6 +3318,162 @@ More notes
         let resolved = resolve_codex_dir_from(None, Some(PathBuf::from("/Users/test"))).unwrap();
 
         assert_eq!(resolved, PathBuf::from("/Users/test/.codex"));
+    }
+
+    #[test]
+    fn test_codex_verify_entry_reports_configured_hooks() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+
+        let paths = CodexPaths {
+            codex_dir: codex_dir.clone(),
+            agents_md: temp.path().join("AGENTS.md"),
+            rtk_md: temp.path().join("RTK.md"),
+            config_toml: codex_dir.join("config.toml"),
+            hooks_json: codex_dir.join("hooks.json"),
+        };
+
+        fs::write(&paths.rtk_md, "codex config").unwrap();
+        fs::write(&paths.config_toml, "[features]\ncodex_hooks = true\n").unwrap();
+        fs::write(
+            &paths.hooks_json,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CODEX_HOOK_COMMAND,
+                            "timeout": CODEX_HOOK_TIMEOUT_SEC
+                        }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let entry = codex_verify_entry("global", &paths, true).unwrap().unwrap();
+
+        assert_eq!(entry.status, CodexVerifyStatus::HooksConfigured);
+        assert_eq!(entry.scope, "global");
+    }
+
+    #[test]
+    fn test_codex_verify_entry_reports_missing_config() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+
+        let paths = CodexPaths {
+            codex_dir: codex_dir.clone(),
+            agents_md: temp.path().join("AGENTS.md"),
+            rtk_md: temp.path().join("RTK.md"),
+            config_toml: codex_dir.join("config.toml"),
+            hooks_json: codex_dir.join("hooks.json"),
+        };
+
+        fs::write(&paths.rtk_md, "codex config").unwrap();
+
+        let entry = codex_verify_entry("global", &paths, true).unwrap().unwrap();
+
+        assert_eq!(entry.status, CodexVerifyStatus::ConfigTomlMissing);
+    }
+
+    #[test]
+    fn test_codex_verify_entry_reports_missing_hook_entry() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+
+        let paths = CodexPaths {
+            codex_dir: codex_dir.clone(),
+            agents_md: temp.path().join("AGENTS.md"),
+            rtk_md: temp.path().join("RTK.md"),
+            config_toml: codex_dir.join("config.toml"),
+            hooks_json: codex_dir.join("hooks.json"),
+        };
+
+        fs::write(&paths.rtk_md, "codex config").unwrap();
+        fs::write(&paths.config_toml, "[features]\ncodex_hooks = true\n").unwrap();
+        fs::write(
+            &paths.hooks_json,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "echo other"
+                        }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let entry = codex_verify_entry("global", &paths, true).unwrap().unwrap();
+
+        assert_eq!(entry.status, CodexVerifyStatus::HookEntryMissing);
+    }
+
+    #[test]
+    fn test_codex_verify_entry_reports_prompt_only_when_hooks_unsupported() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+
+        let paths = CodexPaths {
+            codex_dir: codex_dir.clone(),
+            agents_md: temp.path().join("AGENTS.md"),
+            rtk_md: temp.path().join("RTK.md"),
+            config_toml: codex_dir.join("config.toml"),
+            hooks_json: codex_dir.join("hooks.json"),
+        };
+
+        fs::write(&paths.rtk_md, "codex config").unwrap();
+
+        let entry = codex_verify_entry("global", &paths, false).unwrap().unwrap();
+
+        assert_eq!(entry.status, CodexVerifyStatus::PromptOnly);
+    }
+
+    #[test]
+    fn test_codex_verify_entry_ignores_non_rtk_codex_files() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+
+        let paths = CodexPaths {
+            codex_dir: codex_dir.clone(),
+            agents_md: temp.path().join("AGENTS.md"),
+            rtk_md: temp.path().join("RTK.md"),
+            config_toml: codex_dir.join("config.toml"),
+            hooks_json: codex_dir.join("hooks.json"),
+        };
+
+        fs::write(&paths.config_toml, "[features]\ncodex_hooks = true\n").unwrap();
+        fs::write(
+            &paths.hooks_json,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "echo other"
+                        }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let entry = codex_verify_entry("global", &paths, true).unwrap();
+
+        assert!(entry.is_none());
     }
 
     #[test]

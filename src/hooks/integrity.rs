@@ -13,6 +13,7 @@
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
 use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use super::init::{codex_verify_entries, CodexVerifyEntry, CodexVerifyStatus};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -194,6 +195,7 @@ pub fn resolve_hook_path() -> Result<PathBuf> {
 pub fn run_verify(verbose: u8) -> Result<()> {
     let hook_path = resolve_hook_path()?;
     let hash_file = hash_path(&hook_path);
+    let codex_entries = codex_verify_entries()?;
 
     if verbose > 0 {
         eprintln!("Hook:  {}", hook_path.display());
@@ -226,8 +228,13 @@ pub fn run_verify(verbose: u8) -> Result<()> {
             println!("      Run `rtk init -g` to establish baseline.");
         }
         IntegrityStatus::NotInstalled => {
-            println!("SKIP  RTK hook not installed");
-            println!("      Run `rtk init -g` to install.");
+            if codex_entries.is_empty() {
+                println!("SKIP  RTK hook not installed");
+                println!("      Run `rtk init -g` to install.");
+            } else {
+                println!("SKIP  Claude hook not installed");
+                println!("      Run `rtk init -g` to install Claude hook support.");
+            }
         }
         IntegrityStatus::OrphanedHash => {
             eprintln!("WARN  hash file exists but hook is missing");
@@ -235,7 +242,51 @@ pub fn run_verify(verbose: u8) -> Result<()> {
         }
     }
 
+    for entry in &codex_entries {
+        print_codex_verify_entry(entry);
+    }
+
     Ok(())
+}
+
+fn print_codex_verify_entry(entry: &CodexVerifyEntry) {
+    let scope = entry.scope;
+
+    match entry.status {
+        CodexVerifyStatus::HooksConfigured => {
+            println!("PASS  Codex {scope} hooks configured");
+            println!("      config: {}", entry.config_toml.display());
+            println!("      hooks:  {}", entry.hooks_json.display());
+        }
+        CodexVerifyStatus::PromptOnly => {
+            println!("SKIP  Codex {scope} hook verification not applicable");
+            println!("      Codex lifecycle hooks are unsupported on Windows; RTK is using prompt-only guidance.");
+        }
+        CodexVerifyStatus::ConfigTomlMissing => {
+            println!("WARN  Codex {scope} config.toml missing");
+            println!("      expected: {}", entry.config_toml.display());
+        }
+        CodexVerifyStatus::ConfigTomlInvalid => {
+            println!("WARN  Codex {scope} config.toml invalid");
+            println!("      {}", entry.config_toml.display());
+        }
+        CodexVerifyStatus::HooksDisabled => {
+            println!("WARN  Codex {scope} codex_hooks disabled");
+            println!("      {}", entry.config_toml.display());
+        }
+        CodexVerifyStatus::HooksJsonMissing => {
+            println!("WARN  Codex {scope} hooks.json missing");
+            println!("      expected: {}", entry.hooks_json.display());
+        }
+        CodexVerifyStatus::HooksJsonInvalid => {
+            println!("WARN  Codex {scope} hooks.json invalid");
+            println!("      {}", entry.hooks_json.display());
+        }
+        CodexVerifyStatus::HookEntryMissing => {
+            println!("WARN  Codex {scope} RTK PreToolUse hook missing");
+            println!("      {}", entry.hooks_json.display());
+        }
+    }
 }
 
 /// Runtime integrity gate. Called at startup for operational commands.
