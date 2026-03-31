@@ -4,12 +4,14 @@ use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::Local;
 use colored::Colorize;
 use serde::Serialize;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -24,10 +26,151 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    watch: bool,
+    interval: u64,
     _verbose: u8,
 ) -> Result<()> {
+    if watch && (format == "json" || format == "csv") {
+        bail!("--watch is not compatible with --format {format} (only text format is supported)");
+    }
+
+    if watch && !std::io::stdout().is_terminal() {
+        bail!("--watch requires an interactive terminal (stdout is not a TTY)");
+    }
+
+    if watch {
+        return run_watch_loop(
+            project, graph, history, quota, tier, daily, weekly, monthly, all, failures, interval,
+        );
+    }
+
+    run_once(
+        project, graph, history, quota, tier, daily, weekly, monthly, all, format, failures,
+    )
+}
+
+/// RAII guard that hides the terminal cursor on creation and restores it on drop (including panic).
+struct CursorGuard;
+
+impl CursorGuard {
+    fn new() -> Self {
+        print!("\x1b[?25l");
+        let _ = std::io::stdout().flush();
+        Self
+    }
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        let _ = write!(std::io::stdout(), "\x1b[?25h");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_watch_loop(
+    project: bool,
+    graph: bool,
+    history: bool,
+    quota: bool,
+    tier: &str,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    all: bool,
+    failures: bool,
+    interval: u64,
+) -> Result<()> {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .context("Failed to set Ctrl+C handler")?;
+
+    // Build the command description for the watch header
+    let mut flag_parts: Vec<String> = vec!["rtk gain".into()];
+    for (on, name) in [
+        (project, "--project"),
+        (graph, "--graph"),
+        (history, "--history"),
+        (quota, "--quota"),
+        (daily, "--daily"),
+        (weekly, "--weekly"),
+        (monthly, "--monthly"),
+        (all, "--all"),
+        (failures, "--failures"),
+    ] {
+        if on {
+            flag_parts.push(name.into());
+        }
+    }
+    if quota && tier != "20x" {
+        flag_parts.push(format!("--tier {tier}"));
+    }
+    if interval != 2 {
+        flag_parts.push(format!("-n {interval}"));
+    }
+    let flags = flag_parts.join(" ");
+
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
-    let project_scope = resolve_project_scope(project)?; // added: resolve project path
+    let project_scope = resolve_project_scope(project)?;
+    let _cursor_guard = CursorGuard::new();
+
+    while running.load(Ordering::SeqCst) {
+        print!("\x1b[H");
+        let _ = std::io::stdout().flush();
+
+        let now = Local::now().format("%Y-%m-%d %H:%M:%S");
+        println!("Every {}s: {:<40} {}", interval, flags, now);
+        println!();
+
+        // Ignore display errors in watch mode (DB might be temporarily locked)
+        let _ = run_display(
+            &tracker,
+            project_scope.as_deref(),
+            graph,
+            history,
+            quota,
+            tier,
+            daily,
+            weekly,
+            monthly,
+            all,
+            failures,
+        );
+
+        print!("\x1b[J");
+        let _ = std::io::stdout().flush();
+
+        for _ in 0..(interval * 10) {
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_once(
+    project: bool,
+    graph: bool,
+    history: bool,
+    quota: bool,
+    tier: &str,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    all: bool,
+    format: &str,
+    failures: bool,
+) -> Result<()> {
+    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+    let project_scope = resolve_project_scope(project)?;
 
     if failures {
         return show_failures(&tracker);
@@ -42,7 +185,7 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
-                project_scope.as_deref(), // added: pass project scope
+                project_scope.as_deref(),
             );
         }
         "csv" => {
@@ -52,14 +195,48 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
-                project_scope.as_deref(), // added: pass project scope
+                project_scope.as_deref(),
             );
         }
-        _ => {} // Continue with text format
+        _ => {}
+    }
+
+    run_display(
+        &tracker,
+        project_scope.as_deref(),
+        graph,
+        history,
+        quota,
+        tier,
+        daily,
+        weekly,
+        monthly,
+        all,
+        failures,
+    )
+}
+
+/// Core display logic, separated to allow Tracker reuse in watch mode.
+#[allow(clippy::too_many_arguments)]
+fn run_display(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    graph: bool,
+    history: bool,
+    quota: bool,
+    tier: &str,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    all: bool,
+    failures: bool,
+) -> Result<()> {
+    if failures {
+        return show_failures(tracker);
     }
 
     let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
+        .get_summary_filtered(project_scope)
         .context("Failed to load token savings summary from database")?;
 
     if summary.total_commands == 0 {
@@ -79,7 +256,7 @@ pub fn run(
         println!("{}", styled(title, true));
         println!("{}", "═".repeat(60));
         // added: show project path when scoped
-        if let Some(ref scope) = project_scope {
+        if let Some(scope) = project_scope {
             println!("Scope: {}", shorten_path(scope));
         }
         println!();
@@ -226,7 +403,7 @@ pub fn run(
         }
 
         if history {
-            let recent = tracker.get_recent_filtered(10, project_scope.as_deref())?; // changed: filtered
+            let recent = tracker.get_recent_filtered(10, project_scope)?;
             if !recent.is_empty() {
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
@@ -289,15 +466,15 @@ pub fn run(
 
     // Time breakdown views
     if all || daily {
-        print_daily_full(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_daily_full(tracker, project_scope)?;
     }
 
     if all || weekly {
-        print_weekly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_weekly(tracker, project_scope)?;
     }
 
     if all || monthly {
-        print_monthly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_monthly(tracker, project_scope)?;
     }
 
     Ok(())
@@ -724,4 +901,158 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    #[derive(Parser)]
+    #[command()]
+    struct TestCli {
+        #[command(subcommand)]
+        command: TestCommands,
+    }
+
+    #[derive(clap::Subcommand)]
+    enum TestCommands {
+        Gain {
+            #[arg(short, long)]
+            project: bool,
+            #[arg(short, long)]
+            graph: bool,
+            #[arg(short = 'H', long)]
+            history: bool,
+            #[arg(short, long)]
+            quota: bool,
+            #[arg(short, long, default_value = "20x", requires = "quota")]
+            tier: String,
+            #[arg(short, long)]
+            daily: bool,
+            #[arg(short, long)]
+            weekly: bool,
+            #[arg(short, long)]
+            monthly: bool,
+            #[arg(short, long)]
+            all: bool,
+            #[arg(short, long, default_value = "text")]
+            format: String,
+            #[arg(short = 'F', long)]
+            failures: bool,
+            #[arg(short = 'W', long)]
+            watch: bool,
+            #[arg(short = 'n', long, default_value = "2", requires = "watch", value_parser = clap::value_parser!(u64).range(1..=3600))]
+            interval: u64,
+        },
+    }
+
+    #[test]
+    fn test_watch_rejects_json_format() {
+        let result = super::run(
+            false, false, false, false, "20x", false, false, false, false, "json", false, true, 2,
+            0,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not compatible"),
+            "Expected format incompatibility error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_watch_rejects_csv_format() {
+        let result = super::run(
+            false, false, false, false, "20x", false, false, false, false, "csv", false, true, 2, 0,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not compatible"),
+            "Expected format incompatibility error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_watch_flag_requires_watch_for_interval() {
+        let result = TestCli::try_parse_from(["test", "gain", "--interval", "5"]);
+        assert!(result.is_err(), "--interval without --watch should fail");
+    }
+
+    #[test]
+    fn test_watch_interval_bounds() {
+        let result = TestCli::try_parse_from(["test", "gain", "--watch", "--interval", "0"]);
+        assert!(result.is_err(), "interval=0 should be rejected");
+
+        let result = TestCli::try_parse_from(["test", "gain", "--watch", "--interval", "3601"]);
+        assert!(result.is_err(), "interval=3601 should be rejected");
+
+        let result = TestCli::try_parse_from(["test", "gain", "--watch", "--interval", "1"]);
+        assert!(result.is_ok(), "interval=1 should be accepted");
+
+        let result = TestCli::try_parse_from(["test", "gain", "--watch", "--interval", "3600"]);
+        assert!(result.is_ok(), "interval=3600 should be accepted");
+    }
+
+    #[test]
+    fn test_watch_parses_with_default_interval() {
+        let result = TestCli::try_parse_from(["test", "gain", "--watch"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                TestCommands::Gain {
+                    watch, interval, ..
+                } => {
+                    assert!(watch);
+                    assert_eq!(interval, 2, "default interval should be 2s");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_watch_flag_header_reconstruction() {
+        let bool_flags = [
+            (true, "--project"),
+            (true, "--graph"),
+            (false, "--history"),
+            (false, "--quota"),
+            (true, "--daily"),
+            (false, "--weekly"),
+            (false, "--monthly"),
+            (false, "--all"),
+            (false, "--failures"),
+        ];
+        let mut parts: Vec<&str> = vec!["rtk gain"];
+        for (on, name) in &bool_flags {
+            if *on {
+                parts.push(name);
+            }
+        }
+        let flags = parts.join(" ");
+        assert_eq!(flags, "rtk gain --project --graph --daily");
+    }
+
+    #[test]
+    fn test_watch_flag_header_with_non_default_tier_and_interval() {
+        let mut parts: Vec<&str> = vec!["rtk gain"];
+        let bool_flags = [(true, "--quota"), (false, "--daily")];
+        for (on, name) in &bool_flags {
+            if *on {
+                parts.push(name);
+            }
+        }
+        let tier = "pro";
+        let tier_flag = format!("--tier {tier}");
+        if tier != "20x" {
+            parts.push(&tier_flag);
+        }
+        let interval = 5u64;
+        let interval_flag = format!("-n {interval}");
+        if interval != 2 {
+            parts.push(&interval_flag);
+        }
+        let flags = parts.join(" ");
+        assert_eq!(flags, "rtk gain --quota --tier pro -n 5");
+    }
 }
