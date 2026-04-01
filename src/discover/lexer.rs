@@ -258,6 +258,17 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
     }
 }
 
+pub fn strip_quotes(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() >= 2
+        && ((chars[0] == '"' && chars[chars.len() - 1] == '"')
+            || (chars[0] == '\'' && chars[chars.len() - 1] == '\''))
+    {
+        return chars[1..chars.len() - 1].iter().collect();
+    }
+    s.to_string()
+}
+
 pub fn shell_split(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -920,5 +931,25 @@ mod tests {
     #[test]
     fn test_shell_split_multiple_spaces() {
         assert_eq!(shell_split("a   b   c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_strip_quotes_double() {
+        assert_eq!(strip_quotes("\"hello\""), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_single() {
+        assert_eq!(strip_quotes("'hello'"), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_none() {
+        assert_eq!(strip_quotes("hello"), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_mismatched() {
+        assert_eq!(strip_quotes("\"hello'"), "\"hello'");
     }
 }

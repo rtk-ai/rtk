@@ -15,5 +15,4 @@ pub(crate) mod lexer {
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
-pub use exec::execute;
 pub use hook::check_for_hook;
