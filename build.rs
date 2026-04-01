@@ -3,6 +3,15 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    #[cfg(windows)]
+    {
+        // Clap + the full command graph can exceed the default 1 MiB Windows
+        // main-thread stack during process startup. Reserve a larger stack for
+        // the CLI binary so `rtk.exe --version`, `--help`, and hook entry
+        // points start reliably without requiring ad-hoc RUSTFLAGS.
+        println!("cargo:rustc-link-arg=/STACK:8388608");
+    }
+
     let filters_dir = Path::new("src/filters");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR must be set by Cargo");
     let dest = Path::new(&out_dir).join("builtin_filters.toml");

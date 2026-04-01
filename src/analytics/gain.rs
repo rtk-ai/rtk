@@ -5,6 +5,7 @@ use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
+use chrono::Local;
 use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -230,7 +231,7 @@ pub fn run(
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
-                    let time = rec.timestamp.format("%m-%d %H:%M");
+                    let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
                     let cmd_short = if rec.rtk_cmd.len() > 25 {
                         format!("{}...", &rec.rtk_cmd[..22])
                     } else {

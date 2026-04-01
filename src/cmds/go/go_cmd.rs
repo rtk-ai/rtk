@@ -1,7 +1,9 @@
 //! Filters Go command output — test results, build errors, vet warnings.
 
+use crate::core::runner;
 use crate::core::tracking;
-use crate::core::utils::{resolved_command, truncate};
+use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
+use crate::golangci_cmd;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -38,13 +40,10 @@ struct PackageResult {
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
 }
 
-pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
-    // Force JSON output if not already specified
     if !args.iter().any(|a| a == "-json") {
         cmd.arg("-json");
     }
@@ -57,49 +56,16 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: go test -json {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go test. Is Go installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_go_test_json(&stdout);
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "go_test", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    // Include stderr if present (build errors, etc.)
-    if !stderr.trim().is_empty() {
-        eprintln!("{}", stderr.trim());
-    }
-
-    timer.track(
-        &format!("go test {}", args.join(" ")),
-        &format!("rtk go test {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "go test",
+        &args.join(" "),
+        filter_go_test_json,
+        crate::core::runner::RunOptions::stdout_only().tee("go_test"),
+    )
 }
 
-pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("build");
 
@@ -111,48 +77,16 @@ pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: go build {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go build. Is Go installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_go_build(&raw);
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "go_build", exit_code) {
-        if !filtered.is_empty() {
-            println!("{}\n{}", filtered, hint);
-        } else {
-            println!("{}", hint);
-        }
-    } else if !filtered.is_empty() {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("go build {}", args.join(" ")),
-        &format!("rtk go build {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "go build",
+        &args.join(" "),
+        filter_go_build,
+        crate::core::runner::RunOptions::with_tee("go_build"),
+    )
 }
 
-pub fn run_vet(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run_vet(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("vet");
 
@@ -164,48 +98,25 @@ pub fn run_vet(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: go vet {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run go vet. Is Go installed?")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_go_vet(&raw);
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "go_vet", exit_code) {
-        if !filtered.is_empty() {
-            println!("{}\n{}", filtered, hint);
-        } else {
-            println!("{}", hint);
-        }
-    } else if !filtered.is_empty() {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("go vet {}", args.join(" ")),
-        &format!("rtk go vet {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "go vet",
+        &args.join(" "),
+        filter_go_vet,
+        crate::core::runner::RunOptions::with_tee("go_vet"),
+    )
 }
 
-pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
+pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         anyhow::bail!("go: no subcommand specified");
+    }
+
+    // Intercept: `go tool <known>` invocations for filtered output
+    if let Some((tool, tool_args)) = match_go_tool(args) {
+        match tool {
+            GoTool::GolangciLint => return run_go_tool_golangci_lint(tool_args, verbose),
+        }
     }
 
     let timer = tracking::TimedExecution::start();
@@ -240,12 +151,137 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<()> {
         &raw, // No filtering for unsupported commands
     );
 
-    // Preserve exit code
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
+    Ok(exit_code_from_output(&output, "go"))
+}
+
+/// Detect golangci-lint major version when invoked via `go tool`.
+/// Returns 1 on any failure (safe fallback — v1 behaviour).
+fn detect_go_tool_golangci_version() -> u32 {
+    let output = resolved_command("go")
+        .arg("tool")
+        .arg("golangci-lint")
+        .arg("--version")
+        .output();
+
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let version_text = if stdout.trim().is_empty() {
+                &*stderr
+            } else {
+                &*stdout
+            };
+            golangci_cmd::parse_major_version(version_text)
+        }
+        Err(_) => 1,
+    }
+}
+
+fn has_golangci_format_flag(args: &[OsString]) -> bool {
+    args.iter().any(|a| {
+        let s = a.to_string_lossy();
+        s == "--out-format"
+            || s.starts_with("--out-format=")
+            || s == "--output.json.path"
+            || s.starts_with("--output.json.path=")
+    })
+}
+
+/// Known `go tool` subcommands that RTK provides filtered output for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GoTool {
+    GolangciLint,
+}
+
+impl GoTool {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "golangci-lint" => Some(Self::GolangciLint),
+            _ => None,
+        }
+    }
+}
+
+/// If the first arg is `tool` identify if it is a tool we already handle.
+fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
+    if args.first().map(|a| a == "tool").unwrap_or(false) {
+        if let Some(tool_arg) = args.get(1) {
+            if let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy()) {
+                return Some((tool, &args[2..]));
+            }
+        }
+    }
+    None
+}
+
+/// Run `go tool golangci-lint` and filter its output via the golangci JSON filter.
+/// Reusing parts of golangci_cmd.
+fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let version = detect_go_tool_golangci_version();
+
+    let mut cmd = resolved_command("go");
+    cmd.arg("tool").arg("golangci-lint");
+
+    let has_format = has_golangci_format_flag(args);
+
+    if !has_format {
+        if version >= 2 {
+            cmd.arg("run").arg("--output.json.path").arg("stdout");
+        } else {
+            cmd.arg("run").arg("--out-format=json");
+        }
+    } else {
+        cmd.arg("run");
     }
 
-    Ok(())
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        if version >= 2 {
+            eprintln!("Running: go tool golangci-lint run --output.json.path stdout");
+        } else {
+            eprintln!("Running: go tool golangci-lint run --out-format=json");
+        }
+    }
+
+    let output = cmd
+        .output()
+        .context("Failed to run go tool golangci-lint")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+
+    // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
+    let json_output = if version >= 2 {
+        stdout.lines().next().unwrap_or("")
+    } else {
+        &*stdout
+    };
+
+    let filtered = golangci_cmd::filter_golangci_json(json_output, version);
+    println!("{}", filtered);
+
+    if !stderr.trim().is_empty() && verbose > 0 {
+        eprintln!("{}", stderr.trim());
+    }
+
+    timer.track(
+        "go tool golangci-lint",
+        "rtk go tool golangci-lint",
+        &raw,
+        &filtered,
+    );
+
+    let exit_code = exit_code_from_output(&output, "go tool golangci-lint");
+    // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
+    // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
+    Ok(if exit_code == 1 { 0 } else { exit_code })
 }
 
 /// Parse go test -json output (NDJSON format)
@@ -589,5 +625,61 @@ utils.go:15:5: unreachable code"#;
         assert_eq!(compact_package_name("github.com/user/repo/pkg"), "pkg");
         assert_eq!(compact_package_name("example.com/foo"), "foo");
         assert_eq!(compact_package_name("simple"), "simple");
+    }
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn test_match_go_tool_golangci_lint() {
+        let args = os(&["tool", "golangci-lint", "run", "./..."]);
+        let (tool, rest) = match_go_tool(&args).expect("should match");
+        assert_eq!(tool, GoTool::GolangciLint);
+        assert_eq!(rest.len(), 2); // ["run", "./..."]
+    }
+
+    #[test]
+    fn test_match_go_tool_bare() {
+        let args = os(&["tool", "golangci-lint"]);
+        let (tool, rest) = match_go_tool(&args).expect("should match");
+        assert_eq!(tool, GoTool::GolangciLint);
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn test_match_go_tool_rejects_unknown() {
+        assert!(match_go_tool(&os(&["tool", "pprof"])).is_none());
+        assert!(match_go_tool(&os(&["tool"])).is_none());
+        assert!(match_go_tool(&os(&["test", "./..."])).is_none());
+        assert!(match_go_tool(&os(&[])).is_none());
+    }
+
+    #[test]
+    fn test_has_golangci_format_flag_v1() {
+        assert!(has_golangci_format_flag(&os(&["--out-format=json"])));
+        assert!(has_golangci_format_flag(&os(&[
+            "./...",
+            "--out-format",
+            "json"
+        ])));
+    }
+
+    #[test]
+    fn test_has_golangci_format_flag_v2() {
+        assert!(has_golangci_format_flag(&os(&[
+            "--output.json.path",
+            "stdout"
+        ])));
+        assert!(has_golangci_format_flag(&os(&[
+            "--output.json.path=stdout"
+        ])));
+    }
+
+    #[test]
+    fn test_has_golangci_format_flag_absent() {
+        assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
+        assert!(!has_golangci_format_flag(&os(&[])));
+        assert!(!has_golangci_format_flag(&os(&["--fix"])));
     }
 }

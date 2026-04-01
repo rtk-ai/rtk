@@ -1,7 +1,14 @@
 ---
+name: issue-triage
 description: >
   Issue triage: audit open issues, categorize, detect duplicates, cross-ref PRs, risk assessment, post comments.
   Args: "all" for deep analysis of all, issue numbers to focus (e.g. "42 57"), "en"/"fr" for language, no arg = audit only in French.
+allowed-tools:
+  - Bash
+  - Read
+  - Grep
+effort: medium
+tags: [triage, issues, github, categorize, duplicates, risk]
 ---
 
 # Issue Triage

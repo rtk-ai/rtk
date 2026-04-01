@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # rtk-hook-version: 3
 # RTK auto-rewrite hook for Claude Code PreToolUse:Bash
 # Transparently rewrites raw commands to their RTK equivalents.

@@ -2,7 +2,7 @@
 
 use crate::core::config;
 use crate::core::tracking;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{exit_code_from_output, resolved_command};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ pub fn run(
     file_type: Option<&str>,
     extra_args: &[String],
     verbose: u8,
-) -> Result<()> {
+) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -52,7 +52,7 @@ pub fn run(
         .context("grep/rg failed")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let exit_code = output.status.code().unwrap_or(1);
+    let exit_code = exit_code_from_output(&output, "grep");
 
     let raw_output = stdout.to_string();
 
@@ -72,10 +72,7 @@ pub fn run(
             &raw_output,
             &msg,
         );
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
-        return Ok(());
+        return Ok(exit_code);
     }
 
     let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
@@ -148,11 +145,7 @@ pub fn run(
         &rtk_output,
     );
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    Ok(exit_code)
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {

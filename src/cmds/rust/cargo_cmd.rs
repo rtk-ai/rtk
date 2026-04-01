@@ -1,8 +1,8 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
-use crate::core::tracking;
+use crate::core::runner;
 use crate::core::utils::{resolved_command, truncate};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::OnceLock;
@@ -17,7 +17,7 @@ pub enum CargoCommand {
     Nextest,
 }
 
-pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<()> {
+pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         CargoCommand::Build => run_build(args, verbose),
         CargoCommand::Test => run_test(args, verbose),
@@ -67,13 +67,17 @@ fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<Str
     result
 }
 
-/// Generic cargo command runner with filtering
-fn run_cargo_filtered<F>(subcommand: &str, args: &[String], verbose: u8, filter_fn: F) -> Result<()>
+/// Generic cargo command runner with filtering.
+/// Builds the Command with restored `--` separator, then delegates to shared runner.
+fn run_cargo_filtered<F>(
+    subcommand: &str,
+    args: &[String],
+    verbose: u8,
+    filter_fn: F,
+) -> Result<i32>
 where
     F: Fn(&str) -> String,
 {
-    let timer = tracking::TimedExecution::start();
-
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
@@ -86,62 +90,36 @@ where
         eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to run cargo {}", subcommand))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    let filtered = filter_fn(&raw);
-
-    if let Some(hint) =
-        crate::core::tee::tee_and_hint(&raw, &format!("cargo_{}", subcommand), exit_code)
-    {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("cargo {} {}", subcommand, restored_args.join(" ")),
-        &format!("rtk cargo {} {}", subcommand, restored_args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        &format!("cargo {}", subcommand),
+        &restored_args.join(" "),
+        filter_fn,
+        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+    )
 }
 
-fn run_build(args: &[String], verbose: u8) -> Result<()> {
+fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("build", args, verbose, filter_cargo_build)
 }
 
-fn run_test(args: &[String], verbose: u8) -> Result<()> {
+fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("test", args, verbose, filter_cargo_test)
 }
 
-fn run_clippy(args: &[String], verbose: u8) -> Result<()> {
+fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("clippy", args, verbose, filter_cargo_clippy)
 }
 
-fn run_check(args: &[String], verbose: u8) -> Result<()> {
+fn run_check(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("check", args, verbose, filter_cargo_build)
 }
 
-fn run_install(args: &[String], verbose: u8) -> Result<()> {
+fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("install", args, verbose, filter_cargo_install)
 }
 
-fn run_nextest(args: &[String], verbose: u8) -> Result<()> {
+fn run_nextest(args: &[String], verbose: u8) -> Result<i32> {
     run_cargo_filtered("nextest", args, verbose, filter_cargo_nextest)
 }
 
@@ -567,6 +545,7 @@ fn filter_cargo_build(output: &str) -> String {
     let mut compiled = 0;
     let mut in_error = false;
     let mut current_error = Vec::new();
+    let mut finished_line: Option<String> = None;
 
     for line in output.lines() {
         if line.trim_start().starts_with("Compiling") || line.trim_start().starts_with("Checking") {
@@ -579,6 +558,7 @@ fn filter_cargo_build(output: &str) -> String {
             continue;
         }
         if line.trim_start().starts_with("Finished") {
+            finished_line = Some(line.trim_start().to_string());
             continue;
         }
 
@@ -625,7 +605,11 @@ fn filter_cargo_build(output: &str) -> String {
     }
 
     if error_count == 0 && warnings == 0 {
-        return format!("cargo build ({} crates compiled)", compiled);
+        return if let Some(finished) = finished_line {
+            format!("cargo build ({} crates compiled)\n{}", compiled, finished)
+        } else {
+            format!("cargo build ({} crates compiled)", compiled)
+        };
     }
 
     let mut result = String::new();
@@ -883,6 +867,7 @@ fn filter_cargo_clippy(output: &str) -> String {
     let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
     let mut error_count = 0;
     let mut warning_count = 0;
+    let mut error_details: Vec<String> = Vec::new();
 
     // Parse clippy output lines
     // Format: "warning: description\n  --> file:line:col\n  |\n  | code\n"
@@ -915,6 +900,7 @@ fn filter_cargo_clippy(output: &str) -> String {
             let is_error = line.starts_with("error");
             if is_error {
                 error_count += 1;
+                error_details.push(truncate(line.trim(), 160));
             } else {
                 warning_count += 1;
             }
@@ -953,6 +939,17 @@ fn filter_cargo_clippy(output: &str) -> String {
     ));
     result.push_str("═══════════════════════════════════════\n");
 
+    if !error_details.is_empty() {
+        result.push_str("\nError details:\n");
+        for (idx, detail) in error_details.iter().take(5).enumerate() {
+            result.push_str(&format!("  {}. {}\n", idx + 1, detail));
+        }
+        if error_details.len() > 5 {
+            result.push_str(&format!("  ... +{} more errors\n", error_details.len() - 5));
+        }
+        result.push('\n');
+    }
+
     // Sort rules by frequency
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
     rule_counts.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
@@ -974,28 +971,8 @@ fn filter_cargo_clippy(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Runs an unsupported cargo subcommand by passing it through directly
-pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("cargo passthrough: {:?}", args);
-    }
-    let status = resolved_command("cargo")
-        .args(args)
-        .status()
-        .context("Failed to run cargo")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("cargo {}", args_str),
-        &format!("rtk cargo {} (passthrough)", args_str),
-    );
-
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    crate::core::runner::run_passthrough("cargo", args, verbose)
 }
 
 #[cfg(test)]
@@ -1383,6 +1360,19 @@ warning: `rtk` (bin) generated 2 warnings
         assert!(result.contains("0 errors, 2 warnings"));
         assert!(result.contains("unused_variables"));
         assert!(result.contains("clippy::too_many_arguments"));
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_includes_error_details() {
+        let output = r#"    Checking rtk v0.5.0
+error: struct literals are not allowed here
+warning: unused variable: `x` [unused_variables]
+    Finished dev [unoptimized + debuginfo] target(s) in 1.53s
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(result.contains("cargo clippy: 1 errors, 1 warnings"));
+        assert!(result.contains("Error details:"));
+        assert!(result.contains("struct literals are not allowed here"));
     }
 
     #[test]

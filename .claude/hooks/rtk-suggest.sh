@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # RTK suggest hook for Claude Code PreToolUse:Bash
 # Emits system reminders when rtk-compatible commands are detected.
 # Outputs JSON with systemMessage to inform Claude Code without modifying execution.

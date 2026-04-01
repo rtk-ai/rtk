@@ -1,9 +1,12 @@
 //! Filters Docker and kubectl output into compact summaries.
 
+use crate::core::runner::{self, RunOptions};
 use crate::core::tracking;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{exit_code_from_output, resolved_command};
 use anyhow::{Context, Result};
+use serde_json::Value;
 use std::ffi::OsString;
+use std::process::Command;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ContainerCmd {
@@ -15,7 +18,7 @@ pub enum ContainerCmd {
     KubectlLogs,
 }
 
-pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<()> {
+pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         ContainerCmd::DockerPs => docker_ps(verbose),
         ContainerCmd::DockerImages => docker_images(verbose),
@@ -26,7 +29,28 @@ pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<()> {
     }
 }
 
-fn docker_ps(_verbose: u8) -> Result<()> {
+fn run_kubectl_json<F>(cmd: Command, label: &str, filter_fn: F) -> Result<i32>
+where
+    F: Fn(&Value) -> String,
+{
+    runner::run_filtered(
+        cmd,
+        "kubectl",
+        label,
+        |stdout| match serde_json::from_str::<Value>(stdout) {
+            Ok(json) => filter_fn(&json),
+            Err(e) => {
+                eprintln!("[rtk] kubectl: JSON parse failed: {}", e);
+                stdout.to_string()
+            }
+        },
+        RunOptions::stdout_only()
+            .early_exit_on_failure()
+            .no_trailing_newline(),
+    )
+}
+
+fn docker_ps(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let raw = resolved_command("docker")
@@ -48,7 +72,7 @@ fn docker_ps(_verbose: u8) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprint!("{}", stderr);
         timer.track("docker ps", "rtk docker ps", &raw, &raw);
-        std::process::exit(output.status.code().unwrap_or(1));
+        return Ok(exit_code_from_output(&output, "docker"));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -58,7 +82,7 @@ fn docker_ps(_verbose: u8) -> Result<()> {
         rtk.push_str("[docker] 0 containers");
         println!("{}", rtk);
         timer.track("docker ps", "rtk docker ps", &raw, &rtk);
-        return Ok(());
+        return Ok(0);
     }
 
     let count = stdout.lines().count();
@@ -92,10 +116,10 @@ fn docker_ps(_verbose: u8) -> Result<()> {
 
     print!("{}", rtk);
     timer.track("docker ps", "rtk docker ps", &raw, &rtk);
-    Ok(())
+    Ok(0)
 }
 
-fn docker_images(_verbose: u8) -> Result<()> {
+fn docker_images(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let raw = resolved_command("docker")
@@ -113,7 +137,7 @@ fn docker_images(_verbose: u8) -> Result<()> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprint!("{}", stderr);
         timer.track("docker images", "rtk docker images", &raw, &raw);
-        std::process::exit(output.status.code().unwrap_or(1));
+        return Ok(exit_code_from_output(&output, "docker"));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -124,7 +148,7 @@ fn docker_images(_verbose: u8) -> Result<()> {
         rtk.push_str("[docker] 0 images");
         println!("{}", rtk);
         timer.track("docker images", "rtk docker images", &raw, &rtk);
-        return Ok(());
+        return Ok(0);
     }
 
     let mut total_size_mb: f64 = 0.0;
@@ -173,89 +197,47 @@ fn docker_images(_verbose: u8) -> Result<()> {
 
     print!("{}", rtk);
     timer.track("docker images", "rtk docker images", &raw, &rtk);
-    Ok(())
+    Ok(0)
 }
 
-fn docker_logs(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+fn docker_logs(args: &[String], _verbose: u8) -> Result<i32> {
     let container = args.first().map(|s| s.as_str()).unwrap_or("");
     if container.is_empty() {
         println!("Usage: rtk docker logs <container>");
-        return Ok(());
+        return Ok(0);
     }
 
-    let output = resolved_command("docker")
-        .args(["logs", "--tail", "100", container])
-        .output()
-        .context("Failed to run docker logs")?;
+    let mut cmd = resolved_command("docker");
+    cmd.args(["logs", "--tail", "100", container]);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    if !output.status.success() {
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
-        }
-        timer.track(
-            &format!("docker logs {}", container),
-            "rtk docker logs",
-            &raw,
-            &raw,
-        );
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let analyzed = crate::log_cmd::run_stdin_str(&raw);
-    let rtk = format!("[docker] Logs for {}:\n{}", container, analyzed);
-    println!("{}", rtk);
-    timer.track(
-        &format!("docker logs {}", container),
-        "rtk docker logs",
-        &raw,
-        &rtk,
-    );
-    Ok(())
+    let label = format!("logs {}", container);
+    runner::run_filtered(
+        cmd,
+        "docker",
+        &label,
+        |raw| {
+            format!(
+                "[docker] Logs for {}:\n{}",
+                container,
+                crate::log_cmd::run_stdin_str(raw)
+            )
+        },
+        RunOptions::default().early_exit_on_failure(),
+    )
 }
 
-fn kubectl_pods(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+fn kubectl_pods(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("kubectl");
     cmd.args(["get", "pods", "-o", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
+    run_kubectl_json(cmd, "get pods", format_kubectl_pods)
+}
 
-    let output = cmd.output().context("Failed to run kubectl get pods")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let mut rtk = String::new();
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
-        }
-        timer.track("kubectl get pods", "rtk kubectl pods", &raw, &raw);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let json: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => {
-            rtk.push_str("No pods found");
-            println!("{}", rtk);
-            timer.track("kubectl get pods", "rtk kubectl pods", &raw, &rtk);
-            return Ok(());
-        }
-    };
-
+fn format_kubectl_pods(json: &Value) -> String {
     let Some(pods) = json["items"].as_array().filter(|a| !a.is_empty()) else {
-        rtk.push_str("No pods found");
-        println!("{}", rtk);
-        timer.track("kubectl get pods", "rtk kubectl pods", &raw, &rtk);
-        return Ok(());
+        return "No pods found\n".to_string();
     };
     let (mut running, mut pending, mut failed, mut restarts_total) = (0, 0, 0, 0i64);
     let mut issues: Vec<String> = Vec::new();
@@ -310,61 +292,33 @@ fn kubectl_pods(args: &[String], _verbose: u8) -> Result<()> {
         parts.push(format!("{} restarts", restarts_total));
     }
 
-    rtk.push_str(&format!("{} pods: {}\n", pods.len(), parts.join(", ")));
+    let mut out = format!("{} pods: {}\n", pods.len(), parts.join(", "));
     if !issues.is_empty() {
-        rtk.push_str("[warn] Issues:\n");
+        out.push_str("[warn] Issues:\n");
         for issue in issues.iter().take(10) {
-            rtk.push_str(&format!("  {}\n", issue));
+            out.push_str(&format!("  {}\n", issue));
         }
         if issues.len() > 10 {
-            rtk.push_str(&format!("  ... +{} more", issues.len() - 10));
+            out.push_str(&format!("  ... +{} more", issues.len() - 10));
         }
     }
-
-    print!("{}", rtk);
-    timer.track("kubectl get pods", "rtk kubectl pods", &raw, &rtk);
-    Ok(())
+    out
 }
 
-fn kubectl_services(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+fn kubectl_services(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("kubectl");
     cmd.args(["get", "services", "-o", "json"]);
     for arg in args {
         cmd.arg(arg);
     }
+    run_kubectl_json(cmd, "get services", format_kubectl_services)
+}
 
-    let output = cmd.output().context("Failed to run kubectl get services")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let mut rtk = String::new();
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
-        }
-        timer.track("kubectl get svc", "rtk kubectl svc", &raw, &raw);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let json: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => {
-            rtk.push_str("No services found");
-            println!("{}", rtk);
-            timer.track("kubectl get svc", "rtk kubectl svc", &raw, &rtk);
-            return Ok(());
-        }
-    };
-
+fn format_kubectl_services(json: &Value) -> String {
     let Some(services) = json["items"].as_array().filter(|a| !a.is_empty()) else {
-        rtk.push_str("No services found");
-        println!("{}", rtk);
-        timer.track("kubectl get svc", "rtk kubectl svc", &raw, &rtk);
-        return Ok(());
+        return "No services found\n".to_string();
     };
-    rtk.push_str(&format!("{} services:\n", services.len()));
+    let mut out = format!("{} services:\n", services.len());
 
     for svc in services.iter().take(15) {
         let ns = svc["metadata"]["namespace"].as_str().unwrap_or("-");
@@ -389,7 +343,7 @@ fn kubectl_services(args: &[String], _verbose: u8) -> Result<()> {
                     .collect()
             })
             .unwrap_or_default();
-        rtk.push_str(&format!(
+        out.push_str(&format!(
             "  {}/{} {} [{}]\n",
             ns,
             name,
@@ -398,21 +352,16 @@ fn kubectl_services(args: &[String], _verbose: u8) -> Result<()> {
         ));
     }
     if services.len() > 15 {
-        rtk.push_str(&format!("  ... +{} more", services.len() - 15));
+        out.push_str(&format!("  ... +{} more", services.len() - 15));
     }
-
-    print!("{}", rtk);
-    timer.track("kubectl get svc", "rtk kubectl svc", &raw, &rtk);
-    Ok(())
+    out
 }
 
-fn kubectl_logs(args: &[String], _verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+fn kubectl_logs(args: &[String], _verbose: u8) -> Result<i32> {
     let pod = args.first().map(|s| s.as_str()).unwrap_or("");
     if pod.is_empty() {
         println!("Usage: rtk kubectl logs <pod>");
-        return Ok(());
+        return Ok(0);
     }
 
     let mut cmd = resolved_command("kubectl");
@@ -421,33 +370,20 @@ fn kubectl_logs(args: &[String], _verbose: u8) -> Result<()> {
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run kubectl logs")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
-        }
-        timer.track(
-            &format!("kubectl logs {}", pod),
-            "rtk kubectl logs",
-            &raw,
-            &raw,
-        );
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let analyzed = crate::log_cmd::run_stdin_str(&raw);
-    let rtk = format!("Logs for {}:\n{}", pod, analyzed);
-    println!("{}", rtk);
-    timer.track(
-        &format!("kubectl logs {}", pod),
-        "rtk kubectl logs",
-        &raw,
-        &rtk,
-    );
-    Ok(())
+    let label = format!("logs {}", pod);
+    runner::run_filtered(
+        cmd,
+        "kubectl",
+        &label,
+        |stdout| {
+            format!(
+                "Logs for {}:\n{}",
+                pod,
+                crate::log_cmd::run_stdin_str(stdout)
+            )
+        },
+        RunOptions::stdout_only().early_exit_on_failure(),
+    )
 }
 
 /// Format `docker compose ps --format` output into compact form.
@@ -587,32 +523,12 @@ fn compact_ports(ports: &str) -> String {
     }
 }
 
-/// Runs an unsupported docker subcommand by passing it through directly
-pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("docker passthrough: {:?}", args);
-    }
-    let status = resolved_command("docker")
-        .args(args)
-        .status()
-        .context("Failed to run docker")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("docker {}", args_str),
-        &format!("rtk docker {} (passthrough)", args_str),
-    );
-
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    crate::core::runner::run_passthrough("docker", args, verbose)
 }
 
 /// Run `docker compose ps` with compact output
-pub fn run_compose_ps(verbose: u8) -> Result<()> {
+pub fn run_compose_ps(verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Raw output for token tracking
@@ -624,7 +540,7 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
     if !raw_output.status.success() {
         let stderr = String::from_utf8_lossy(&raw_output.stderr);
         eprintln!("{}", stderr);
-        std::process::exit(raw_output.status.code().unwrap_or(1));
+        return Ok(exit_code_from_output(&raw_output, "docker"));
     }
     let raw = String::from_utf8_lossy(&raw_output.stdout).to_string();
 
@@ -642,7 +558,7 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!("{}", stderr);
-        std::process::exit(output.status.code().unwrap_or(1));
+        return Ok(exit_code_from_output(&output, "docker"));
     }
     let structured = String::from_utf8_lossy(&output.stdout).to_string();
 
@@ -653,132 +569,61 @@ pub fn run_compose_ps(verbose: u8) -> Result<()> {
     let rtk = format_compose_ps(&structured);
     println!("{}", rtk);
     timer.track("docker compose ps", "rtk docker compose ps", &raw, &rtk);
-    Ok(())
+    Ok(0)
 }
 
-/// Run `docker compose logs` with deduplication
-pub fn run_compose_logs(service: Option<&str>, verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run_compose_logs(service: Option<&str>, verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("docker");
     cmd.args(["compose", "logs", "--tail", "100"]);
     if let Some(svc) = service {
         cmd.arg(svc);
     }
 
-    let output = cmd.output().context("Failed to run docker compose logs")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("{}", stderr);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    if verbose > 0 {
-        eprintln!("raw docker compose logs:\n{}", raw);
-    }
-
-    let rtk = format_compose_logs(&raw);
-    println!("{}", rtk);
     let svc_label = service.unwrap_or("all");
-    timer.track(
-        &format!("docker compose logs {}", svc_label),
-        "rtk docker compose logs",
-        &raw,
-        &rtk,
-    );
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "docker",
+        &format!("compose logs {}", svc_label),
+        |raw| {
+            if verbose > 0 {
+                eprintln!("raw docker compose logs:\n{}", raw);
+            }
+            format_compose_logs(raw)
+        },
+        RunOptions::default().early_exit_on_failure(),
+    )
 }
 
-/// Run `docker compose build` with summary output
-pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run_compose_build(service: Option<&str>, verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("docker");
     cmd.args(["compose", "build"]);
     if let Some(svc) = service {
         cmd.arg(svc);
     }
 
-    let output = cmd.output().context("Failed to run docker compose build")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("{}", stderr);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    if verbose > 0 {
-        eprintln!("raw docker compose build:\n{}", raw);
-    }
-
-    let rtk = format_compose_build(&raw);
-    println!("{}", rtk);
     let svc_label = service.unwrap_or("all");
-    timer.track(
-        &format!("docker compose build {}", svc_label),
-        "rtk docker compose build",
-        &raw,
-        &rtk,
-    );
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "docker",
+        &format!("compose build {}", svc_label),
+        |raw| {
+            if verbose > 0 {
+                eprintln!("raw docker compose build:\n{}", raw);
+            }
+            format_compose_build(raw)
+        },
+        RunOptions::default().early_exit_on_failure(),
+    )
 }
 
-/// Runs an unsupported docker compose subcommand by passing it through directly
-pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("docker compose passthrough: {:?}", args);
-    }
-    let status = resolved_command("docker")
-        .arg("compose")
-        .args(args)
-        .status()
-        .context("Failed to run docker compose")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("docker compose {}", args_str),
-        &format!("rtk docker compose {} (passthrough)", args_str),
-    );
-
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    let mut combined = vec![OsString::from("compose")];
+    combined.extend_from_slice(args);
+    crate::core::runner::run_passthrough("docker", &combined, verbose)
 }
 
-/// Runs an unsupported kubectl subcommand by passing it through directly
-pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    if verbose > 0 {
-        eprintln!("kubectl passthrough: {:?}", args);
-    }
-    let status = resolved_command("kubectl")
-        .args(args)
-        .status()
-        .context("Failed to run kubectl")?;
-
-    let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("kubectl {}", args_str),
-        &format!("rtk kubectl {} (passthrough)", args_str),
-    );
-
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
+    crate::core::runner::run_passthrough("kubectl", args, verbose)
 }
 
 #[cfg(test)]
