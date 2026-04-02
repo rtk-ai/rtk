@@ -403,6 +403,9 @@ enum Commands {
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
+        /// Reset all token savings stats to zero
+        #[arg(long)]
+        reset: bool,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -1665,6 +1668,7 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             failures,
+            reset,
         } => {
             analytics::gain::run(
                 project, // added: pass project flag
@@ -1678,6 +1682,7 @@ fn run_cli() -> Result<i32> {
                 all,
                 &format,
                 failures,
+                reset,
                 cli.verbose,
             )?;
             0

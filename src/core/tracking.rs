@@ -29,7 +29,7 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -395,6 +395,14 @@ impl Tracker {
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        Ok(())
+    }
+
+    /// Delete all tracked commands, resetting savings stats to zero.
+    pub fn reset_all(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM commands", [])
+            .context("Failed to reset tracking data")?;
         Ok(())
     }
 

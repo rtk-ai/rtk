@@ -24,10 +24,19 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    reset: bool,
     _verbose: u8,
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
+
+    if reset {
+        tracker
+            .reset_all()
+            .context("Failed to reset token savings")?;
+        println!("{}", "Token savings stats reset to zero.".green());
+        return Ok(());
+    }
 
     if failures {
         return show_failures(&tracker);
