@@ -78,10 +78,6 @@ in {
     home.file = lib.mkIf cfg.claudeCode.enable {
       ".claude/CLAUDE.md".source = "${manifest}/.claude/CLAUDE.md";
       ".claude/settings.json".source = "${manifest}/.claude/settings.json";
-      ".claude/hooks/rtk-rewrite.sh" = {
-        source = "${manifest}/.claude/hooks/rtk-rewrite.sh";
-        executable = true;
-      };
       ".claude/RTK.md".source = "${manifest}/.claude/RTK.md";
     };
   };
