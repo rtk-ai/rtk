@@ -19,8 +19,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read, summary,
-    tree, wc_cmd,
+    deps, direnv_cmd, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls,
+    read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -223,6 +223,13 @@ enum Commands {
         /// Show all (include sensitive)
         #[arg(long)]
         show_all: bool,
+    },
+
+    /// direnv passthrough with TOML filtering for exec output
+    Direnv {
+        /// direnv arguments (for example: exec . env)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
 
     /// Find files with compact tree output (accepts native find flags like -name, -type)
@@ -1462,6 +1469,8 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Direnv { args } => direnv_cmd::run(&args, cli.verbose)?,
+
         Commands::Find { args } => {
             find_cmd::run_from_args(&args, cli.verbose)?;
             0
@@ -2101,6 +2110,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Json { .. }
             | Commands::Deps { .. }
             | Commands::Env { .. }
+            | Commands::Direnv { .. }
             | Commands::Find { .. }
             | Commands::Diff { .. }
             | Commands::Log { .. }

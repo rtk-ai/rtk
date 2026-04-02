@@ -1,0 +1,61 @@
+[filters.direnv-01-env-dump]
+description = "Redact env/printenv output under direnv exec"
+match_command = "^direnv\\s+exec\\s+(?:'[^']+'|\"[^\"]+\"|\\S+)\\s+(?:env|printenv)(?:\\s|$).*"
+strip_ansi = true
+replace = [
+  { pattern = "^([A-Za-z_][A-Za-z0-9_]*)=.*$", replacement = "$1=***" },
+]
+
+[[tests.direnv-01-env-dump]]
+name = "direct env dump is redacted"
+input = """
+GITHUB_TOKEN=ghp_secret
+NODE_AUTH_TOKEN=npm_secret
+OPENAI_API_KEY=sk-secret
+PATH=/usr/local/bin:/usr/bin
+"""
+expected = "GITHUB_TOKEN=***\nNODE_AUTH_TOKEN=***\nOPENAI_API_KEY=***\nPATH=***"
+
+[filters.direnv-02-shell-env-dump]
+description = "Redact bash/sh/zsh wrappers that run env inspection under direnv exec"
+match_command = "^direnv\\s+exec\\s+(?:'[^']+'|\"[^\"]+\"|\\S+)\\s+(?:bash|sh|zsh)\\s+-[A-Za-z]*c\\s+.*(?:printenv|declare\\s+-x|(?:^|[^A-Za-z0-9_])env(?:$|[^A-Za-z0-9_])).*"
+strip_ansi = true
+replace = [
+  { pattern = "^([A-Za-z_][A-Za-z0-9_]*)=.*$", replacement = "$1=***" },
+]
+
+[[tests.direnv-02-shell-env-dump]]
+name = "shell env dump preserves chatter and redacts values"
+input = """
+direnv: loading /repo/.envrc
+GITHUB_TOKEN=ghp_secret
+OPENAI_API_KEY=sk-secret
+"""
+expected = "direnv: loading /repo/.envrc\nGITHUB_TOKEN=***\nOPENAI_API_KEY=***"
+
+[filters.direnv-03-gh-auth-token]
+description = "Redact GitHub CLI token display under direnv exec"
+match_command = "^direnv\\s+exec\\s+(?:'[^']+'|\"[^\"]+\"|\\S+)\\s+gh\\s+auth\\s+(?:token(?:\\s|$)|status\\b.*--show-token\\b).*"
+strip_ansi = true
+replace = [
+  { pattern = "gh[pousr]_[A-Za-z0-9_]+", replacement = "***" },
+  { pattern = "github_pat_[A-Za-z0-9_]+", replacement = "***" },
+]
+
+[[tests.direnv-03-gh-auth-token]]
+name = "gh auth token is redacted"
+input = "ghp_abcdefghijklmnopqrstuvwxyz"
+expected = "***"
+
+[filters.direnv-04-node-auth-token]
+description = "Redact npm/pnpm auth-token reads under direnv exec"
+match_command = "^direnv\\s+exec\\s+(?:'[^']+'|\"[^\"]+\"|\\S+)\\s+(?:npm|pnpm)\\s+config\\s+get\\s+.*(?:_authToken|authToken|npmAuthToken).*"
+strip_ansi = true
+replace = [
+  { pattern = "^.+$", replacement = "***" },
+]
+
+[[tests.direnv-04-node-auth-token]]
+name = "npm auth token read is redacted"
+input = "npm_xxxxxxxxxxxxxxxxxxxx"
+expected = "***"
