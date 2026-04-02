@@ -1,6 +1,6 @@
 # Hook System
 
-> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview | [hooks/](../../hooks/README.md) for deployed hook artifacts
+> See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview | [hooks/](../../hooks/README.md) for deployed hook artifacts
 
 ## Scope
 
