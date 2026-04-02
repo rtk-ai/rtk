@@ -1967,21 +1967,37 @@ fn run_cli() -> Result<i32> {
                 eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
             }
 
-            let mut child = core::utils::resolved_command(cmd_name.as_ref())
-                .args(&cmd_args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .context(format!("Failed to execute command: {}", cmd_name))?;
+            // ISSUE #897: ChildGuard kills child on error/panic to prevent
+            // orphan processes that caused a 514GB memory leak + kernel panic.
+            struct ChildGuard(std::process::Child);
+            impl Drop for ChildGuard {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+
+            let mut child = ChildGuard(
+                core::utils::resolved_command(cmd_name.as_ref())
+                    .args(&cmd_args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context(format!("Failed to execute command: {}", cmd_name))?,
+            );
 
             let stdout_pipe = child
+                .0
                 .stdout
                 .take()
                 .context("Failed to capture child stdout")?;
             let stderr_pipe = child
+                .0
                 .stderr
                 .take()
                 .context("Failed to capture child stderr")?;
+
+            const CAP: usize = 1_048_576;
 
             let stdout_handle = thread::spawn(move || -> std::io::Result<Vec<u8>> {
                 let mut reader = stdout_pipe;
@@ -1993,7 +2009,10 @@ fn run_cli() -> Result<i32> {
                     if count == 0 {
                         break;
                     }
-                    captured.extend_from_slice(&buf[..count]);
+                    if captured.len() < CAP {
+                        let take = count.min(CAP - captured.len());
+                        captured.extend_from_slice(&buf[..take]);
+                    }
                     let mut out = std::io::stdout().lock();
                     out.write_all(&buf[..count])?;
                     out.flush()?;
@@ -2012,7 +2031,10 @@ fn run_cli() -> Result<i32> {
                     if count == 0 {
                         break;
                     }
-                    captured.extend_from_slice(&buf[..count]);
+                    if captured.len() < CAP {
+                        let take = count.min(CAP - captured.len());
+                        captured.extend_from_slice(&buf[..take]);
+                    }
                     let mut err = std::io::stderr().lock();
                     err.write_all(&buf[..count])?;
                     err.flush()?;
@@ -2022,6 +2044,7 @@ fn run_cli() -> Result<i32> {
             });
 
             let status = child
+                .0
                 .wait()
                 .context(format!("Failed waiting for command: {}", cmd_name))?;
 
