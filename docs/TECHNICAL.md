@@ -94,6 +94,121 @@ All rewrite logic lives in Rust (`src/discover/registry.rs`). Hooks are thin del
 
 > **Details**: [`hooks/README.md`](../hooks/README.md) covers each agent's JSON format, the rewrite registry, compound command handling, and the `RTK_DISABLED` override.
 
+#### Rewrite Pipeline
+
+The rewrite pipeline is how RTK intercepts and rewrites commands. The call chain is:
+
+```
+hook shell → rewrite_cmd.rs → rewrite_command() → rewrite_compound() → rewrite_segment() → classify_command()
+```
+
+Traced step by step for `cargo fmt --all && cargo test 2>&1 | tail -20`:
+
+```
+LLM Agent: "cargo fmt --all && cargo test 2>&1 | tail -20"
+  |
+  |  Hook shell (hooks/claude/rtk-rewrite.sh)
+  |  Reads JSON from agent, extracts command, calls `rtk rewrite "$CMD"`
+  |  On failure (jq missing, rtk missing, old version): exit 0 (passthrough)
+  |
+  v
+rewrite_cmd::run(cmd)                              [src/hooks/rewrite_cmd.rs]
+  |  1. Load config → hooks.exclude_commands
+  |  2. check_command(cmd) → Deny → exit(2)
+  |  3. registry::rewrite_command(cmd, excluded)
+  |     → None → exit(1)          (no RTK equivalent, passthrough)
+  |     → Some + Allow → print, exit(0)
+  |     → Some + Ask   → print, exit(3)
+  |
+  v
+rewrite_command(cmd, excluded)                     [src/discover/registry.rs]
+  |  Early exits:
+  |  - Empty → None
+  |  - Contains "<<" or "$((" (heredoc/arithmetic) → None
+  |  - Simple "rtk ..." (no operators) → return as-is
+  |  - Otherwise → rewrite_compound(cmd, excluded)
+  |
+  v
+rewrite_compound(cmd, excluded)                    [src/discover/registry.rs]
+  |
+  |  Step 1 — Tokenize (lexer.rs)
+  |  tokenize() produces typed tokens with byte offsets:
+  |    Arg("cargo") Arg("fmt") Arg("--all")
+  |    Operator("&&")
+  |    Arg("cargo") Arg("test") Redirect("2>&1")
+  |    Pipe("|")
+  |    Arg("tail") Arg("-20")
+  |
+  |  Step 2 — Split on operators, rewrite each segment
+  |  Operator (&&, ||, ;) → rewrite both sides
+  |  Pipe (|) → rewrite left side only, keep right side raw
+  |             exception: find/fd before pipe → skip rewrite
+  |  Shellism (&) → rewrite both sides (background)
+  |
+  |  Calls rewrite_segment() per segment:
+  |    segment 1: "cargo fmt --all"
+  |    segment 2: "cargo test 2>&1"
+  |    after pipe: "tail -20" kept raw
+  |
+  v
+rewrite_segment(seg, excluded)                     [src/discover/registry.rs]
+  |
+  |  Step 3 — Strip trailing redirects
+  |  strip_trailing_redirects() re-tokenizes the segment:
+  |    "cargo test 2>&1" → cmd_part="cargo test", redirect=" 2>&1"
+  |  (simple commands like "cargo fmt --all" → no redirect, suffix is "")
+  |
+  |  Step 4 — Already RTK → return as-is
+  |
+  |  Step 5 — Special cases (short-circuit before classification)
+  |  head -N / --lines=N → rewrite_line_range() → "rtk read file --max-lines N"
+  |  tail -N / -n N / --lines N → rewrite_line_range() → "rtk read file --tail-lines N"
+  |  head/tail with unsupported flag (-c, -f) → None (skip rewrite)
+  |  cat with incompatible flag (-A, -v, -e) → None (skip rewrite)
+  |
+  |  Step 6 — classify_command(cmd_part) [see below]
+  |  → Supported → check excluded list → continue
+  |  → Unsupported/Ignored → None (skip rewrite)
+  |
+  |  Step 7 — Build rewritten command
+  |  a. Find matching rule from rules.rs
+  |  b. Extract env prefix (ENV_PREFIX regex, second pass — first was in classify)
+  |     e.g. "GIT_SSH_COMMAND=\"ssh -o ...\" git push" → prefix="GIT_SSH_COMMAND=..."
+  |  c. Guard: RTK_DISABLED=1 in prefix → None
+  |  d. Guard: gh with --json/--jq/--template → None
+  |  e. Apply rule's rewrite_prefixes: "cargo fmt" → "rtk cargo fmt"
+  |  f. Reassemble: env_prefix + rtk_cmd + args + redirect_suffix
+  |
+  v
+classify_command(cmd)                              [src/discover/registry.rs]
+  |  1. Check IGNORED_EXACT (cd, echo, fi, done, ...)
+  |  2. Check IGNORED_PREFIXES (rtk, mkdir, mv, ...)
+  |  3. Strip env prefix with ENV_PREFIX regex (for pattern matching only)
+  |  4. Normalize absolute paths: /usr/bin/grep → grep
+  |  5. Strip git global opts: git -C /tmp status → git status
+  |  6. Guard: cat/head/tail with redirect (>, >>) → Unsupported (write, not read)
+  |  7. Match against REGEX_SET (60+ compiled patterns from rules.rs)
+  |  8. Extract subcommand → lookup custom savings/status overrides
+  |  9. Return Classification::Supported { rtk_equivalent, category, savings, status }
+  |
+  v
+Result: "rtk cargo fmt --all && rtk cargo test 2>&1 | tail -20"
+  |
+  |  Hook response
+  |  Hook wraps result in agent-specific JSON, returns to LLM agent
+  |
+  v
+LLM Agent executes rewritten command
+  (bash handles && and |, each rtk invocation is a separate process)
+```
+
+Key design decisions:
+- **Lexer-based tokenization**: A single-pass state machine (`lexer.rs`) handles all shell constructs (quotes, escapes, redirects, operators). Used for both compound splitting and redirect stripping.
+- **Segment-level rewriting**: Compound commands are split by operators, each segment rewritten independently. Bash recombines them at execution time.
+- **Pipe semantics**: Only the left side of `|` is rewritten. The pipe consumer (grep, head, wc) runs raw. `find`/`fd` before a pipe is never rewritten (output format incompatible with xargs).
+- **Double env prefix handling**: `classify_command()` strips env prefixes to match the underlying command against rules. `rewrite_segment()` extracts the same prefix separately to re-prepend it to the rewritten command.
+- **Fallback contract**: If any segment fails to match, it stays raw. `rewrite_command()` returns `None` only when zero segments were rewritten.
+
 ### 3.3 CLI Parsing and Routing
 
 Once the rewritten command reaches RTK:

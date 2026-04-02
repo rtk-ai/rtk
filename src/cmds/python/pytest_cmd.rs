@@ -1,8 +1,8 @@
 //! Filters pytest output to show only failures and the summary line.
 
-use crate::core::tracking;
+use crate::core::runner;
 use crate::core::utils::{resolved_command, tool_exists, truncate};
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -12,20 +12,15 @@ enum ParseState {
     Summary,
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    // Try to detect pytest command (could be "pytest", "python -m pytest", etc.)
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("pytest") {
         resolved_command("pytest")
     } else {
-        // Fallback to python -m pytest
         let mut c = resolved_command("python");
         c.arg("-m").arg("pytest");
         c
     };
 
-    // Force short traceback and quiet mode for compact output
     let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
     let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
 
@@ -44,44 +39,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: pytest --tb=short -q {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run pytest. Is it installed? Try: pip install pytest")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let filtered = filter_pytest_output(&stdout);
-
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "pytest", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    // Include stderr if present (import errors, etc.)
-    if !stderr.trim().is_empty() {
-        eprintln!("{}", stderr.trim());
-    }
-
-    timer.track(
-        &format!("pytest {}", args.join(" ")),
-        &format!("rtk pytest {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "pytest",
+        &args.join(" "),
+        filter_pytest_output,
+        runner::RunOptions::stdout_only().tee("pytest"),
+    )
 }
 
 /// Parse pytest output using state machine

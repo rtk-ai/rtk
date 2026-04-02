@@ -6,44 +6,12 @@
 //! Token optimization: automatically excludes noise directories via -I pattern
 //! unless -a flag is present (respecting user intent).
 
-use crate::core::tracking;
+use super::constants::NOISE_DIRS;
+use crate::core::runner::{self, RunOptions};
 use crate::core::utils::{resolved_command, tool_exists};
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-/// Noise directories commonly excluded from LLM context
-const NOISE_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
-    "target",
-    "__pycache__",
-    ".next",
-    "dist",
-    "build",
-    ".cache",
-    ".turbo",
-    ".vercel",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".tox",
-    ".venv",
-    "venv",
-    "env",
-    ".env",
-    "coverage",
-    ".nyc_output",
-    ".DS_Store",
-    "Thumbs.db",
-    ".idea",
-    ".vscode",
-    ".vs",
-    "*.egg-info",
-    ".eggs",
-];
-
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    // Check if tree is installed
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if !tool_exists("tree") {
         anyhow::bail!(
             "tree command not found. Install it first:\n\
@@ -56,49 +24,42 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
 
     let mut cmd = resolved_command("tree");
 
-    // Determine if user wants all files or default behavior
     let show_all = args.iter().any(|a| a == "-a" || a == "--all");
     let has_ignore = args.iter().any(|a| a == "-I" || a.starts_with("--ignore="));
 
-    // Auto-inject -I pattern unless user wants all or already specified -I
     if !show_all && !has_ignore {
         let ignore_pattern = NOISE_DIRS.join("|");
         cmd.arg("-I").arg(&ignore_pattern);
     }
 
-    // Pass all user args
     for arg in args {
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run tree")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprint!("{}", stderr);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let filtered = filter_tree_output(&raw);
-
-    if verbose > 0 {
-        eprintln!(
-            "Lines: {} → {} ({}% reduction)",
-            raw.lines().count(),
-            filtered.lines().count(),
-            if raw.lines().count() > 0 {
-                100 - (filtered.lines().count() * 100 / raw.lines().count())
-            } else {
-                0
+    runner::run_filtered(
+        cmd,
+        "tree",
+        &args.join(" "),
+        |raw| {
+            let filtered = filter_tree_output(raw);
+            if verbose > 0 {
+                eprintln!(
+                    "Lines: {} → {} ({}% reduction)",
+                    raw.lines().count(),
+                    filtered.lines().count(),
+                    if raw.lines().count() > 0 {
+                        100 - (filtered.lines().count() * 100 / raw.lines().count())
+                    } else {
+                        0
+                    }
+                );
             }
-        );
-    }
-
-    print!("{}", filtered);
-    timer.track("tree", "rtk tree", &raw, &filtered);
-
-    Ok(())
+            filtered
+        },
+        RunOptions::stdout_only()
+            .early_exit_on_failure()
+            .no_trailing_newline(),
+    )
 }
 
 fn filter_tree_output(raw: &str) -> String {

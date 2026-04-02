@@ -22,6 +22,7 @@
 ///   6. head/tail_lines      — keep first/last N lines
 ///   7. max_lines            — absolute line cap
 ///   8. on_empty             — message if result is empty
+use super::constants::{FILTERS_TOML, RTK_DATA_DIR};
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 use serde::Deserialize;
@@ -210,7 +211,7 @@ impl TomlFilterRegistry {
 
         // Priority 2: user-global ~/.config/rtk/filters.toml
         if let Some(config_dir) = dirs::config_dir() {
-            let global_path = config_dir.join("rtk").join("filters.toml");
+            let global_path = config_dir.join(RTK_DATA_DIR).join(FILTERS_TOML);
             if let Ok(content) = std::fs::read_to_string(&global_path) {
                 match Self::parse_and_compile(&content, "user-global") {
                     Ok(f) => filters.extend(f),

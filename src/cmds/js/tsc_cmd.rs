@@ -1,14 +1,12 @@
 //! Filters TypeScript compiler errors, grouping them by file and error code.
 
-use crate::core::tracking;
+use crate::core::runner;
 use crate::core::utils::{resolved_command, tool_exists, truncate};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Try tsc directly first, fallback to npx if not found
     let tsc_exists = tool_exists("tsc");
 
@@ -29,31 +27,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: {} {}", tool, args.join(" "));
     }
 
-    let output = cmd
-        .output()
-        .context("Failed to run tsc (try: npm install -g typescript)")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let filtered = filter_tsc_output(&raw);
-
-    let exit_code = output.status.code().unwrap_or(1);
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "tsc", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    timer.track(
-        &format!("tsc {}", args.join(" ")),
-        &format!("rtk tsc {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    // Preserve tsc exit code for CI/CD compatibility
-    std::process::exit(exit_code);
+    runner::run_filtered(
+        cmd,
+        "tsc",
+        &args.join(" "),
+        |raw| filter_tsc_output(raw),
+        runner::RunOptions::with_tee("tsc"),
+    )
 }
 
 /// Filter TypeScript compiler output - group errors by file, show every error
