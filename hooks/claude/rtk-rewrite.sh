@@ -78,28 +78,24 @@ case $EXIT_CODE in
     ;;
 esac
 
-UPDATED_INPUT=$(jq -c --arg cmd "$REWRITTEN" '.tool_input | .command = $cmd' <<<"$INPUT")
-
 if [ "$EXIT_CODE" -eq 3 ]; then
   # Ask: rewrite the command, omit permissionDecision so Claude Code prompts.
-  jq -n \
-    --argjson updated "$UPDATED_INPUT" \
-    '{
+  jq -c --arg cmd "$REWRITTEN" \
+    '.tool_input.command = $cmd | {
       "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "updatedInput": $updated
+        "updatedInput": .tool_input
       }
-    }'
+    }' <<<"$INPUT"
 else
   # Allow: rewrite the command and auto-allow.
-  jq -n \
-    --argjson updated "$UPDATED_INPUT" \
-    '{
+  jq -c --arg cmd "$REWRITTEN" \
+    '.tool_input.command = $cmd | {
       "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
         "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": $updated
+        "updatedInput": .tool_input
       }
-    }'
+    }' <<<"$INPUT"
 fi
