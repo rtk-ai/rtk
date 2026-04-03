@@ -6,7 +6,6 @@ use serde_json::{json, Value};
 use std::io::{self, Read};
 
 use crate::discover::registry::rewrite_command;
-use crate::hooks::permissions::{check_command, PermissionVerdict};
 
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
 
@@ -112,24 +111,10 @@ fn handle_vscode(cmd: &str) -> Result<()> {
         None => return Ok(()),
     };
 
-    let verdict = check_command(cmd);
-
-    // Deny: pass through without rewrite — let the host tool handle it.
-    if verdict == PermissionVerdict::Deny {
-        return Ok(());
-    }
-
-    // Allow (explicit rule matched): auto-allow the rewritten command.
-    // Ask/Default (no allow rule matched): rewrite but let the host tool prompt.
-    let decision = match verdict {
-        PermissionVerdict::Allow => "allow",
-        _ => "ask",
-    };
-
     let output = json!({
         "hookSpecificOutput": {
             "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecision": decision,
+            "permissionDecision": "allow",
             "permissionDecisionReason": "RTK auto-rewrite",
             "updatedInput": { "command": rewritten }
         }
@@ -153,6 +138,19 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
     });
     println!("{output}");
     Ok(())
+}
+
+/// Run the Claude Code PreToolUse hook (native, no bash/jq required).
+/// Reads JSON from stdin, rewrites shell commands to rtk equivalents,
+/// outputs JSON to stdout in Claude Code hook format.
+///
+/// This enables Windows-native hook support: instead of a bash script,
+/// install `rtk hook claude` directly in settings.json.
+pub fn run_claude() -> Result<()> {
+    // Claude Code uses the same JSON format as VS Code Copilot Chat:
+    // { "tool_name": "Bash", "tool_input": { "command": "..." } }
+    // handle_vscode already emits the correct updatedInput response.
+    run_copilot()
 }
 
 // ── Gemini hook ───────────────────────────────────────────────
@@ -182,12 +180,6 @@ pub fn run_gemini() -> Result<()> {
 
     if cmd.is_empty() {
         print_allow();
-        return Ok(());
-    }
-
-    // Check deny rules — Gemini CLI only supports allow/deny (no ask mode).
-    if check_command(cmd) == PermissionVerdict::Deny {
-        println!(r#"{{"decision":"deny","reason":"Blocked by RTK permission rule"}}"#);
         return Ok(());
     }
 

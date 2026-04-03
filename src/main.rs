@@ -691,6 +691,11 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Claude Code PreToolUse hook (reads JSON from stdin, no bash/jq required)
+    ///
+    /// Install natively in ~/.claude/settings.json for Windows support:
+    ///   "command": "\"C:\\path\\to\\rtk.exe\" hook claude"
+    Claude,
 }
 
 #[derive(Subcommand)]
@@ -1938,6 +1943,7 @@ fn run_cli() -> Result<i32> {
             match command {
                 HookCommands::Gemini => hooks::hook_cmd::run_gemini()?,
                 HookCommands::Copilot => hooks::hook_cmd::run_copilot()?,
+                HookCommands::Claude => hooks::hook_cmd::run_claude()?,
             }
             0
         }

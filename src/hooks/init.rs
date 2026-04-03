@@ -11,6 +11,7 @@ use super::constants::{
     REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
+use crate::core::config;
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
@@ -292,6 +293,14 @@ pub fn run(
     }
 
     println!();
+    let env_disabled = std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1";
+    let config_disabled = matches!(config::telemetry_enabled(), Some(false));
+    if env_disabled || config_disabled {
+        println!("  [info] Anonymous telemetry is disabled");
+    } else {
+        println!("  [info] Anonymous telemetry is enabled by default (opt-out: RTK_TELEMETRY_DISABLED=1)");
+    }
+    println!("  [info] See: https://github.com/rtk-ai/rtk#privacy--telemetry");
 
     Ok(())
 }
@@ -473,7 +482,7 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    if command.contains(REWRITE_HOOK_FILE) {
+                    if command.contains(REWRITE_HOOK_FILE) || command.contains("hook claude") {
                         return false;
                     }
                 }
@@ -866,21 +875,164 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .any(|cmd| {
             cmd == hook_command
                 || (cmd.contains(REWRITE_HOOK_FILE) && hook_command.contains(REWRITE_HOOK_FILE))
+                || (cmd.contains("hook claude") && hook_command.contains("hook claude"))
         })
 }
 
+/// Build the native hook command string: `"<rtk_exe>" hook claude`
+/// Works on any platform without requiring bash or jq.
+fn native_hook_command() -> Result<String> {
+    let exe = std::env::current_exe()
+        .context("Failed to determine RTK binary path")?;
+    let exe_str = exe
+        .to_str()
+        .context("RTK binary path contains invalid UTF-8")?;
+    // Quote the path in case it contains spaces (common on Windows)
+    Ok(format!("\"{}\" hook claude", exe_str))
+}
+
+/// Patch settings.json using a pre-built command string (no shell script file needed).
+/// Used by the Windows native hook path where bash is unavailable.
+fn patch_settings_native(
+    hook_command: &str,
+    mode: PatchMode,
+    verbose: u8,
+    include_opencode: bool,
+) -> Result<PatchResult> {
+    let claude_dir = resolve_claude_dir()?;
+    let settings_path = claude_dir.join("settings.json");
+
+    let mut root = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    if hook_already_present(&root, hook_command) {
+        if verbose > 0 {
+            eprintln!("settings.json: hook already present");
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    match mode {
+        PatchMode::Skip => {
+            println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
+            println!("  {{");
+            println!("    \"hooks\": {{ \"PreToolUse\": [{{");
+            println!("      \"matcher\": \"Bash\",");
+            println!("      \"hooks\": [{{ \"type\": \"command\",");
+            let cmd_json = serde_json::to_string(hook_command).unwrap_or_default();
+            println!("        \"command\": {}", cmd_json);
+            println!("      }}]");
+            println!("    }}]}}");
+            println!("  }}");
+            if include_opencode {
+                println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
+            } else {
+                println!("\n  Then restart Claude Code. Test with: git status\n");
+            }
+            return Ok(PatchResult::Skipped);
+        }
+        PatchMode::Ask => {
+            if !prompt_user_consent(&settings_path)? {
+                println!("\n  Skipped settings.json patching.");
+                return Ok(PatchResult::Declined);
+            }
+        }
+        PatchMode::Auto => {}
+    }
+
+    insert_hook_entry(&mut root, hook_command);
+
+    if settings_path.exists() {
+        let backup_path = settings_path.with_extension("json.bak");
+        fs::copy(&settings_path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup_path.display());
+        }
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+    atomic_write(&settings_path, &serialized)?;
+
+    println!("\n  settings.json: hook added");
+    Ok(PatchResult::Patched)
+}
+
 /// Default mode: hook + slim RTK.md + @RTK.md reference
+/// On Windows, installs `rtk hook claude` natively (no bash/jq required).
 #[cfg(not(unix))]
 fn run_default_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
+    global: bool,
+    patch_mode: PatchMode,
+    verbose: u8,
+    install_opencode: bool,
 ) -> Result<()> {
-    eprintln!("[warn] Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose, _install_opencode)
+    if !global {
+        run_claude_md_mode(false, verbose, install_opencode)?;
+        return Ok(());
+    }
+
+    let claude_dir = resolve_claude_dir()?;
+    fs::create_dir_all(&claude_dir)
+        .with_context(|| format!("Failed to create directory: {}", claude_dir.display()))?;
+    let rtk_md_path = claude_dir.join("RTK.md");
+    let claude_md_path = claude_dir.join("CLAUDE.md");
+
+    // 1. Write RTK.md
+    write_if_changed(&rtk_md_path, RTK_SLIM, "RTK.md", verbose)?;
+
+    // 2. Patch CLAUDE.md (@RTK.md reference)
+    let migrated = patch_claude_md(&claude_md_path, verbose)?;
+
+    // 3. Install native hook in settings.json (no bash script needed)
+    let hook_command = native_hook_command()?;
+    let patch_result = patch_settings_native(&hook_command, patch_mode, verbose, install_opencode)?;
+
+    match patch_result {
+        PatchResult::Patched => {
+            println!("\nRTK hook installed (Windows native).\n");
+            println!("  Hook:      {}", hook_command);
+            println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+            println!("  CLAUDE.md: @RTK.md reference added");
+            println!("  settings.json: hook added");
+            println!("  Restart Claude Code. Test with: git status");
+        }
+        PatchResult::AlreadyPresent => {
+            println!("\nRTK hook installed (Windows native).\n");
+            println!("  Hook:      {}", hook_command);
+            println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+            println!("  CLAUDE.md: @RTK.md reference added");
+            println!("  settings.json: hook already present");
+            println!("  Restart Claude Code. Test with: git status");
+        }
+        PatchResult::Declined | PatchResult::Skipped => {
+            println!("\nRTK not fully installed (settings.json not patched).\n");
+            println!("  Hook command (manual setup): {}", hook_command);
+            println!("  RTK.md:    {} (10 lines)", rtk_md_path.display());
+            println!("  CLAUDE.md: @RTK.md reference added");
+            println!("  Next step: add the hook command above to ~/.claude/settings.json");
+        }
+    }
+
+    if migrated {
+        println!("\n  [ok] Migrated: removed RTK block from CLAUDE.md, replaced with @RTK.md");
+    }
+
+    generate_global_filters_template(verbose)?;
+
+    println!();
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -2779,6 +2931,28 @@ More notes
     }
 
     #[test]
+    fn test_hook_already_present_native_windows() {
+        // Native Windows hook: "C:\...\rtk.exe" hook claude
+        let hook_command = r#""C:\Users\test\AppData\Local\rtk.exe" hook claude"#;
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": hook_command
+                    }]
+                }]
+            }
+        });
+        // Exact match
+        assert!(hook_already_present(&json_content, hook_command));
+        // Different exe path, same fingerprint
+        let other_path = r#""C:\other\rtk.exe" hook claude"#;
+        assert!(hook_already_present(&json_content, other_path));
+    }
+
+    #[test]
     fn test_hook_not_present_other_hooks() {
         let json_content = serde_json::json!({
             "hooks": {
@@ -2951,6 +3125,33 @@ More notes
         assert_eq!(pre_tool_use.len(), 1);
 
         // Check it's the other hook
+        let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(command, "/some/other/hook.sh");
+    }
+
+    #[test]
+    fn test_remove_native_hook_from_json() {
+        let native_cmd = r#""C:\Users\test\AppData\Local\rtk.exe" hook claude"#;
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": "/some/other/hook.sh" }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{ "type": "command", "command": native_cmd }]
+                    }
+                ]
+            }
+        });
+
+        let removed = remove_hook_from_json(&mut json_content);
+        assert!(removed);
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
         let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(command, "/some/other/hook.sh");
     }
