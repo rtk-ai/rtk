@@ -1288,9 +1288,9 @@ fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     println!("\nRTK configured for Codex CLI.\n");
     println!("  RTK.md:    {}", rtk_md_path.display());
     if added_ref {
-        println!("  AGENTS.md: @RTK.md reference added");
+        println!("  AGENTS.md: {} reference added", rtk_md_ref);
     } else {
-        println!("  AGENTS.md: @RTK.md reference already present");
+        println!("  AGENTS.md: {} reference already present", rtk_md_ref);
     }
     if global {
         println!(

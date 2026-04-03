@@ -1255,8 +1255,14 @@ fn run_cli() -> Result<i32> {
             line_numbers,
         } => {
             let mut had_error = false;
+            let mut stdin_seen = false;
             for file in &files {
                 let result = if file == Path::new("-") {
+                    if stdin_seen {
+                        eprintln!("rtk: warning: stdin specified more than once");
+                        continue;
+                    }
+                    stdin_seen = true;
                     read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
                 } else {
                     read::run(
@@ -1982,30 +1988,31 @@ fn run_cli() -> Result<i32> {
 
             // ISSUE #897: ChildGuard kills child on error/panic to prevent
             // orphan processes that caused a 514GB memory leak + kernel panic.
-            struct ChildGuard(std::process::Child);
+            struct ChildGuard(Option<std::process::Child>);
             impl Drop for ChildGuard {
                 fn drop(&mut self) {
-                    let _ = self.0.kill();
-                    let _ = self.0.wait();
+                    if let Some(mut child) = self.0.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
                 }
             }
 
-            let mut child = ChildGuard(
+            let mut child = ChildGuard(Some(
                 core::utils::resolved_command(cmd_name.as_ref())
                     .args(&cmd_args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
                     .context(format!("Failed to execute command: {}", cmd_name))?,
-            );
+            ));
 
-            let stdout_pipe = child
-                .0
+            let inner = child.0.as_mut().context("Child process missing")?;
+            let stdout_pipe = inner
                 .stdout
                 .take()
                 .context("Failed to capture child stdout")?;
-            let stderr_pipe = child
-                .0
+            let stderr_pipe = inner
                 .stderr
                 .take()
                 .context("Failed to capture child stderr")?;
@@ -2058,6 +2065,8 @@ fn run_cli() -> Result<i32> {
 
             let status = child
                 .0
+                .take()
+                .context("Child process missing")?
                 .wait()
                 .context(format!("Failed waiting for command: {}", cmd_name))?;
 
