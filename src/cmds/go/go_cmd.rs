@@ -439,30 +439,86 @@ fn filter_go_test_json(output: &str) -> String {
         for (test, outputs) in &pkg_result.failed_tests {
             result.push_str(&format!("  [FAIL] {}\n", test));
 
-            // Show failure output (limit to key lines)
-            let relevant_lines: Vec<&String> = outputs
-                .iter()
-                .filter(|line| {
-                    let lower = line.to_lowercase();
-                    !line.trim().is_empty()
-                        && !line.starts_with("=== RUN")
-                        && !line.starts_with("--- FAIL")
-                        && (lower.contains("error")
-                            || lower.contains("expected")
-                            || lower.contains("got")
-                            || lower.contains("panic")
-                            || line.trim().starts_with("at "))
-                })
-                .take(5)
-                .collect();
-
-            for line in relevant_lines {
-                result.push_str(&format!("     {}\n", truncate(line, 100)));
+            for line in select_go_test_failure_lines(outputs) {
+                result.push_str(&format!("     {}\n", truncate(&line, 100)));
             }
         }
     }
 
     result.trim().to_string()
+}
+
+fn select_go_test_failure_lines(outputs: &[String]) -> Vec<String> {
+    let mut relevant = Vec::new();
+    let mut keep_next_context_line = false;
+
+    for line in outputs {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty()
+            || trimmed.starts_with("=== RUN")
+            || trimmed.starts_with("--- FAIL")
+            || trimmed.starts_with("--- PASS")
+        {
+            keep_next_context_line = false;
+            continue;
+        }
+
+        let is_location = is_go_test_location_line(trimmed);
+        let is_failure = is_go_test_failure_line(trimmed);
+
+        if is_location || is_failure || keep_next_context_line {
+            relevant.push(trimmed.to_string());
+            keep_next_context_line = is_location;
+        } else {
+            keep_next_context_line = false;
+        }
+
+        if relevant.len() >= 5 {
+            break;
+        }
+    }
+
+    if relevant.is_empty() {
+        if let Some(line) = outputs.iter().map(|line| line.trim()).find(|line| {
+            !line.is_empty()
+                && !line.starts_with("=== RUN")
+                && !line.starts_with("--- FAIL")
+                && !line.starts_with("--- PASS")
+        }) {
+            relevant.push(line.to_string());
+        }
+    }
+
+    relevant
+}
+
+fn is_go_test_location_line(line: &str) -> bool {
+    if let Some((_, rest)) = line.split_once(".go:") {
+        rest.chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+fn is_go_test_failure_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+
+    lower.starts_with("panic:")
+        || lower.starts_with("error:")
+        || lower.contains(" error:")
+        || lower.contains("expected")
+        || lower.contains("got")
+        || lower.contains("want")
+        || lower.contains("actual")
+        || lower.contains("assert")
+        || lower.contains("mismatch")
+        || lower.contains("unexpected")
+        || lower.contains("fatal")
+        || line.starts_with("at ")
 }
 
 /// Filter go build output - show only errors
@@ -579,6 +635,20 @@ mod tests {
         assert!(result.contains("1 failed"));
         assert!(result.contains("TestFail"));
         assert!(result.contains("expected 5, got 3"));
+    }
+
+    #[test]
+    fn test_filter_go_test_preserves_file_location_and_followup_context() {
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"run","Package":"example.com/foo","Test":"TestFail"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"=== RUN   TestFail\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"    foo_test.go:42:\n"}
+{"Time":"2024-01-01T10:00:03Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"        values differ after normalization\n"}
+{"Time":"2024-01-01T10:00:04Z","Action":"fail","Package":"example.com/foo","Test":"TestFail","Elapsed":0.5}
+{"Time":"2024-01-01T10:00:04Z","Action":"fail","Package":"example.com/foo","Elapsed":0.5}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(result.contains("foo_test.go:42:"));
+        assert!(result.contains("values differ after normalization"));
     }
 
     #[test]
