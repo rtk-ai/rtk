@@ -84,8 +84,9 @@ enum Commands {
 
     /// Read file with intelligent filtering
     Read {
-        /// File to read
-        file: PathBuf,
+        /// Files to read (supports multiple, like cat)
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
         /// Filter: none (default, full content), minimal, aggressive
         #[arg(short, long, default_value = "none")]
         level: core::filter::FilterLevel,
@@ -1245,26 +1246,38 @@ fn run_cli() -> Result<i32> {
 
         Commands::Tree { args } => tree::run(&args, cli.verbose)?,
 
+        // ISSUE #989: support multiple files (cat file1 file2 → rtk read file1 file2)
         Commands::Read {
-            file,
+            files,
             level,
             max_lines,
             tail_lines,
             line_numbers,
         } => {
-            if file == Path::new("-") {
-                read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)?;
-            } else {
-                read::run(
-                    &file,
-                    level,
-                    max_lines,
-                    tail_lines,
-                    line_numbers,
-                    cli.verbose,
-                )?;
+            let mut had_error = false;
+            for file in &files {
+                let result = if file == Path::new("-") {
+                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                } else {
+                    read::run(
+                        file,
+                        level,
+                        max_lines,
+                        tail_lines,
+                        line_numbers,
+                        cli.verbose,
+                    )
+                };
+                if let Err(e) = result {
+                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
+                    had_error = true;
+                }
             }
-            0
+            if had_error {
+                1
+            } else {
+                0
+            }
         }
 
         Commands::Smart {

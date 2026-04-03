@@ -70,7 +70,7 @@ pub fn run(
     } else {
         filtered.clone()
     };
-    println!("{}", rtk_output);
+    print!("{}", rtk_output);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk read",
@@ -134,7 +134,7 @@ pub fn run_stdin(
     } else {
         filtered.clone()
     };
-    println!("{}", rtk_output);
+    print!("{}", rtk_output);
 
     timer.track("cat - (stdin)", "rtk read -", &content, &rtk_output);
     Ok(())
