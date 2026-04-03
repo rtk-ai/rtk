@@ -368,6 +368,42 @@ pub fn tool_exists(name: &str) -> bool {
     which::which(name).is_ok()
 }
 
+/// Extract short name from AWS ARN.
+/// Example: `arn:aws:ecs:region:acct:service/cluster/name` -> `name`
+/// For simple ARNs like `arn:aws:iam::123:user/alice`, returns `alice`.
+pub fn shorten_arn(arn: &str) -> &str {
+    // ARNs use "/" or ":" as separators. Try "/" first (service/cluster/name pattern),
+    // then fall back to ":" for Lambda/IAM ARNs.
+    let slash_result = arn.rsplit('/').next().unwrap_or(arn);
+    // If rsplit('/') returned the whole string (no '/' found), try ':'
+    if slash_result == arn {
+        arn.rsplit(':').next().unwrap_or(arn)
+    } else {
+        slash_result
+    }
+}
+
+/// Convert bytes to human-readable format (KB, MB, GB, TB).
+/// Used for S3 object sizes.
+pub fn human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+
+    if bytes >= TB {
+        format!("{:.1} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +783,83 @@ mod tests {
                 "which_in should find .cmd wrapper on Windows"
             );
         }
+    }
+
+    // ===== AWS helper function tests =====
+
+    #[test]
+    fn test_shorten_arn_ecs_service() {
+        assert_eq!(
+            shorten_arn("arn:aws:ecs:us-east-1:123:service/cluster/api-service"),
+            "api-service"
+        );
+    }
+
+    #[test]
+    fn test_shorten_arn_iam_user() {
+        assert_eq!(shorten_arn("arn:aws:iam::123456789012:user/alice"), "alice");
+    }
+
+    #[test]
+    fn test_shorten_arn_lambda() {
+        assert_eq!(
+            shorten_arn("arn:aws:lambda:us-west-2:123:function:my-function"),
+            "my-function"
+        );
+    }
+
+    #[test]
+    fn test_shorten_arn_fallback() {
+        // Non-ARN string - return as-is
+        assert_eq!(shorten_arn("simple-name"), "simple-name");
+    }
+
+    #[test]
+    fn test_human_bytes_bytes() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_human_bytes_kb() {
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(2048), "2.0 KB");
+        assert_eq!(human_bytes(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn test_human_bytes_mb() {
+        assert_eq!(human_bytes(1_048_576), "1.0 MB");
+        assert_eq!(human_bytes(5_242_880), "5.0 MB");
+    }
+
+    #[test]
+    fn test_human_bytes_gb() {
+        assert_eq!(human_bytes(1_073_741_824), "1.0 GB");
+        assert_eq!(human_bytes(2_147_483_648), "2.0 GB");
+    }
+
+    #[test]
+    fn test_human_bytes_tb() {
+        assert_eq!(human_bytes(1_099_511_627_776), "1.0 TB");
+    }
+
+    #[test]
+    fn test_count_tokens_basic() {
+        assert_eq!(count_tokens("hello world"), 2);
+        assert_eq!(count_tokens("one two three four"), 4);
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        assert_eq!(count_tokens(""), 0);
+        assert_eq!(count_tokens("   "), 0);
+    }
+
+    #[test]
+    fn test_count_tokens_multiple_spaces() {
+        assert_eq!(count_tokens("hello    world"), 2);
+        assert_eq!(count_tokens("  hello   world  "), 2);
     }
 }

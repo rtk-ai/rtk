@@ -529,7 +529,12 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let cmd_clean = stripped_cow.trim();
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
+    // #508: warn on stderr so agents learn to stop overusing it
     if has_rtk_disabled_prefix(cmd_part) {
+        eprintln!(
+            "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+             Remove RTK_DISABLED=1 to restore token savings."
+        );
         return None;
     }
 
@@ -1164,6 +1169,35 @@ mod tests {
         assert_eq!(
             rewrite_command("FOO=1 RTK_DISABLED=1 git status", &[]),
             None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_warns_on_stderr() {
+        // RTK_DISABLED=1 should still return None (no rewrite)
+        // and emit a warning on stderr (tested via subprocess below)
+        assert_eq!(rewrite_command("RTK_DISABLED=1 git status", &[]), None);
+
+        // Verify warning via subprocess when Cargo provides the current rtk binary path.
+        // Unit tests do not reliably have a fresh `target/debug/rtk`, so skip this leg
+        // unless Cargo has wired up the executable path for the current test run.
+        let Ok(rtk_bin) = std::env::var("CARGO_BIN_EXE_rtk") else {
+            return;
+        };
+        let output = std::process::Command::new(&rtk_bin)
+            .args(["rewrite", "RTK_DISABLED=1 git status"])
+            .output()
+            .expect("Failed to run rtk");
+
+        assert!(
+            !output.status.success(),
+            "Should exit non-zero (no rewrite)"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("RTK_DISABLED=1 detected"),
+            "Should warn on stderr, got: {}",
+            stderr
         );
     }
 
@@ -2331,6 +2365,35 @@ mod tests {
         assert_eq!(
             rewrite_command("wc src/*.rs", &[]),
             Some("rtk wc src/*.rs".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_command_substitution_passthrough() {
+        assert_eq!(
+            classify_command("git log $(git rev-parse HEAD~1)"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_command_substitution_passthrough() {
+        assert_eq!(
+            rewrite_command("git log $(git rev-parse HEAD~1)", &[]),
+            Some("rtk git log $(git rev-parse HEAD~1)".into())
+        );
+    }
+
+    #[test]
+    fn test_split_command_substitution_no_split() {
+        assert_eq!(
+            split_command_chain("git log $(git rev-parse HEAD~1)"),
+            vec!["git log $(git rev-parse HEAD~1)"]
         );
     }
 }
