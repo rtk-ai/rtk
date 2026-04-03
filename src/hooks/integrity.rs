@@ -13,7 +13,7 @@
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
 use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
-use super::init::{codex_verify_entries, CodexVerifyEntry, CodexVerifyStatus};
+use super::init::{codex_verify_entries, CodexAgentsState, CodexVerifyEntry, CodexVerifyStatus};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -250,43 +250,88 @@ pub fn run_verify(verbose: u8) -> Result<()> {
 }
 
 fn print_codex_verify_entry(entry: &CodexVerifyEntry) {
+    for line in codex_verify_lines(entry) {
+        println!("{line}");
+    }
+}
+
+fn codex_verify_lines(entry: &CodexVerifyEntry) -> Vec<String> {
     let scope = entry.scope;
+    let mut lines = Vec::new();
+
+    match entry.agents_state {
+        CodexAgentsState::Missing => {
+            lines.push(format!("WARN  Codex {scope} AGENTS.md missing"));
+            lines.push(format!("      expected: {}", entry.agents_md.display()));
+        }
+        CodexAgentsState::InlineCurrent => {
+            lines.push(format!("PASS  Codex {scope} AGENTS guidance configured"));
+            lines.push(format!("      agents: {}", entry.agents_md.display()));
+        }
+        CodexAgentsState::InlineStale => {
+            lines.push(format!("WARN  Codex {scope} AGENTS guidance stale"));
+            lines.push(format!("      {}", entry.agents_md.display()));
+        }
+        CodexAgentsState::LegacyReference => {
+            lines.push(format!(
+                "WARN  Codex {scope} AGENTS uses legacy @RTK.md reference"
+            ));
+            lines.push(format!("      {}", entry.agents_md.display()));
+        }
+        CodexAgentsState::MalformedBlock => {
+            lines.push(format!(
+                "WARN  Codex {scope} AGENTS has malformed RTK block"
+            ));
+            lines.push(format!("      {}", entry.agents_md.display()));
+        }
+        CodexAgentsState::NotConfigured => {
+            lines.push(format!("WARN  Codex {scope} AGENTS missing RTK guidance"));
+            lines.push(format!("      {}", entry.agents_md.display()));
+        }
+    }
 
     match entry.status {
         CodexVerifyStatus::HooksConfigured => {
-            println!("PASS  Codex {scope} hooks configured");
-            println!("      config: {}", entry.config_toml.display());
-            println!("      hooks:  {}", entry.hooks_json.display());
+            lines.push(format!("PASS  Codex {scope} hooks configured"));
+            lines.push(format!("      config: {}", entry.config_toml.display()));
+            lines.push(format!("      hooks:  {}", entry.hooks_json.display()));
         }
         CodexVerifyStatus::PromptOnly => {
-            println!("SKIP  Codex {scope} hook verification not applicable");
-            println!("      Codex lifecycle hooks are unsupported on Windows; RTK is using prompt-only guidance.");
+            lines.push(format!(
+                "SKIP  Codex {scope} hook verification not applicable"
+            ));
+            lines.push(
+                "      Codex lifecycle hooks are unsupported on Windows; RTK is using prompt-only guidance."
+                    .to_string(),
+            );
         }
         CodexVerifyStatus::ConfigTomlMissing => {
-            println!("WARN  Codex {scope} config.toml missing");
-            println!("      expected: {}", entry.config_toml.display());
+            lines.push(format!("WARN  Codex {scope} config.toml missing"));
+            lines.push(format!("      expected: {}", entry.config_toml.display()));
         }
         CodexVerifyStatus::ConfigTomlInvalid => {
-            println!("WARN  Codex {scope} config.toml invalid");
-            println!("      {}", entry.config_toml.display());
+            lines.push(format!("WARN  Codex {scope} config.toml invalid"));
+            lines.push(format!("      {}", entry.config_toml.display()));
         }
         CodexVerifyStatus::HooksDisabled => {
-            println!("WARN  Codex {scope} codex_hooks disabled");
-            println!("      {}", entry.config_toml.display());
+            lines.push(format!("WARN  Codex {scope} codex_hooks disabled"));
+            lines.push(format!("      {}", entry.config_toml.display()));
         }
         CodexVerifyStatus::HooksJsonMissing => {
-            println!("WARN  Codex {scope} hooks.json missing");
-            println!("      expected: {}", entry.hooks_json.display());
+            lines.push(format!("WARN  Codex {scope} hooks.json missing"));
+            lines.push(format!("      expected: {}", entry.hooks_json.display()));
         }
         CodexVerifyStatus::HooksJsonInvalid => {
-            println!("WARN  Codex {scope} hooks.json invalid");
-            println!("      {}", entry.hooks_json.display());
+            lines.push(format!("WARN  Codex {scope} hooks.json invalid"));
+            lines.push(format!("      {}", entry.hooks_json.display()));
         }
         CodexVerifyStatus::HookEntryMissing => {
-            println!("WARN  Codex {scope} RTK PreToolUse hook missing");
-            println!("      {}", entry.hooks_json.display());
+            lines.push(format!("WARN  Codex {scope} RTK PreToolUse hook missing"));
+            lines.push(format!("      {}", entry.hooks_json.display()));
         }
     }
+
+    lines
 }
 
 /// Runtime integrity gate. Called at startup for operational commands.
@@ -338,6 +383,7 @@ pub fn runtime_check() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hooks::init::{CodexAgentsState, CodexVerifyStatus};
     use tempfile::TempDir;
 
     #[test]
@@ -589,5 +635,69 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].len(), 64);
         assert_eq!(parts[1], "rtk-rewrite.sh");
+    }
+
+    #[test]
+    fn test_codex_verify_lines_include_agents_guidance_state() {
+        let entry = CodexVerifyEntry {
+            scope: "global",
+            agents_md: PathBuf::from("/tmp/.codex/AGENTS.md"),
+            agents_state: CodexAgentsState::InlineCurrent,
+            status: CodexVerifyStatus::HooksConfigured,
+            config_toml: PathBuf::from("/tmp/.codex/config.toml"),
+            hooks_json: PathBuf::from("/tmp/.codex/hooks.json"),
+        };
+
+        let lines = codex_verify_lines(&entry);
+
+        assert_eq!(
+            lines,
+            vec![
+                "PASS  Codex global AGENTS guidance configured".to_string(),
+                "      agents: /tmp/.codex/AGENTS.md".to_string(),
+                "PASS  Codex global hooks configured".to_string(),
+                "      config: /tmp/.codex/config.toml".to_string(),
+                "      hooks:  /tmp/.codex/hooks.json".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_codex_verify_lines_warn_on_legacy_agents_reference() {
+        let entry = CodexVerifyEntry {
+            scope: "local",
+            agents_md: PathBuf::from("/repo/AGENTS.md"),
+            agents_state: CodexAgentsState::LegacyReference,
+            status: CodexVerifyStatus::HooksConfigured,
+            config_toml: PathBuf::from("/repo/.codex/config.toml"),
+            hooks_json: PathBuf::from("/repo/.codex/hooks.json"),
+        };
+
+        let lines = codex_verify_lines(&entry);
+
+        assert_eq!(
+            lines[0],
+            "WARN  Codex local AGENTS uses legacy @RTK.md reference"
+        );
+        assert_eq!(lines[1], "      /repo/AGENTS.md");
+        assert_eq!(lines[2], "PASS  Codex local hooks configured");
+    }
+
+    #[test]
+    fn test_codex_verify_lines_warn_on_missing_agents_guidance() {
+        let entry = CodexVerifyEntry {
+            scope: "global",
+            agents_md: PathBuf::from("/tmp/.codex/AGENTS.md"),
+            agents_state: CodexAgentsState::Missing,
+            status: CodexVerifyStatus::HooksJsonMissing,
+            config_toml: PathBuf::from("/tmp/.codex/config.toml"),
+            hooks_json: PathBuf::from("/tmp/.codex/hooks.json"),
+        };
+
+        let lines = codex_verify_lines(&entry);
+
+        assert_eq!(lines[0], "WARN  Codex global AGENTS.md missing");
+        assert_eq!(lines[1], "      expected: /tmp/.codex/AGENTS.md");
+        assert_eq!(lines[2], "WARN  Codex global hooks.json missing");
     }
 }

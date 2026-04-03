@@ -362,13 +362,15 @@ rtk init -g --codex --uninstall
 
 On macOS and Linux, global install writes `${CODEX_HOME:-~/.codex}/RTK.md`, `${CODEX_HOME:-~/.codex}/AGENTS.md`, `${CODEX_HOME:-~/.codex}/config.toml`, and `${CODEX_HOME:-~/.codex}/hooks.json`. Project-scoped install writes the same files under `./.codex/`.
 
+RTK writes Codex guidance inline into `AGENTS.md` so Codex does not need to resolve `@RTK.md` includes for either global or project-local installs.
+
 RTK enables `features.codex_hooks = true` and installs a `PreToolUse` Bash hook that runs `rtk hook codex`.
 
 Codex does not support transparent `updatedInput` rewrites yet, so supported raw Bash commands are denied with the exact `rtk ...` replacement instead of being silently rewritten.
 
 Notes:
 - If `CODEX_HOME` is set, `rtk init -g --codex` uses that directory instead of `~/.codex`.
-- On Windows, RTK falls back to `RTK.md` + `AGENTS.md` instructions only because Codex lifecycle hooks are currently disabled upstream.
+- On Windows, RTK falls back to inline `AGENTS.md` guidance plus `RTK.md` because Codex lifecycle hooks are currently disabled upstream.
 - Project-scoped `.codex/` installs only activate when Codex trusts the project.
 
 ### Windsurf

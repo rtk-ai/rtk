@@ -340,7 +340,7 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (installs AGENTS.md + RTK.md; macOS/Linux add Codex hooks, Windows stays prompt-only)
+        /// Target Codex CLI (inlines RTK guidance into AGENTS.md; macOS/Linux add Codex hooks, Windows stays prompt-only)
         #[arg(long)]
         codex: bool,
 
