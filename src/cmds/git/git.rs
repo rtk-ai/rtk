@@ -330,8 +330,9 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             }
             in_hunk = true;
             hunk_shown = 0;
-            let hunk_info = line.split("@@").nth(1).unwrap_or("").trim();
-            result.push(format!("  @@ {} @@", hunk_info));
+            // Preserve the full unified diff hunk header, including trailing
+            // function / symbol context after the second @@ marker.
+            result.push(format!("  {}", line));
         } else if in_hunk {
             if line.starts_with('+') && !line.starts_with("+++") {
                 added += 1;
@@ -1742,6 +1743,24 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_compact_diff_preserves_full_hunk_header_context() {
+        let diff = r#"diff --git a/foo.rs b/foo.rs
+--- a/foo.rs
++++ b/foo.rs
+@@ -10,3 +10,4 @@ fn important_context() {
+ fn main() {
++    println!("hello");
+ }
+"#;
+        let result = compact_diff(diff, 100);
+        assert!(
+            result.contains("@@ -10,3 +10,4 @@ fn important_context() {"),
+            "Expected full hunk header with trailing context, got:\n{}",
+            result
+        );
     }
 
     #[test]
