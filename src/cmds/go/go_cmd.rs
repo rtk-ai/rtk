@@ -534,11 +534,14 @@ fn is_go_build_error_line(line: &str) -> bool {
         "no required module provides package ",
         "missing go.sum entry for module providing package ",
         "found packages ",
+        "go: go.mod file not found in current directory or any parent directory",
+        "go: cannot load module ",
         "go: build failed",
         "go: error ",
         "error: ",
         "go: updates to go.mod needed",
         "go: inconsistent vendoring",
+        "no go files in ",
     ];
 
     non_file_error_prefixes
@@ -644,7 +647,7 @@ main.go:15:2: cannot use x (type int) as type string"#;
 
     #[test]
     fn test_filter_go_build_ignores_download_lines_with_error_in_package_names() {
-        let output = r#"go: downloading git.gametaptap.com/neutron/gotap/errors v1.0.8
+        let output = r#"go: downloading github.com/go-errors/errors v1.5.1
 go: finding module for package example.com/foo
 go: extracting github.com/pkg/errors v0.9.1
 go: downloading github.com/pkg/errors v0.9.1
@@ -675,6 +678,13 @@ go: downloading golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2"#;
         ));
         assert!(is_go_build_error_line(
             "go.work:1: invalid go version 'not-a-version': must match format 1.23.0"
+        ));
+        assert!(is_go_build_error_line(
+            "go: go.mod file not found in current directory or any parent directory; see 'go help modules'"
+        ));
+        assert!(is_go_build_error_line("no Go files in /tmp/example"));
+        assert!(is_go_build_error_line(
+            "go: cannot load module missing listed in go.work file: open missing/go.mod: no such file or directory"
         ));
         assert!(is_go_build_error_line(
             "runtime.main_main·f: function main is undeclared in the main package"
@@ -727,6 +737,19 @@ go.work:1: invalid go version 'not-a-version': must match format 1.23.0"#;
         assert!(result.contains("go.work:1: invalid go version"));
         assert!(!result.contains("go: errors parsing go.mod:"));
         assert!(!result.contains("go: errors parsing go.work:"));
+    }
+
+    #[test]
+    fn test_filter_go_build_preserves_module_root_and_workspace_errors() {
+        let output = r#"go: go.mod file not found in current directory or any parent directory; see 'go help modules'
+no Go files in /tmp/example
+go: cannot load module missing listed in go.work file: open missing/go.mod: no such file or directory"#;
+
+        let result = filter_go_build(output);
+        assert!(result.contains("3 errors"));
+        assert!(result.contains("go.mod file not found in current directory or any parent directory"));
+        assert!(result.contains("no Go files in /tmp/example"));
+        assert!(result.contains("go: cannot load module missing listed in go.work file"));
     }
 
     #[test]
