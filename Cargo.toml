@@ -55,7 +55,9 @@ license-file = ["LICENSE", "0"]
 extended-description = "rtk filters and compresses command outputs before they reach your LLM context, saving 60-90% of tokens."
 section = "utility"
 priority = "optional"
-assets = [["target/release/rtk", "usr/bin/", "755"]]
+assets = [
+    ["target/release/rtk", "usr/bin/", "755"],
+]
 
 # cargo-generate-rpm configuration
 [package.metadata.generate-rpm]
