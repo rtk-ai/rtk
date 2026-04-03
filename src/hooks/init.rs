@@ -11,7 +11,6 @@ use super::constants::{
     REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
-use crate::core::config;
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
@@ -293,14 +292,6 @@ pub fn run(
     }
 
     println!();
-    let env_disabled = std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1";
-    let config_disabled = matches!(config::telemetry_enabled(), Some(false));
-    if env_disabled || config_disabled {
-        println!("  [info] Anonymous telemetry is disabled");
-    } else {
-        println!("  [info] Anonymous telemetry is enabled by default (opt-out: RTK_TELEMETRY_DISABLED=1)");
-    }
-    println!("  [info] See: https://github.com/rtk-ai/rtk#privacy--telemetry");
 
     Ok(())
 }
