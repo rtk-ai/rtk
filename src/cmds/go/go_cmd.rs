@@ -471,20 +471,7 @@ fn filter_go_build(output: &str) -> String {
 
     for line in output.lines() {
         let trimmed = line.trim();
-        let lower = trimmed.to_lowercase();
-
-        // Skip package markers (# package/name lines without errors)
-        if trimmed.starts_with('#') && !lower.contains("error") {
-            continue;
-        }
-
-        // Collect error lines (file:line:col format or error keywords)
-        if !trimmed.is_empty()
-            && (lower.contains("error")
-                || trimmed.contains(".go:")
-                || lower.contains("undefined")
-                || lower.contains("cannot"))
-        {
+        if is_go_build_error_line(trimmed) {
             errors.push(trimmed.to_string());
         }
     }
@@ -506,6 +493,39 @@ fn filter_go_build(output: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+fn is_go_build_error_line(line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+
+    let trimmed = line.trim();
+    let lower = trimmed.to_lowercase();
+
+    // Go download/progress lines often contain package names like pkg/errors,
+    // xerrors, or multierror. These are not compilation failures.
+    if lower.starts_with("go: downloading ")
+        || lower.starts_with("go: finding ")
+        || lower.starts_with("go: extracting ")
+    {
+        return false;
+    }
+
+    // Package headers are context, not errors by themselves.
+    if trimmed.starts_with('#') {
+        return false;
+    }
+
+    // Canonical compiler error locations: file.go:line:col: ...
+    if trimmed.contains(".go:") {
+        return true;
+    }
+
+    // Some toolchain/build wrapper failures still surface as non-file errors.
+    lower.starts_with("go: build failed")
+        || lower.starts_with("go: error ")
+        || lower.starts_with("error: ")
 }
 
 /// Filter go vet output - show issues
@@ -599,6 +619,29 @@ main.go:15:2: cannot use x (type int) as type string"#;
         assert!(result.contains("2 errors"));
         assert!(result.contains("undefined: missingFunc"));
         assert!(result.contains("cannot use x"));
+    }
+
+    #[test]
+    fn test_filter_go_build_ignores_download_lines_with_error_in_package_names() {
+        let output = r#"go: downloading git.gametaptap.com/neutron/gotap/errors v1.0.8
+go: downloading github.com/pkg/errors v0.9.1
+go: downloading github.com/hashicorp/go-multierror v1.1.1
+go: downloading golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2"#;
+
+        let result = filter_go_build(output);
+        assert_eq!(result, "Go build: Success");
+    }
+
+    #[test]
+    fn test_is_go_build_error_line_recognizes_real_compiler_errors() {
+        assert!(is_go_build_error_line(
+            "main.go:10:5: undefined: missingFunc"
+        ));
+        assert!(is_go_build_error_line("error: failed to load module"));
+        assert!(!is_go_build_error_line(
+            "go: downloading github.com/pkg/errors v0.9.1"
+        ));
+        assert!(!is_go_build_error_line("# example.com/foo"));
     }
 
     #[test]
