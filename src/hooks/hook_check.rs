@@ -1,6 +1,9 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use super::constants::{
+    CLAUDE_DIR, CODEX_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HOOKS_SUBDIR,
+    OPENCODE_PLUGIN_PATH, REWRITE_HOOK_FILE,
+};
 use crate::core::constants::RTK_DATA_DIR;
 use std::path::PathBuf;
 
@@ -31,6 +34,9 @@ pub fn status() -> HookStatus {
     }
 
     let Some(hook_path) = hook_installed_path() else {
+        if other_integration_installed(&home) {
+            return HookStatus::Ok;
+        }
         return HookStatus::Missing;
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
@@ -90,6 +96,20 @@ pub fn parse_hook_version(content: &str) -> u8 {
     0 // No version tag = version 0 (outdated)
 }
 
+fn other_integration_installed(home: &std::path::Path) -> bool {
+    let paths = [
+        home.join(OPENCODE_PLUGIN_PATH),
+        home.join(CURSOR_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(REWRITE_HOOK_FILE),
+        home.join(CODEX_DIR).join("AGENTS.md"),
+        home.join(GEMINI_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(GEMINI_HOOK_FILE),
+    ];
+    paths.iter().any(|p| p.exists())
+}
+
 fn hook_installed_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let path = home
@@ -147,32 +167,93 @@ mod tests {
     }
 
     #[test]
+    fn test_other_integration_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(!other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_opencode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(OPENCODE_PLUGIN_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"plugin").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_cursor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp
+            .path()
+            .join(CURSOR_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(REWRITE_HOOK_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"hook").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_codex() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"agents").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_gemini() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp
+            .path()
+            .join(GEMINI_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(GEMINI_HOOK_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"hook").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_empty_dirs_not_enough() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join(CURSOR_DIR).join(HOOKS_SUBDIR)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(CODEX_DIR)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(GEMINI_DIR)).unwrap();
+        assert!(!other_integration_installed(tmp.path()));
+    }
+
+    #[test]
     fn test_status_returns_valid_variant() {
-        // Skip on machines without Claude Code or without hook
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => return,
         };
-        if !home
+        let s = status();
+        let has_claude_hook = home
             .join(".claude")
             .join("hooks")
             .join("rtk-rewrite.sh")
-            .exists()
-        {
-            // No hook — status should be Missing (if .claude exists) or Ok (if not)
-            let s = status();
-            if home.join(".claude").exists() {
-                assert_eq!(s, HookStatus::Missing);
-            } else {
-                assert_eq!(s, HookStatus::Ok);
-            }
-            return;
+            .exists();
+        let has_claude_dir = home.join(".claude").exists();
+        let has_other = other_integration_installed(&home);
+
+        match (has_claude_hook, has_claude_dir, has_other) {
+            (true, _, _) => assert!(
+                s == HookStatus::Ok || s == HookStatus::Outdated,
+                "Expected Ok or Outdated when Claude hook exists, got {:?}",
+                s
+            ),
+            (false, true, true) => assert_eq!(
+                s,
+                HookStatus::Ok,
+                "Expected Ok when other integration installed, got {:?}",
+                s
+            ),
+            (false, true, false) => assert_eq!(s, HookStatus::Missing),
+            (false, false, _) => assert_eq!(s, HookStatus::Ok),
         }
-        let s = status();
-        assert!(
-            s == HookStatus::Ok || s == HookStatus::Outdated,
-            "Expected Ok or Outdated when hook exists, got {:?}",
-            s
-        );
     }
 }
