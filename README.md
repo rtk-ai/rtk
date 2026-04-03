@@ -472,7 +472,7 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Privacy & Telemetry
 
-RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers.
+RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers. For the full list of fields, data handling, and contributor guidelines, see **[docs/TELEMETRY.md](docs/TELEMETRY.md)**.
 
 **What is collected and why:**
 
