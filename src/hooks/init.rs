@@ -62,6 +62,65 @@ const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
 
+fn codex_agents_reference(rtk_md_path: &Path, global: bool) -> String {
+    if global {
+        rtk_md_path.display().to_string()
+    } else {
+        RTK_MD_REF.to_string()
+    }
+}
+
+fn codex_agents_reference_aliases(rtk_md_path: &Path, global: bool) -> Vec<String> {
+    let absolute_ref = rtk_md_path.display().to_string();
+
+    if global {
+        vec![
+            absolute_ref.clone(),
+            format!("@{absolute_ref}"),
+            RTK_MD_REF.to_string(),
+        ]
+    } else {
+        vec![
+            RTK_MD_REF.to_string(),
+            RTK_MD.to_string(),
+            absolute_ref.clone(),
+            format!("@{absolute_ref}"),
+        ]
+    }
+}
+
+fn content_has_reference(content: &str, reference: &str) -> bool {
+    content.lines().any(|line| line.trim() == reference)
+}
+
+fn content_has_any_reference(content: &str, references: &[String]) -> bool {
+    references
+        .iter()
+        .any(|reference| content_has_reference(content, reference))
+}
+
+fn normalize_agents_references(
+    content: &str,
+    references: &[String],
+    desired_reference: &str,
+) -> String {
+    let filtered = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !references.iter().any(|reference| trimmed == reference)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let trimmed = filtered.trim();
+    if trimmed.is_empty() {
+        format!("{desired_reference}\n")
+    } else {
+        format!("{trimmed}\n\n{desired_reference}\n")
+    }
+}
+
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
@@ -685,8 +744,9 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
     }
 
     let agents_md_path = codex_dir.join(AGENTS_MD);
-    if remove_rtk_reference_from_agents(&agents_md_path, verbose)? {
-        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
+    let references = codex_agents_reference_aliases(&rtk_md_path, true);
+    if remove_rtk_reference_from_agents(&agents_md_path, &references, verbose)? {
+        removed.push("AGENTS.md: removed RTK reference".to_string());
     }
 
     Ok(removed)
@@ -1274,14 +1334,22 @@ fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     };
 
     write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, verbose)?;
-    let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, verbose)?;
+    let agents_reference = codex_agents_reference(&rtk_md_path, global);
+    let changed_ref = patch_agents_md(
+        &agents_md_path,
+        &agents_reference,
+        &rtk_md_path,
+        global,
+        verbose,
+    )?;
 
     println!("\nRTK configured for Codex CLI.\n");
     println!("  RTK.md:    {}", rtk_md_path.display());
-    if added_ref {
-        println!("  AGENTS.md: {} reference added", rtk_md_ref);
+    println!("  AGENTS.md: {}", agents_reference);
+    if changed_ref {
+        println!("             reference installed or updated");
     } else {
-        println!("  AGENTS.md: {} reference already present", rtk_md_ref);
+        println!("             reference already present");
     }
     if global {
         println!(
@@ -1410,8 +1478,14 @@ fn patch_claude_md(path: &Path, verbose: u8) -> Result<bool> {
     Ok(migrated)
 }
 
-/// Patch AGENTS.md: add @RTK.md (or absolute path), migrate old inline block if present
-fn patch_agents_md(path: &Path, rtk_md_ref: &str, verbose: u8) -> Result<bool> {
+/// Patch AGENTS.md: add the desired RTK reference, migrate old inline block if present
+fn patch_agents_md(
+    path: &Path,
+    desired_reference: &str,
+    rtk_md_path: &Path,
+    global: bool,
+    verbose: u8,
+) -> Result<bool> {
     let mut content = if path.exists() {
         fs::read_to_string(path)
             .with_context(|| format!("Failed to read AGENTS.md: {}", path.display()))?
@@ -1431,58 +1505,51 @@ fn patch_agents_md(path: &Path, rtk_md_ref: &str, verbose: u8) -> Result<bool> {
         }
     }
 
-    // ISSUE #892: Check for both relative and absolute @RTK.md references
-    if content.contains(RTK_MD_REF) || content.contains(rtk_md_ref) {
+    let references = codex_agents_reference_aliases(rtk_md_path, global);
+    let has_desired_reference = content_has_reference(&content, desired_reference);
+    let has_legacy_reference = references.iter().any(|reference| {
+        reference != desired_reference && content_has_reference(&content, reference)
+    });
+
+    if has_desired_reference && !has_legacy_reference && !migrated {
         if verbose > 0 {
-            eprintln!("{} reference already present in AGENTS.md", rtk_md_ref);
-        }
-        // ISSUE #892: Migrate old relative @RTK.md to absolute path if needed
-        if rtk_md_ref != RTK_MD_REF && content.contains(RTK_MD_REF) && !content.contains(rtk_md_ref)
-        {
-            content = content.replace(RTK_MD_REF, rtk_md_ref);
-            atomic_write(path, &content)
-                .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
-            if verbose > 0 {
-                eprintln!("Migrated {} to {}", RTK_MD_REF, rtk_md_ref);
-            }
-            return Ok(true);
-        }
-        if migrated {
-            atomic_write(path, &content)
-                .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
+            eprintln!("RTK reference already present in AGENTS.md");
         }
         return Ok(false);
     }
 
-    let new_content = if content.is_empty() {
-        format!("{}\n", rtk_md_ref)
-    } else {
-        format!("{}\n\n{}\n", content.trim(), rtk_md_ref)
-    };
+    let new_content = normalize_agents_references(&content, &references, desired_reference);
 
     atomic_write(path, &new_content)
         .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
     if verbose > 0 {
-        eprintln!("Added {} reference to AGENTS.md", rtk_md_ref);
+        eprintln!("Installed RTK reference in AGENTS.md");
     }
 
     Ok(true)
 }
 
-fn remove_rtk_reference_from_agents(path: &Path, verbose: u8) -> Result<bool> {
+fn remove_rtk_reference_from_agents(
+    path: &Path,
+    references: &[String],
+    verbose: u8,
+) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
 
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read AGENTS.md: {}", path.display()))?;
-    if !content.contains(RTK_MD_REF) {
+    if !content_has_any_reference(&content, references) {
         return Ok(false);
     }
 
     let new_content = content
         .lines()
-        .filter(|line| !line.trim().starts_with(RTK_MD_REF))
+        .filter(|line| {
+            let trimmed = line.trim();
+            !references.iter().any(|reference| trimmed == reference)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let cleaned = clean_double_blanks(&new_content);
@@ -1490,10 +1557,7 @@ fn remove_rtk_reference_from_agents(path: &Path, verbose: u8) -> Result<bool> {
         .with_context(|| format!("Failed to write AGENTS.md: {}", path.display()))?;
 
     if verbose > 0 {
-        eprintln!(
-            "Removed @RTK.md reference from AGENTS.md: {}",
-            path.display()
-        );
+        eprintln!("Removed RTK reference from AGENTS.md: {}", path.display());
     }
 
     Ok(true)
@@ -2070,8 +2134,12 @@ fn show_codex_config() -> Result<()> {
 
     if global_agents_md.exists() {
         let content = fs::read_to_string(&global_agents_md)?;
-        if content.contains(RTK_MD_REF) {
-            println!("[ok] Global AGENTS.md: @RTK.md reference");
+        let global_references = codex_agents_reference_aliases(&global_rtk_md, true);
+        if content_has_any_reference(&content, &global_references) {
+            println!(
+                "[ok] Global AGENTS.md: {}",
+                codex_agents_reference(&global_rtk_md, true)
+            );
         } else if content.contains("<!-- rtk-instructions") {
             println!("[!!] Global AGENTS.md: old inline RTK block");
         } else {
@@ -2089,8 +2157,12 @@ fn show_codex_config() -> Result<()> {
 
     if local_agents_md.exists() {
         let content = fs::read_to_string(&local_agents_md)?;
-        if content.contains(RTK_MD_REF) {
-            println!("[ok] Local AGENTS.md: @RTK.md reference");
+        let local_references = codex_agents_reference_aliases(&local_rtk_md, false);
+        if content_has_any_reference(&content, &local_references) {
+            println!(
+                "[ok] Local AGENTS.md: {}",
+                codex_agents_reference(&local_rtk_md, false)
+            );
         } else if content.contains("<!-- rtk-instructions") {
             println!("[!!] Local AGENTS.md: old inline RTK block");
         } else {
@@ -2613,10 +2685,11 @@ More notes
     fn test_patch_agents_md_adds_reference_once() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
 
         fs::write(&agents_md, "# Team rules\n").unwrap();
-        let first_added = patch_agents_md(&agents_md, RTK_MD_REF, 0).unwrap();
-        let second_added = patch_agents_md(&agents_md, RTK_MD_REF, 0).unwrap();
+        let first_added = patch_agents_md(&agents_md, RTK_MD_REF, &rtk_md, false, 0).unwrap();
+        let second_added = patch_agents_md(&agents_md, RTK_MD_REF, &rtk_md, false, 0).unwrap();
 
         assert!(first_added);
         assert!(!second_added);
@@ -2673,8 +2746,9 @@ More notes
     fn test_patch_agents_md_creates_missing_file() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
 
-        let added = patch_agents_md(&agents_md, RTK_MD_REF, 0).unwrap();
+        let added = patch_agents_md(&agents_md, RTK_MD_REF, &rtk_md, false, 0).unwrap();
 
         assert!(added);
         let content = fs::read_to_string(&agents_md).unwrap();
@@ -2685,18 +2759,37 @@ More notes
     fn test_patch_agents_md_migrates_inline_block() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
         fs::write(
             &agents_md,
             "# Team rules\n\n<!-- rtk-instructions v2 -->\nold\n<!-- /rtk-instructions -->\n",
         )
         .unwrap();
 
-        let added = patch_agents_md(&agents_md, RTK_MD_REF, 0).unwrap();
+        let added = patch_agents_md(&agents_md, RTK_MD_REF, &rtk_md, false, 0).unwrap();
 
         assert!(added);
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("old"));
         assert_eq!(content.matches("@RTK.md").count(), 1);
+    }
+
+    #[test]
+    fn test_patch_agents_md_migrates_global_reference_to_absolute_path() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
+        let expected_reference = rtk_md.display().to_string();
+
+        fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
+
+        let changed = patch_agents_md(&agents_md, &expected_reference, &rtk_md, true, 0).unwrap();
+
+        assert!(changed);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(content.contains("# Team rules"));
+        assert!(content.contains(&expected_reference));
+        assert!(!content.contains("@RTK.md"));
     }
 
     #[test]
@@ -2718,6 +2811,29 @@ More notes
 
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("@RTK.md"));
+        assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_uninstall_codex_at_removes_absolute_reference() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path();
+        let agents_md = codex_dir.join("AGENTS.md");
+        let rtk_md = codex_dir.join("RTK.md");
+        let absolute_reference = rtk_md.display().to_string();
+
+        fs::write(
+            &agents_md,
+            format!("# Team rules\n\n{absolute_reference}\n"),
+        )
+        .unwrap();
+        fs::write(&rtk_md, "codex config").unwrap();
+
+        let removed = uninstall_codex_at(codex_dir, 0).unwrap();
+
+        assert_eq!(removed.len(), 2);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(!content.contains(&absolute_reference));
         assert!(content.contains("# Team rules"));
     }
 

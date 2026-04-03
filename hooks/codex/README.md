@@ -5,5 +5,5 @@
 ## Specifics
 
 - Prompt-level guidance via awareness document -- no programmatic hook
-- `rtk-awareness.md` is injected into `AGENTS.md` with an `@RTK.md` reference
+- Global installs inject the absolute `~/.codex/RTK.md` path into `AGENTS.md`; local installs keep the project-local `@RTK.md` reference
 - Installed to `~/.codex/` by `rtk init --codex`

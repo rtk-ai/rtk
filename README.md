@@ -368,7 +368,7 @@ Creates `~/.gemini/hooks/rtk-hook-gemini.sh` + patches `~/.gemini/settings.json`
 rtk init -g --codex
 ```
 
-Creates `~/.codex/RTK.md` + `~/.codex/AGENTS.md` with `@RTK.md` reference. Codex reads these as global instructions.
+Creates `~/.codex/RTK.md` + `~/.codex/AGENTS.md`. Global Codex installs write the absolute `~/.codex/RTK.md` path into `AGENTS.md` so the instructions still resolve when Codex is opened from another project.
 
 ### Windsurf
 
