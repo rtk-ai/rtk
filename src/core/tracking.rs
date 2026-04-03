@@ -1011,6 +1011,125 @@ impl Tracker {
         )?;
         Ok(avg)
     }
+
+    /// Days since first recorded command (installation age).
+    pub fn first_seen_days(&self) -> Result<i64> {
+        let oldest: Option<String> = self
+            .conn
+            .query_row("SELECT MIN(timestamp) FROM commands", [], |row| row.get(0))
+            .unwrap_or(None);
+        match oldest {
+            Some(ts) => {
+                let first = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S")
+                    .or_else(|_| chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M:%S"))
+                    .map(|dt| dt.and_utc())
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                let days = (chrono::Utc::now() - first).num_days();
+                Ok(days.max(0))
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Number of distinct active days in the last 30 days.
+    pub fn active_days_30d(&self) -> Result<i64> {
+        let since = (chrono::Utc::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT DATE(timestamp)) FROM commands WHERE timestamp >= ?1",
+            params![since],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Total number of recorded commands.
+    pub fn commands_total(&self) -> Result<i64> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))?;
+        Ok(count)
+    }
+
+    /// Ecosystem distribution as percentages (top categories by command prefix).
+    pub fn ecosystem_mix(&self) -> Result<Vec<(String, f64)>> {
+        let total: f64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM commands WHERE input_tokens > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        if total == 0.0 {
+            return Ok(vec![]);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd, COUNT(*) as cnt FROM commands
+             WHERE input_tokens > 0
+             GROUP BY rtk_cmd ORDER BY cnt DESC",
+        )?;
+        let mut categories: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            let cmd: String = row.get(0)?;
+            let cnt: f64 = row.get(1)?;
+            Ok((cmd, cnt))
+        })?;
+        for row in rows.flatten() {
+            let cat = categorize_command(&row.0);
+            *categories.entry(cat).or_default() += row.1;
+        }
+        let mut result: Vec<(String, f64)> = categories
+            .into_iter()
+            .map(|(cat, cnt)| (cat, (cnt / total * 100.0).round()))
+            .collect();
+        result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        result.truncate(8);
+        Ok(result)
+    }
+
+    /// Tokens saved in the last 30 days.
+    pub fn tokens_saved_30d(&self) -> Result<i64> {
+        let since = (chrono::Utc::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        let saved: i64 = self.conn.query_row(
+            "SELECT COALESCE(SUM(saved_tokens), 0) FROM commands WHERE timestamp >= ?1",
+            params![since],
+            |row| row.get(0),
+        )?;
+        Ok(saved)
+    }
+
+    /// Number of distinct project paths.
+    pub fn projects_count(&self) -> Result<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT project_path) FROM commands WHERE project_path != ''",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+}
+
+/// Map an rtk_cmd to an ecosystem category for telemetry.
+fn categorize_command(rtk_cmd: &str) -> String {
+    let parts: Vec<&str> = rtk_cmd.split_whitespace().collect();
+    let tool = parts.get(1).copied().unwrap_or("other");
+    match tool {
+        "git" | "gh" | "gt" => "git",
+        "cargo" => "cargo",
+        "npm" | "npx" | "pnpm" | "vitest" | "tsc" | "lint" | "prettier" | "next" | "playwright"
+        | "prisma" => "js",
+        "pytest" | "ruff" | "mypy" | "pip" => "python",
+        "go" | "golangci-lint" => "go",
+        "docker" | "kubectl" => "cloud",
+        "rspec" | "rubocop" | "rake" => "ruby",
+        "dotnet" => "dotnet",
+        "ls" | "tree" | "grep" | "find" | "wc" | "read" | "env" | "json" | "log" | "smart"
+        | "diff" | "deps" | "summary" | "format" => "system",
+        _ => "other",
+    }
+    .to_string()
 }
 
 fn get_db_path() -> Result<PathBuf> {

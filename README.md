@@ -472,15 +472,26 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Privacy & Telemetry
 
-RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This helps prioritize development. See opt-out options below.
+RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers.
 
-**What is collected:**
-- Device hash (salted SHA-256 — per-user random salt stored locally, not reversible)
-- RTK version, OS, architecture
-- Command count (last 24h) and top command names (e.g. "git", "cargo" — no arguments, no file paths)
-- Token savings percentage
+**What is collected and why:**
 
-**What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, or any personally identifiable information.
+| Category | Data | Why |
+|----------|------|-----|
+| Identity | Salted device hash (SHA-256, not reversible) | Count unique installations without tracking individuals |
+| Environment | RTK version, OS, architecture, install method | Know which platforms to support and test |
+| Usage volume | Command count (24h), total commands, tokens saved (24h/30d/total) | Measure adoption and value delivered |
+| Quality | Top 5 passthrough commands (0% savings), parse failure count, commands with <30% savings | Identify missing filters and weak ones to improve |
+| Ecosystem | Command category distribution (e.g. git 45%, cargo 20%, js 15%) | Prioritize filter development for popular ecosystems |
+| Retention | Days since first use, active days in last 30 | Understand engagement and detect churn |
+| Adoption | AI agent hook type (claude/gemini/codex), custom TOML filter count | Track integration coverage and DSL adoption |
+| Configuration | Whether config.toml exists, number of excluded commands, project count | Understand user maturity and customization patterns |
+| Features | Usage counts for meta-commands (gain, discover, proxy, verify) | Know which RTK features are valued vs unused |
+| Economics | Estimated USD savings (based on API token pricing) | Quantify the value RTK provides to users |
+
+All data is **aggregate counts or anonymized command names** (first 3 words, no arguments). Top commands report only tool names (e.g. "git", "cargo"), never full command lines.
+
+**What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, personal data, or repository contents.
 
 **Opt-out** (any of these):
 ```bash
