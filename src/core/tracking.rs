@@ -398,11 +398,16 @@ impl Tracker {
         Ok(())
     }
 
-    /// Delete all tracked commands, resetting savings stats to zero.
+    /// Delete all tracked data (commands + parse_failures), resetting all stats to zero.
     pub fn reset_all(&self) -> Result<()> {
         self.conn
-            .execute("DELETE FROM commands", [])
-            .context("Failed to reset tracking data")?;
+            .execute_batch(
+                "BEGIN;
+                 DELETE FROM commands;
+                 DELETE FROM parse_failures;
+                 COMMIT;",
+            )
+            .context("Failed to reset tracking database")?;
         Ok(())
     }
 
@@ -1396,5 +1401,45 @@ mod tests {
         // We can't assert exact rate because other tests may have added records,
         // but we can verify recovery_rate is between 0 and 100
         assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
+    }
+
+    #[test]
+    fn test_reset_all_clears_both_tables() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let pid = std::process::id();
+
+        // Insert into commands
+        tracker
+            .record(
+                "git status",
+                &format!("rtk git status reset_test_{}", pid),
+                100,
+                20,
+                50,
+            )
+            .expect("Failed to record command");
+
+        // Insert into parse_failures
+        tracker
+            .record_parse_failure(&format!("bad_cmd_reset_test_{}", pid), "parse error", false)
+            .expect("Failed to record parse failure");
+
+        // Reset everything
+        tracker.reset_all().expect("Failed to reset");
+
+        // Both tables should be empty
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(
+            summary.total_commands, 0,
+            "commands table should be empty after reset"
+        );
+
+        let failures = tracker
+            .get_parse_failure_summary()
+            .expect("Failed to get failure summary");
+        assert_eq!(
+            failures.total, 0,
+            "parse_failures table should be empty after reset"
+        );
     }
 }

@@ -406,6 +406,9 @@ enum Commands {
         /// Reset all token savings stats to zero
         #[arg(long)]
         reset: bool,
+        /// Skip confirmation prompt when resetting
+        #[arg(long, requires = "reset")]
+        yes: bool,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -1669,6 +1672,7 @@ fn run_cli() -> Result<i32> {
             format,
             failures,
             reset,
+            yes,
         } => {
             analytics::gain::run(
                 project, // added: pass project flag
@@ -1683,6 +1687,7 @@ fn run_cli() -> Result<i32> {
                 &format,
                 failures,
                 reset,
+                yes,
                 cli.verbose,
             )?;
             0
