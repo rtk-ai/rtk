@@ -496,11 +496,11 @@ fn filter_go_build(output: &str) -> String {
 }
 
 fn is_go_build_error_line(line: &str) -> bool {
-    if line.is_empty() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
         return false;
     }
 
-    let trimmed = line.trim();
     let lower = trimmed.to_lowercase();
 
     // Go download/progress lines often contain package names like pkg/errors,
@@ -517,15 +517,36 @@ fn is_go_build_error_line(line: &str) -> bool {
         return false;
     }
 
-    // Canonical compiler error locations: file.go:line:col: ...
-    if trimmed.contains(".go:") {
+    // Canonical compiler/config error locations: file:line:col: ...
+    let is_go_config_location = !lower.starts_with("go: ")
+        && (lower.contains("go.mod:")
+            || lower.contains("go.work:")
+            || lower.contains("go.sum:"));
+    if trimmed.contains(".go:") || is_go_config_location {
         return true;
     }
 
-    // Some toolchain/build wrapper failures still surface as non-file errors.
-    lower.starts_with("go: build failed")
-        || lower.starts_with("go: error ")
-        || lower.starts_with("error: ")
+    // Some compiler/module failures do not include a file.go:line:col location.
+    let non_file_error_prefixes = [
+        "undefined: ",
+        "cannot use ",
+        "cannot find package ",
+        "no required module provides package ",
+        "missing go.sum entry for module providing package ",
+        "found packages ",
+        "go: build failed",
+        "go: error ",
+        "error: ",
+        "go: updates to go.mod needed",
+        "go: inconsistent vendoring",
+    ];
+
+    non_file_error_prefixes
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+        || lower.contains("import cycle not allowed")
+        || lower.contains("build constraints exclude all go files")
+        || lower.contains("function main is undeclared in the main package")
 }
 
 /// Filter go vet output - show issues
@@ -624,6 +645,8 @@ main.go:15:2: cannot use x (type int) as type string"#;
     #[test]
     fn test_filter_go_build_ignores_download_lines_with_error_in_package_names() {
         let output = r#"go: downloading git.gametaptap.com/neutron/gotap/errors v1.0.8
+go: finding module for package example.com/foo
+go: extracting github.com/pkg/errors v0.9.1
 go: downloading github.com/pkg/errors v0.9.1
 go: downloading github.com/hashicorp/go-multierror v1.1.1
 go: downloading golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2"#;
@@ -634,6 +657,28 @@ go: downloading golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2"#;
 
     #[test]
     fn test_is_go_build_error_line_recognizes_real_compiler_errors() {
+        assert!(is_go_build_error_line("undefined: missingFunc"));
+        assert!(is_go_build_error_line(
+            "cannot find package \"foo/bar\""
+        ));
+        assert!(is_go_build_error_line(
+            "found packages a (a.go) and b (b.go) in /tmp/rtk-go-build-probe-mix"
+        ));
+        assert!(is_go_build_error_line(
+            "imports example.com/cycle/a: import cycle not allowed"
+        ));
+        assert!(is_go_build_error_line(
+            "package example.com/buildtag: build constraints exclude all Go files in /tmp/rtk-go-build-probe-buildtag"
+        ));
+        assert!(is_go_build_error_line(
+            "go.mod:3: invalid go version 'not-a-version': must match format 1.23.0"
+        ));
+        assert!(is_go_build_error_line(
+            "go.work:1: invalid go version 'not-a-version': must match format 1.23.0"
+        ));
+        assert!(is_go_build_error_line(
+            "runtime.main_main·f: function main is undeclared in the main package"
+        ));
         assert!(is_go_build_error_line(
             "main.go:10:5: undefined: missingFunc"
         ));
@@ -641,7 +686,47 @@ go: downloading golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2"#;
         assert!(!is_go_build_error_line(
             "go: downloading github.com/pkg/errors v0.9.1"
         ));
+        assert!(!is_go_build_error_line(
+            "go: finding module for package example.com/foo"
+        ));
+        assert!(!is_go_build_error_line(
+            "go: extracting github.com/pkg/errors v0.9.1"
+        ));
         assert!(!is_go_build_error_line("# example.com/foo"));
+    }
+
+    #[test]
+    fn test_filter_go_build_preserves_non_file_error_shapes() {
+        let output = r#"undefined: missingFunc
+cannot find package "foo/bar"
+found packages a (a.go) and b (b.go) in /tmp/rtk-go-build-probe-mix
+imports example.com/cycle/a: import cycle not allowed
+package example.com/buildtag: build constraints exclude all Go files in /tmp/rtk-go-build-probe-buildtag
+runtime.main_main·f: function main is undeclared in the main package"#;
+
+        let result = filter_go_build(output);
+        assert!(result.contains("6 errors"));
+        assert!(result.contains("undefined: missingFunc"));
+        assert!(result.contains("cannot find package \"foo/bar\""));
+        assert!(result.contains("found packages a (a.go) and b (b.go)"));
+        assert!(result.contains("import cycle not allowed"));
+        assert!(result.contains("build constraints exclude all Go files"));
+        assert!(result.contains("function main is undeclared in the main package"));
+    }
+
+    #[test]
+    fn test_filter_go_build_preserves_go_config_parse_errors() {
+        let output = r#"go: errors parsing go.mod:
+go.mod:3: invalid go version 'not-a-version': must match format 1.23.0
+go: errors parsing go.work:
+go.work:1: invalid go version 'not-a-version': must match format 1.23.0"#;
+
+        let result = filter_go_build(output);
+        assert!(result.contains("2 errors"));
+        assert!(result.contains("go.mod:3: invalid go version"));
+        assert!(result.contains("go.work:1: invalid go version"));
+        assert!(!result.contains("go: errors parsing go.mod:"));
+        assert!(!result.contains("go: errors parsing go.work:"));
     }
 
     #[test]
