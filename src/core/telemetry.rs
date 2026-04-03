@@ -64,6 +64,7 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
     // Get stats from tracking DB
     let (commands_24h, top_commands, savings_pct, tokens_saved_24h, tokens_saved_total) =
         get_stats();
+    let enriched = get_enriched_stats();
 
     let payload = serde_json::json!({
         "device_hash": device_hash,
@@ -76,6 +77,13 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
         "savings_pct": savings_pct,
         "tokens_saved_24h": tokens_saved_24h,
         "tokens_saved_total": tokens_saved_total,
+        // Enriched: identify gaps and quality issues
+        "passthrough_top": enriched.passthrough_top,
+        "parse_failures_24h": enriched.parse_failures_24h,
+        "low_savings_commands": enriched.low_savings_commands,
+        "avg_savings_per_command": enriched.avg_savings_per_command,
+        "hook_type": enriched.hook_type,
+        "custom_toml_filters": enriched.custom_toml_filters,
     });
 
     let mut req = ureq::post(url).set("Content-Type", "application/json");
@@ -185,6 +193,119 @@ fn get_stats() -> (i64, Vec<String>, Option<f64>, i64, i64) {
         tokens_saved_24h,
         tokens_saved_total,
     )
+}
+
+struct EnrichedStats {
+    passthrough_top: Vec<String>,
+    parse_failures_24h: i64,
+    low_savings_commands: Vec<String>,
+    avg_savings_per_command: f64,
+    hook_type: String,
+    custom_toml_filters: usize,
+}
+
+fn get_enriched_stats() -> EnrichedStats {
+    let tracker = match tracking::Tracker::new() {
+        Ok(t) => t,
+        Err(_) => {
+            return EnrichedStats {
+                passthrough_top: vec![],
+                parse_failures_24h: 0,
+                low_savings_commands: vec![],
+                avg_savings_per_command: 0.0,
+                hook_type: detect_hook_type(),
+                custom_toml_filters: count_custom_toml_filters(),
+            }
+        }
+    };
+
+    let since_24h = chrono::Utc::now() - chrono::Duration::hours(24);
+
+    let passthrough_top = tracker
+        .top_passthrough(5)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(cmd, count)| format!("{}:{}", cmd, count))
+        .collect();
+
+    let parse_failures_24h = tracker.parse_failures_since(since_24h).unwrap_or(0);
+
+    let low_savings_commands = tracker
+        .low_savings_commands(5)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(cmd, pct)| format!("{}:{:.0}%", cmd, pct))
+        .collect();
+
+    let avg_savings_per_command = tracker.avg_savings_per_command().unwrap_or(0.0);
+
+    EnrichedStats {
+        passthrough_top,
+        parse_failures_24h,
+        low_savings_commands,
+        avg_savings_per_command,
+        hook_type: detect_hook_type(),
+        custom_toml_filters: count_custom_toml_filters(),
+    }
+}
+
+/// Detect which AI agent hook is installed.
+fn detect_hook_type() -> String {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return "unknown".to_string(),
+    };
+
+    // Check in order of popularity
+    let checks = [
+        (home.join(".claude/hooks/rtk-rewrite.sh"), "claude"),
+        (home.join(".claude/hooks/rtk-rewrite.json"), "claude"),
+        (home.join(".gemini/hooks/rtk-hook.sh"), "gemini"),
+        (home.join(".codex/AGENTS.md"), "codex"),
+        (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
+    ];
+
+    for (path, name) in &checks {
+        if path.exists() {
+            return name.to_string();
+        }
+    }
+
+    // Check project-level hooks
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join(".claude/hooks/rtk-rewrite.sh").exists() {
+            return "claude".to_string();
+        }
+    }
+
+    "none".to_string()
+}
+
+/// Count user-defined TOML filter files (project-local + global).
+fn count_custom_toml_filters() -> usize {
+    let mut count = 0;
+
+    // Project-local: .rtk/filters/*.toml
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(entries) = std::fs::read_dir(cwd.join(".rtk/filters")) {
+            count += entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+                .count();
+        }
+    }
+
+    // Global: ~/.config/rtk/filters/*.toml
+    if let Some(config_dir) = dirs::config_dir() {
+        if let Ok(entries) = std::fs::read_dir(config_dir.join("rtk/filters")) {
+            count += entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+                .count();
+        }
+    }
+
+    count
 }
 
 fn detect_install_method() -> &'static str {
@@ -335,5 +456,38 @@ mod tests {
         if let Some(p) = pct {
             assert!((0.0..=100.0).contains(&p));
         }
+    }
+
+    #[test]
+    fn test_enriched_stats_returns_valid_data() {
+        let stats = get_enriched_stats();
+        assert!(stats.passthrough_top.len() <= 5);
+        assert!(stats.parse_failures_24h >= 0);
+        assert!(stats.low_savings_commands.len() <= 5);
+        assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
+        assert!(
+            ["claude", "gemini", "codex", "cursor", "none", "unknown"]
+                .iter()
+                .any(|&h| stats.hook_type.starts_with(h)),
+            "Unexpected hook type: {}",
+            stats.hook_type
+        );
+    }
+
+    #[test]
+    fn test_detect_hook_type_returns_known() {
+        let ht = detect_hook_type();
+        assert!(
+            ["claude", "gemini", "codex", "cursor", "none", "unknown"].contains(&ht.as_str()),
+            "Unexpected hook type: {}",
+            ht
+        );
+    }
+
+    #[test]
+    fn test_count_custom_toml_filters() {
+        // Should not panic even if directories don't exist
+        let count = count_custom_toml_filters();
+        assert!(count < 10000); // sanity check
     }
 }

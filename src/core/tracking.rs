@@ -956,6 +956,61 @@ impl Tracker {
         )?;
         Ok(saved)
     }
+
+    /// Top N passthrough commands (0% savings) — commands missing a filter.
+    pub fn top_passthrough(&self, limit: usize) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT original_cmd, COUNT(*) as cnt FROM commands
+             WHERE input_tokens = 0 AND output_tokens = 0
+             GROUP BY original_cmd ORDER BY cnt DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let cmd: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+            Ok((short, count))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Count parse failures in the last 24 hours.
+    pub fn parse_failures_since(&self, since: chrono::DateTime<chrono::Utc>) -> Result<i64> {
+        let ts = since.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM parse_failures WHERE timestamp >= ?1",
+            params![ts],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Count commands with low savings (<30%) — filters that need improvement.
+    pub fn low_savings_commands(&self, limit: usize) -> Result<Vec<(String, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd, AVG(savings_pct) as avg_sav FROM commands
+             WHERE input_tokens > 0
+             GROUP BY rtk_cmd
+             HAVING avg_sav < 30.0 AND avg_sav > 0.0
+             ORDER BY COUNT(*) DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let cmd: String = row.get(0)?;
+            let sav: f64 = row.get(1)?;
+            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+            Ok((short, sav))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Average savings percentage per command (unweighted by volume).
+    pub fn avg_savings_per_command(&self) -> Result<f64> {
+        let avg: f64 = self.conn.query_row(
+            "SELECT COALESCE(AVG(savings_pct), 0.0) FROM commands WHERE input_tokens > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(avg)
+    }
 }
 
 fn get_db_path() -> Result<PathBuf> {
