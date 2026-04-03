@@ -3,6 +3,7 @@
 use crate::core::config;
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use std::process::Stdio;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
@@ -908,6 +909,7 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     }
 
     let output = build_commit_command(args, global_args)
+        .stdin(Stdio::inherit())
         .output()
         .context("Failed to run git commit")?;
 
@@ -972,7 +974,7 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run git push")?;
+    let output = cmd.stdin(Stdio::inherit()).output().context("Failed to run git push")?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
