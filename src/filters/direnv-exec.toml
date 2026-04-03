@@ -35,7 +35,7 @@ expected = "direnv: loading /repo/.envrc\nGITHUB_TOKEN=***\nOPENAI_API_KEY=***"
 
 [filters.direnv-03-gh-auth-token]
 description = "Redact GitHub CLI token display under direnv exec"
-match_command = "^direnv\\s+exec\\s+(?:'[^']+'|\"[^\"]+\"|\\S+)\\s+gh\\s+auth\\s+(?:token(?:\\s|$)|status\\b.*--show-token\\b).*"
+match_command = "^direnv\\s+exec\\s+(?:'[^']+'|\"[^\"]+\"|\\S+)\\s+(?:gh\\s+auth\\s+(?:token\\b|status\\b.*--show-token\\b).*|(?:bash|sh|zsh)\\s+-[A-Za-z]*c\\s+.*gh\\s+auth\\s+(?:token\\b|status\\b.*--show-token\\b).*)"
 strip_ansi = true
 replace = [
   { pattern = "gh[pousr]_[A-Za-z0-9_]+", replacement = "***" },

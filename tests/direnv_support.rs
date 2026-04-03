@@ -294,3 +294,29 @@ fn direnv_exec_real_source_up_redacts_gh_auth_token() {
         stderr
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn direnv_exec_shell_wrapped_gh_auth_token_is_redacted() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fake_direnv_script(temp.path());
+    fake_gh_script(temp.path());
+
+    let output = Command::new(rtk_bin())
+        .args(["direnv", "exec", ".", "sh", "-lc", "gh auth token"])
+        .env("PATH", test_path(temp.path()))
+        .env("GITHUB_TOKEN", "ghp_wrapped_secret_value")
+        .output()
+        .expect("run rtk direnv exec sh -lc gh auth token");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("***"), "stdout: {}", stdout);
+    assert!(!stdout.contains("ghp_wrapped_secret_value"), "stdout: {}", stdout);
+    assert!(
+        !stderr.contains("ghp_wrapped_secret_value"),
+        "stderr: {}",
+        stderr
+    );
+}

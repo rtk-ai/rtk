@@ -1651,6 +1651,11 @@ match_command = "^make\\b"
             Some("direnv-03-gh-auth-token")
         );
         assert_eq!(
+            find_filter_in("direnv exec . sh -lc 'gh auth token'", &filters)
+                .map(|f| f.name.as_str()),
+            Some("direnv-03-gh-auth-token")
+        );
+        assert_eq!(
             find_filter_in(
                 "direnv exec . pnpm config get //registry.npmjs.org/:_authToken",
                 &filters
