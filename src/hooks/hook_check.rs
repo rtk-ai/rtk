@@ -34,9 +34,6 @@ pub fn status() -> HookStatus {
     }
 
     let Some(hook_path) = hook_installed_path() else {
-        if other_integration_installed(&home) {
-            return HookStatus::Ok;
-        }
         return HookStatus::Missing;
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
@@ -96,6 +93,7 @@ pub fn parse_hook_version(content: &str) -> u8 {
     0 // No version tag = version 0 (outdated)
 }
 
+#[cfg(test)]
 fn other_integration_installed(home: &std::path::Path) -> bool {
     let paths = [
         home.join(OPENCODE_PLUGIN_PATH),
@@ -246,13 +244,12 @@ mod tests {
                 "Expected Ok or Outdated when Claude hook exists, got {:?}",
                 s
             ),
-            (false, true, true) => assert_eq!(
+            (false, true, _) => assert_eq!(
                 s,
-                HookStatus::Ok,
-                "Expected Ok when other integration installed, got {:?}",
+                HookStatus::Missing,
+                "Expected Missing when .claude/ exists but hook absent, got {:?}",
                 s
             ),
-            (false, true, false) => assert_eq!(s, HookStatus::Missing),
             (false, false, _) => assert_eq!(s, HookStatus::Ok),
         }
     }
