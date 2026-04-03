@@ -39,7 +39,7 @@ pub fn run(
         tracker
             .reset_all()
             .context("Failed to reset token savings")?;
-        println!("{}", "Token savings stats reset to zero.".green());
+        println!("{}", styled("Token savings stats reset to zero.", true));
         return Ok(());
     }
 
