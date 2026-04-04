@@ -11,7 +11,7 @@ use super::constants::{
     REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
-use crate::core::constants::RTK_DATA_DIR;
+use crate::core::constants::{HISTORY_DB, RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
@@ -664,7 +664,7 @@ fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> 
     let mut removed = Vec::new();
 
     // Warn about history.db before removal
-    let history_path = data_dir.join("history.db");
+    let history_path = data_dir.join(HISTORY_DB);
     if history_path.exists() {
         eprintln!(
             "Note: removing token savings database ({}). \
@@ -676,7 +676,7 @@ fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> 
 
     // Report known artifacts for verbose output
     let known_artifacts = [
-        "trusted_filters.json",
+        TRUSTED_FILTERS_JSON,
         ".hook_warn_last",
         ".telemetry_last_ping",
         ".device_salt",
@@ -3158,6 +3158,18 @@ More notes
         assert!(
             removed.iter().any(|s: &String| s.contains("history.db")),
             "should mention history.db in removed items"
+        );
+        assert!(
+            removed.iter().any(|s| s.contains("trusted_filters.json")),
+            "should mention trusted_filters.json"
+        );
+        assert!(
+            removed.iter().any(|s| s.contains(".hook_warn_last")),
+            "should mention .hook_warn_last"
+        );
+        assert!(
+            removed.iter().any(|s| s.contains("tee/")),
+            "should mention tee/"
         );
     }
 
