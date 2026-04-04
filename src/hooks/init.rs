@@ -638,6 +638,22 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     let cursor_removed = remove_cursor_hooks(verbose)?;
     removed.extend(cursor_removed);
 
+    // 7. Remove RTK data directory (~/.local/share/rtk/)
+    if let Some(data_base) = dirs::data_local_dir() {
+        let data_dir = data_base.join(RTK_DATA_DIR);
+        let data_removed = clean_data_directory_at(&data_dir, verbose)
+            .context("Failed to clean RTK data directory")?;
+        removed.extend(data_removed);
+    }
+
+    // 8. Remove RTK config directory (~/.config/rtk/)
+    if let Some(config_base) = dirs::config_dir() {
+        let config_dir = config_base.join(RTK_DATA_DIR);
+        let config_removed = clean_config_directory_at(&config_dir, verbose)
+            .context("Failed to clean RTK config directory")?;
+        removed.extend(config_removed);
+    }
+
     // Report results
     if removed.is_empty() {
         println!("RTK was not installed (nothing to remove)");
@@ -654,7 +670,6 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
 
 /// Remove RTK data directory and its contents.
 /// Returns list of removed items for the uninstall report.
-#[allow(dead_code)]
 fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> {
     if !data_dir.exists() {
         if verbose > 0 {
@@ -710,7 +725,6 @@ fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> 
 
 /// Remove RTK config directory (~/.config/rtk/) and its contents.
 /// Returns list of removed items for the uninstall report.
-#[allow(dead_code)]
 fn clean_config_directory_at(config_dir: &Path, verbose: u8) -> Result<Vec<String>> {
     if !config_dir.exists() {
         if verbose > 0 {
