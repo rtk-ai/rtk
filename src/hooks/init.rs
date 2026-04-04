@@ -641,7 +641,7 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     // 7. Remove RTK data directory (~/.local/share/rtk/)
     if let Some(data_base) = dirs::data_local_dir() {
         let data_dir = data_base.join(RTK_DATA_DIR);
-        let data_removed = clean_data_directory_at(&data_dir, verbose)
+        let data_removed = clean_data_directory_at(&data_dir, verbose, true)
             .context("Failed to clean RTK data directory")?;
         removed.extend(data_removed);
     }
@@ -670,7 +670,7 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
 
 /// Remove RTK data directory and its contents.
 /// Returns list of removed items for the uninstall report.
-fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> {
+fn clean_data_directory_at(data_dir: &Path, verbose: u8, interactive: bool) -> Result<Vec<String>> {
     if !data_dir.exists() {
         if verbose > 0 {
             eprintln!("rtk: data dir not found: {}", data_dir.display());
@@ -680,18 +680,42 @@ fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> 
 
     let mut removed = Vec::new();
 
-    // Always warn about history.db (unconditional - data loss warning per issue #1014)
+    // Prompt before deleting history.db (contains user's token savings data)
     let history_path = data_dir.join(HISTORY_DB);
-    if history_path.exists() {
+    if history_path.exists() && interactive {
+        use std::io::{self, BufRead, IsTerminal};
+
         eprintln!(
-            "Note: removing token savings database ({}). \
-             Run `rtk gain --history` first if you want to export your data.",
+            "\nFound token savings database: {}\n\
+             Run `rtk gain --history` to export before deleting.",
             history_path.display()
         );
+        eprint!("Delete data directory and history? [y/N] ");
+
+        let confirmed = if !io::stdin().is_terminal() {
+            eprintln!("(non-interactive mode, skipping data directory removal)");
+            false
+        } else {
+            let mut line = String::new();
+            io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .context("Failed to read user input")?;
+            let response = line.trim().to_lowercase();
+            response == "y" || response == "yes"
+        };
+
+        if !confirmed {
+            eprintln!("Skipped data directory removal.");
+            return Ok(vec![]);
+        }
+    }
+
+    if history_path.exists() {
         removed.push(format!("Data: history.db ({})", history_path.display()));
     }
 
-    // Report known artifacts for verbose output
+    // Report known artifacts
     let known_artifacts = [
         TRUSTED_FILTERS_JSON,
         ".hook_warn_last",
@@ -3202,7 +3226,7 @@ More notes
         fs::write(data_dir.join(".device_salt"), b"salt").expect("write device_salt");
         fs::write(data_dir.join("tee").join("output.txt"), b"tee data").expect("write tee file");
 
-        let removed = clean_data_directory_at(&data_dir, 0).expect("clean should succeed");
+        let removed = clean_data_directory_at(&data_dir, 0, false).expect("clean should succeed");
 
         assert!(!data_dir.exists(), "data dir should be removed");
         assert!(!removed.is_empty(), "should report removed items");
@@ -3229,7 +3253,7 @@ More notes
         let tmp = tempfile::tempdir().expect("create tempdir");
         let data_dir = tmp.path().join("rtk-nonexistent");
 
-        let removed = clean_data_directory_at(&data_dir, 0).expect("clean should succeed");
+        let removed = clean_data_directory_at(&data_dir, 0, false).expect("clean should succeed");
         assert!(removed.is_empty(), "nothing to remove");
     }
 
@@ -3283,7 +3307,7 @@ More notes
         fs::write(data_dir.join(".device_salt"), b"salt").expect("write");
         fs::write(data_dir.join("tee").join("out.txt"), b"tee").expect("write");
 
-        let removed = clean_data_directory_at(&data_dir, 1).expect("clean");
+        let removed = clean_data_directory_at(&data_dir, 1, false).expect("clean");
 
         // Should report 6 items: history.db, trusted_filters, hook_warn, telemetry, salt, tee/
         assert_eq!(
