@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CONFIG_TOML, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 use crate::core::config;
@@ -420,6 +420,57 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+fn backup_path(path: &Path) -> Result<PathBuf> {
+    let file_name = path
+        .file_name()
+        .context("Cannot create backup: path has no file name")?
+        .to_string_lossy();
+    Ok(path.with_file_name(format!("{file_name}.bak")))
+}
+
+fn backup_file_if_exists(path: &Path, verbose: u8) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let backup = backup_path(path)?;
+    fs::copy(path, &backup).with_context(|| {
+        format!(
+            "Failed to back up {} to {}",
+            path.display(),
+            backup.display()
+        )
+    })?;
+
+    if verbose > 0 {
+        eprintln!("Backup: {}", backup.display());
+    }
+
+    Ok(Some(backup))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn current_rtk_hook_command() -> Result<String> {
+    let exe = std::env::current_exe().context("Failed to resolve current RTK executable")?;
+    let canonical = fs::canonicalize(&exe).unwrap_or(exe);
+    let exe_str = canonical
+        .to_str()
+        .context("RTK executable path contains invalid UTF-8")?;
+    Ok(format!("{} hook codex", shell_quote(exe_str)))
+}
+
+fn is_codex_hook_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    trimmed == "rtk hook codex"
+        || trimmed.ends_with("/rtk hook codex")
+        || trimmed.ends_with("\\rtk hook codex")
+        || trimmed.ends_with("/rtk' hook codex")
+        || trimmed.ends_with("\\rtk' hook codex")
+}
+
 /// Prompt user for consent to patch settings.json
 /// Prints to stderr (stdout may be piped), reads from stdin
 /// Default is No (capital N)
@@ -698,7 +749,71 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
         removed.push("AGENTS.md: removed @RTK.md reference".to_string());
     }
 
+    let hooks_json_path = codex_dir.join(HOOKS_JSON);
+    if remove_codex_hook_from_settings(&hooks_json_path, verbose)? {
+        removed.push("hooks.json: removed RTK PreToolUse hook".to_string());
+    }
+
     Ok(removed)
+}
+
+fn remove_codex_hook_from_settings(path: &Path, verbose: u8) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))?;
+
+    let removed = remove_codex_hook_from_json(&mut root);
+    if !removed {
+        return Ok(false);
+    }
+
+    backup_file_if_exists(path, verbose)?;
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Codex hooks.json")?;
+    atomic_write(path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("Removed Codex RTK hook from {}", path.display());
+    }
+
+    Ok(true)
+}
+
+fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let hooks = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(hooks) => hooks,
+        None => return false,
+    };
+
+    let original_len = hooks.len();
+    hooks.retain(|entry| {
+        let hook_entries = match entry.get("hooks").and_then(|h| h.as_array()) {
+            Some(hook_entries) => hook_entries,
+            None => return true,
+        };
+
+        !hook_entries.iter().any(|hook| {
+            hook.get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(is_codex_hook_command)
+        })
+    });
+
+    hooks.len() < original_len
 }
 
 /// Orchestrator: patch settings.json with RTK hook
@@ -1255,26 +1370,31 @@ fn run_windsurf_mode(verbose: u8) -> Result<()> {
 }
 
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
+    let codex_dir = if global {
+        resolve_codex_dir()?
+    } else {
+        resolve_local_codex_dir()
+    };
     let (agents_md_path, rtk_md_path) = if global {
-        let codex_dir = resolve_codex_dir()?;
         (codex_dir.join(AGENTS_MD), codex_dir.join(RTK_MD))
     } else {
         (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
     };
 
-    if global {
-        if let Some(parent) = agents_md_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create Codex config directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
-    }
+    fs::create_dir_all(&codex_dir).with_context(|| {
+        format!(
+            "Failed to create Codex config directory: {}",
+            codex_dir.display()
+        )
+    })?;
+
+    let config_path = codex_dir.join(CONFIG_TOML);
+    let hooks_json_path = codex_dir.join(HOOKS_JSON);
 
     write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, verbose)?;
     let added_ref = patch_agents_md(&agents_md_path, verbose)?;
+    let feature_enabled = ensure_codex_hooks_feature_enabled(&config_path, verbose)?;
+    let hook_added = patch_codex_hooks_json(&hooks_json_path, verbose)?;
 
     println!("\nRTK configured for Codex CLI.\n");
     println!("  RTK.md:    {}", rtk_md_path.display());
@@ -1294,6 +1414,22 @@ fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
             agents_md_path.display()
         );
     }
+    println!("  hooks.json: {}", hooks_json_path.display());
+    if hook_added {
+        println!("  hooks.json: RTK PreToolUse hook added");
+    } else {
+        println!("  hooks.json: RTK PreToolUse hook already present");
+    }
+    println!("  config.toml: {}", config_path.display());
+    if feature_enabled {
+        println!("  config.toml: enabled features.codex_hooks = true");
+    } else {
+        println!("  config.toml: features.codex_hooks already enabled");
+    }
+    println!(
+        "\n  Note: Codex hooks cannot rewrite Bash commands in-place yet, so RTK blocks matching Bash commands and suggests the `rtk ...` equivalent."
+    );
+    println!("  Restart Codex. Test with: git status\n");
 
     Ok(())
 }
@@ -1539,6 +1675,10 @@ fn resolve_codex_dir() -> Result<PathBuf> {
     resolve_home_subdir(".codex")
 }
 
+fn resolve_local_codex_dir() -> PathBuf {
+    PathBuf::from(".codex")
+}
+
 fn resolve_opencode_dir() -> Result<PathBuf> {
     resolve_home_subdir(".config/opencode")
 }
@@ -1584,6 +1724,228 @@ fn remove_opencode_plugin(verbose: u8) -> Result<Vec<PathBuf>> {
     }
 
     Ok(removed)
+}
+
+fn codex_hooks_enabled(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let root: toml::Value =
+        toml::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
+
+    Ok(root
+        .get("features")
+        .and_then(|f| f.get("codex_hooks"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
+}
+
+fn ensure_codex_hooks_feature_enabled(path: &Path, verbose: u8) -> Result<bool> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create Codex config dir: {}", parent.display()))?;
+    }
+
+    let mut root = if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+
+        if content.trim().is_empty() {
+            toml::Value::Table(toml::map::Map::new())
+        } else {
+            toml::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", path.display()))?
+        }
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+
+    let root_table = match root.as_table_mut() {
+        Some(table) => table,
+        None => anyhow::bail!("Codex config root must be a TOML table: {}", path.display()),
+    };
+
+    let features = root_table
+        .entry("features")
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let features_table = match features.as_table_mut() {
+        Some(table) => table,
+        None => anyhow::bail!("Codex [features] must be a TOML table: {}", path.display()),
+    };
+
+    if features_table
+        .get("codex_hooks")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
+    features_table.insert("codex_hooks".to_string(), toml::Value::Boolean(true));
+    backup_file_if_exists(path, verbose)?;
+    let serialized = toml::to_string_pretty(&root).context("Failed to serialize Codex config")?;
+    atomic_write(path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("Enabled features.codex_hooks in {}", path.display());
+    }
+
+    Ok(true)
+}
+
+fn patch_codex_hooks_json(path: &Path, verbose: u8) -> Result<bool> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create Codex hooks dir: {}", parent.display()))?;
+    }
+
+    let mut root = if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+
+        if content.trim().is_empty() {
+            serde_json::json!({ "hooks": {} })
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
+        }
+    } else {
+        serde_json::json!({ "hooks": {} })
+    };
+
+    let command = current_rtk_hook_command()?;
+    let changed = upsert_codex_hook_entry(&mut root, &command);
+    if !changed {
+        if verbose > 0 {
+            eprintln!("Codex hooks.json: RTK hook already present");
+        }
+        return Ok(false);
+    }
+    backup_file_if_exists(path, verbose)?;
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Codex hooks.json")?;
+    atomic_write(path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("Patched Codex hooks.json: {}", path.display());
+    }
+
+    Ok(true)
+}
+
+fn upsert_codex_hook_entry(root: &mut serde_json::Value, command: &str) -> bool {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({ "hooks": {} });
+            root.as_object_mut()
+                .expect("Just created object, must succeed")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .expect("hooks must be an object");
+
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .expect("PreToolUse must be an array");
+
+    let mut changed = false;
+    let mut found = false;
+    for entry in pre_tool_use.iter_mut() {
+        let Some(hooks_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            continue;
+        };
+
+        for hook in hooks_array.iter_mut() {
+            let Some(existing) = hook.get("command").and_then(|c| c.as_str()) else {
+                continue;
+            };
+
+            if is_codex_hook_command(existing) {
+                found = true;
+                if existing != command {
+                    if let Some(obj) = hook.as_object_mut() {
+                        obj.insert("command".to_string(), serde_json::json!(command));
+                        obj.entry("statusMessage".to_string())
+                            .or_insert_with(|| serde_json::json!("Checking RTK rewrite"));
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if found {
+        return changed;
+    }
+
+    insert_codex_hook_entry(root, command);
+    true
+}
+
+fn codex_hook_already_present(root: &serde_json::Value) -> bool {
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .is_some_and(|groups| {
+            groups.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(is_codex_hook_command)
+                        })
+                    })
+            })
+        })
+}
+
+fn insert_codex_hook_entry(root: &mut serde_json::Value, command: &str) {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({ "hooks": {} });
+            root.as_object_mut()
+                .expect("Just created object, must succeed")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .expect("hooks must be an object");
+
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .expect("PreToolUse must be an array");
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": command,
+            "statusMessage": "Checking RTK rewrite"
+        }]
+    }));
 }
 
 // ─── Cursor Agent support ─────────────────────────────────────────────
@@ -2033,8 +2395,10 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
-    println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex         # Configure ~/.codex/AGENTS.md + ~/.codex/RTK.md");
+    println!(
+        "  rtk init --codex            # Configure local AGENTS.md + RTK.md + ./.codex/hooks.json"
+    );
+    println!("  rtk init -g --codex         # Configure ~/.codex/AGENTS.md + ~/.codex/RTK.md + hooks.json");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -2045,8 +2409,13 @@ fn show_codex_config() -> Result<()> {
     let codex_dir = resolve_codex_dir()?;
     let global_agents_md = codex_dir.join(AGENTS_MD);
     let global_rtk_md = codex_dir.join(RTK_MD);
+    let global_hooks_json = codex_dir.join(HOOKS_JSON);
+    let global_config_toml = codex_dir.join(CONFIG_TOML);
+    let local_codex_dir = resolve_local_codex_dir();
     let local_agents_md = PathBuf::from(AGENTS_MD);
     let local_rtk_md = PathBuf::from(RTK_MD);
+    let local_hooks_json = local_codex_dir.join(HOOKS_JSON);
+    let local_config_toml = local_codex_dir.join(CONFIG_TOML);
 
     println!("rtk Configuration (Codex CLI):\n");
 
@@ -2069,6 +2438,26 @@ fn show_codex_config() -> Result<()> {
         println!("[--] Global AGENTS.md: not found");
     }
 
+    if global_hooks_json.exists() {
+        let content = fs::read_to_string(&global_hooks_json)?;
+        let json: serde_json::Value = serde_json::from_str(&content)?;
+        if codex_hook_already_present(&json) {
+            println!("[ok] Global hooks.json: RTK PreToolUse hook");
+        } else {
+            println!("[--] Global hooks.json: exists but RTK hook missing");
+        }
+    } else {
+        println!("[--] Global hooks.json: not found");
+    }
+
+    if codex_hooks_enabled(&global_config_toml)? {
+        println!("[ok] Global config.toml: features.codex_hooks = true");
+    } else if global_config_toml.exists() {
+        println!("[--] Global config.toml: Codex hooks feature disabled");
+    } else {
+        println!("[--] Global config.toml: not found");
+    }
+
     if local_rtk_md.exists() {
         println!("[ok] Local RTK.md: {}", local_rtk_md.display());
     } else {
@@ -2088,10 +2477,31 @@ fn show_codex_config() -> Result<()> {
         println!("[--] Local AGENTS.md: not found");
     }
 
+    if local_hooks_json.exists() {
+        let content = fs::read_to_string(&local_hooks_json)?;
+        let json: serde_json::Value = serde_json::from_str(&content)?;
+        if codex_hook_already_present(&json) {
+            println!("[ok] Local hooks.json: RTK PreToolUse hook");
+        } else {
+            println!("[--] Local hooks.json: exists but RTK hook missing");
+        }
+    } else {
+        println!("[--] Local hooks.json: not found");
+    }
+
+    if codex_hooks_enabled(&local_config_toml)? {
+        println!("[ok] Local config.toml: features.codex_hooks = true");
+    } else if local_config_toml.exists() {
+        println!("[--] Local config.toml: Codex hooks feature disabled");
+    } else {
+        println!("[--] Local config.toml: not found");
+    }
+
     println!("\nUsage:");
-    println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex           # Configure ~/.codex/AGENTS.md + ~/.codex/RTK.md");
+    println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md + ./.codex/hooks.json");
+    println!("  rtk init -g --codex           # Configure ~/.codex/AGENTS.md + ~/.codex/RTK.md + hooks.json");
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
+    println!("  Note: Codex currently blocks + suggests `rtk ...`; transparent hook rewrites are not supported yet.");
 
     Ok(())
 }
@@ -2658,6 +3068,126 @@ More notes
     }
 
     #[test]
+    fn test_insert_codex_hook_entry_empty() {
+        let mut json_content = serde_json::json!({});
+        let command = "'/tmp/rtk' hook codex";
+
+        insert_codex_hook_entry(&mut json_content, command);
+
+        let pre_tool_use = json_content["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(pre_tool_use[0]["matcher"], "Bash");
+        assert_eq!(pre_tool_use[0]["hooks"][0]["command"], command);
+    }
+
+    #[test]
+    fn test_insert_codex_hook_preserves_existing() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                (PRE_TOOL_USE_KEY): [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "python3 ./other-hook.py"
+                    }]
+                }]
+            }
+        });
+        let command = "'/tmp/rtk' hook codex";
+
+        insert_codex_hook_entry(&mut json_content, command);
+
+        let pre_tool_use = json_content["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 2);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"],
+            "python3 ./other-hook.py"
+        );
+        assert_eq!(pre_tool_use[1]["hooks"][0]["command"], command);
+    }
+
+    #[test]
+    fn test_upsert_codex_hook_entry_updates_stale_command() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                (PRE_TOOL_USE_KEY): [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "rtk hook codex"
+                    }]
+                }]
+            }
+        });
+
+        let changed = upsert_codex_hook_entry(&mut json_content, "'/tmp/rtk' hook codex");
+
+        assert!(changed);
+        let pre_tool_use = json_content["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"],
+            "'/tmp/rtk' hook codex"
+        );
+    }
+
+    #[test]
+    fn test_remove_codex_hook_from_json() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                (PRE_TOOL_USE_KEY): [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "python3 ./other-hook.py"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "'/tmp/rtk' hook codex"
+                        }]
+                    }
+                ]
+            }
+        });
+
+        let removed = remove_codex_hook_from_json(&mut json_content);
+
+        assert!(removed);
+        let pre_tool_use = json_content["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"],
+            "python3 ./other-hook.py"
+        );
+    }
+
+    #[test]
+    fn test_ensure_codex_hooks_feature_enabled_creates_and_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join(CONFIG_TOML);
+
+        let changed_first = ensure_codex_hooks_feature_enabled(&config_path, 0).unwrap();
+        let changed_second = ensure_codex_hooks_feature_enabled(&config_path, 0).unwrap();
+
+        assert!(changed_first);
+        assert!(!changed_second);
+        assert!(codex_hooks_enabled(&config_path).unwrap());
+    }
+
+    #[test]
+    fn test_is_codex_hook_command_matches_bare_and_absolute_forms() {
+        assert!(is_codex_hook_command("rtk hook codex"));
+        assert!(is_codex_hook_command(
+            "/home/user/.local/bin/rtk hook codex"
+        ));
+        assert!(is_codex_hook_command("'/tmp/build dir/rtk' hook codex"));
+        assert!(!is_codex_hook_command("python3 ./hook.py"));
+    }
+
+    #[test]
     fn test_patch_agents_md_creates_missing_file() {
         let temp = TempDir::new().unwrap();
         let agents_md = temp.path().join("AGENTS.md");
@@ -2693,20 +3223,41 @@ More notes
         let codex_dir = temp.path();
         let agents_md = codex_dir.join("AGENTS.md");
         let rtk_md = codex_dir.join("RTK.md");
+        let hooks_json = codex_dir.join(HOOKS_JSON);
 
         fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
         fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(
+            &hooks_json,
+            serde_json::json!({
+                "hooks": {
+                    (PRE_TOOL_USE_KEY): [{
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "'/tmp/rtk' hook codex"
+                        }]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         let removed_first = uninstall_codex_at(codex_dir, 0).unwrap();
         let removed_second = uninstall_codex_at(codex_dir, 0).unwrap();
 
-        assert_eq!(removed_first.len(), 2);
+        assert_eq!(removed_first.len(), 3);
         assert!(removed_second.is_empty());
         assert!(!rtk_md.exists());
 
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("@RTK.md"));
         assert!(content.contains("# Team rules"));
+
+        let hooks_content = fs::read_to_string(&hooks_json).unwrap();
+        let hooks_json: serde_json::Value = serde_json::from_str(&hooks_content).unwrap();
+        assert!(!codex_hook_already_present(&hooks_json));
     }
 
     #[test]

@@ -340,7 +340,7 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        /// Target Codex CLI (AGENTS.md + RTK.md + hooks.json for deny-with-suggestion)
         #[arg(long)]
         codex: bool,
 
@@ -668,7 +668,7 @@ enum Commands {
     /// Exits 0 and prints the rewritten command if supported.
     /// Exits 1 with no output if the command has no RTK equivalent.
     ///
-    /// Used by Claude Code, Gemini CLI, and other LLM hooks:
+    /// Used by Claude Code, Gemini CLI, Codex, and other LLM hooks:
     ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
@@ -677,7 +677,7 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, etc.)
+    /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, Codex, etc.)
     Hook {
         #[command(subcommand)]
         command: HookCommands,
@@ -690,6 +690,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
+    Codex,
 }
 
 #[derive(Subcommand)]
@@ -1919,6 +1921,7 @@ fn run_cli() -> Result<i32> {
             match command {
                 HookCommands::Gemini => hooks::hook_cmd::run_gemini()?,
                 HookCommands::Copilot => hooks::hook_cmd::run_copilot()?,
+                HookCommands::Codex => hooks::hook_cmd::run_codex()?,
             }
             0
         }

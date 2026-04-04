@@ -4,6 +4,16 @@
 
 ## Specifics
 
-- Prompt-level guidance via awareness document -- no programmatic hook
-- `rtk-awareness.md` is injected into `AGENTS.md` with an `@RTK.md` reference
-- Installed to `~/.codex/` by `rtk init --codex`
+- Prompt-level guidance via `rtk-awareness.md`, injected into `AGENTS.md` with an `@RTK.md` reference
+- Programmatic Codex hook via `rtk hook codex`, wired through `hooks.json`
+- `rtk init --codex` also enables `features.codex_hooks = true` in the active Codex `config.toml`
+
+## Behavior
+
+- Codex `PreToolUse` hooks currently **cannot** apply `updatedInput` yet.
+- RTK therefore uses a **deny-with-suggestion** pattern for Codex:
+  - raw command: `git status`
+  - hook response: deny + suggest `rtk git status`
+  - Codex retries with the RTK command and gets filtered output
+
+This differs from Claude Code and Cursor, where RTK can transparently rewrite the Bash command in-place.
