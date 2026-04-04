@@ -3,8 +3,9 @@
 use anyhow::{Context, Result};
 use std::process::Command;
 
+use crate::core::stream::{self, FilterMode, StdinMode};
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, exit_code_from_status};
+use crate::core::utils::exit_code_from_status;
 
 pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
     if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
@@ -65,53 +66,44 @@ where
 {
     let timer = tracking::TimedExecution::start();
 
-    let output = cmd
-        .output()
+    // CaptureOnly: stderr streams live, stdout buffered silently.
+    // result.filtered = raw_stdout, result.raw = stdout + stderr
+    let result = stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
         .with_context(|| format!("Failed to run {}", tool_name))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-    let exit_code = exit_code_from_output(&output, tool_name);
+    let exit_code = result.exit_code;
+    let raw_stdout = &result.filtered;
+    let raw = &result.raw;
 
-    // On failure, skip filtering and return early (e.g. psql error messages
-    // containing '|' would be misinterpreted by the table parser)
     if opts.skip_filter_on_failure && exit_code != 0 {
-        if !stderr.trim().is_empty() {
-            eprintln!("{}", stderr.trim());
-        }
         timer.track(
             &format!("{} {}", tool_name, args_display),
             &format!("rtk {} {}", tool_name, args_display),
-            &raw,
-            stderr.as_ref(),
+            raw,
+            raw,
         );
         return Ok(exit_code);
     }
 
     let text_to_filter = if opts.filter_stdout_only {
-        &stdout
+        raw_stdout
     } else {
-        raw.as_str()
+        raw
     };
     let filtered = filter_fn(text_to_filter);
 
     if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, &raw, label, exit_code);
+        print_with_hint(&filtered, raw, label, exit_code);
     } else if opts.no_trailing_newline {
         print!("{}", filtered);
     } else {
         println!("{}", filtered);
     }
 
-    if opts.filter_stdout_only && !stderr.trim().is_empty() {
-        eprintln!("{}", stderr.trim());
-    }
-
     let raw_for_tracking = if opts.filter_stdout_only {
-        stdout.as_ref()
+        raw_stdout
     } else {
-        raw.as_str()
+        raw
     };
     timer.track(
         &format!("{} {}", tool_name, args_display),

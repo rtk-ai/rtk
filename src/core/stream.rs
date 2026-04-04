@@ -35,10 +35,10 @@ impl<F: FnMut(&str) -> Option<String>> StreamFilter for LineFilter<F> {
 pub enum FilterMode {
     Streaming(Box<dyn StreamFilter>),
     Buffered(fn(&str) -> String),
+    CaptureOnly,
     Passthrough,
 }
 
-#[allow(dead_code)]
 pub enum StdinMode {
     Inherit,
     Filter(Box<dyn StdinFilter + Send>),
@@ -201,6 +201,15 @@ pub fn run_streaming(
                     Err(e) => return Err(e.into()),
                     Ok(_) => {}
                 }
+            }
+            FilterMode::CaptureOnly => {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if raw_stdout.len() < RAW_CAP {
+                        raw_stdout.push_str(&line);
+                        raw_stdout.push('\n');
+                    }
+                }
+                filtered = raw_stdout.clone();
             }
         }
     }

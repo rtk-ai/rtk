@@ -1,9 +1,10 @@
 //! Runs arbitrary commands and captures only stderr or test failures.
 
+use crate::core::stream::{self, FilterMode, StdinMode};
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Run a command and filter output to show only errors/warnings
 pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
@@ -13,35 +14,29 @@ pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
         eprintln!("Running: {}", command);
     }
 
-    let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", command]);
+        c
     } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute command")?;
+        let mut c = Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-    let filtered = filter_errors(&raw);
+    let result = stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
+        .context("Failed to execute command")?;
+
+    let raw = &result.raw;
+    let exit_code = result.exit_code;
+    let filtered = filter_errors(raw);
     let mut rtk = String::new();
 
     if filtered.is_empty() {
-        if output.status.success() {
+        if exit_code == 0 {
             rtk.push_str("[ok] Command completed successfully (no errors)");
         } else {
-            rtk.push_str(&format!(
-                "[FAIL] Command failed (exit code: {:?})\n",
-                output.status.code()
-            ));
+            rtk.push_str(&format!("[FAIL] Command failed (exit code: {})\n", exit_code));
             let lines: Vec<&str> = raw.lines().collect();
             for line in lines.iter().rev().take(10).rev() {
                 rtk.push_str(&format!("  {}\n", line));
@@ -51,13 +46,12 @@ pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
         rtk.push_str(&filtered);
     }
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "err");
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "err", exit_code) {
+    if let Some(hint) = crate::core::tee::tee_and_hint(raw, "err", exit_code) {
         println!("{}\n{}", rtk, hint);
     } else {
         println!("{}", rtk);
     }
-    timer.track(command, "rtk run-err", &raw, &rtk);
+    timer.track(command, "rtk run-err", raw, &rtk);
     Ok(exit_code)
 }
 
@@ -69,33 +63,28 @@ pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
         eprintln!("Running tests: {}", command);
     }
 
-    let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", command]);
+        c
     } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute test command")?;
+        let mut c = Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let result = stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
+        .context("Failed to execute test command")?;
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "test");
-    let summary = extract_test_summary(&raw, command);
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "test", exit_code) {
+    let raw = &result.raw;
+    let exit_code = result.exit_code;
+    let summary = extract_test_summary(raw, command);
+    if let Some(hint) = crate::core::tee::tee_and_hint(raw, "test", exit_code) {
         println!("{}\n{}", summary, hint);
     } else {
         println!("{}", summary);
     }
-    timer.track(command, "rtk run-test", &raw, &summary);
+    timer.track(command, "rtk run-test", raw, &summary);
     Ok(exit_code)
 }
 
