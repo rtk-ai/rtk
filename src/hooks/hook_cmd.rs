@@ -197,7 +197,7 @@ fn codex_block_response(cmd: &str) -> Option<Value> {
         "hookSpecificOutput": {
             "hookEventName": PRE_TOOL_USE_KEY,
             "permissionDecision": "deny",
-            "permissionDecisionReason": rewritten
+            "permissionDecisionReason": format!("Rerun that as: {}", rewritten)
         }
     }))
 }
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
         assert_eq!(
             output["hookSpecificOutput"]["permissionDecisionReason"],
-            "rtk git status"
+            "Rerun that as: rtk git status"
         );
     }
 
