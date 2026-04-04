@@ -35,6 +35,9 @@ quick-xml = "0.37"
 which = "8"
 automod = "1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 toml = "0.8"
 
