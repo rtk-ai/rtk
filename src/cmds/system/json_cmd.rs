@@ -158,9 +158,9 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
 
                     if is_simple {
                         let val_str = compact_json(val, 0, max_depth);
-                        lines.push(format!("{}  {}: {}", indent, key, val_str.trim()));
+                        lines.push(format!("{}  \"{}\": {}", indent, key, val_str.trim()));
                     } else {
-                        lines.push(format!("{}  {}:", indent, key));
+                        lines.push(format!("{}  \"{}\":", indent, key));
                         lines.push(compact_json(val, depth + 1, max_depth));
                     }
 
@@ -250,12 +250,12 @@ fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
 
                     if is_simple {
                         if i < keys.len() - 1 {
-                            lines.push(format!("{}  {}: {},", indent, key, val_trimmed));
+                            lines.push(format!("{}  \"{}\": {},", indent, key, val_trimmed));
                         } else {
-                            lines.push(format!("{}  {}: {}", indent, key, val_trimmed));
+                            lines.push(format!("{}  \"{}\": {}", indent, key, val_trimmed));
                         }
                     } else {
-                        lines.push(format!("{}  {}:", indent, key));
+                        lines.push(format!("{}  \"{}\":", indent, key));
                         lines.push(val_schema);
                     }
 
