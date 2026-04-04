@@ -1,5 +1,6 @@
 ---
 description: Generate a comprehensive repo recap (PRs, issues, releases) for sharing with team. Pass "en" or "fr" as argument for language (default fr).
+allowed-tools: Bash Read Grep
 ---
 
 # Repo Recap
@@ -139,7 +140,16 @@ Structure the full recap as Markdown with:
 After displaying the recap, automatically copy it to clipboard:
 
 ```bash
-cat << 'EOF' | pbcopy
+# Cross-platform clipboard
+clip() {
+  if command -v pbcopy &>/dev/null; then pbcopy
+  elif command -v xclip &>/dev/null; then xclip -selection clipboard
+  elif command -v wl-copy &>/dev/null; then wl-copy
+  else cat
+  fi
+}
+
+cat << 'EOF' | clip
 {formatted recap content}
 EOF
 ```

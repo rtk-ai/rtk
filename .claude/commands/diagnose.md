@@ -199,7 +199,7 @@ options:
 
 ### Fix 1 : Installer RTK localement
 ```bash
-cd /Users/florianbruniaux/Sites/rtk-ai/rtk
+# Depuis la racine du repo RTK
 cargo install --path .
 # Vérifier installation
 which rtk && rtk --version
@@ -345,7 +345,7 @@ chmod +x .claude/hooks/*.sh
 **Upgrade recommendation**: If running v0.15.x or older, upgrade to v0.16.x:
 
 ```bash
-cd /Users/florianbruniaux/Sites/rtk-ai/rtk
+# From the RTK repo root
 git pull origin main
 cargo install --path . --force
 rtk --version  # Should show 0.16.x or newer

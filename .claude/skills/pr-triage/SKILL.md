@@ -153,7 +153,16 @@ _Externes — Problématiques_ : un des critères suivants :
 
 Après affichage du tableau de triage, copier dans le presse-papier :
 ```bash
-pbcopy <<'EOF'
+# Cross-platform clipboard
+clip() {
+  if command -v pbcopy &>/dev/null; then pbcopy
+  elif command -v xclip &>/dev/null; then xclip -selection clipboard
+  elif command -v wl-copy &>/dev/null; then wl-copy
+  else cat
+  fi
+}
+
+clip <<'EOF'
 {tableau de triage complet}
 EOF
 ```

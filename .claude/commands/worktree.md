@@ -1,6 +1,7 @@
 ---
 model: haiku
 description: Git Worktree Setup for RTK (Rust project)
+argument-hint: "<branch-name>"
 ---
 
 # Git Worktree Setup
