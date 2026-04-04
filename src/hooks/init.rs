@@ -11,7 +11,9 @@ use super::constants::{
     REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
-use crate::core::constants::{CONFIG_TOML, FILTERS_TOML, HISTORY_DB, RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
+use crate::core::constants::{
+    CONFIG_TOML, FILTERS_TOML, HISTORY_DB, RTK_DATA_DIR, TRUSTED_FILTERS_JSON,
+};
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
@@ -701,6 +703,41 @@ fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> 
     if removed.is_empty() {
         // Directory existed but had no known artifacts - still report removal
         removed.push(format!("Data directory: {}", data_dir.display()));
+    }
+
+    Ok(removed)
+}
+
+/// Remove RTK config directory (~/.config/rtk/) and its contents.
+/// Returns list of removed items for the uninstall report.
+#[allow(dead_code)]
+fn clean_config_directory_at(config_dir: &Path, verbose: u8) -> Result<Vec<String>> {
+    if !config_dir.exists() {
+        if verbose > 0 {
+            eprintln!("rtk: config dir not found: {}", config_dir.display());
+        }
+        return Ok(vec![]);
+    }
+
+    let mut removed = Vec::new();
+
+    let known_files = [CONFIG_TOML, FILTERS_TOML];
+    for name in &known_files {
+        let path = config_dir.join(name);
+        if path.exists() {
+            removed.push(format!("Config: {}", name));
+        }
+    }
+
+    fs::remove_dir_all(config_dir).with_context(|| {
+        format!(
+            "Failed to remove config directory: {}",
+            config_dir.display()
+        )
+    })?;
+
+    if removed.is_empty() {
+        removed.push(format!("Config directory: {}", config_dir.display()));
     }
 
     Ok(removed)
@@ -3188,7 +3225,11 @@ More notes
         let config_dir = tmp.path().join("rtk");
         fs::create_dir_all(&config_dir).expect("create config dir");
 
-        fs::write(config_dir.join("config.toml"), b"[tracking]\nenabled = true").expect("write config");
+        fs::write(
+            config_dir.join("config.toml"),
+            b"[tracking]\nenabled = true",
+        )
+        .expect("write config");
         fs::write(config_dir.join("filters.toml"), b"schema_version = 1").expect("write filters");
 
         let removed = clean_config_directory_at(&config_dir, 0).expect("clean should succeed");
