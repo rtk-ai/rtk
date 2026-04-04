@@ -680,7 +680,7 @@ fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> 
 
     let mut removed = Vec::new();
 
-    // Warn about history.db before removal
+    // Always warn about history.db (unconditional - data loss warning per issue #1014)
     let history_path = data_dir.join(HISTORY_DB);
     if history_path.exists() {
         eprintln!(
