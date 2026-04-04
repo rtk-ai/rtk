@@ -1,5 +1,4 @@
 mod analytics;
-mod cmd;
 mod cmds;
 mod core;
 mod discover;
@@ -710,6 +709,8 @@ enum Commands {
 enum HookCommands {
     /// Process Claude Code PreToolUse hook (reads JSON from stdin)
     Claude,
+    /// Process Cursor Agent hook (reads JSON from stdin)
+    Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
@@ -1951,7 +1952,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Hook { command } => match command {
             HookCommands::Claude => {
-                cmd::hook::claude::run()?;
+                hooks::hook_cmd::run_claude()?;
+                0
+            }
+            HookCommands::Cursor => {
+                hooks::hook_cmd::run_cursor()?;
                 0
             }
             HookCommands::Gemini => {
@@ -1962,16 +1967,22 @@ fn run_cli() -> Result<i32> {
                 hooks::hook_cmd::run_copilot()?;
                 0
             }
-            HookCommands::Check { agent, command } => {
+            HookCommands::Check { agent: _, command } => {
+                use crate::discover::registry::rewrite_command;
                 let raw = command.join(" ");
-                let (rewritten, allowed, exit_code) =
-                    cmd::hook::format_for_claude(cmd::check_for_hook(&raw, &agent));
-                if allowed {
-                    println!("{}", rewritten);
-                } else {
-                    eprintln!("{}", rewritten);
+                let excluded = crate::core::config::Config::load()
+                    .map(|c| c.hooks.exclude_commands)
+                    .unwrap_or_default();
+                match rewrite_command(&raw, &excluded) {
+                    Some(rewritten) => {
+                        println!("{}", rewritten);
+                        0
+                    }
+                    None => {
+                        eprintln!("No rewrite for: {}", raw);
+                        1
+                    }
                 }
-                exit_code
             }
         },
 
@@ -1995,7 +2006,20 @@ fn run_cli() -> Result<i32> {
                 None if !args.is_empty() => args.join(" "),
                 None => String::new(),
             };
-            cmd::exec::execute(&raw, cli.verbose)?
+            if raw.trim().is_empty() {
+                0
+            } else {
+                // Execute via shell passthrough with token tracking
+                use std::process::Command as ProcCommand;
+                let shell = if cfg!(windows) { "cmd" } else { "sh" };
+                let flag = if cfg!(windows) { "/C" } else { "-c" };
+                let status = ProcCommand::new(shell)
+                    .arg(flag)
+                    .arg(&raw)
+                    .status()
+                    .with_context(|| format!("Failed to execute: {}", raw))?;
+                status.code().unwrap_or(1)
+            }
         }
 
         Commands::Proxy { args } => {

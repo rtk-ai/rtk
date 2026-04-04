@@ -249,16 +249,16 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^(python\s+-m\s+)?pytest(\s|$)",
+        pattern: r"^(python[0-9.]*\s+-m\s+)?pytest(\s|$)",
         rtk_cmd: "rtk pytest",
-        rewrite_prefixes: &["python -m pytest", "pytest"],
+        rewrite_prefixes: &["python3 -m pytest", "python -m pytest", "pytest"],
         category: "Python",
         savings_pct: 90.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install)",
+        pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)",
         rtk_cmd: "rtk pip",
         rewrite_prefixes: &["pip3", "pip", "uv pip"],
         category: "Python",
@@ -641,6 +641,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        pattern: r"^gt\s+",
+        rtk_cmd: "rtk gt",
+        rewrite_prefixes: &["gt"],
+        category: "Git",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[
@@ -659,7 +668,6 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "touch ",
     "which ",
     "type ",
-    "command ",
     "test ",
     "true",
     "false",

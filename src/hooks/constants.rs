@@ -7,3 +7,8 @@ pub const SETTINGS_LOCAL_JSON: &str = "settings.local.json";
 pub const HOOKS_JSON: &str = "hooks.json";
 pub const PRE_TOOL_USE_KEY: &str = "PreToolUse";
 pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
+
+/// Native Rust hook command for Claude Code (replaces rtk-rewrite.sh).
+pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
+/// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
+pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";

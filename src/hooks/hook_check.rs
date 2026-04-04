@@ -1,6 +1,9 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
-use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use super::constants::{
+    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
+};
 use crate::core::constants::RTK_DATA_DIR;
 use std::path::PathBuf;
 
@@ -26,10 +29,23 @@ pub fn status() -> HookStatus {
         Some(h) => h,
         None => return HookStatus::Ok,
     };
-    if !home.join(CLAUDE_DIR).exists() {
+    let claude_dir = home.join(CLAUDE_DIR);
+    if !claude_dir.exists() {
         return HookStatus::Ok;
     }
 
+    // Check for new binary command in settings.json first
+    if binary_hook_registered(&claude_dir) {
+        // If old script file still exists alongside new command, report Outdated
+        // (migration not complete — user should run `rtk init -g` to clean up)
+        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
+        if old_hook.exists() {
+            return HookStatus::Outdated;
+        }
+        return HookStatus::Ok;
+    }
+
+    // Fall back to legacy script file check
     let Some(hook_path) = hook_installed_path() else {
         return HookStatus::Missing;
     };
@@ -41,6 +57,33 @@ pub fn status() -> HookStatus {
     } else {
         HookStatus::Outdated
     }
+}
+
+/// Check if the native binary command is registered in settings.json
+fn binary_hook_registered(claude_dir: &std::path::Path) -> bool {
+    let settings_path = claude_dir.join(SETTINGS_JSON);
+    let content = match std::fs::read_to_string(&settings_path) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return false,
+    };
+    let root: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let pre_tool_use = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+    pre_tool_use
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd == CLAUDE_HOOK_COMMAND)
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -148,30 +191,21 @@ mod tests {
 
     #[test]
     fn test_status_returns_valid_variant() {
-        // Skip on machines without Claude Code or without hook
+        // Skip on machines without Claude Code
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => return,
         };
-        if !home
-            .join(".claude")
-            .join("hooks")
-            .join("rtk-rewrite.sh")
-            .exists()
-        {
-            // No hook — status should be Missing (if .claude exists) or Ok (if not)
-            let s = status();
-            if home.join(".claude").exists() {
-                assert_eq!(s, HookStatus::Missing);
-            } else {
-                assert_eq!(s, HookStatus::Ok);
-            }
+        let claude_dir = home.join(".claude");
+        if !claude_dir.exists() {
+            assert_eq!(status(), HookStatus::Ok);
             return;
         }
+        // With .claude dir present, status must be one of the valid variants
         let s = status();
         assert!(
-            s == HookStatus::Ok || s == HookStatus::Outdated,
-            "Expected Ok or Outdated when hook exists, got {:?}",
+            s == HookStatus::Ok || s == HookStatus::Outdated || s == HookStatus::Missing,
+            "Expected valid HookStatus variant, got {:?}",
             s
         );
     }

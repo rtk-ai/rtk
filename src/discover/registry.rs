@@ -203,13 +203,21 @@ fn extract_base_command(cmd: &str) -> &str {
     }
 }
 
+/// Quote-aware heredoc detection — `<<` inside quotes is not a heredoc.
+pub fn has_heredoc(cmd: &str) -> bool {
+    tokenize(cmd)
+        .iter()
+        .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
+}
+
 pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return vec![];
     }
 
-    if trimmed.contains("<<") || trimmed.contains("$((") {
+    // Lexer-based for `<<`; string-based for `$((` (lexer splits it across tokens).
+    if has_heredoc(trimmed) || trimmed.contains("$((") {
         return vec![trimmed];
     }
 
@@ -346,8 +354,7 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
         return None;
     }
 
-    // Heredoc or arithmetic expansion — unsafe to split/rewrite
-    if trimmed.contains("<<") || trimmed.contains("$((") {
+    if has_heredoc(trimmed) || trimmed.contains("$((") {
         return None;
     }
 
@@ -474,6 +481,10 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     None
 }
 
+/// Shell prefix builtins that modify how the shell runs a command
+/// but don't change which command runs. Strip before routing, re-prepend after.
+const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+
 /// Rewrite a single (non-compound) command segment.
 /// Returns `Some(rewritten)` if matched (including already-RTK pass-through).
 /// Returns `None` if no match (caller uses original segment).
@@ -481,6 +492,21 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
         return None;
+    }
+
+    // Peel shell prefix builtins (noglob, command, builtin, exec, nocorrect)
+    // before routing, re-prepend after.
+    for &prefix in SHELL_PREFIX_BUILTINS {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            if rest.is_empty() {
+                return None; // bare "noglob" etc. — nothing to rewrite
+            }
+            // Recursively rewrite the inner command
+            return match rewrite_segment(rest, excluded) {
+                Some(rewritten) => Some(format!("{} {}", prefix, rewritten)),
+                None => None,
+            };
+        }
     }
 
     // Strip trailing stderr/stdout redirects before matching (#530)
@@ -2397,6 +2423,72 @@ mod tests {
         assert_eq!(
             split_command_chain("git log $(git rev-parse HEAD~1)"),
             vec!["git log $(git rev-parse HEAD~1)"]
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_noglob() {
+        assert_eq!(
+            rewrite_command("noglob git status", &[]),
+            Some("noglob rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_command() {
+        assert_eq!(
+            rewrite_command("command git status", &[]),
+            Some("command rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_builtin_exec_nocorrect() {
+        assert_eq!(
+            rewrite_command("builtin git status", &[]),
+            Some("builtin rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command("exec git status", &[]),
+            Some("exec rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command("nocorrect git status", &[]),
+            Some("nocorrect rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_unknown_inner() {
+        assert_eq!(rewrite_command("noglob unknown_cmd --flag", &[]), None);
+    }
+
+    #[test]
+    fn test_python3_m_pytest() {
+        assert_eq!(
+            rewrite_command("python3 -m pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_pip_show() {
+        assert_eq!(
+            rewrite_command("pip show flask", &[]),
+            Some("rtk pip show flask".into())
+        );
+    }
+
+    #[test]
+    fn test_gt_graphite() {
+        assert_eq!(rewrite_command("gt log", &[]), Some("rtk gt log".into()));
+    }
+
+    #[test]
+    fn test_command_no_longer_ignored() {
+        assert_ne!(
+            classify_command("command git status"),
+            Classification::Ignored
         );
     }
 }
