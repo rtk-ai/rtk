@@ -11,7 +11,7 @@ use super::constants::{
     REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
-use crate::core::constants::{HISTORY_DB, RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
+use crate::core::constants::{CONFIG_TOML, FILTERS_TOML, HISTORY_DB, RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
@@ -3179,6 +3179,38 @@ More notes
         let data_dir = tmp.path().join("rtk-nonexistent");
 
         let removed = clean_data_directory_at(&data_dir, 0).expect("clean should succeed");
+        assert!(removed.is_empty(), "nothing to remove");
+    }
+
+    #[test]
+    fn test_clean_config_directory_removes_rtk_config() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let config_dir = tmp.path().join("rtk");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+
+        fs::write(config_dir.join("config.toml"), b"[tracking]\nenabled = true").expect("write config");
+        fs::write(config_dir.join("filters.toml"), b"schema_version = 1").expect("write filters");
+
+        let removed = clean_config_directory_at(&config_dir, 0).expect("clean should succeed");
+
+        assert!(!config_dir.exists(), "config dir should be removed");
+        assert!(!removed.is_empty(), "should report removed items");
+        assert!(
+            removed.iter().any(|s| s.contains("config.toml")),
+            "should mention config.toml"
+        );
+        assert!(
+            removed.iter().any(|s| s.contains("filters.toml")),
+            "should mention filters.toml"
+        );
+    }
+
+    #[test]
+    fn test_clean_config_directory_noop_when_missing() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let config_dir = tmp.path().join("rtk-nonexistent");
+
+        let removed = clean_config_directory_at(&config_dir, 0).expect("clean should succeed");
         assert!(removed.is_empty(), "nothing to remove");
     }
 }
