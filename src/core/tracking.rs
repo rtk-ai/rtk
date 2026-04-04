@@ -498,21 +498,7 @@ impl Tracker {
                  END AS base_cmd,
                  timestamp,
                  LAG(timestamp) OVER (
-                   PARTITION BY
-                     CASE
-                       WHEN original_cmd LIKE 'git %' THEN
-                         CASE
-                           WHEN instr(substr(original_cmd, 5), ' ') > 0
-                           THEN substr(original_cmd, 1, instr(substr(original_cmd, 5), ' ') + 3)
-                           ELSE original_cmd
-                         END
-                       ELSE
-                         CASE
-                           WHEN instr(original_cmd, ' ') > 0
-                           THEN substr(original_cmd, 1, instr(original_cmd, ' ') - 1)
-                           ELSE original_cmd
-                         END
-                     END
+                   PARTITION BY original_cmd
                    ORDER BY timestamp
                  ) AS prev_ts
                FROM commands
