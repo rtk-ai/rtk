@@ -1,6 +1,6 @@
 # Discover — History Analysis & Command Rewrite
 
-> Full rewrite pipeline diagram: [docs/TECHNICAL.md](../../docs/TECHNICAL.md#32-hook-interception-command-rewriting)
+> Full rewrite pipeline diagram: [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md#32-hook-interception-command-rewriting)
 
 ## What This Module Does
 

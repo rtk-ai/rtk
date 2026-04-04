@@ -18,7 +18,7 @@
   <a href="https://www.rtk-ai.app">Sitio web</a> &bull;
   <a href="#instalacion">Instalar</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Solucion de problemas</a> &bull;
-  <a href="ARCHITECTURE.md">Arquitectura</a> &bull;
+  <a href="docs/contributing/ARCHITECTURE.md">Arquitectura</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -146,7 +146,7 @@ rtk discover                    # Descubrir ahorros perdidos
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resolver problemas comunes
 - **[INSTALL.md](INSTALL.md)** - Guia de instalacion detallada
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Arquitectura tecnica
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Arquitectura tecnica
 
 ## Contribuir
 
@@ -157,3 +157,7 @@ Unete a la comunidad en [Discord](https://discord.gg/RySmvNF5kF).
 ## Licencia
 
 Licencia MIT - ver [LICENSE](LICENSE) para detalles.
+
+## Descargo de responsabilidad
+
+Ver [DISCLAIMER.md](DISCLAIMER.md).

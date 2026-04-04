@@ -3,7 +3,7 @@
 > **Start here** for a guided tour of how RTK works end-to-end.
 >
 > - [CONTRIBUTING.md](../CONTRIBUTING.md) — Design philosophy, PR process, branch naming, testing requirements
-> - [ARCHITECTURE.md](../ARCHITECTURE.md) — Deep reference: filtering taxonomy, performance benchmarks, architecture decisions
+> - [ARCHITECTURE.md](ARCHITECTURE.md) — Deep reference: filtering taxonomy, performance benchmarks, architecture decisions
 > - Each folder has its own `README.md` with implementation details and file descriptions
 
 ---

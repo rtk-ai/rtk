@@ -18,7 +18,7 @@
   <a href="https://www.rtk-ai.app">웹사이트</a> &bull;
   <a href="#설치">설치</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">문제 해결</a> &bull;
-  <a href="ARCHITECTURE.md">아키텍처</a> &bull;
+  <a href="docs/contributing/ARCHITECTURE.md">아키텍처</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -146,7 +146,7 @@ rtk discover                    # 놓친 절약 기회 발견
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 일반적인 문제 해결
 - **[INSTALL.md](INSTALL.md)** - 상세 설치 가이드
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - 기술 아키텍처
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 기술 아키텍처
 
 ## 기여
 
@@ -157,3 +157,7 @@ rtk discover                    # 놓친 절약 기회 발견
 ## 라이선스
 
 MIT 라이선스 - 자세한 내용은 [LICENSE](LICENSE)를 참조하세요.
+
+## 면책 조항
+
+자세한 내용은 [DISCLAIMER.md](DISCLAIMER.md)를 참조하세요.
