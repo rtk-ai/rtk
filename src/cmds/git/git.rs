@@ -3,7 +3,8 @@
 use crate::core::config;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_status, resolved_command};
+use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use std::process::Stdio;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
@@ -317,8 +318,9 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             }
             in_hunk = true;
             hunk_shown = 0;
-            let hunk_info = line.split("@@").nth(1).unwrap_or("").trim();
-            result.push(format!("  @@ {} @@", hunk_info));
+            // Preserve the full unified diff hunk header, including trailing
+            // function / symbol context after the second @@ marker.
+            result.push(format!("  {}", line));
         } else if in_hunk {
             if line.starts_with('+') && !line.starts_with("+++") {
                 added += 1;
@@ -874,14 +876,19 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         eprintln!("{}", original_cmd);
     }
 
-    let mut commit_cmd = build_commit_command(args, global_args);
-    let result = exec_capture(&mut commit_cmd).context("Failed to run git commit")?;
+    let output = build_commit_command(args, global_args)
+        .stdin(Stdio::inherit())
+        .output()
+        .context("Failed to run git commit")?;
 
-    let raw_output = format!("{}\n{}", result.stdout, result.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exit_code = exit_code_from_output(&output, "git commit");
+    let raw_output = format!("{}\n{}", stdout, stderr);
 
-    if result.success() {
+    if output.status.success() {
         // Extract commit hash from output like "[main abc1234] message"
-        let compact = if let Some(line) = result.stdout.lines().next() {
+        let compact = if let Some(line) = stdout.lines().next() {
             if let Some(hash_start) = line.find(' ') {
                 let hash = line[1..hash_start].split(' ').next_back().unwrap_or("");
                 if !hash.is_empty() && hash.len() >= 7 {
@@ -900,8 +907,8 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
         timer.track(&original_cmd, "rtk git commit", &raw_output, &compact);
     } else {
-        if result.stderr.contains("nothing to commit")
-            || result.stdout.contains("nothing to commit")
+        if stderr.contains("nothing to commit")
+            || stdout.contains("nothing to commit")
         {
             println!("ok (nothing to commit)");
             timer.track(
@@ -911,14 +918,14 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
                 "ok (nothing to commit)",
             );
         } else {
-            if !result.stderr.trim().is_empty() {
-                eprint!("{}", result.stderr);
+            if !stderr.trim().is_empty() {
+                eprint!("{}", stderr);
             }
-            if !result.stdout.trim().is_empty() {
-                eprint!("{}", result.stdout);
+            if !stdout.trim().is_empty() {
+                eprint!("{}", stdout);
             }
             timer.track(&original_cmd, "rtk git commit", &raw_output, &raw_output);
-            return Ok(result.exit_code);
+            return Ok(exit_code);
         }
     }
 
@@ -938,16 +945,18 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let cap = exec_capture(&mut cmd).context("Failed to run git push")?;
+    let output = cmd.stdin(Stdio::inherit()).output().context("Failed to run git push")?;
 
-    let raw = format!("{}{}", cap.stdout, cap.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw = format!("{}{}", stdout, stderr);
 
-    if cap.success() {
-        let compact = if cap.stderr.contains("Everything up-to-date") {
+    if output.status.success() {
+        let compact = if stderr.contains("Everything up-to-date") {
             "ok (up-to-date)".to_string()
         } else {
             let mut push_info = String::new();
-            for line in cap.stderr.lines() {
+            for line in stderr.lines() {
                 if line.contains("->") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 {
@@ -973,13 +982,13 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         );
     } else {
         eprintln!("FAILED: git push");
-        if !cap.stderr.trim().is_empty() {
-            eprintln!("{}", cap.stderr);
+        if !stderr.trim().is_empty() {
+            eprintln!("{}", stderr);
         }
-        if !cap.stdout.trim().is_empty() {
-            eprintln!("{}", cap.stdout);
+        if !stdout.trim().is_empty() {
+            eprintln!("{}", stdout);
         }
-        return Ok(cap.exit_code);
+        return Ok(exit_code_from_output(&output, "git push"));
     }
 
     Ok(0)
@@ -1699,6 +1708,24 @@ mod tests {
         let result = compact_diff(diff, 100);
         assert!(result.contains("foo.rs"));
         assert!(result.contains("+"));
+    }
+
+    #[test]
+    fn test_compact_diff_preserves_full_hunk_header_context() {
+        let diff = r#"diff --git a/foo.rs b/foo.rs
+--- a/foo.rs
++++ b/foo.rs
+@@ -10,3 +10,4 @@ fn important_context() {
+ fn main() {
++    println!("hello");
+ }
+"#;
+        let result = compact_diff(diff, 100);
+        assert!(
+            result.contains("@@ -10,3 +10,4 @@ fn important_context() {"),
+            "Expected full hunk header with trailing context, got:\n{}",
+            result
+        );
     }
 
     #[test]

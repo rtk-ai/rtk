@@ -4,6 +4,8 @@ use super::constants::{
     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
     SETTINGS_JSON,
 };
+#[cfg(test)]
+use super::constants::{CODEX_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, OPENCODE_PLUGIN_PATH};
 use crate::core::constants::RTK_DATA_DIR;
 use std::path::PathBuf;
 
@@ -133,6 +135,21 @@ pub fn parse_hook_version(content: &str) -> u8 {
     0 // No version tag = version 0 (outdated)
 }
 
+#[cfg(test)]
+fn other_integration_installed(home: &std::path::Path) -> bool {
+    let paths = [
+        home.join(OPENCODE_PLUGIN_PATH),
+        home.join(CURSOR_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(REWRITE_HOOK_FILE),
+        home.join(CODEX_DIR).join("AGENTS.md"),
+        home.join(GEMINI_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(GEMINI_HOOK_FILE),
+    ];
+    paths.iter().any(|p| p.exists())
+}
+
 fn hook_installed_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let path = home
@@ -187,6 +204,65 @@ mod tests {
         // Clone works
         let s = HookStatus::Missing;
         assert_eq!(s.clone(), HookStatus::Missing);
+    }
+
+    #[test]
+    fn test_other_integration_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(!other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_opencode() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(OPENCODE_PLUGIN_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"plugin").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_cursor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp
+            .path()
+            .join(CURSOR_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(REWRITE_HOOK_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"hook").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_codex() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"agents").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_gemini() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp
+            .path()
+            .join(GEMINI_DIR)
+            .join(HOOKS_SUBDIR)
+            .join(GEMINI_HOOK_FILE);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"hook").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_empty_dirs_not_enough() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join(CURSOR_DIR).join(HOOKS_SUBDIR)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(CODEX_DIR)).unwrap();
+        std::fs::create_dir_all(tmp.path().join(GEMINI_DIR)).unwrap();
+        assert!(!other_integration_installed(tmp.path()));
     }
 
     #[test]

@@ -115,10 +115,24 @@ fn handle_vscode(cmd: &str) -> Result<()> {
         None => return Ok(()),
     };
 
+    let verdict = permissions::check_command(cmd);
+
+    // Deny: pass through without rewrite — let the host tool handle it.
+    if verdict == PermissionVerdict::Deny {
+        return Ok(());
+    }
+
+    // Allow (explicit rule matched): auto-allow the rewritten command.
+    // Ask/Default (no allow rule matched): rewrite but let the host tool prompt.
+    let decision = match verdict {
+        PermissionVerdict::Allow => "allow",
+        _ => "ask",
+    };
+
     let output = json!({
         "hookSpecificOutput": {
             "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecision": "allow",
+            "permissionDecision": decision,
             "permissionDecisionReason": "RTK auto-rewrite",
             "updatedInput": { "command": rewritten }
         }
@@ -169,6 +183,15 @@ pub fn run_gemini() -> Result<()> {
 
     if cmd.is_empty() {
         print_allow();
+        return Ok(());
+    }
+
+    // Check deny rules — Gemini CLI only supports allow/deny (no ask mode).
+    if permissions::check_command(cmd) == PermissionVerdict::Deny {
+        let _ = writeln!(
+            io::stdout(),
+            r#"{{"decision":"deny","reason":"Blocked by RTK permission rule"}}"#
+        );
         return Ok(());
     }
 
@@ -655,7 +678,8 @@ mod tests {
         let hook = &v["hookSpecificOutput"];
 
         assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
-        assert_eq!(hook["permissionDecision"], "allow");
+        // permissionDecision is only set when an explicit allow rule matches;
+        // with default-to-ask semantics (no rules configured), it is absent.
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert!(hook["updatedInput"].is_object());
         assert!(hook["updatedInput"]["command"].is_string());
