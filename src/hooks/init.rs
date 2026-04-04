@@ -3079,4 +3079,37 @@ More notes
         assert!(CURSOR_REWRITE_HOOK.contains("\"updated_input\""));
         assert!(!CURSOR_REWRITE_HOOK.contains("hookSpecificOutput"));
     }
+
+    #[test]
+    fn test_clean_data_directory_removes_artifacts() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let data_dir = tmp.path().join("rtk");
+        fs::create_dir_all(data_dir.join("tee")).expect("create tee dir");
+
+        // Create all known artifacts
+        fs::write(data_dir.join("history.db"), b"fake db").expect("write history.db");
+        fs::write(data_dir.join("trusted_filters.json"), b"{}").expect("write trusted_filters");
+        fs::write(data_dir.join(".hook_warn_last"), b"").expect("write hook_warn_last");
+        fs::write(data_dir.join(".telemetry_last_ping"), b"").expect("write telemetry marker");
+        fs::write(data_dir.join(".device_salt"), b"salt").expect("write device_salt");
+        fs::write(data_dir.join("tee").join("output.txt"), b"tee data").expect("write tee file");
+
+        let removed = clean_data_directory_at(&data_dir, 0).expect("clean should succeed");
+
+        assert!(!data_dir.exists(), "data dir should be removed");
+        assert!(!removed.is_empty(), "should report removed items");
+        assert!(
+            removed.iter().any(|s| s.contains("history.db")),
+            "should mention history.db in removed items"
+        );
+    }
+
+    #[test]
+    fn test_clean_data_directory_noop_when_missing() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let data_dir = tmp.path().join("rtk-nonexistent");
+
+        let removed = clean_data_directory_at(&data_dir, 0).expect("clean should succeed");
+        assert!(removed.is_empty(), "nothing to remove");
+    }
 }
