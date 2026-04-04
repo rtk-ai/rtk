@@ -11,6 +11,7 @@ use super::constants::{
     REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
+use crate::core::constants::RTK_DATA_DIR;
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
@@ -649,6 +650,62 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     Ok(())
 }
 
+/// Remove RTK data directory and its contents.
+/// Returns list of removed items for the uninstall report.
+#[allow(dead_code)]
+fn clean_data_directory_at(data_dir: &Path, verbose: u8) -> Result<Vec<String>> {
+    if !data_dir.exists() {
+        if verbose > 0 {
+            eprintln!("rtk: data dir not found: {}", data_dir.display());
+        }
+        return Ok(vec![]);
+    }
+
+    let mut removed = Vec::new();
+
+    // Warn about history.db before removal
+    let history_path = data_dir.join("history.db");
+    if history_path.exists() {
+        eprintln!(
+            "Note: removing token savings database ({}). \
+             Run `rtk gain --history` first if you want to export your data.",
+            history_path.display()
+        );
+        removed.push(format!("Data: history.db ({})", history_path.display()));
+    }
+
+    // Report known artifacts for verbose output
+    let known_artifacts = [
+        "trusted_filters.json",
+        ".hook_warn_last",
+        ".telemetry_last_ping",
+        ".device_salt",
+    ];
+    for name in &known_artifacts {
+        let path = data_dir.join(name);
+        if path.exists() {
+            removed.push(format!("Data: {}", name));
+        }
+    }
+
+    // Report tee directory
+    let tee_dir = data_dir.join("tee");
+    if tee_dir.exists() {
+        removed.push(format!("Data: tee/ ({})", tee_dir.display()));
+    }
+
+    // Remove entire data directory
+    fs::remove_dir_all(data_dir)
+        .with_context(|| format!("Failed to remove data directory: {}", data_dir.display()))?;
+
+    if removed.is_empty() {
+        // Directory existed but had no known artifacts - still report removal
+        removed.push(format!("Data directory: {}", data_dir.display()));
+    }
+
+    Ok(removed)
+}
+
 fn uninstall_codex(global: bool, verbose: u8) -> Result<()> {
     if !global {
         anyhow::bail!(
@@ -994,7 +1051,7 @@ fn generate_project_filters_template(verbose: u8) -> Result<()> {
 /// Generate ~/.config/rtk/filters.toml template if not present.
 fn generate_global_filters_template(verbose: u8) -> Result<()> {
     let config_dir = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from(".config"));
-    let rtk_dir = config_dir.join(crate::core::constants::RTK_DATA_DIR);
+    let rtk_dir = config_dir.join(RTK_DATA_DIR);
     let path = rtk_dir.join("filters.toml");
 
     if path.exists() {
@@ -3099,7 +3156,7 @@ More notes
         assert!(!data_dir.exists(), "data dir should be removed");
         assert!(!removed.is_empty(), "should report removed items");
         assert!(
-            removed.iter().any(|s| s.contains("history.db")),
+            removed.iter().any(|s: &String| s.contains("history.db")),
             "should mention history.db in removed items"
         );
     }
