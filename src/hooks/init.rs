@@ -639,19 +639,24 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     removed.extend(cursor_removed);
 
     // 7. Remove RTK data directory (~/.local/share/rtk/)
-    if let Some(data_base) = dirs::data_local_dir() {
-        let data_dir = data_base.join(RTK_DATA_DIR);
-        let data_removed = clean_data_directory_at(&data_dir, verbose, true)
+    let data_dir = dirs::data_local_dir().map(|d| d.join(RTK_DATA_DIR));
+    if let Some(ref data_dir) = data_dir {
+        let data_removed = clean_data_directory_at(data_dir, verbose, true)
             .context("Failed to clean RTK data directory")?;
         removed.extend(data_removed);
     }
 
     // 8. Remove RTK config directory (~/.config/rtk/)
+    // On macOS both dirs resolve to ~/Library/Application Support/rtk/ -
+    // skip if already handled (or skipped) by step 7.
     if let Some(config_base) = dirs::config_dir() {
         let config_dir = config_base.join(RTK_DATA_DIR);
-        let config_removed = clean_config_directory_at(&config_dir, verbose)
-            .context("Failed to clean RTK config directory")?;
-        removed.extend(config_removed);
+        let same_as_data = data_dir.as_ref() == Some(&config_dir);
+        if !same_as_data {
+            let config_removed = clean_config_directory_at(&config_dir, verbose)
+                .context("Failed to clean RTK config directory")?;
+            removed.extend(config_removed);
+        }
     }
 
     // Report results
