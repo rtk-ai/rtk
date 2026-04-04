@@ -1,4 +1,5 @@
 use super::constants::{CLAUDE_DIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON};
+use crate::core::stream::exec_capture;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -140,14 +141,12 @@ fn find_project_root() -> Option<PathBuf> {
     }
 
     // Fallback: git (spawns a subprocess, slower but handles monorepo layouts).
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "--show-toplevel"]);
+    let result = exec_capture(&mut cmd).ok()?;
 
-    if output.status.success() {
-        let path = String::from_utf8(output.stdout).ok()?;
-        return Some(PathBuf::from(path.trim()));
+    if result.success() {
+        return Some(PathBuf::from(result.stdout.trim()));
     }
 
     None

@@ -3,11 +3,9 @@
 //! Replaces verbose `--output table`/`text` with JSON, then compresses.
 //! Specialized filters for high-frequency commands (STS, S3, EC2, ECS, RDS, CloudFormation).
 
+use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
-use crate::core::utils::{
-    exit_code_from_output, exit_code_from_status, join_with_overflow, resolved_command,
-    truncate_iso_date,
-};
+use crate::core::utils::{join_with_overflow, resolved_command, truncate_iso_date};
 use crate::json_cmd;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -86,21 +84,20 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         eprintln!("Running: aws {}", full_sub);
     }
 
-    let output = cmd.output().context("Failed to run aws CLI")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let result = exec_capture(&mut cmd).context("Failed to run aws CLI")?;
 
-    if !output.status.success() {
+    if !result.success() {
         timer.track(
             &format!("aws {}", full_sub),
             &format!("rtk aws {}", full_sub),
-            &stderr,
-            &stderr,
+            &result.stderr,
+            &result.stderr,
         );
-        eprintln!("{}", stderr.trim());
-        return Ok(exit_code_from_output(&output, "aws"));
+        eprintln!("{}", result.stderr.trim());
+        return Ok(result.exit_code);
     }
 
+    let raw = result.stdout;
     let filtered = match json_cmd::filter_json_string(&raw, JSON_COMPRESS_DEPTH) {
         Ok(schema) => {
             println!("{}", schema);
@@ -127,7 +124,7 @@ fn run_aws_json(
     sub_args: &[&str],
     extra_args: &[String],
     verbose: u8,
-) -> Result<(String, String, std::process::ExitStatus)> {
+) -> Result<CaptureResult> {
     let mut cmd = resolved_command("aws");
     for arg in sub_args {
         cmd.arg(arg);
@@ -153,17 +150,14 @@ fn run_aws_json(
         eprintln!("Running: {}", cmd_desc);
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .context(format!("Failed to run {}", cmd_desc))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
-        eprintln!("{}", stderr.trim());
+    if !result.success() {
+        eprintln!("{}", result.stderr.trim());
     }
 
-    Ok((stdout, stderr, output.status))
+    Ok(result)
 }
 
 fn run_aws_filtered(
@@ -175,14 +169,14 @@ fn run_aws_filtered(
     let timer = tracking::TimedExecution::start();
     let label = format!("aws {}", sub_args.join(" "));
     let rtk_label = format!("rtk {}", label);
-    let (raw, stderr, status) = run_aws_json(sub_args, extra_args, verbose)?;
-    if !status.success() {
-        timer.track(&label, &rtk_label, &stderr, &stderr);
-        return Ok(exit_code_from_status(&status, "aws"));
+    let result = run_aws_json(sub_args, extra_args, verbose)?;
+    if !result.success() {
+        timer.track(&label, &rtk_label, &result.stderr, &result.stderr);
+        return Ok(result.exit_code);
     }
-    let filtered = filter_fn(&raw).unwrap_or_else(|| raw.clone());
+    let filtered = filter_fn(&result.stdout).unwrap_or_else(|| result.stdout.clone());
     println!("{}", filtered);
-    timer.track(&label, &rtk_label, &raw, &filtered);
+    timer.track(&label, &rtk_label, &result.stdout, &filtered);
     Ok(0)
 }
 
@@ -209,15 +203,15 @@ fn run_s3_ls(extra_args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: aws s3 ls {}", extra_args.join(" "));
     }
 
-    let output = cmd.output().context("Failed to run aws s3 ls")?;
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let result = exec_capture(&mut cmd).context("Failed to run aws s3 ls")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        timer.track("aws s3 ls", "rtk aws s3 ls", &stderr, &stderr);
-        eprintln!("{}", stderr.trim());
-        return Ok(exit_code_from_output(&output, "aws"));
+    if !result.success() {
+        timer.track("aws s3 ls", "rtk aws s3 ls", &result.stderr, &result.stderr);
+        eprintln!("{}", result.stderr.trim());
+        return Ok(result.exit_code);
     }
+
+    let raw = result.stdout;
 
     let filtered = filter_s3_ls(&raw);
     println!("{}", filtered);

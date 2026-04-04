@@ -228,6 +228,32 @@ pub fn run_streaming(
     })
 }
 
+pub struct CaptureResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+impl CaptureResult {
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+
+    pub fn combined(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+}
+
+pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::null());
+    let output = cmd.output().context("Failed to execute command")?;
+    Ok(CaptureResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: status_to_exit_code(output.status),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +449,51 @@ mod tests {
         cmd.arg("check_equality");
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
         assert_eq!(result.filtered.trim(), result.raw.trim());
+    }
+
+    #[test]
+    fn test_exec_capture_success() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello_capture");
+        let result = exec_capture(&mut cmd).unwrap();
+        assert!(result.success());
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("hello_capture"));
+    }
+
+    #[test]
+    fn test_exec_capture_failure() {
+        let mut cmd = Command::new("false");
+        let result = exec_capture(&mut cmd).unwrap();
+        assert!(!result.success());
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn test_exec_capture_stderr() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo err_msg >&2"]);
+        let result = exec_capture(&mut cmd).unwrap();
+        assert!(result.stderr.contains("err_msg"));
+    }
+
+    #[test]
+    fn test_exec_capture_combined() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out_msg; echo err_msg >&2"]);
+        let result = exec_capture(&mut cmd).unwrap();
+        let combined = result.combined();
+        assert!(combined.contains("out_msg"));
+        assert!(combined.contains("err_msg"));
+    }
+
+    #[test]
+    fn test_capture_result_combined_empty() {
+        let r = CaptureResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+        assert_eq!(r.combined(), "");
     }
 }

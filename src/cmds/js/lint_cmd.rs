@@ -1,6 +1,7 @@
 //! Filters ESLint and Biome linter output, grouping violations by rule.
 
 use crate::core::config;
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, resolved_command, truncate};
 use crate::mypy_cmd;
@@ -166,49 +167,42 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} with structured output", linter);
     }
 
-    let output = cmd.output().context(format!(
+    let result = exec_capture(&mut cmd).context(format!(
         "Failed to run {}. Is it installed? Try: pip install {} (or npm/pnpm for JS linters)",
         linter, linter
     ))?;
 
     // Check if process was killed by signal (SIGABRT, SIGKILL, etc.)
-    if !output.status.success() && output.status.code().is_none() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !result.success() && result.exit_code > 128 {
         eprintln!("[warn] Linter process terminated abnormally (possibly out of memory)");
-        if !stderr.is_empty() {
+        if !result.stderr.is_empty() {
             eprintln!(
                 "stderr: {}",
-                stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+                result.stderr.lines().take(5).collect::<Vec<_>>().join("\n")
             );
         }
-        return Ok(crate::core::utils::exit_code_from_output(&output, "eslint"));
+        return Ok(result.exit_code);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Dispatch to appropriate filter based on linter
     let filtered = match linter {
-        "eslint" => filter_eslint_json(&stdout),
+        "eslint" => filter_eslint_json(&result.stdout),
         "ruff" => {
             // Reuse ruff_cmd's JSON parser
-            if !stdout.trim().is_empty() {
-                ruff_cmd::filter_ruff_check_json(&stdout)
+            if !result.stdout.trim().is_empty() {
+                ruff_cmd::filter_ruff_check_json(&result.stdout)
             } else {
                 "Ruff: No issues found".to_string()
             }
         }
-        "pylint" => filter_pylint_json(&stdout),
+        "pylint" => filter_pylint_json(&result.stdout),
         "mypy" => mypy_cmd::filter_mypy_output(&raw),
         _ => filter_generic_lint(&raw),
     };
 
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", exit_code) {
+    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code) {
         println!("{}\n{}", filtered, hint);
     } else {
         println!("{}", filtered);
@@ -221,8 +215,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         &filtered,
     );
 
-    if !output.status.success() {
-        return Ok(crate::core::utils::exit_code_from_output(&output, "eslint"));
+    if !result.success() {
+        return Ok(result.exit_code);
     }
 
     Ok(0)
