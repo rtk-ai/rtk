@@ -3268,4 +3268,30 @@ More notes
         let removed = clean_config_directory_at(&config_dir, 0).expect("clean should succeed");
         assert!(removed.is_empty(), "nothing to remove");
     }
+
+    #[test]
+    fn test_full_data_cleanup_reports_all_known_artifacts() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let data_dir = tmp.path().join("rtk");
+        fs::create_dir_all(data_dir.join("tee")).expect("create dirs");
+
+        // Populate all known artifacts
+        fs::write(data_dir.join("history.db"), b"data").expect("write");
+        fs::write(data_dir.join("trusted_filters.json"), b"{}").expect("write");
+        fs::write(data_dir.join(".hook_warn_last"), b"").expect("write");
+        fs::write(data_dir.join(".telemetry_last_ping"), b"").expect("write");
+        fs::write(data_dir.join(".device_salt"), b"salt").expect("write");
+        fs::write(data_dir.join("tee").join("out.txt"), b"tee").expect("write");
+
+        let removed = clean_data_directory_at(&data_dir, 1).expect("clean");
+
+        // Should report 6 items: history.db, trusted_filters, hook_warn, telemetry, salt, tee/
+        assert_eq!(
+            removed.len(),
+            6,
+            "expected 6 artifacts reported, got: {:?}",
+            removed
+        );
+        assert!(!data_dir.exists());
+    }
 }
