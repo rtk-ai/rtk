@@ -197,10 +197,7 @@ fn codex_block_response(cmd: &str) -> Option<Value> {
         "hookSpecificOutput": {
             "hookEventName": PRE_TOOL_USE_KEY,
             "permissionDecision": "deny",
-            "permissionDecisionReason": format!(
-                "Token savings: retry with `{}` instead (Codex hooks cannot rewrite Bash commands in-place yet).",
-                rewritten
-            )
+            "permissionDecisionReason": rewritten
         }
     }))
 }
@@ -349,10 +346,10 @@ mod tests {
             PRE_TOOL_USE_KEY
         );
         assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(output["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap()
-            .contains("rtk git status"));
+        assert_eq!(
+            output["hookSpecificOutput"]["permissionDecisionReason"],
+            "rtk git status"
+        );
     }
 
     #[test]
