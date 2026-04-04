@@ -307,7 +307,6 @@ fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Write hook file if missing or outdated, return true if changed
-#[cfg(unix)]
 fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
     let changed = if hook_path.exists() {
         let existing = fs::read_to_string(hook_path)
@@ -335,10 +334,13 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
         true
     };
 
-    // Set executable permissions
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    // set executable permissions (unix only -- not needed on windows)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
 
     // Store SHA-256 hash for runtime integrity verification.
     // Always store (idempotent) to ensure baseline exists even for
@@ -702,11 +704,22 @@ fn patch_settings_json(
 ) -> Result<PatchResult> {
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
-    let hook_command = hook_path
-        .to_str()
-        .context("Hook path contains invalid UTF-8")?;
-
+    let hook_command = {
+        let path_str = hook_path
+            .to_str()
+            .context("Hook path contains invalid UTF-8")?;
+        #[cfg(unix)]
+        {
+            path_str.to_string()
+        }
+        #[cfg(not(unix))]
+        {
+            // windows: prefix with bash so the .sh hook executes via git bash/msys2
+            format!("bash \"{}\"", path_str)
+        }
+    };
     // Read or create settings.json
+
     let mut root = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)
             .with_context(|| format!("Failed to read {}", settings_path.display()))?;
@@ -722,7 +735,7 @@ fn patch_settings_json(
     };
 
     // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    if hook_already_present(&root, &hook_command) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -747,7 +760,7 @@ fn patch_settings_json(
     }
 
     // Deep-merge hook
-    insert_hook_entry(&mut root, hook_command);
+    insert_hook_entry(&mut root, &hook_command);
 
     // Backup original
     if settings_path.exists() {
@@ -870,20 +883,6 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
-#[cfg(not(unix))]
-fn run_default_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    eprintln!("[warn] Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose, _install_opencode)
-}
-
-#[cfg(unix)]
 fn run_default_mode(
     global: bool,
     patch_mode: PatchMode,
@@ -1017,17 +1016,6 @@ fn generate_global_filters_template(verbose: u8) -> Result<()> {
 }
 
 /// Hook-only mode: just the hook, no RTK.md
-#[cfg(not(unix))]
-fn run_hook_only_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
-}
-
-#[cfg(unix)]
 fn run_hook_only_mode(
     global: bool,
     patch_mode: PatchMode,
@@ -3099,5 +3087,37 @@ More notes
         assert!(CURSOR_REWRITE_HOOK.contains("\"permission\": \"allow\""));
         assert!(CURSOR_REWRITE_HOOK.contains("\"updated_input\""));
         assert!(!CURSOR_REWRITE_HOOK.contains("hookSpecificOutput"));
+    }
+    #[test]
+    fn test_ensure_hook_installed_cross_platform() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = temp.path().join("rtk-rewrite.sh");
+
+        let changed = ensure_hook_installed(&hook_path, 0).unwrap();
+        assert!(changed, "should report changed on first install");
+        assert!(hook_path.exists(), "hook file should exist");
+
+        let content = fs::read_to_string(&hook_path).unwrap();
+        assert!(
+            content.contains("rtk-hook-version:"),
+            "should contain version tag"
+        );
+        assert!(
+            content.contains("rtk rewrite"),
+            "should contain rewrite delegation"
+        );
+
+        // second call should be idempotent
+        let changed_again = ensure_hook_installed(&hook_path, 0).unwrap();
+        assert!(!changed_again, "should report no change on second install");
+    }
+
+    #[test]
+    fn test_hook_already_present_bash_wrapped() {
+        let mut json_content = serde_json::json!({});
+        let hook_command = r#"bash "C:\Users\test\.claude\hooks\rtk-rewrite.sh""#;
+        insert_hook_entry(&mut json_content, hook_command);
+        // hook_already_present checks for REWRITE_HOOK_FILE substring
+        assert!(hook_already_present(&json_content, hook_command));
     }
 }
