@@ -855,9 +855,13 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
     }));
 }
 
-/// Check if RTK hook is already present in settings.json
-/// Matches on rtk-rewrite.sh substring to handle different path formats
-fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
+/// Check if RTK hook is already present in settings.json.
+///
+/// Returns true if ANY RTK hook variant is found — either the bash script
+/// (`rtk-rewrite.sh`) or the native hook (`hook claude`). This prevents
+/// double-installation when a user already has the bash hook and runs
+/// `rtk init -g` on Windows (which installs the native variant).
+fn hook_already_present(root: &serde_json::Value, _hook_command: &str) -> bool {
     let pre_tool_use_array = match root
         .get("hooks")
         .and_then(|h| h.get(PRE_TOOL_USE_KEY))
@@ -872,18 +876,13 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| {
-            cmd == hook_command
-                || (cmd.contains(REWRITE_HOOK_FILE) && hook_command.contains(REWRITE_HOOK_FILE))
-                || (cmd.contains("hook claude") && hook_command.contains("hook claude"))
-        })
+        .any(|cmd| cmd.contains(REWRITE_HOOK_FILE) || cmd.contains("hook claude"))
 }
 
 /// Build the native hook command string: `"<rtk_exe>" hook claude`
 /// Works on any platform without requiring bash or jq.
 fn native_hook_command() -> Result<String> {
-    let exe = std::env::current_exe()
-        .context("Failed to determine RTK binary path")?;
+    let exe = std::env::current_exe().context("Failed to determine RTK binary path")?;
     let exe_str = exe
         .to_str()
         .context("RTK binary path contains invalid UTF-8")?;
@@ -2968,6 +2967,45 @@ More notes
 
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
         assert!(!hook_already_present(&json_content, hook_command));
+    }
+
+    #[test]
+    fn test_bash_hook_detected_when_installing_native() {
+        // If bash hook is already present, native install should report "already present"
+        // to prevent double-installation (e.g. shared settings.json between WSL + Windows).
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/home/user/.claude/hooks/rtk-rewrite.sh"
+                    }]
+                }]
+            }
+        });
+        let native_hook = r#""C:\Users\test\rtk.exe" hook claude"#;
+        // Any RTK hook (bash or native) counts as present
+        assert!(hook_already_present(&json_content, native_hook));
+    }
+
+    #[test]
+    fn test_native_hook_detected_when_installing_bash() {
+        // If native hook is already present, bash install should also report "already present".
+        let native_cmd = r#""C:\Users\test\rtk.exe" hook claude"#;
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": native_cmd
+                    }]
+                }]
+            }
+        });
+        let bash_hook = "/home/user/.claude/hooks/rtk-rewrite.sh";
+        assert!(hook_already_present(&json_content, bash_hook));
     }
 
     // Tests for insert_hook_entry()

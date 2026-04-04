@@ -1,6 +1,7 @@
 //! Processes incoming hook calls from AI agents and rewrites commands on the fly.
 
 use super::constants::PRE_TOOL_USE_KEY;
+use crate::hooks::permissions::PermissionVerdict;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read};
@@ -144,13 +145,103 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
 /// Reads JSON from stdin, rewrites shell commands to rtk equivalents,
 /// outputs JSON to stdout in Claude Code hook format.
 ///
-/// This enables Windows-native hook support: instead of a bash script,
-/// install `rtk hook claude` directly in settings.json.
+/// Unlike `run_copilot()`, this function:
+/// - Only handles Claude Code's snake_case format (not Copilot CLI camelCase)
+/// - Respects deny/ask permission rules before rewriting
+///
+/// Permission protocol (mirrors rewrite_cmd.rs exit codes):
+/// - Deny rule matched → silent passthrough, Claude Code enforces natively
+/// - Ask/Default rule → emit `updatedInput` but omit `permissionDecision` so Claude Code prompts
+/// - Allow rule matched → emit `updatedInput` with `permissionDecision: "allow"`
 pub fn run_claude() -> Result<()> {
-    // Claude Code uses the same JSON format as VS Code Copilot Chat:
-    // { "tool_name": "Bash", "tool_input": { "command": "..." } }
-    // handle_vscode already emits the correct updatedInput response.
-    run_copilot()
+    let mut input = String::new();
+    io::stdin()
+        .read_to_string(&mut input)
+        .context("Failed to read stdin")?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    // Claude Code uses snake_case keys only. Reject camelCase Copilot CLI format
+    // to avoid emitting a deny response Claude Code wouldn't understand.
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(tool_name, "Bash" | "bash") {
+        return Ok(());
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    if cmd.contains("<<") {
+        return Ok(());
+    }
+
+    let excluded = crate::core::config::Config::load()
+        .map(|c| c.hooks.exclude_commands)
+        .unwrap_or_default();
+
+    let verdict = crate::hooks::permissions::check_command(cmd);
+
+    if let Some(output) = build_claude_response(cmd, verdict, &excluded) {
+        println!("{output}");
+    }
+    Ok(())
+}
+
+/// Build the JSON response for a Claude Code hook event.
+///
+/// Returns `None` when no output should be emitted (deny rule, no rewrite, heredoc).
+/// Visible for testing.
+pub(crate) fn build_claude_response(
+    cmd: &str,
+    verdict: PermissionVerdict,
+    excluded: &[String],
+) -> Option<Value> {
+    // Deny: silent passthrough — Claude Code evaluates its own deny rules.
+    if verdict == PermissionVerdict::Deny {
+        return None;
+    }
+
+    let rewritten = rewrite_command(cmd, excluded)?;
+    if rewritten == cmd {
+        return None;
+    }
+
+    Some(match verdict {
+        // Explicit allow: auto-approve the rewritten command.
+        PermissionVerdict::Allow | PermissionVerdict::Default => json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "RTK auto-rewrite",
+                "updatedInput": { "command": rewritten }
+            }
+        }),
+        // Ask: rewrite but omit permissionDecision so Claude Code prompts the user.
+        PermissionVerdict::Ask => json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "updatedInput": { "command": rewritten }
+            }
+        }),
+        PermissionVerdict::Deny => unreachable!(),
+    })
 }
 
 // ── Gemini hook ───────────────────────────────────────────────
@@ -344,6 +435,81 @@ mod tests {
         assert_eq!(
             rewrite_command("RUST_LOG=debug cargo test", &[]),
             Some("RUST_LOG=debug rtk cargo test".into())
+        );
+    }
+
+    // --- run_claude() / build_claude_response() tests ---
+
+    #[test]
+    fn test_claude_allow_verdict_emits_permission_decision() {
+        let response = build_claude_response("git status", PermissionVerdict::Allow, &[]);
+        let response = response.expect("should produce output");
+        assert_eq!(
+            response["hookSpecificOutput"]["permissionDecision"],
+            "allow"
+        );
+        assert_eq!(
+            response["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_claude_default_verdict_emits_permission_decision() {
+        // Default (no rules configured) should behave like Allow — auto-approve.
+        let response = build_claude_response("git status", PermissionVerdict::Default, &[]);
+        let response = response.expect("should produce output");
+        assert_eq!(
+            response["hookSpecificOutput"]["permissionDecision"],
+            "allow"
+        );
+    }
+
+    #[test]
+    fn test_claude_ask_verdict_omits_permission_decision() {
+        // Ask rule: rewrite but omit permissionDecision so Claude Code prompts.
+        let response = build_claude_response("git status", PermissionVerdict::Ask, &[]);
+        let response = response.expect("should produce output");
+        assert!(
+            response["hookSpecificOutput"]
+                .get("permissionDecision")
+                .is_none()
+                || response["hookSpecificOutput"]["permissionDecision"].is_null(),
+            "permissionDecision must be absent for Ask verdict"
+        );
+        assert_eq!(
+            response["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_claude_deny_verdict_returns_none() {
+        // Deny: no output — Claude Code evaluates its own deny rules.
+        let response = build_claude_response("git status", PermissionVerdict::Deny, &[]);
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_claude_unsupported_command_returns_none() {
+        let response = build_claude_response("htop", PermissionVerdict::Default, &[]);
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_claude_already_rtk_returns_none() {
+        // If the command is already an rtk command, rewrite_command returns the same string.
+        let response = build_claude_response("rtk git status", PermissionVerdict::Default, &[]);
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_claude_response_has_hook_event_name() {
+        let response = build_claude_response("git status", PermissionVerdict::Allow, &[])
+            .expect("should produce output");
+        assert_eq!(
+            response["hookSpecificOutput"]["hookEventName"],
+            PRE_TOOL_USE_KEY
         );
     }
 }
