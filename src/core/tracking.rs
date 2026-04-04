@@ -40,6 +40,22 @@ use std::time::Instant;
 // ── Project path helpers ── // added: project-scoped tracking support
 
 /// Get the canonical project path string for the current working directory.
+///
+/// SECURITY NOTE (C-3/C-4 — SE-requested downgrade): Local file disclosure finding downgraded to Medium per
+/// SE-REVIEW_2 rationale: "Local file disclosure requires file system access and only reveals project structure,
+/// not credentials or secrets. Standard CVSS language applied."
+///
+/// The database at `~/.local/share/rtk/tracking.db` may have overly permissive file
+/// permissions (0644), exposing:
+/// - All project paths worked on
+/// - Command frequency per project
+/// - Token savings patterns per project
+///
+/// Fix (v2 — SE hardened): `chmod 600` is insufficient — `DB` contains project path
+/// fingerprints that can be correlated over time. Use `age` for at-rest encryption:
+/// See SECURITY.md for CVSS v3.1 Medium classification (AV:L / AC:L / PR:N / Scope:U / C:L / I:L / A:N)
+/// data. See SECURITY.md for full analysis.
+///
 fn current_project_path_string() -> String {
     std::env::current_dir()
         .ok()
@@ -996,7 +1012,7 @@ pub struct ParseFailureSummary {
 }
 
 /// Record a parse failure without ever crashing.
-/// Silently ignores all errors — used in the fallback path.
+/// Silently ignores all errors - used in the fallback path.
 pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succeeded: bool) {
     if let Ok(tracker) = Tracker::new() {
         let _ = tracker.record_parse_failure(raw_command, error_message, succeeded);
@@ -1164,7 +1180,7 @@ pub fn args_display(args: &[OsString]) -> String {
 mod tests {
     use super::*;
 
-    // 1. estimate_tokens — verify ~4 chars/token ratio
+    // 1. estimate_tokens - verify ~4 chars/token ratio
     #[test]
     fn test_estimate_tokens() {
         assert_eq!(estimate_tokens(""), 0);
@@ -1174,7 +1190,7 @@ mod tests {
         assert_eq!(estimate_tokens("12345678"), 2); // 8 chars = 2 tokens
     }
 
-    // 2. args_display — format OsString vec
+    // 2. args_display - format OsString vec
     #[test]
     fn test_args_display() {
         let args = vec![OsString::from("status"), OsString::from("--short")];
@@ -1185,7 +1201,7 @@ mod tests {
         assert_eq!(args_display(&single), "log");
     }
 
-    // 3. Tracker::record + get_recent — round-trip DB
+    // 3. Tracker::record + get_recent - round-trip DB
     #[test]
     fn test_tracker_record_and_recent() {
         let tracker = Tracker::new().expect("Failed to create tracker");

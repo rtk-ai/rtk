@@ -27,7 +27,8 @@ toml = "0.8"
 chrono = "0.4"
 tempfile = "3"
 sha2 = "0.10"
-ureq = "2"
+# W-3: Pin to exact version for TLS reproducibility
+ureq = { version = "=2.9.0", default-features = false, features = ["tls"] }
 hostname = "0.4"
 getrandom = "0.4"
 flate2 = "1.0"

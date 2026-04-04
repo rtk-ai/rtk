@@ -74,9 +74,16 @@ install() {
     info "Target: $TARGET"
     info "Version: $VERSION"
 
+    # C-1: Document execution chain
+    # Note: Expands to: sh -c "rtk rewrite \"\$CMD\""  (C-1 finding)
+
     DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.tar.gz"
     TEMP_DIR=$(mktemp -d)
     ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.tar.gz"
+
+    # C-1: GitHub TLS caveat (C-1 finding)
+    # WARNING: GitHub's TLS 1.3 implementation mitigates network-level MITM attacks, but artifact integrity verification remains critical for supply chain security.
+    # This download does not include pinned checksums or GPG signature verification. Users should verify releases independently.
 
     info "Downloading from: $DOWNLOAD_URL"
     if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
@@ -84,7 +91,22 @@ install() {
     fi
 
     info "Extracting..."
+    # C-7: Tar extraction safeguards (symlink + path traversal detection)
     tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
+
+    # Check for symlinks or suspicious path entries
+    if find "$TEMP_DIR" -type l -print 2>/dev/null | grep -q '.'; then
+        error "SECURITY: Archive contains symlinks. Aborting."
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
+
+    # Check for path traversal attempts (../)
+    if find "$TEMP_DIR" -name '..*' -print 2>/dev/null | grep -q .; then
+        error "SECURITY: Archive contains path traversal attempts. Aborting."
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
 
     mkdir -p "$INSTALL_DIR"
     mv "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/"

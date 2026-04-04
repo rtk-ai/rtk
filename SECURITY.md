@@ -12,6 +12,8 @@ If you discover a security vulnerability in RTK, please report it to the maintai
 - Open public GitHub issues for security vulnerabilities
 - Disclose vulnerabilities on social media or forums before we've had a chance to address them
 
+We follow a **coordinated disclosure** process: vulnerabilities are reported privately, we develop a fix, and then disclose publicly. We request a 90-day embargo period from initial report to public disclosure. If you discover a vulnerability, please give us reasonable time to address it before public disclosure.
+
 ---
 
 ## Security Review Process for Pull Requests
@@ -22,6 +24,37 @@ RTK is a CLI tool that executes shell commands and handles user input. PRs from 
 - **Supply chain attacks** (malicious dependencies)
 - **Backdoors** (logic bombs, exfiltration code)
 - **Data leaks** (tracking.db exposure, telemetry abuse)
+
+---
+
+## C-4: Local File Disclosure — Downgraded to Medium (SE-Requested)
+
+**File:** `src/core/tracking.rs`  
+**Severity:** 🟡 Medium  
+**Category:** Data Privacy
+
+**CVSS v3.1 Justification (Medium):** `AV:L / AC:L / PR:N / Scope:U / C:L / I:L / A:N`
+- **Attack Vector: Local** — requires file system access to `~/.local/share/rtk/tracking.db`
+- **Privileges Required:** None — file may be world-readable if umask is permissive (0027 or broader)
+- **Confidentiality Impact:** Low — project path disclosure reveals work patterns but no credentials or secrets
+- **Integrity Impact:** Low — data at rest, no direct modification risk from exposure alone
+
+**Revised severity per SE-REVIEW_2:** Downgraded from Critical to Medium. Rationale: Local file disclosure requires file system access but only reveals project structure, not credentials or secrets. Standard CVSS language applied.
+
+**Fix:** Use `age` for at-rest encryption or store only SHA-256 hashes of project paths.
+
+---
+
+## M-1 → M-2: Process Isolation Reclassification (SE-Requested Downgrade)
+
+**Original classification (M-1):** Medium vulnerability
+**Revised classification (M-2):** Hardening recommendation
+
+**Rationale:** This was originally categorized as a Medium vulnerability. Upon SE review, it was reclassified as a hardening recommendation. This is not a current vulnerability that requires a fix — it's a defense-in-depth measure that would strengthen the system if implemented. The reclassification aligns with security best practices: hardening recommendations provide guidance for strengthening systems without blocking normal operation.
+
+**Context:** This finding is about `src/core/runner.rs` — process isolation recommendation (bubblewrap sandbox, Firecracker, or equivalent) — to prevent lateral movement if a malicious URL is passed to `rtk curl`. This is a "best practice" defense-in-depth measure, not a "fix this bug" task.
+
+**Note:** For the original vulnerability classification rationale (prior to SE-REQUESTED_CHANGES downgrade), see the audit history in the PR comments or contact the maintainers.
 
 ---
 
@@ -178,7 +211,7 @@ let api_key = std::env::var("API_KEY").context("API_KEY not set")?;
 - Validate all user input before passing to `Command`
 - Use allowlists for command flags (not denylists)
 - Canonicalize file paths to prevent traversal attacks
-- Sanitize package names with strict regex patterns
+- Sanitize package names with strict regex patterns (avoid ReDoS — Regular Expression Denial of Service)
 
 ---
 
