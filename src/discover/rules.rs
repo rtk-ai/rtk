@@ -656,6 +656,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        pattern: r"^liquibase(?:\s|$)",
+        rtk_cmd: "rtk liquibase",
+        rewrite_prefixes: &["liquibase"],
+        category: "Infra",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[
