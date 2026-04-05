@@ -152,7 +152,7 @@ pub fn run_streaming(
         match stdout_mode {
             FilterMode::Passthrough => {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if raw_stdout.len() < RAW_CAP {
+                    if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
                     }
@@ -166,7 +166,7 @@ pub fn run_streaming(
             }
             FilterMode::Streaming(mut filter) => {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if raw_stdout.len() < RAW_CAP {
+                    if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
                     }
@@ -189,14 +189,13 @@ pub fn run_streaming(
             }
             FilterMode::Buffered(filter_fn) => {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if raw_stdout.len() < RAW_CAP {
+                    if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
                     }
                 }
-                let result = filter_fn(&raw_stdout);
-                filtered = result.clone();
-                match write!(out, "{}", result) {
+                filtered = filter_fn(&raw_stdout);
+                match write!(out, "{}", filtered) {
                     Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
                     Err(e) => return Err(e.into()),
                     Ok(_) => {}
@@ -204,7 +203,7 @@ pub fn run_streaming(
             }
             FilterMode::CaptureOnly => {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if raw_stdout.len() < RAW_CAP {
+                    if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
                     }
@@ -214,7 +213,10 @@ pub fn run_streaming(
         }
     }
 
-    let raw_stderr = stderr_thread.join().unwrap_or_else(|_| String::new());
+    let raw_stderr = stderr_thread.join().unwrap_or_else(|e| {
+        eprintln!("[rtk] warning: stderr reader thread panicked: {:?}", e);
+        String::new()
+    });
     if let Some(t) = stdin_thread {
         t.join().ok();
     }

@@ -485,24 +485,28 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
 /// but don't change which command runs. Strip before routing, re-prepend after.
 const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
 
-/// Rewrite a single (non-compound) command segment.
-/// Returns `Some(rewritten)` if matched (including already-RTK pass-through).
-/// Returns `None` if no match (caller uses original segment).
+const MAX_PREFIX_DEPTH: usize = 10;
+
 fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
+    rewrite_segment_inner(seg, excluded, 0)
+}
+
+fn rewrite_segment_inner(seg: &str, excluded: &[String], depth: usize) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    // Peel shell prefix builtins (noglob, command, builtin, exec, nocorrect)
-    // before routing, re-prepend after.
+    if depth >= MAX_PREFIX_DEPTH {
+        return None;
+    }
+
     for &prefix in SHELL_PREFIX_BUILTINS {
         if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
-                return None; // bare "noglob" etc. — nothing to rewrite
+                return None;
             }
-            // Recursively rewrite the inner command
-            return match rewrite_segment(rest, excluded) {
+            return match rewrite_segment_inner(rest, excluded, depth + 1) {
                 Some(rewritten) => Some(format!("{} {}", prefix, rewritten)),
                 None => None,
             };

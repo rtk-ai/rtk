@@ -302,7 +302,7 @@ fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Resu
             }
             Ok(false)
         } else {
-            fs::write(path, content)
+            atomic_write(path, content)
                 .with_context(|| format!("Failed to write {}: {}", name, path.display()))?;
             if verbose > 0 {
                 eprintln!("Updated {}: {}", name, path.display());
@@ -310,7 +310,7 @@ fn write_if_changed(path: &Path, content: &str, name: &str, verbose: u8) -> Resu
             Ok(true)
         }
     } else {
-        fs::write(path, content)
+        atomic_write(path, content)
             .with_context(|| format!("Failed to write {}: {}", name, path.display()))?;
         if verbose > 0 {
             eprintln!("Created {}: {}", name, path.display());
@@ -682,8 +682,7 @@ fn patch_settings_json_command(
         }
     }
 
-    // Deep-merge hook
-    insert_hook_entry(&mut root, hook_command);
+    insert_hook_entry(&mut root, hook_command)?;
 
     // Backup original
     if settings_path.exists() {
@@ -748,31 +747,27 @@ fn clean_double_blanks(content: &str) -> String {
 
 /// Deep-merge RTK hook entry into settings.json
 /// Creates hooks.PreToolUse structure if missing, preserves existing hooks
-fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
-    // Ensure root is an object
+fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
     let root_obj = match root.as_object_mut() {
         Some(obj) => obj,
         None => {
             *root = serde_json::json!({});
-            root.as_object_mut()
-                .expect("Just created object, must succeed")
+            root.as_object_mut().expect("just-created json object")
         }
     };
 
-    // Use entry() API for idiomatic insertion
     let hooks = root_obj
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .expect("hooks must be an object");
+        .context("hooks value is not an object")?;
 
     let pre_tool_use = hooks
         .entry(PRE_TOOL_USE_KEY)
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
-        .expect("PreToolUse must be an array");
+        .context("PreToolUse value is not an array")?;
 
-    // Append RTK hook entry
     pre_tool_use.push(serde_json::json!({
         "matcher": "Bash",
         "hooks": [{
@@ -780,6 +775,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
             "command": hook_command
         }]
     }));
+    Ok(())
 }
 
 /// Check if RTK hook is already present in settings.json
@@ -1622,8 +1618,7 @@ fn patch_cursor_hooks_json(path: &Path, verbose: u8) -> Result<bool> {
         return Ok(false);
     }
 
-    // Insert the RTK preToolUse entry
-    insert_cursor_hook_entry(&mut root);
+    insert_cursor_hook_entry(&mut root)?;
 
     // Backup if exists
     if path.exists() {
@@ -1664,35 +1659,34 @@ fn cursor_hook_already_present(root: &serde_json::Value) -> bool {
 }
 
 /// Insert RTK preToolUse entry into Cursor hooks.json
-fn insert_cursor_hook_entry(root: &mut serde_json::Value) {
+fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
     let root_obj = match root.as_object_mut() {
         Some(obj) => obj,
         None => {
             *root = serde_json::json!({ "version": 1 });
-            root.as_object_mut()
-                .expect("Just created object, must succeed")
+            root.as_object_mut().expect("just-created json object")
         }
     };
 
-    // Ensure version key
     root_obj.entry("version").or_insert(serde_json::json!(1));
 
     let hooks = root_obj
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .expect("hooks must be an object");
+        .context("hooks value is not an object")?;
 
     let pre_tool_use = hooks
         .entry("preToolUse")
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
-        .expect("preToolUse must be an array");
+        .context("preToolUse value is not an array")?;
 
     pre_tool_use.push(serde_json::json!({
         "command": CURSOR_HOOK_COMMAND,
         "matcher": "Shell"
     }));
+    Ok(())
 }
 
 /// Remove Cursor RTK artifacts: hook script + hooks.json entry
@@ -2745,7 +2739,7 @@ More notes
         let mut json_content = serde_json::json!({});
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
 
-        insert_hook_entry(&mut json_content, hook_command);
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         // Should create full structure
         assert!(json_content.get("hooks").is_some());
@@ -2777,7 +2771,7 @@ More notes
         });
 
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
-        insert_hook_entry(&mut json_content, hook_command);
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 2); // Should have both hooks
@@ -2800,7 +2794,7 @@ More notes
         });
 
         let hook_command = "/Users/test/.claude/hooks/rtk-rewrite.sh";
-        insert_hook_entry(&mut json_content, hook_command);
+        insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         // Should preserve all other keys
         assert_eq!(json_content["env"]["PATH"], "/custom/path");
@@ -3003,7 +2997,7 @@ More notes
     #[test]
     fn test_insert_cursor_hook_entry_empty() {
         let mut json_content = serde_json::json!({ "version": 1 });
-        insert_cursor_hook_entry(&mut json_content);
+        insert_cursor_hook_entry(&mut json_content).unwrap();
 
         let hooks = json_content["hooks"]["preToolUse"].as_array().unwrap();
         assert_eq!(hooks.len(), 1);
@@ -3027,7 +3021,7 @@ More notes
             }
         });
 
-        insert_cursor_hook_entry(&mut json_content);
+        insert_cursor_hook_entry(&mut json_content).unwrap();
 
         let pre_tool_use = json_content["hooks"]["preToolUse"].as_array().unwrap();
         assert_eq!(pre_tool_use.len(), 2);
