@@ -2,7 +2,7 @@
 
 use super::constants::{
     CLAUDE_DIR, CODEX_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HOOKS_SUBDIR,
-    OPENCODE_PLUGIN_PATH, REWRITE_HOOK_FILE,
+    OPENCODE_PLUGIN_PATH, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use crate::core::constants::RTK_DATA_DIR;
 use std::path::PathBuf;
@@ -33,6 +33,11 @@ pub fn status() -> HookStatus {
         return HookStatus::Ok;
     }
 
+    // Check for native hook in settings.json (Windows path — no bash script file).
+    if native_hook_in_settings(&home) {
+        return HookStatus::Ok;
+    }
+
     let Some(hook_path) = hook_installed_path() else {
         return HookStatus::Missing;
     };
@@ -44,6 +49,32 @@ pub fn status() -> HookStatus {
     } else {
         HookStatus::Outdated
     }
+}
+
+/// Return true if settings.json contains a native RTK hook (`hook claude`).
+///
+/// This is the Windows hook path installed by `rtk init -g` — no bash script file is deployed.
+fn native_hook_in_settings(home: &std::path::Path) -> bool {
+    let settings_path = home.join(CLAUDE_DIR).join(SETTINGS_JSON);
+    let Ok(content) = std::fs::read_to_string(&settings_path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    let Some(pre_tool_use) = root
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+    else {
+        return false;
+    };
+    pre_tool_use
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd.contains("hook claude"))
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -235,10 +266,11 @@ mod tests {
             .join("hooks")
             .join("rtk-rewrite.sh")
             .exists();
+        let has_native_hook = native_hook_in_settings(&home);
         let has_claude_dir = home.join(".claude").exists();
         let has_other = other_integration_installed(&home);
 
-        match (has_claude_hook, has_claude_dir, has_other) {
+        match (has_claude_hook || has_native_hook, has_claude_dir, has_other) {
             (true, _, _) => assert!(
                 s == HookStatus::Ok || s == HookStatus::Outdated,
                 "Expected Ok or Outdated when Claude hook exists, got {:?}",
@@ -252,5 +284,57 @@ mod tests {
             ),
             (false, false, _) => assert_eq!(s, HookStatus::Ok),
         }
+    }
+
+    #[test]
+    fn test_native_hook_in_settings_detected() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": r#""C:\Users\test\rtk.exe" hook claude"#
+                    }]
+                }]
+            }
+        });
+        let mut f = std::fs::File::create(claude_dir.join("settings.json")).unwrap();
+        write!(f, "{}", settings).unwrap();
+
+        assert!(native_hook_in_settings(dir.path()));
+    }
+
+    #[test]
+    fn test_native_hook_in_settings_absent_when_only_bash() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/home/user/.claude/hooks/rtk-rewrite.sh"
+                    }]
+                }]
+            }
+        });
+        let mut f = std::fs::File::create(claude_dir.join("settings.json")).unwrap();
+        write!(f, "{}", settings).unwrap();
+
+        assert!(!native_hook_in_settings(dir.path()));
+    }
+
+    #[test]
+    fn test_native_hook_in_settings_absent_when_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!native_hook_in_settings(dir.path()));
     }
 }
