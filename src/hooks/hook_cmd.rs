@@ -11,6 +11,20 @@ use std::io::{self, Read, Write};
 
 use crate::discover::registry::{has_heredoc, rewrite_command};
 
+const STDIN_CAP: usize = 1_048_576; // 1 MiB
+
+fn read_stdin_limited() -> Result<String> {
+    let mut input = String::new();
+    io::stdin()
+        .take((STDIN_CAP + 1) as u64)
+        .read_to_string(&mut input)
+        .context("Failed to read stdin")?;
+    if input.len() > STDIN_CAP {
+        anyhow::bail!("hook stdin exceeds {} byte limit", STDIN_CAP);
+    }
+    Ok(input)
+}
+
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
 
 /// Format detected from the preToolUse JSON input.
@@ -26,10 +40,7 @@ enum HookFormat {
 /// Run the Copilot preToolUse hook.
 /// Auto-detects VS Code Copilot Chat vs Copilot CLI format.
 pub fn run_copilot() -> Result<()> {
-    let mut input = String::new();
-    io::stdin()
-        .read_to_string(&mut input)
-        .context("Failed to read stdin")?;
+    let input = read_stdin_limited()?;
 
     let input = input.trim();
     if input.is_empty() {
@@ -142,6 +153,10 @@ fn handle_vscode(cmd: &str) -> Result<()> {
 }
 
 fn handle_copilot_cli(cmd: &str) -> Result<()> {
+    if permissions::check_command(cmd) == PermissionVerdict::Deny {
+        return Ok(());
+    }
+
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
         None => return Ok(()),
@@ -162,10 +177,7 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
 
 /// Run the Gemini CLI BeforeTool hook.
 pub fn run_gemini() -> Result<()> {
-    let mut input = String::new();
-    io::stdin()
-        .read_to_string(&mut input)
-        .context("Failed to read hook input from stdin")?;
+    let input = read_stdin_limited()?;
 
     let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
 
@@ -233,6 +245,11 @@ fn audit_log(action: &str, original: &str, rewritten: &str) {
     let _ = audit_log_inner(action, original, rewritten);
 }
 
+/// Escape newlines to prevent log-line injection in the pipe-delimited audit log.
+fn sanitize_log_field(s: &str) -> String {
+    s.replace('\n', "\\n").replace('\r', "\\r")
+}
+
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
     let home = dirs::home_dir()?;
     let dir = home.join(".local").join("share").join("rtk");
@@ -244,17 +261,22 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
         .open(path)
         .ok()?;
     let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
-    writeln!(file, "{} | {} | {} | {}", ts, action, original, rewritten).ok()
+    writeln!(
+        file,
+        "{} | {} | {} | {}",
+        ts,
+        action,
+        sanitize_log_field(original),
+        sanitize_log_field(rewritten)
+    )
+    .ok()
 }
 
 // ── Claude Code native hook ────────────────────────────────────
 
 /// Run the Claude Code PreToolUse hook natively.
 pub fn run_claude() -> Result<()> {
-    let mut input = String::new();
-    io::stdin()
-        .read_to_string(&mut input)
-        .context("Failed to read stdin")?;
+    let input = read_stdin_limited()?;
 
     let input = input.trim();
     if input.is_empty() {
@@ -365,10 +387,7 @@ fn run_claude_inner(input: &str) -> Option<String> {
 
 /// Run the Cursor Agent hook natively.
 pub fn run_cursor() -> Result<()> {
-    let mut input = String::new();
-    io::stdin()
-        .read_to_string(&mut input)
-        .context("Failed to read stdin")?;
+    let input = read_stdin_limited()?;
 
     let input = input.trim();
     if input.is_empty() {
@@ -395,6 +414,11 @@ pub fn run_cursor() -> Result<()> {
             return Ok(());
         }
     };
+
+    if permissions::check_command(&cmd) == PermissionVerdict::Deny {
+        let _ = writeln!(io::stdout(), "{{}}");
+        return Ok(());
+    }
 
     let rewritten = match get_rewritten(&cmd) {
         Some(r) => r,
@@ -428,6 +452,10 @@ fn run_cursor_inner(input: &str) -> String {
         Some(c) => c.to_string(),
         None => return "{}".to_string(),
     };
+
+    if permissions::check_command(&cmd) == PermissionVerdict::Deny {
+        return "{}".to_string();
+    }
 
     match get_rewritten(&cmd) {
         Some(rewritten) => {
@@ -780,5 +808,37 @@ mod tests {
         assert_eq!(parts[3], "rtk git status");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // --- Adversarial tests ---
+
+    #[test]
+    fn test_audit_log_sanitizes_newlines() {
+        let sanitized = sanitize_log_field("git status\nfake | inject | evil");
+        assert!(!sanitized.contains('\n'));
+        assert!(sanitized.contains("\\n"));
+    }
+
+    #[test]
+    fn test_claude_unicode_null_passthrough() {
+        let input = claude_input("git status \u{0000}\u{FEFF}");
+        let _ = run_claude_inner(&input);
+    }
+
+    #[test]
+    fn test_claude_extremely_long_command() {
+        let long_cmd = format!("git status {}", "A".repeat(100_000));
+        let input = claude_input(&long_cmd);
+        let _ = run_claude_inner(&input);
+    }
+
+    #[test]
+    fn test_cursor_deny_blocks_rewrite() {
+        use super::permissions::check_command_with_rules;
+        let deny = vec!["git status".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
     }
 }
