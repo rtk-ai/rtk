@@ -609,6 +609,7 @@ const SUBCOMMAND_ROUTERS: &[&str] = &[
     "mvn",
     "next",
     "ng",
+    "nix",
     "npm",
     "php",
     "pip",
