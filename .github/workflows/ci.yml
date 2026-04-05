@@ -64,6 +64,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
+  supply-chain:
+    name: supply-chain (cargo-deny)
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   security:
     name: Security Scan
     needs: clippy

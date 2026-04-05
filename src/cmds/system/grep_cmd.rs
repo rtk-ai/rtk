@@ -21,6 +21,13 @@ pub fn run(
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
+    // Check for --no-compact flag to bypass deduplication
+    let no_compact = extra_args.iter().any(|a| a == "--no-compact");
+    let extra_args: Vec<&String> = extra_args
+        .iter()
+        .filter(|a| a.as_str() != "--no-compact")
+        .collect();
+
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern, path);
     }
@@ -107,10 +114,86 @@ pub fn run(
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
+    // --- Cross-file deduplication (skipped with --no-compact) ---
+    let cross_file_contents: Vec<(String, Vec<(String, usize)>)>;
+    let deduped: std::collections::HashSet<(String, usize)>;
+
+    if no_compact {
+        cross_file_contents = Vec::new();
+        deduped = std::collections::HashSet::new();
+    } else {
+        // Build reverse map: content → [(file, line_num)]
+        let mut content_to_files: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+        for (file, matches) in &by_file {
+            for (line_num, content) in matches {
+                content_to_files
+                    .entry(content.clone())
+                    .or_default()
+                    .push((file.clone(), *line_num));
+            }
+        }
+
+        // Identify cross-file matches (same content in ≥3 files)
+        let mut cfc: Vec<(String, Vec<(String, usize)>)> = content_to_files
+            .into_iter()
+            .filter(|(_, locations)| {
+                let unique_files: std::collections::HashSet<&str> =
+                    locations.iter().map(|(f, _)| f.as_str()).collect();
+                unique_files.len() >= 3
+            })
+            .collect();
+        cfc.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+        // Track which (file, line_num) pairs are covered by cross-file groups
+        let mut d: std::collections::HashSet<(String, usize)> =
+            std::collections::HashSet::new();
+        for (_, locations) in &cfc {
+            for loc in locations {
+                d.insert(loc.clone());
+            }
+        }
+        cross_file_contents = cfc;
+        deduped = d;
+    }
+
     let mut rtk_output = String::new();
     rtk_output.push_str(&format!("{} matches in {}F:\n\n", total, by_file.len()));
 
     let mut shown = 0;
+
+    // Show cross-file groups first
+    if !cross_file_contents.is_empty() {
+        for (content, locations) in &cross_file_contents {
+            if shown >= max_results {
+                break;
+            }
+            let unique_files: std::collections::HashSet<&str> =
+                locations.iter().map(|(f, _)| f.as_str()).collect();
+            let mut file_list: Vec<&str> = unique_files.into_iter().collect();
+            file_list.sort();
+
+            if file_list.len() <= 3 {
+                let names: Vec<String> = file_list.iter().map(|f| compact_path(f)).collect();
+                rtk_output.push_str(&format!(
+                    "[{}F] {}:\n",
+                    file_list.len(),
+                    names.join(", ")
+                ));
+            } else {
+                rtk_output.push_str(&format!(
+                    "[{}F] {}, {} ... +{} more:\n",
+                    file_list.len(),
+                    compact_path(file_list[0]),
+                    compact_path(file_list[1]),
+                    file_list.len() - 2
+                ));
+            }
+            rtk_output.push_str(&format!("       {}\n\n", content));
+            shown += locations.len();
+        }
+    }
+
+    // Show remaining per-file matches (excluding deduped ones)
     let mut files: Vec<_> = by_file.iter().collect();
     files.sort_by_key(|(f, _)| *f);
 
@@ -119,11 +202,21 @@ pub fn run(
             break;
         }
 
+        // Filter out matches already shown in cross-file groups
+        let remaining: Vec<&(usize, String)> = matches
+            .iter()
+            .filter(|(ln, _)| !deduped.contains(&(file.clone(), *ln)))
+            .collect();
+
+        if remaining.is_empty() {
+            continue;
+        }
+
         let file_display = compact_path(file);
-        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, matches.len()));
+        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, remaining.len()));
 
         let per_file = config::limits().grep_max_per_file;
-        for (line_num, content) in matches.iter().take(per_file) {
+        for (line_num, content) in remaining.iter().take(per_file) {
             rtk_output.push_str(&format!("  {:>4}: {}\n", line_num, content));
             shown += 1;
             if shown >= max_results {
@@ -131,8 +224,8 @@ pub fn run(
             }
         }
 
-        if matches.len() > per_file {
-            rtk_output.push_str(&format!("  +{}\n", matches.len() - per_file));
+        if remaining.len() > per_file {
+            rtk_output.push_str(&format!("  +{}\n", remaining.len() - per_file));
         }
         rtk_output.push('\n');
     }
@@ -277,6 +370,71 @@ mod tests {
             .collect();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0], "-i");
+    }
+
+    #[test]
+    fn test_cross_file_dedup_groups_identical_content() {
+        // Simulate the dedup logic: same content in 3+ files → grouped
+        let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+        by_file.insert(
+            "a.rs".to_string(),
+            vec![(1, "use std::fmt;".to_string()), (5, "unique_a".to_string())],
+        );
+        by_file.insert(
+            "b.rs".to_string(),
+            vec![(1, "use std::fmt;".to_string())],
+        );
+        by_file.insert(
+            "c.rs".to_string(),
+            vec![(1, "use std::fmt;".to_string())],
+        );
+        by_file.insert(
+            "d.rs".to_string(),
+            vec![(1, "use std::fmt;".to_string())],
+        );
+
+        // Build content_to_files
+        let mut content_to_files: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+        for (file, matches) in &by_file {
+            for (ln, content) in matches {
+                content_to_files
+                    .entry(content.clone())
+                    .or_default()
+                    .push((file.clone(), *ln));
+            }
+        }
+
+        let cross: Vec<_> = content_to_files
+            .iter()
+            .filter(|(_, locs)| {
+                let files: std::collections::HashSet<&str> =
+                    locs.iter().map(|(f, _)| f.as_str()).collect();
+                files.len() >= 3
+            })
+            .collect();
+
+        assert_eq!(cross.len(), 1, "Only 'use std::fmt;' should be grouped");
+        assert_eq!(cross[0].0, "use std::fmt;");
+        assert_eq!(cross[0].1.len(), 4, "Should appear in 4 files");
+    }
+
+    #[test]
+    fn test_cross_file_dedup_no_group_under_threshold() {
+        // Content in only 2 files should NOT be grouped
+        let mut content_to_files: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+        content_to_files.insert(
+            "import foo".to_string(),
+            vec![("a.rs".to_string(), 1), ("b.rs".to_string(), 1)],
+        );
+        let cross: Vec<_> = content_to_files
+            .iter()
+            .filter(|(_, locs)| {
+                let files: std::collections::HashSet<&str> =
+                    locs.iter().map(|(f, _)| f.as_str()).collect();
+                files.len() >= 3
+            })
+            .collect();
+        assert!(cross.is_empty(), "2 files should not trigger grouping");
     }
 
     // --- truncation accuracy ---

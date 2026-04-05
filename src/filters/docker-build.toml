@@ -1,0 +1,56 @@
+[filters.docker-build]
+description = "Compact docker build output — strip layer downloads, progress bars, and cache metadata"
+match_command = "^docker\\s+(build|buildx\\s+build)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^#\\d+\\s+\\[internal\\]",
+  "^#\\d+\\s+sha256:",
+  "^#\\d+\\s+\\d+\\.\\d+s done$",
+  "^#\\d+\\s+extracting",
+  "^#\\d+\\s+downloading",
+  "^#\\d+\\s+resolve",
+  "^#\\d+\\s+transferring",
+  "^\\s*=>\\s*\\[internal\\]",
+  "^\\s*=>\\s*resolve",
+  "^\\s*=>\\s*sha256:",
+  "^\\s*=>\\s*extracting",
+  "^\\s*=>\\s*CACHED",
+  "^\\s*=>\\s*transferring",
+]
+match_output = [
+  { pattern = "exporting to image", message = "ok (image built)" },
+]
+max_lines = 40
+
+[[tests.docker-build]]
+name = "strips layer download lines"
+input = """
+#1 [internal] load build definition from Dockerfile
+#1 sha256:abc123def456
+#1 transferring dockerfile: 1.2kB
+#1 0.1s done
+#2 [internal] load .dockerignore
+#2 sha256:def456abc789
+#2 0.0s done
+#3 [1/4] FROM docker.io/library/node:18@sha256:abc
+#3 resolve docker.io/library/node:18@sha256:abc
+#3 sha256:abc 0.0s done
+#4 [2/4] WORKDIR /app
+#5 [3/4] COPY package.json .
+#6 [4/4] RUN npm install
+#6 npm warn deprecated package@1.0.0
+#7 exporting to image
+"""
+expected = "#3 [1/4] FROM docker.io/library/node:18@sha256:abc\n#4 [2/4] WORKDIR /app\n#5 [3/4] COPY package.json .\n#6 [4/4] RUN npm install\n#6 npm warn deprecated package@1.0.0\n#7 exporting to image"
+
+[[tests.docker-build]]
+name = "short-circuits on successful build"
+input = """
+#1 [internal] load build definition
+#2 [1/2] FROM node:18
+#3 [2/2] COPY . .
+#4 exporting to image
+#4 exporting layers done
+"""
+expected = "ok (image built)"

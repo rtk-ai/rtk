@@ -1,0 +1,41 @@
+# cargo-deny configuration for RTK
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Deny crates with known security vulnerabilities
+vulnerability = "deny"
+# Warn about unmaintained crates
+unmaintained = "warn"
+# Warn about yanked crates
+yanked = "warn"
+
+[licenses]
+# Allow only these open-source licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Warn when multiple versions of the same crate are pulled in
+multiple-versions = "warn"
+# Deny wildcard dependencies (e.g. version = "*")
+wildcards = "deny"
+
+[sources]
+# Deny crates from unknown registries
+unknown-registry = "deny"
+# Deny crates fetched from unknown git repos
+unknown-git = "deny"
+# Only allow crates from crates.io
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
