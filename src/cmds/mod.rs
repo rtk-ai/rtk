@@ -5,6 +5,7 @@ pub mod dotnet;
 pub mod git;
 pub mod go;
 pub mod js;
+pub mod nix;
 pub mod python;
 pub mod ruby;
 pub mod rust;
