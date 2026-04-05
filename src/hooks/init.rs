@@ -482,7 +482,7 @@ fn remove_hook_from_json(root: &mut serde_json::Value) -> bool {
         if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
             for hook in hooks_array {
                 if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
-                    if command.contains(REWRITE_HOOK_FILE) || command.contains("hook claude") {
+                    if command.contains(REWRITE_HOOK_FILE) || command.ends_with("hook claude") {
                         return false;
                     }
                 }
@@ -876,7 +876,7 @@ fn hook_already_present(root: &serde_json::Value, _hook_command: &str) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| cmd.contains(REWRITE_HOOK_FILE) || cmd.contains("hook claude"))
+        .any(|cmd| cmd.contains(REWRITE_HOOK_FILE) || cmd.ends_with("hook claude"))
 }
 
 /// Build the native hook command string: `"<rtk_exe>" hook claude`

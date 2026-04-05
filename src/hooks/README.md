@@ -23,13 +23,32 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 
 | Mode | Command | Creates | Patches |
 |------|---------|---------|---------|
-| Default (global) | `rtk init -g` | Hook, SHA-256 hash, RTK.md | settings.json, CLAUDE.md |
+| Default (global, Unix) | `rtk init -g` | Hook script, SHA-256 hash, RTK.md | settings.json, CLAUDE.md |
+| Default (global, Windows) | `rtk init -g` | RTK.md | settings.json (`hook claude`), CLAUDE.md |
 | Hook only | `rtk init -g --hook-only` | Hook, SHA-256 hash | settings.json |
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
+
+### Windows native hook
+
+On Windows, `rtk init -g` installs a native hook instead of the bash script (which requires `bash`/`jq`, unavailable on Windows):
+
+```json
+// ~/.claude/settings.json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{ "type": "command", "command": "\"C:\\...\\rtk.exe\" hook claude" }]
+    }]
+  }
+}
+```
+
+The `rtk hook claude` subcommand reads Claude Code's `PreToolUse` JSON from stdin, evaluates deny/ask/allow rules, and emits a `hookSpecificOutput` response. Unlike the bash hook (which delegates to `rtk rewrite`), it runs entirely in-process with no external dependencies.
 
 
 ## Integrity Verification
@@ -82,17 +101,18 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 
 | Tool | ask support | Behavior on Default |
 |------|------------|-------------------|
-| Claude Code (rtk-rewrite.sh) | Yes | `permissionDecision: "ask"` — user prompted |
-| Copilot VS Code (rtk hook copilot) | Yes | `permissionDecision: "ask"` — user prompted |
-| Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
-| Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
+| Claude Code Unix (`rtk-rewrite.sh`) | Yes | rewrite + exit 3 (host prompts user) |
+| Claude Code Windows (`rtk hook claude`) | Yes | `updatedInput` without `permissionDecision` (host prompts) |
+| Copilot VS Code (`rtk hook copilot`) | Yes | `permissionDecision: "ask"` — user prompted |
+| Gemini CLI (`rtk hook gemini`) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
+| Copilot CLI (`rtk hook copilot`) | No updatedInput | deny-with-suggestion (unchanged) |
 | Codex | ask parsed but no-op | allow (limitation — fails open) |
 
 ### Implementation
 
 - `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
-- `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
-- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini)
+- `rewrite_cmd.rs` — maps verdict to exit code (consumed by bash shell hook on Unix)
+- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini/Claude Windows)
 
 ## Exit Code Contract
 

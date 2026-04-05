@@ -224,7 +224,7 @@ pub(crate) fn build_claude_response(
     }
 
     Some(match verdict {
-        // Explicit allow: auto-approve the rewritten command.
+        // Allow (explicit) or Default (no rules configured) → auto-approve.
         PermissionVerdict::Allow | PermissionVerdict::Default => json!({
             "hookSpecificOutput": {
                 "hookEventName": PRE_TOOL_USE_KEY,
@@ -511,5 +511,13 @@ mod tests {
             response["hookSpecificOutput"]["hookEventName"],
             PRE_TOOL_USE_KEY
         );
+    }
+
+    #[test]
+    fn test_claude_excluded_command_returns_none() {
+        // Excluded commands are not rewritten — hook should produce no output.
+        let excluded = vec!["git".to_string()];
+        let response = build_claude_response("git status", PermissionVerdict::Default, &excluded);
+        assert!(response.is_none());
     }
 }

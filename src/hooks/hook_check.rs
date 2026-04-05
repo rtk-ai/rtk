@@ -74,7 +74,7 @@ fn native_hook_in_settings(home: &std::path::Path) -> bool {
         .filter_map(|entry| entry.get("hooks")?.as_array())
         .flatten()
         .filter_map(|hook| hook.get("command")?.as_str())
-        .any(|cmd| cmd.contains("hook claude"))
+        .any(|cmd| cmd.ends_with("hook claude"))
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -270,7 +270,11 @@ mod tests {
         let has_claude_dir = home.join(".claude").exists();
         let has_other = other_integration_installed(&home);
 
-        match (has_claude_hook || has_native_hook, has_claude_dir, has_other) {
+        match (
+            has_claude_hook || has_native_hook,
+            has_claude_dir,
+            has_other,
+        ) {
             (true, _, _) => assert!(
                 s == HookStatus::Ok || s == HookStatus::Outdated,
                 "Expected Ok or Outdated when Claude hook exists, got {:?}",
