@@ -174,7 +174,7 @@ fn filter_pip_list(output: &str) -> String {
     letters.sort();
 
     for letter in letters {
-        let pkgs = by_letter.get(letter).unwrap();
+        let Some(pkgs) = by_letter.get(letter) else { continue };
         result.push_str(&format!("\n[{}]\n", letter.to_uppercase()));
 
         for pkg in pkgs.iter().take(10) {

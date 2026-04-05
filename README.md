@@ -472,15 +472,24 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Privacy & Telemetry
 
-RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This helps prioritize development. See opt-out options below.
+RTK collects **anonymous, aggregate usage metrics** at most once every 23 hours, **enabled by default**. This helps prioritize which commands to optimize next. See opt-out options below.
 
-**What is collected:**
-- Device hash (salted SHA-256 — per-user random salt stored locally, not reversible)
-- RTK version, OS, architecture
-- Command count (last 24h) and top command names (e.g. "git", "cargo" — no arguments, no file paths)
-- Token savings percentage
+**What is collected** (exact payload — see `src/core/telemetry.rs`):
+- `device_hash` — salted SHA-256 of hostname+username (per-user random salt stored locally in `~/.local/share/rtk/.device_salt`, not reversible)
+- `version` — RTK version (e.g. "0.34.3")
+- `os`, `arch` — operating system and CPU architecture
+- `install_method` — how RTK was installed (homebrew, cargo, script, nix, or other)
+- `commands_24h` — number of RTK commands run in the last 24 hours
+- `top_commands` — top 5 command names by frequency (e.g. "git status", "cargo test" — no file paths, no arguments beyond the subcommand)
+- `savings_pct` — overall token savings percentage
+- `tokens_saved_24h`, `tokens_saved_total` — token counts saved (last 24h and all-time)
 
-**What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, or any personally identifiable information.
+**What is NOT collected:** source code, file paths, full command arguments, secrets, environment variables, or any personally identifiable information.
+
+**Technical details:**
+- Telemetry URL is compiled into the binary at build time via `RTK_TELEMETRY_URL`. Open-source builds from source have no URL compiled in, so **no data is ever sent** unless you explicitly set this env var during compilation.
+- Pings use a 2-second timeout and run in a background thread — they never block CLI execution.
+- The salt file is created with `0600` permissions (owner-only read/write).
 
 **Opt-out** (any of these):
 ```bash

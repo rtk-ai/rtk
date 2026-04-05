@@ -8,5 +8,6 @@ pub mod init;
 pub mod integrity;
 pub mod permissions;
 pub mod rewrite_cmd;
+pub mod suggest_cmd;
 pub mod trust;
 pub mod verify_cmd;

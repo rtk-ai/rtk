@@ -254,7 +254,9 @@ fn run_show(
     let stat_stdout = String::from_utf8_lossy(&stat_output.stdout);
     let stat_text = stat_stdout.trim();
     if !stat_text.is_empty() {
-        println!("{}", stat_text);
+        // Filter out generated/lockfile lines from stat, collapsing them into a summary
+        let stat_filtered = filter_stat_generated(stat_text);
+        println!("{}", stat_filtered);
     }
 
     // Step 3: compacted diff
@@ -292,89 +294,288 @@ fn is_blob_show_arg(arg: &str) -> bool {
     !arg.starts_with('-') && arg.contains(':')
 }
 
+/// Filter `--stat` output to collapse generated/lockfile entries into a summary.
+/// Stat lines look like: ` path/to/file | 123 ++--`
+fn filter_stat_generated(stat: &str) -> String {
+    let mut kept = Vec::new();
+    let mut generated_count = 0usize;
+
+    for line in stat.lines() {
+        // Stat lines contain ' | ', the summary line does not
+        if line.contains(" | ") {
+            // Extract filename: everything before the first ' | '
+            let filename = line.split(" | ").next().unwrap_or("").trim();
+            if is_generated_file(filename) {
+                generated_count += 1;
+                continue;
+            }
+        }
+        kept.push(line);
+    }
+
+    if generated_count > 0 {
+        let summary_line = format!(
+            " ({} generated file{} omitted)",
+            generated_count,
+            if generated_count == 1 { "" } else { "s" }
+        );
+        // Insert summary before the last line (which is the total summary)
+        let mut result: Vec<String> = kept.iter().map(|l| l.to_string()).collect();
+        let insert_pos = if result.len() > 1 { result.len() - 1 } else { result.len() };
+        result.insert(insert_pos, summary_line);
+        result.join("\n")
+    } else {
+        kept.join("\n")
+    }
+}
+
+/// Returns true if the filename looks like a generated/lockfile that should be
+/// summarised in diffs rather than shown line-by-line.
+fn is_generated_file(filename: &str) -> bool {
+    let lower = filename.to_lowercase();
+    let basename = filename.rsplit('/').next().unwrap_or(filename);
+    let basename_lower = basename.to_lowercase();
+
+    // Lock files
+    if basename_lower.ends_with(".lock")
+        || basename_lower.contains("-lock.")
+        || basename_lower == "shrinkwrap.json"
+    {
+        return true;
+    }
+
+    // Test snapshots
+    if lower.ends_with(".snap") || lower.ends_with(".snapshot") {
+        return true;
+    }
+
+    // Minified assets
+    if lower.ends_with(".min.js")
+        || lower.ends_with(".min.css")
+        || lower.ends_with(".min.mjs")
+    {
+        return true;
+    }
+
+    // Code-generated files
+    if lower.contains(".generated.")
+        || lower.ends_with(".g.dart")
+        || lower.ends_with(".pb.go")
+        || lower.ends_with(".pb.h")
+        || lower.ends_with(".pb.cc")
+    {
+        return true;
+    }
+
+    // Generated directories
+    if lower.starts_with("dist/")
+        || lower.starts_with("build/")
+        || lower.starts_with("vendor/")
+        || lower.starts_with("node_modules/")
+        || lower.contains("/dist/")
+        || lower.contains("/build/output/")
+        || lower.contains("/vendor/")
+        || lower.contains("/node_modules/")
+    {
+        return true;
+    }
+
+    false
+}
+
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
-    let mut result = Vec::new();
-    let mut current_file = String::new();
-    let mut added = 0;
-    let mut removed = 0;
+    // --- First pass: parse into per-file entries ---
+    struct FileDiff {
+        filename: String,
+        is_generated: bool,
+        hunks: Vec<String>,   // formatted hunk lines (for non-generated files)
+        added: usize,
+        removed: usize,
+    }
+
+    let mut files: Vec<FileDiff> = Vec::new();
+    let mut current: Option<FileDiff> = None;
     let mut in_hunk = false;
     let mut hunk_shown = 0;
     let mut hunk_skipped = 0usize;
+    let mut any_hunk_truncated = false;
     let max_hunk_lines = 100;
-    let mut was_truncated = false;
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
-            // Flush hunk truncation before starting a new file
-            if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
-                was_truncated = true;
-                hunk_skipped = 0;
+            // Flush previous hunk truncation
+            if let Some(ref mut f) = current {
+                if hunk_skipped > 0 && !f.is_generated {
+                    f.hunks
+                        .push(format!("  ... ({} lines truncated)", hunk_skipped));
+                    any_hunk_truncated = true;
+                }
             }
-            if !current_file.is_empty() && (added > 0 || removed > 0) {
-                result.push(format!("  +{} -{}", added, removed));
+            if let Some(f) = current.take() {
+                files.push(f);
             }
-            current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
-            result.push(format!("\n{}", current_file));
-            added = 0;
-            removed = 0;
+
+            let filename = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
+            let is_generated = is_generated_file(&filename);
+            current = Some(FileDiff {
+                filename,
+                is_generated,
+                hunks: Vec::new(),
+                added: 0,
+                removed: 0,
+            });
             in_hunk = false;
             hunk_shown = 0;
-        } else if line.starts_with("@@") {
-            // Flush hunk truncation before starting a new hunk
-            if hunk_skipped > 0 {
-                result.push(format!("  ... ({} lines truncated)", hunk_skipped));
-                was_truncated = true;
-                hunk_skipped = 0;
-            }
-            in_hunk = true;
-            hunk_shown = 0;
-            let hunk_info = line.split("@@").nth(1).unwrap_or("").trim();
-            result.push(format!("  @@ {} @@", hunk_info));
-        } else if in_hunk {
-            if line.starts_with('+') && !line.starts_with("+++") {
-                added += 1;
-                if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                } else {
-                    hunk_skipped += 1;
+            hunk_skipped = 0;
+        } else if let Some(ref mut f) = current {
+            if line.starts_with("@@") {
+                if hunk_skipped > 0 && !f.is_generated {
+                    f.hunks
+                        .push(format!("  ... ({} lines truncated)", hunk_skipped));
+                    any_hunk_truncated = true;
+                    hunk_skipped = 0;
                 }
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                removed += 1;
-                if hunk_shown < max_hunk_lines {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                } else {
-                    hunk_skipped += 1;
+                in_hunk = true;
+                hunk_shown = 0;
+                if !f.is_generated {
+                    let hunk_info = line.split("@@").nth(1).unwrap_or("").trim();
+                    f.hunks.push(format!("  @@ {} @@", hunk_info));
                 }
-            } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
-                // Context line
-                if hunk_shown > 0 {
-                    result.push(format!("  {}", line));
+            } else if in_hunk {
+                if line.starts_with('+') && !line.starts_with("+++") {
+                    f.added += 1;
+                    if !f.is_generated && hunk_shown < max_hunk_lines {
+                        f.hunks.push(format!("  {}", line));
+                        hunk_shown += 1;
+                    } else if !f.is_generated {
+                        hunk_skipped += 1;
+                    }
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    f.removed += 1;
+                    if !f.is_generated && hunk_shown < max_hunk_lines {
+                        f.hunks.push(format!("  {}", line));
+                        hunk_shown += 1;
+                    } else if !f.is_generated {
+                        hunk_skipped += 1;
+                    }
+                } else if !f.is_generated
+                    && hunk_shown < max_hunk_lines
+                    && !line.starts_with("\\")
+                    && hunk_shown > 0
+                {
+                    f.hunks.push(format!("  {}", line));
                     hunk_shown += 1;
                 }
             }
         }
+    }
 
+    // Flush last file
+    if let Some(ref mut f) = current {
+        if hunk_skipped > 0 && !f.is_generated {
+            f.hunks
+                .push(format!("  ... ({} lines truncated)", hunk_skipped));
+            any_hunk_truncated = true;
+        }
+    }
+    if let Some(f) = current.take() {
+        files.push(f);
+    }
+
+    // --- Second pass: group files with identical hunks ---
+    let mut result = Vec::new();
+    let mut was_truncated = false;
+    let mut i = 0;
+
+    while i < files.len() {
         if result.len() >= max_lines {
             result.push("\n... (more changes truncated)".to_string());
             was_truncated = true;
             break;
         }
+
+        let f = &files[i];
+
+        if f.is_generated {
+            // Generated file — 1-line summary
+            result.push(format!("\n{}", f.filename));
+            result.push(format!(
+                "  (generated file — +{} -{} lines, content omitted)",
+                f.added, f.removed
+            ));
+            i += 1;
+            continue;
+        }
+
+        // Look ahead for files with identical hunks
+        let mut similar = vec![i];
+        for (j, other) in files.iter().enumerate().skip(i + 1) {
+            if !other.is_generated && other.hunks == f.hunks && !f.hunks.is_empty() {
+                similar.push(j);
+            }
+        }
+
+        if similar.len() >= 2 {
+            // Group similar files
+            let names: Vec<&str> = similar.iter().map(|&idx| files[idx].filename.as_str()).collect();
+            let total_added: usize = similar.iter().map(|&idx| files[idx].added).sum();
+            let total_removed: usize = similar.iter().map(|&idx| files[idx].removed).sum();
+
+            if names.len() <= 3 {
+                result.push(format!("\n{}", names.join(", ")));
+            } else {
+                result.push(format!(
+                    "\n{}, {} ... +{} similar files",
+                    names[0],
+                    names[1],
+                    names.len() - 2
+                ));
+            }
+            result.push("  (identical changes in each file)".to_string());
+            for hunk_line in &f.hunks {
+                result.push(hunk_line.clone());
+                if result.len() >= max_lines {
+                    result.push("\n... (more changes truncated)".to_string());
+                    was_truncated = true;
+                    break;
+                }
+            }
+            if f.added > 0 || f.removed > 0 {
+                result.push(format!(
+                    "  +{} -{} (total across {} files: +{} -{})",
+                    f.added,
+                    f.removed,
+                    similar.len(),
+                    total_added,
+                    total_removed
+                ));
+            }
+
+            // Skip all similar files
+            let similar_set: std::collections::HashSet<usize> = similar.into_iter().collect();
+            i += 1;
+            while i < files.len() && similar_set.contains(&i) {
+                i += 1;
+            }
+        } else {
+            // Unique file — show normally
+            result.push(format!("\n{}", f.filename));
+            for hunk_line in &f.hunks {
+                result.push(hunk_line.clone());
+                if result.len() >= max_lines {
+                    result.push("\n... (more changes truncated)".to_string());
+                    was_truncated = true;
+                    break;
+                }
+            }
+            if f.added > 0 || f.removed > 0 {
+                result.push(format!("  +{} -{}", f.added, f.removed));
+            }
+            i += 1;
+        }
     }
 
-    // Flush last hunk
-    if hunk_skipped > 0 {
-        result.push(format!("  ... ({} lines truncated)", hunk_skipped));
-        was_truncated = true;
-    }
-
-    if !current_file.is_empty() && (added > 0 || removed > 0) {
-        result.push(format!("  +{} -{}", added, removed));
-    }
-
-    if was_truncated {
+    if was_truncated || any_hunk_truncated {
         result.push("[full diff: rtk git diff --no-compact]".to_string());
     }
 
@@ -518,7 +719,7 @@ fn filter_log_output(
     user_set_limit: bool,
     user_format: bool,
 ) -> String {
-    let truncate_width = if user_set_limit { 120 } else { 80 };
+    let truncate_width = if user_set_limit { 120 } else { 100 };
 
     // When user specified their own format (--oneline, --pretty, --format),
     // RTK did not inject ---END--- markers. Use simple line-based truncation.
@@ -1310,11 +1511,11 @@ fn filter_branch_output(output: &str) -> String {
             .collect();
         if !remote_only.is_empty() {
             result.push(format!("  remote-only ({}):", remote_only.len()));
-            for b in remote_only.iter().take(10) {
+            for b in remote_only.iter().take(5) {
                 result.push(format!("    {}", b));
             }
-            if remote_only.len() > 10 {
-                result.push(format!("    ... +{} more", remote_only.len() - 10));
+            if remote_only.len() > 5 {
+                result.push(format!("    ... +{} more", remote_only.len() - 5));
             }
         }
     }
@@ -1420,8 +1621,7 @@ fn run_stash(
 
             timer.track("git stash show", "rtk git stash show", &raw, &filtered);
         }
-        Some("pop") | Some("apply") | Some("drop") | Some("push") => {
-            let sub = subcommand.unwrap();
+        Some(sub @ ("pop" | "apply" | "drop" | "push")) => {
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", sub]);
             for arg in args {
@@ -1531,10 +1731,13 @@ fn run_stash(
     Ok(0)
 }
 
+const MAX_STASH_ENTRIES: usize = 20;
+
 fn filter_stash_list(output: &str) -> String {
     // Format: "stash@{0}: WIP on main: abc1234 commit message"
     let mut result = Vec::new();
-    for line in output.lines() {
+    let total = output.lines().count();
+    for line in output.lines().take(MAX_STASH_ENTRIES) {
         if let Some(colon_pos) = line.find(": ") {
             let index = &line[..colon_pos];
             let rest = &line[colon_pos + 2..];
@@ -1548,6 +1751,9 @@ fn filter_stash_list(output: &str) -> String {
         } else {
             result.push(line.to_string());
         }
+    }
+    if total > MAX_STASH_ENTRIES {
+        result.push(format!("... +{} more stashes", total - MAX_STASH_ENTRIES));
     }
     result.join("\n")
 }
@@ -1968,7 +2174,7 @@ A  added.rs
         let result = filter_log_output(&long_line, 10, false, false);
         assert!(result.chars().count() < long_line.chars().count());
         assert!(result.contains("..."));
-        assert!(result.chars().count() <= 80);
+        assert!(result.chars().count() <= 100);
     }
 
     #[test]
@@ -1999,22 +2205,22 @@ A  added.rs
     #[test]
     fn test_filter_log_output_user_limit_wider_truncation() {
         // When user explicitly passes -N, lines up to 120 chars should NOT be truncated
-        let line_90_chars = format!("abc1234 {} (2 days ago) <author>", "x".repeat(60));
-        assert!(line_90_chars.chars().count() > 80);
-        assert!(line_90_chars.chars().count() < 120);
+        let line_110_chars = format!("abc1234 {} (2 days ago) <author>", "x".repeat(80));
+        assert!(line_110_chars.chars().count() > 100);
+        assert!(line_110_chars.chars().count() < 120);
 
-        let result_default = filter_log_output(&line_90_chars, 10, false, false);
-        let result_user = filter_log_output(&line_90_chars, 10, true, false);
+        let result_default = filter_log_output(&line_110_chars, 10, false, false);
+        let result_user = filter_log_output(&line_110_chars, 10, true, false);
 
-        // Default truncates at 80 chars
+        // Default truncates at 100 chars
         assert!(
             result_default.contains("..."),
-            "Default should truncate at 80 chars"
+            "Default should truncate at 100 chars"
         );
         // User-set limit uses wider threshold (120 chars)
         assert!(
             !result_user.contains("..."),
-            "User limit should not truncate 90-char line"
+            "User limit should not truncate 110-char line"
         );
     }
 
@@ -2403,5 +2609,52 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_stash_list_caps_at_20() {
+        let mut input = String::new();
+        for i in 0..30 {
+            input.push_str(&format!(
+                "stash@{{{}}}: WIP on main: abc{:04x} commit {}\n",
+                i, i, i
+            ));
+        }
+        let result = filter_stash_list(&input);
+        assert!(
+            result.contains("... +10 more stashes"),
+            "Expected stash cap message, got:\n{}",
+            result
+        );
+        // Should contain stash@{0} through stash@{19} but not stash@{20}
+        assert!(result.contains("stash@{0}:"));
+        assert!(result.contains("stash@{19}:"));
+        assert!(!result.contains("stash@{20}:"));
+    }
+
+    #[test]
+    fn test_filter_stash_list_no_cap_under_limit() {
+        let input = "stash@{0}: WIP on main: abc1234 fix\nstash@{1}: On dev: def5678 wip\n";
+        let result = filter_stash_list(input);
+        assert!(!result.contains("more stashes"));
+    }
+
+    #[test]
+    fn test_filter_branch_remote_cap_at_5() {
+        let mut input = String::from("* main\n");
+        for i in 0..15 {
+            input.push_str(&format!("  remotes/origin/feature-{}\n", i));
+        }
+        let result = filter_branch_output(&input);
+        assert!(
+            result.contains("... +10 more"),
+            "Expected remote cap at 5 (15 remotes - 5 shown = 10 more), got:\n{}",
+            result
+        );
+        // Should show first 5 remote-only branches
+        assert!(result.contains("feature-0"));
+        assert!(result.contains("feature-4"));
+        // Should NOT show 6th remote
+        assert!(!result.contains("feature-5"));
     }
 }

@@ -8,6 +8,7 @@ use std::str::FromStr;
 pub enum FilterLevel {
     None,
     Minimal,
+    Smart,
     Aggressive,
 }
 
@@ -18,6 +19,7 @@ impl FromStr for FilterLevel {
         match s.to_lowercase().as_str() {
             "none" => Ok(FilterLevel::None),
             "minimal" => Ok(FilterLevel::Minimal),
+            "smart" => Ok(FilterLevel::Smart),
             "aggressive" => Ok(FilterLevel::Aggressive),
             _ => Err(format!("Unknown filter level: {}", s)),
         }
@@ -29,6 +31,7 @@ impl std::fmt::Display for FilterLevel {
         match self {
             FilterLevel::None => write!(f, "none"),
             FilterLevel::Minimal => write!(f, "minimal"),
+            FilterLevel::Smart => write!(f, "smart"),
             FilterLevel::Aggressive => write!(f, "aggressive"),
         }
     }
@@ -230,7 +233,7 @@ impl FilterStrategy for MinimalFilter {
     }
 }
 
-pub struct AggressiveFilter;
+pub struct SmartFilter;
 
 lazy_static! {
     static ref IMPORT_PATTERN: Regex =
@@ -239,7 +242,202 @@ lazy_static! {
         r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+"
     )
     .unwrap();
+    static ref TEST_PATTERN: Regex = Regex::new(
+        r"(#\[test\]|#\[cfg\(test\)\]|fn test_|def test_|it\(|test\(|describe\()"
+    )
+    .unwrap();
+    static ref DOC_COMMENT_PATTERN: Regex =
+        Regex::new(r"^(///|//!|/\*\*|#\s|##\s|\*\s|@\w+)").unwrap();
+    static ref MULTI_BLANK_SMART: Regex = Regex::new(r"\n{3,}").unwrap();
 }
+
+impl FilterStrategy for SmartFilter {
+    fn filter(&self, content: &str, lang: &Language) -> String {
+        // Data formats: delegate to MinimalFilter (no smart collapsing)
+        if *lang == Language::Data {
+            return MinimalFilter.filter(content, lang);
+        }
+
+        // Start with minimal filtering (strip comments, normalize blanks)
+        let minimal = MinimalFilter.filter(content, lang);
+        let lines: Vec<&str> = minimal.lines().collect();
+        let mut result: Vec<String> = Vec::with_capacity(lines.len());
+
+        let mut i = 0;
+        while i < lines.len() {
+            let trimmed = lines[i].trim();
+
+            // --- Collapse import blocks (>10 consecutive → keep first 5 + last 2) ---
+            if IMPORT_PATTERN.is_match(trimmed) {
+                let import_start = i;
+                while i < lines.len() {
+                    let t = lines[i].trim();
+                    if t.is_empty() || IMPORT_PATTERN.is_match(t) {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let import_end = i;
+                let import_lines: Vec<&str> = lines[import_start..import_end]
+                    .iter()
+                    .filter(|l| !l.trim().is_empty())
+                    .copied()
+                    .collect();
+
+                if import_lines.len() > 10 {
+                    for line in import_lines.iter().take(5) {
+                        result.push(line.to_string());
+                    }
+                    result.push(format!(
+                        "// ... +{} more imports",
+                        import_lines.len() - 7
+                    ));
+                    for line in import_lines.iter().skip(import_lines.len() - 2) {
+                        result.push(line.to_string());
+                    }
+                } else {
+                    for line in &import_lines {
+                        result.push(line.to_string());
+                    }
+                }
+                continue;
+            }
+
+            // --- Collapse test blocks ---
+            if TEST_PATTERN.is_match(trimmed) {
+                let test_start = i;
+                let mut test_count = 0;
+                let mut test_blocks: Vec<(usize, usize)> = Vec::new();
+
+                // Scan ahead to collect consecutive test functions
+                while i < lines.len() {
+                    let t = lines[i].trim();
+
+                    // Is this a test marker or test function start?
+                    if TEST_PATTERN.is_match(t) {
+                        test_count += 1;
+                        let block_start = i;
+                        // Find the end of this test block (track braces/indentation)
+                        let mut brace_depth = 0i32;
+                        let mut found_brace = false;
+                        i += 1;
+                        while i < lines.len() {
+                            let bt = lines[i].trim();
+                            brace_depth += bt.matches('{').count() as i32;
+                            brace_depth -= bt.matches('}').count() as i32;
+                            if bt.contains('{') {
+                                found_brace = true;
+                            }
+                            i += 1;
+                            if found_brace && brace_depth <= 0 {
+                                break;
+                            }
+                            // Python/JS: no braces, use indentation
+                            if !found_brace
+                                && i < lines.len()
+                                && !lines[i].trim().is_empty()
+                                && !lines[i].starts_with(' ')
+                                && !lines[i].starts_with('\t')
+                            {
+                                break;
+                            }
+                        }
+                        test_blocks.push((block_start, i));
+                    } else if t.is_empty() {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                if test_count > 2 {
+                    // Keep first 2 test blocks, summarize the rest
+                    for &(start, end) in test_blocks.iter().take(2) {
+                        for line in &lines[start..end] {
+                            result.push(line.to_string());
+                        }
+                    }
+                    result.push(format!(
+                        "// ... +{} more tests",
+                        test_count - 2
+                    ));
+                } else {
+                    // ≤2 tests: keep everything
+                    for line in &lines[test_start..i] {
+                        result.push(line.to_string());
+                    }
+                }
+                continue;
+            }
+
+            // --- Collapse doc-comment blocks (>15 consecutive lines) ---
+            if DOC_COMMENT_PATTERN.is_match(trimmed) {
+                let doc_start = i;
+                while i < lines.len() {
+                    let t = lines[i].trim();
+                    if t.is_empty()
+                        || DOC_COMMENT_PATTERN.is_match(t)
+                        || t == "*/"
+                        || t == "*"
+                    {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let doc_lines: Vec<&str> = lines[doc_start..i]
+                    .iter()
+                    .filter(|l| !l.trim().is_empty())
+                    .copied()
+                    .collect();
+
+                if doc_lines.len() > 15 {
+                    for line in doc_lines.iter().take(3) {
+                        result.push(line.to_string());
+                    }
+                    result.push(format!(
+                        "// ... +{} more doc lines",
+                        doc_lines.len() - 3
+                    ));
+                } else {
+                    for line in &doc_lines {
+                        result.push(line.to_string());
+                    }
+                }
+                continue;
+            }
+
+            // --- Truncate long string literals (>200 chars) ---
+            if trimmed.len() > 200 {
+                // Check if this looks like a string/array literal line
+                let has_long_string = trimmed.contains('"') && trimmed.len() > 200;
+                if has_long_string {
+                    let truncated: String = trimmed.chars().take(120).collect();
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    let prefix = &lines[i][..indent];
+                    result.push(format!(
+                        "{}{}... (line truncated, {} chars total)",
+                        prefix,
+                        truncated,
+                        trimmed.len()
+                    ));
+                    i += 1;
+                    continue;
+                }
+            }
+
+            result.push(lines[i].to_string());
+            i += 1;
+        }
+
+        // Normalize consecutive blank lines (3+ → 2)
+        let joined = result.join("\n").trim().to_string();
+        MULTI_BLANK_SMART.replace_all(&joined, "\n\n").to_string()
+    }
+}
+
+pub struct AggressiveFilter;
 
 impl FilterStrategy for AggressiveFilter {
     fn filter(&self, content: &str, lang: &Language) -> String {
@@ -316,6 +514,7 @@ pub fn get_filter(level: FilterLevel) -> Box<dyn FilterStrategy> {
     match level {
         FilterLevel::None => Box::new(NoFilter),
         FilterLevel::Minimal => Box::new(MinimalFilter),
+        FilterLevel::Smart => Box::new(SmartFilter),
         FilterLevel::Aggressive => Box::new(AggressiveFilter),
     }
 }
@@ -381,6 +580,10 @@ mod tests {
         assert_eq!(
             FilterLevel::from_str("minimal").unwrap(),
             FilterLevel::Minimal
+        );
+        assert_eq!(
+            FilterLevel::from_str("smart").unwrap(),
+            FilterLevel::Smart
         );
         assert_eq!(
             FilterLevel::from_str("aggressive").unwrap(),
@@ -478,6 +681,158 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    // --- SmartFilter tests ---
+
+    #[test]
+    fn test_smart_filter_collapses_imports() {
+        let mut code = String::new();
+        for i in 0..15 {
+            code.push_str(&format!("use crate::module{};\n", i));
+        }
+        code.push_str("\nfn main() {}\n");
+
+        let filter = SmartFilter;
+        let result = filter.filter(&code, &Language::Rust);
+        // Should have collapsed 15 imports to 5 + summary + 2
+        assert!(
+            result.contains("more imports"),
+            "Expected import collapse summary, got:\n{}",
+            result
+        );
+        // First 5 should be present
+        assert!(result.contains("use crate::module0;"));
+        assert!(result.contains("use crate::module4;"));
+        // Last 2 should be present
+        assert!(result.contains("use crate::module13;"));
+        assert!(result.contains("use crate::module14;"));
+        // Middle ones should NOT be present
+        assert!(!result.contains("use crate::module6;"));
+    }
+
+    #[test]
+    fn test_smart_filter_keeps_small_import_blocks() {
+        let code = "use std::fmt;\nuse std::io;\nuse std::fs;\n\nfn main() {}\n";
+        let filter = SmartFilter;
+        let result = filter.filter(code, &Language::Rust);
+        // Only 3 imports — should keep all
+        assert!(!result.contains("more imports"));
+        assert!(result.contains("use std::fmt;"));
+        assert!(result.contains("use std::io;"));
+        assert!(result.contains("use std::fs;"));
+    }
+
+    #[test]
+    fn test_smart_filter_collapses_tests() {
+        let code = r#"
+fn main() {}
+
+#[test]
+fn test_one() {
+    assert!(true);
+}
+
+#[test]
+fn test_two() {
+    assert!(true);
+}
+
+#[test]
+fn test_three() {
+    assert!(true);
+}
+
+#[test]
+fn test_four() {
+    assert!(true);
+}
+"#;
+        let filter = SmartFilter;
+        let result = filter.filter(code, &Language::Rust);
+        // Should keep first 2 tests, collapse the rest
+        assert!(
+            result.contains("more tests"),
+            "Expected test collapse summary, got:\n{}",
+            result
+        );
+        assert!(result.contains("fn test_one()"));
+        assert!(result.contains("fn test_two()"));
+        // test_three and test_four should be collapsed
+        assert!(!result.contains("fn test_three()"));
+    }
+
+    #[test]
+    fn test_smart_filter_truncates_long_strings() {
+        let long = format!(
+            "    let s = \"{}\";",
+            "x".repeat(250)
+        );
+        let code = format!("fn main() {{\n{}\n}}\n", long);
+        let filter = SmartFilter;
+        let result = filter.filter(&code, &Language::Rust);
+        assert!(
+            result.contains("line truncated"),
+            "Expected long string truncation, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_smart_filter_data_delegates_to_minimal() {
+        let json = r#"{"key": "value"}"#;
+        let smart = SmartFilter.filter(json, &Language::Data);
+        let minimal = MinimalFilter.filter(json, &Language::Data);
+        assert_eq!(smart, minimal);
+    }
+
+    #[test]
+    fn test_smart_filter_collapses_long_doc_comments() {
+        let mut code = String::from("fn main() {}\n\n");
+        // 20 doc-comment lines
+        for i in 0..20 {
+            code.push_str(&format!("/// Doc line {}\n", i));
+        }
+        code.push_str("fn documented() {}\n");
+
+        let filter = SmartFilter;
+        let result = filter.filter(&code, &Language::Rust);
+        assert!(
+            result.contains("more doc lines"),
+            "Expected doc-comment collapse, got:\n{}",
+            result
+        );
+        // First 3 should be kept
+        assert!(result.contains("/// Doc line 0"));
+        assert!(result.contains("/// Doc line 2"));
+        // Later ones should be collapsed
+        assert!(!result.contains("/// Doc line 10"));
+    }
+
+    #[test]
+    fn test_smart_filter_keeps_short_doc_comments() {
+        let code = "/// Short doc\n/// Second line\nfn foo() {}\n";
+        let filter = SmartFilter;
+        let result = filter.filter(code, &Language::Rust);
+        assert!(!result.contains("more doc lines"));
+        assert!(result.contains("/// Short doc"));
+        assert!(result.contains("/// Second line"));
+    }
+
+    #[test]
+    fn test_smart_filter_normalizes_blank_lines() {
+        // After stripping comments, we might end up with 3+ blank lines
+        let code = "fn a() {}\n\n\n\n\n\nfn b() {}\n";
+        let filter = SmartFilter;
+        let result = filter.filter(code, &Language::Rust);
+        // Should not have 3+ consecutive newlines
+        assert!(
+            !result.contains("\n\n\n"),
+            "Should collapse 3+ blanks, got:\n{:?}",
+            result
+        );
+        assert!(result.contains("fn a()"));
+        assert!(result.contains("fn b()"));
     }
 
     // --- truncation accuracy ---
