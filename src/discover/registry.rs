@@ -1174,12 +1174,13 @@ mod tests {
 
     #[test]
     fn test_rewrite_rtk_disabled_warns_on_stderr() {
-        // RTK_DISABLED=1 should still return None (no rewrite)
-        // and emit a warning on stderr (tested via subprocess below)
         assert_eq!(rewrite_command("RTK_DISABLED=1 git status", &[]), None);
+    }
 
+    #[test]
+    fn test_rewrite_rtk_disabled_subprocess_warns() {
         // Verify warning via subprocess when Cargo provides the current rtk binary path.
-        // Unit tests do not reliably have a fresh `target/debug/rtk`, so skip this leg
+        // Unit tests do not reliably have a fresh target/debug/rtk, so skip this leg
         // unless Cargo has wired up the executable path for the current test run.
         let Ok(rtk_bin) = std::env::var("CARGO_BIN_EXE_rtk") else {
             return;

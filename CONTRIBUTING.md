@@ -7,7 +7,7 @@
 - [Report an Issue](../../issues/new)
 - [Open Pull Requests](../../pulls)
 - [Start a Discussion](../../discussions)
-- [Technical Documentation](docs/TECHNICAL.md) — Architecture, end-to-end flow, folder map, how to write tests
+- [Technical Documentation](docs/contributing/TECHNICAL.md) — Architecture, end-to-end flow, folder map, how to write tests
 
 ---
 
@@ -203,7 +203,7 @@ your branch --> develop (review + CI + integration testing) --> version branch -
 
 Every change **must** include tests. We follow **TDD (Red-Green-Refactor)**: write a failing test first, implement the minimum to pass, then refactor.
 
-For how to write tests (fixtures, snapshots, token savings verification), see [docs/TECHNICAL.md — Testing](docs/TECHNICAL.md#testing).
+For how to write tests (fixtures, snapshots, token savings verification), see [docs/contributing/TECHNICAL.md — Testing](docs/contributing/TECHNICAL.md#testing).
 
 ### Test Types
 
@@ -242,12 +242,12 @@ Every change **must** include documentation updates. Use this table to find whic
 | New Rust filter (`src/cmds/`) | Ecosystem `README.md` (e.g., `src/cmds/git/README.md`), [README.md](README.md) command list, [CHANGELOG.md](CHANGELOG.md) |
 | New TOML filter (`src/filters/`) | [src/filters/README.md](src/filters/README.md) if naming conventions change, [README.md](README.md) command list, [CHANGELOG.md](CHANGELOG.md) |
 | New rewrite pattern | `src/discover/rules.rs` — see [Adding a New Command Filter](src/cmds/README.md#adding-a-new-command-filter) |
-| Core infrastructure (`src/core/`) | [src/core/README.md](src/core/README.md), [docs/TECHNICAL.md](docs/TECHNICAL.md) if flow changes |
+| Core infrastructure (`src/core/`) | [src/core/README.md](src/core/README.md), [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) if flow changes |
 | Hook system (`src/hooks/`) | [src/hooks/README.md](src/hooks/README.md), [hooks/README.md](hooks/README.md) for agent-facing docs |
-| Architecture or design change | [ARCHITECTURE.md](ARCHITECTURE.md), [docs/TECHNICAL.md](docs/TECHNICAL.md) |
+| Architecture or design change | [ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md), [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) |
 | Bug fix or breaking change | [CHANGELOG.md](CHANGELOG.md) |
 
-**Navigation**: [CONTRIBUTING.md](CONTRIBUTING.md) (you are here) → [docs/TECHNICAL.md](docs/TECHNICAL.md) (architecture + flow) → each folder's `README.md` (implementation details).
+**Navigation**: [CONTRIBUTING.md](CONTRIBUTING.md) (you are here) → [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) (architecture + flow) → each folder's `README.md` (implementation details).
 
 Keep documentation concise and practical -- examples over explanations.
 

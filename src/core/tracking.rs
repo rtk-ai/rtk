@@ -1290,11 +1290,11 @@ mod tests {
     fn test_custom_db_path_env() {
         use std::env;
 
-        let custom_path = "/tmp/rtk_test_custom.db";
-        env::set_var("RTK_DB_PATH", custom_path);
+        let custom_path = env::temp_dir().join("rtk_test_custom.db");
+        env::set_var("RTK_DB_PATH", &custom_path);
 
         let db_path = get_db_path().expect("Failed to get db path");
-        assert_eq!(db_path, PathBuf::from(custom_path));
+        assert_eq!(db_path, custom_path);
 
         env::remove_var("RTK_DB_PATH");
     }

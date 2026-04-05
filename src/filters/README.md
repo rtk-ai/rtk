@@ -1,6 +1,6 @@
 # Built-in Filters
 
-> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview
+> See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 
 Each `.toml` file in this directory defines one filter and its inline tests.
 Files are concatenated alphabetically by `build.rs` into a single TOML blob embedded in the binary.

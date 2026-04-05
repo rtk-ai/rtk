@@ -1,6 +1,6 @@
 # Analytics
 
-> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview
+> See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 
 ## Scope
 
