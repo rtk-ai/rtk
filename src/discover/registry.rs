@@ -96,6 +96,10 @@ pub fn classify_command(cmd: &str) -> Classification {
         return Classification::Ignored;
     }
 
+    // Strip `uv run` transparent prefix — it's a virtualenv wrapper, not a command
+    let cmd_clean = strip_uv_run_prefix(cmd_clean);
+    let cmd_clean = cmd_clean.as_ref();
+
     // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
     let cmd_normalized = strip_absolute_path(cmd_clean);
     // Strip git global options: git -C /tmp status → git status (#163)
@@ -256,6 +260,20 @@ fn strip_git_global_opts(cmd: &str) -> String {
     let after_git = &cmd[4..]; // skip "git "
     let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
     format!("git {}", stripped.trim())
+}
+
+/// Strip `uv run` transparent prefix: `uv run pytest -v` → `pytest -v`
+/// Returns a Cow to avoid allocation when no prefix is present.
+fn strip_uv_run_prefix(cmd: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(rest) = cmd.strip_prefix("uv run ") {
+        let inner = rest.trim_start();
+        if inner.is_empty() {
+            return std::borrow::Cow::Borrowed(cmd);
+        }
+        std::borrow::Cow::Owned(inner.to_string())
+    } else {
+        std::borrow::Cow::Borrowed(cmd)
+    }
 }
 
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
@@ -526,7 +544,14 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let stripped_cow = ENV_PREFIX.replace(cmd_part, "");
     let env_prefix_len = cmd_part.len() - stripped_cow.len();
     let env_prefix = &cmd_part[..env_prefix_len];
-    let cmd_clean = stripped_cow.trim();
+    let after_env = stripped_cow.trim();
+
+    // Strip `uv run` transparent prefix — preserve it for the rewritten command
+    let (uv_prefix, cmd_clean) = if let Some(rest) = after_env.strip_prefix("uv run ") {
+        ("uv run ", rest.trim_start())
+    } else {
+        ("", after_env)
+    };
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
     // #508: warn on stderr so agents learn to stop overusing it
@@ -554,9 +579,12 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
             let rewritten = if rest.is_empty() {
-                format!("{}{}{}", env_prefix, rule.rtk_cmd, redirect_suffix)
+                format!("{}{}{}{}", env_prefix, uv_prefix, rule.rtk_cmd, redirect_suffix)
             } else {
-                format!("{}{} {}{}", env_prefix, rule.rtk_cmd, rest, redirect_suffix)
+                format!(
+                    "{}{}{} {}{}",
+                    env_prefix, uv_prefix, rule.rtk_cmd, rest, redirect_suffix
+                )
             };
             return Some(rewritten);
         }
@@ -1822,6 +1850,83 @@ mod tests {
         assert_eq!(
             rewrite_command("uv pip list", &[]),
             Some("rtk pip list".into())
+        );
+    }
+
+    // --- uv run transparent prefix ---
+
+    #[test]
+    fn test_classify_uv_run_pytest() {
+        assert!(matches!(
+            classify_command("uv run pytest tests/ -v"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pytest",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_uv_run_ruff() {
+        assert!(matches!(
+            classify_command("uv run ruff check ."),
+            Classification::Supported {
+                rtk_equivalent: "rtk ruff",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_pytest() {
+        assert_eq!(
+            rewrite_command("uv run pytest tests/ -v", &[]),
+            Some("uv run rtk pytest tests/ -v".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_ruff() {
+        assert_eq!(
+            rewrite_command("uv run ruff check .", &[]),
+            Some("uv run rtk ruff check .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_mypy() {
+        assert_eq!(
+            rewrite_command("uv run mypy --strict src/", &[]),
+            Some("uv run rtk mypy --strict src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_python_m_pytest() {
+        assert_eq!(
+            rewrite_command("uv run python -m pytest tests/", &[]),
+            Some("uv run rtk pytest tests/".into())
+        );
+    }
+
+    // --- git tag ---
+
+    #[test]
+    fn test_classify_git_tag() {
+        assert!(matches!(
+            classify_command("git tag v1.0.0"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_git_tag() {
+        assert_eq!(
+            rewrite_command("git tag v1.0.0", &[]),
+            Some("rtk git tag v1.0.0".into())
         );
     }
 
