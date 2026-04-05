@@ -368,6 +368,7 @@ mod tests {
         assert!(!result.success());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_streaming_filter_drops_lines() {
         let mut cmd = Command::new("printf");
@@ -391,6 +392,7 @@ mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_run_streaming_buffered_filter() {
         let mut cmd = Command::new("printf");
