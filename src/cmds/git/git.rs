@@ -2,7 +2,7 @@
 
 use crate::core::config;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use crate::core::utils::resolved_command;
 use std::process::Stdio;
 use anyhow::{Context, Result};
 use std::ffi::OsString;

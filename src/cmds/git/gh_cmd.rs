@@ -1070,7 +1070,7 @@ fn pr_create(args: &[String], _verbose: u8) -> Result<()> {
     Ok(())
 }
 
-fn pr_merge(args: &[String], _verbose: u8) -> Result<i32> {
+fn pr_merge(args: &[String], _verbose: u8) -> Result<()> {
     // gh pr merge is a destructive action — pass through the real output
     // so the user (or AI agent) sees exactly what happened.
     run_passthrough("gh", "pr", &{
