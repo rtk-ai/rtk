@@ -860,6 +860,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        pattern: r"^ssh\s+\S+",
+        rtk_cmd: "rtk ssh",
+        rewrite_prefixes: &["ssh"],
+        category: "Infra",
+        savings_pct: 50.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[
