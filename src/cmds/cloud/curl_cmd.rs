@@ -4,6 +4,17 @@ use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
 use crate::json_cmd;
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use regex::Regex;
+
+lazy_static! {
+    static ref HTML_TAG_RE: Regex = Regex::new(r"<[^>]+>").unwrap();
+    static ref HTML_ENTITY_RE: Regex = Regex::new(r"&(amp|lt|gt|quot|nbsp|#\d+);").unwrap();
+    static ref SCRIPT_RE: Regex =
+        Regex::new(r"(?si)<script[^>]*>.*?</script>").unwrap();
+    static ref STYLE_RE: Regex =
+        Regex::new(r"(?si)<style[^>]*>.*?</style>").unwrap();
+}
 
 /// Not using run_filtered: on failure, curl can return HTML error pages (404, 500)
 /// that the JSON schema filter would mangle. The early exit skips filtering entirely.
@@ -66,15 +77,22 @@ fn filter_curl_output(output: &str) -> String {
         }
     }
 
-    // Not JSON: truncate long output
-    let lines: Vec<&str> = trimmed.lines().collect();
+    // Detect HTML and strip tags for cleaner output
+    let text = if trimmed.contains("<!DOCTYPE") || trimmed.contains("<html") || trimmed.contains("<HTML") {
+        strip_html_tags(trimmed)
+    } else {
+        trimmed.to_string()
+    };
+
+    // Truncate long output
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.len() > 30 {
         let mut result: Vec<&str> = lines[..30].to_vec();
         result.push("");
         let msg = format!(
             "... ({} more lines, {} bytes total)",
             lines.len() - 30,
-            trimmed.len()
+            text.len()
         );
         return format!("{}\n{}", result.join("\n"), msg);
     }
@@ -83,6 +101,34 @@ fn filter_curl_output(output: &str) -> String {
     lines
         .iter()
         .map(|l| truncate(l, 200))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Strip HTML tags and entities, returning only visible text content.
+fn strip_html_tags(html: &str) -> String {
+    // Remove <script> and <style> blocks entirely
+    let no_script = SCRIPT_RE.replace_all(html, "");
+    let no_style = STYLE_RE.replace_all(&no_script, "");
+    // Strip remaining tags
+    let no_tags = HTML_TAG_RE.replace_all(&no_style, " ");
+    // Decode common entities
+    let decoded = HTML_ENTITY_RE.replace_all(&no_tags, |caps: &regex::Captures| {
+        match &caps[1] {
+            "amp" => "&",
+            "lt" => "<",
+            "gt" => ">",
+            "quot" => "\"",
+            "nbsp" => " ",
+            _ => "",
+        }
+        .to_string()
+    });
+    // Collapse whitespace within lines, remove blank lines
+    decoded
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -134,5 +180,38 @@ mod tests {
         assert!(result.contains("Line 0"));
         assert!(result.contains("Line 29"));
         assert!(result.contains("more lines"));
+    }
+
+    #[test]
+    fn test_strip_html_tags_basic() {
+        let html = "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>404 Not Found</h1><p>The page was not found.</p></body></html>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("404 Not Found"));
+        assert!(result.contains("page was not found"));
+        assert!(!result.contains("<h1>"));
+        assert!(!result.contains("<p>"));
+    }
+
+    #[test]
+    fn test_strip_html_removes_script() {
+        let html = "<html><body><script>var x = 1;</script><p>visible</p></body></html>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("visible"));
+        assert!(!result.contains("var x"));
+    }
+
+    #[test]
+    fn test_filter_curl_html_response() {
+        let html = "<!DOCTYPE html><html><body><h1>Server Error</h1><p>Something went wrong</p></body></html>";
+        let result = filter_curl_output(html);
+        assert!(result.contains("Server Error"));
+        assert!(!result.contains("<h1>"));
+    }
+
+    #[test]
+    fn test_strip_html_entities() {
+        let html = "<html><body><p>A &amp; B &lt; C</p></body></html>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("A & B < C"));
     }
 }

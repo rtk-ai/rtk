@@ -156,20 +156,39 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
         return ("(empty)\n".to_string(), String::new());
     }
 
+    const MAX_LS_ENTRIES: usize = 50;
+    let total_entries = dirs.len() + files.len();
+
     let mut entries = String::new();
+    let mut shown = 0usize;
 
     // Dirs first, compact
     for d in &dirs {
+        if shown >= MAX_LS_ENTRIES {
+            break;
+        }
         entries.push_str(d);
         entries.push_str("/\n");
+        shown += 1;
     }
 
     // Files with size
     for (name, size) in &files {
+        if shown >= MAX_LS_ENTRIES {
+            break;
+        }
         entries.push_str(name);
         entries.push_str("  ");
         entries.push_str(size);
         entries.push('\n');
+        shown += 1;
+    }
+
+    if total_entries > MAX_LS_ENTRIES {
+        entries.push_str(&format!(
+            "... +{} more entries\n",
+            total_entries - MAX_LS_ENTRIES
+        ));
     }
 
     // Summary line (separate so caller can suppress when piped)
@@ -324,5 +343,39 @@ mod tests {
             "pipe should see exactly 3 lines (1 dir + 2 files), got {}",
             line_count
         );
+    }
+
+    #[test]
+    fn test_compact_ls_caps_at_50() {
+        // Generate 60 files to exceed the MAX_LS_ENTRIES cap
+        let mut input = String::from("total 1000\n");
+        for i in 0..60 {
+            input.push_str(&format!(
+                "-rw-r--r--  1 user  staff  100 Jan  1 12:00 file_{:03}.txt\n",
+                i
+            ));
+        }
+        let (entries, _summary) = compact_ls(&input, false);
+        assert!(
+            entries.contains("... +10 more entries"),
+            "should truncate at 50 entries, got:\n{}",
+            entries
+        );
+        // Should show exactly 50 file lines + 1 truncation line
+        assert_eq!(entries.lines().count(), 51);
+    }
+
+    #[test]
+    fn test_compact_ls_no_cap_under_limit() {
+        let mut input = String::from("total 100\n");
+        for i in 0..10 {
+            input.push_str(&format!(
+                "-rw-r--r--  1 user  staff  100 Jan  1 12:00 file_{}.txt\n",
+                i
+            ));
+        }
+        let (entries, _summary) = compact_ls(&input, false);
+        assert!(!entries.contains("... +"));
+        assert_eq!(entries.lines().count(), 10);
     }
 }

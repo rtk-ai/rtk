@@ -25,4 +25,19 @@ pub const NOISE_DIRS: &[&str] = &[
     ".vs",
     "*.egg-info",
     ".eggs",
+    // Build tool caches
+    ".gradle",
+    ".cargo",
+    ".npm",
+    ".yarn",
+    ".pnpm-store",
+    // Vendor directories
+    "vendor",
+    // IaC / framework caches
+    ".terraform",
+    ".angular",
+    ".svelte-kit",
+    ".nuxt",
+    // Test snapshots
+    "__snapshots__",
 ];

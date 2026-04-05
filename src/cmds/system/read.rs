@@ -1,5 +1,6 @@
 //! Reads source files with optional language-aware filtering to strip boilerplate.
 
+use crate::cmds::system::json_cmd;
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::tracking;
 use anyhow::{Context, Result};
@@ -24,6 +25,26 @@ pub fn run(
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
+    // Lockfile shortcut: show summary instead of full content
+    if is_lockfile(file) && level != FilterLevel::None {
+        let line_count = content.lines().count();
+        let size_kb = content.len() as f64 / 1024.0;
+        let summary = format!(
+            "(lockfile: {} lines, {:.1} kB — use `cat {}` for full content)",
+            line_count,
+            size_kb,
+            file.display()
+        );
+        println!("{}", summary);
+        timer.track(
+            &format!("cat {}", file.display()),
+            "rtk read",
+            &content,
+            &summary,
+        );
+        return Ok(());
+    }
+
     // Detect language from extension
     let lang = file
         .extension()
@@ -35,9 +56,22 @@ pub fn run(
         eprintln!("Detected language: {:?}", lang);
     }
 
-    // Apply filter
-    let filter = filter::get_filter(level);
-    let mut filtered = filter.filter(&content, &lang);
+    // Apply filter — for JSON files, use the compact JSON filter for better token savings
+    let is_json = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext == "json" || ext == "jsonc");
+
+    let mut filtered = if is_json && matches!(level, FilterLevel::Minimal | FilterLevel::Smart) {
+        json_cmd::filter_json_compact(&content, 10).unwrap_or_else(|_| {
+            // If JSON parsing fails, fall back to generic filter
+            let filter = filter::get_filter(level);
+            filter.filter(&content, &lang)
+        })
+    } else {
+        let filter = filter::get_filter(level);
+        filter.filter(&content, &lang)
+    };
 
     // Safety: if filter emptied a non-empty file, fall back to raw content
     if filtered.trim().is_empty() && !content.trim().is_empty() {
@@ -176,6 +210,31 @@ fn apply_line_window(
     content.to_string()
 }
 
+/// Detect common lockfile names by filename (not just extension).
+fn is_lockfile(path: &Path) -> bool {
+    const LOCKFILE_NAMES: &[&str] = &[
+        "Cargo.lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "Gemfile.lock",
+        "Pipfile.lock",
+        "poetry.lock",
+        "composer.lock",
+        "go.sum",
+        "flake.lock",
+        "packages.lock.json",
+        "pdm.lock",
+        "uv.lock",
+        "bun.lockb",
+    ];
+    let name = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+    LOCKFILE_NAMES.contains(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,10 +279,90 @@ fn main() {{
     }
 
     #[test]
+    fn test_read_json_uses_compact_filter() -> Result<()> {
+        let mut file = NamedTempFile::with_suffix(".json")?;
+        // Write a JSON with a large array (>5 items) to trigger compact truncation
+        writeln!(
+            file,
+            r#"{{"items": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "name": "test"}}"#
+        )?;
+        // Should not panic and should use compact JSON filter
+        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_json_compact_truncates_arrays() {
+        let json = r#"{"items": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}"#;
+        let result = json_cmd::filter_json_compact(json, 10).unwrap();
+        // Array with 10 items should be truncated (>5 items triggers summary)
+        assert!(
+            result.contains("more"),
+            "Expected array truncation, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
     fn test_apply_line_window_max_lines_still_works() {
         let input = "a\nb\nc\nd\n";
         let output = apply_line_window(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_is_lockfile_known_names() {
+        for name in [
+            "Cargo.lock",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "Gemfile.lock",
+            "poetry.lock",
+            "go.sum",
+            "uv.lock",
+        ] {
+            assert!(
+                is_lockfile(Path::new(name)),
+                "{} should be detected as lockfile",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_lockfile_non_lockfile() {
+        for name in ["Cargo.toml", "package.json", "main.rs", "go.mod"] {
+            assert!(
+                !is_lockfile(Path::new(name)),
+                "{} should NOT be a lockfile",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_lockfile_shows_summary() -> Result<()> {
+        // Create a fake lockfile with many lines
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("Cargo.lock");
+        let content = "line\n".repeat(500);
+        fs::write(&lock_path, &content)?;
+
+        // With Minimal filter, lockfile should produce summary
+        run(&lock_path, FilterLevel::Minimal, None, None, false, 0)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_lockfile_none_filter_shows_full() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("Cargo.lock");
+        fs::write(&lock_path, "line1\nline2\n")?;
+
+        // With None filter, lockfile should show full content
+        run(&lock_path, FilterLevel::None, None, None, false, 0)?;
+        Ok(())
     }
 }

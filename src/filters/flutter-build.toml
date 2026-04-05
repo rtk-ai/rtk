@@ -1,0 +1,46 @@
+[filters.flutter-build]
+description = "Compact flutter build output — strip download progress and verbose compilation lines"
+match_command = "^flutter\\s+(build|run)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Downloading ",
+  "^\\s*\\[\\s*\\d+ms\\]",
+  "^Running Gradle task",
+  "^✓\\s+Built ",
+  "^\\s*Compiling, linking",
+  "^\\s*\\[\\s*\\+\\d+\\s*ms\\]",
+  "^\\s*Resolving dependencies",
+  "^\\s*Got dependencies",
+]
+match_output = [
+  { pattern = "Built build/", message = "ok (built)", unless = "Error|FAILURE|error:" },
+]
+max_lines = 30
+
+[[tests.flutter-build]]
+name = "successful build short-circuits"
+input = """
+Running Gradle task 'assembleRelease'...
+Resolving dependencies...
+Got dependencies!
+Compiling, linking and signing...
+Built build/app/outputs/flutter-apk/app-release.apk (18.2MB)
+"""
+expected = "ok (built)"
+
+[[tests.flutter-build]]
+name = "strips download and progress lines"
+input = """
+Downloading Material fonts...
+Downloading Gradle Wrapper...
+[   +8 ms] executing: /usr/bin/xcode-select --print-path
+[  +37 ms] Exit code 0 from: /usr/bin/xcode-select --print-path
+Running Gradle task 'assembleDebug'...
+Resolving dependencies...
+Got dependencies!
+Launching lib/main.dart on iPhone 15 in debug mode...
+Xcode build done.                                            8.3s
+Syncing files to device iPhone 15...
+"""
+expected = "Launching lib/main.dart on iPhone 15 in debug mode...\nXcode build done.                                            8.3s\nSyncing files to device iPhone 15..."
