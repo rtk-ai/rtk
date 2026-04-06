@@ -306,9 +306,42 @@ fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     Ok((hook_dir, hook_path))
 }
 
-/// Write hook file if missing or outdated, return true if changed
-#[cfg(unix)]
-fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
+/// Checks if the hook exists and is executable.
+/// On Windows, it check if the file exists.
+pub fn is_hook_installed(verbose: u8) -> bool {
+    let hook_path = match prepare_hook_paths() {
+        Ok((_, path)) => path,
+        Err(_) => return false,
+    };
+
+    if !hook_path.exists() {
+        if verbose > 1 {
+            eprintln!("Hook missing: {}", hook_path.display());
+        }
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(&hook_path) {
+            let is_exe = metadata.permissions().mode() & 0o111 != 0;
+            if !is_exe {
+                if verbose > 1 {
+                    eprintln!("Hook not executable: {}", hook_path.display());
+                }
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Write hook file if missing or outdated, return true if changed.
+/// On Windows, this still writes the bash script, as Claude Code
+/// on Windows often runs in a bash-like environment or uses bash for tools.
+pub fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
     let changed = if hook_path.exists() {
         let existing = fs::read_to_string(hook_path)
             .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
@@ -335,10 +368,13 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
         true
     };
 
-    // Set executable permissions
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    #[cfg(unix)]
+    {
+        // Set executable permissions on Unix
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
 
     // Store SHA-256 hash for runtime integrity verification.
     // Always store (idempotent) to ensure baseline exists even for
@@ -702,9 +738,18 @@ fn patch_settings_json(
 ) -> Result<PatchResult> {
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
-    let hook_command = hook_path
-        .to_str()
-        .context("Hook path contains invalid UTF-8")?;
+
+    let hook_command = if cfg!(windows) {
+        // On Windows, Claude Code expects a command it can execute.
+        // Even though it's a bash script, Claude Code on Windows often uses bash for executing tools.
+        // We use forward slashes for the path to the hook script.
+        format!("bash \"{}\"", hook_path.to_string_lossy().replace('\\', "/"))
+    } else {
+        hook_path
+            .to_str()
+            .context("Hook path contains invalid UTF-8")?
+            .to_string()
+    };
 
     // Read or create settings.json
     let mut root = if settings_path.exists() {
@@ -722,7 +767,7 @@ fn patch_settings_json(
     };
 
     // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    if hook_already_present(&root, &hook_command) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -747,7 +792,7 @@ fn patch_settings_json(
     }
 
     // Deep-merge hook
-    insert_hook_entry(&mut root, hook_command);
+    insert_hook_entry(&mut root, &hook_command);
 
     // Backup original
     if settings_path.exists() {
@@ -870,20 +915,6 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
-#[cfg(not(unix))]
-fn run_default_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    eprintln!("[warn] Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose, _install_opencode)
-}
-
-#[cfg(unix)]
 fn run_default_mode(
     global: bool,
     patch_mode: PatchMode,
@@ -895,6 +926,16 @@ fn run_default_mode(
         run_claude_md_mode(false, verbose, install_opencode)?;
         generate_project_filters_template(verbose)?;
         return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On Windows, the hook must be invoked by a shell that Claude Code understands.
+        // We use the bash-based hook even on Windows because Claude Code's shell-exec 
+        // usually provides a bash-like environment or uses bash for tools.
+        if verbose > 0 {
+            eprintln!("[info] Installing Bash-based hook for Windows.");
+        }
     }
 
     let claude_dir = resolve_claude_dir()?;
@@ -938,7 +979,7 @@ fn run_default_mode(
         println!("              replaced with @RTK.md (10 lines)");
     }
 
-    // 5. Patch settings.json
+    // 5. Patch settings.json (use bash explicitly on Windows)
     let patch_result = patch_settings_json(&hook_path, patch_mode, verbose, install_opencode)?;
 
     // Report result
@@ -1017,17 +1058,6 @@ fn generate_global_filters_template(verbose: u8) -> Result<()> {
 }
 
 /// Hook-only mode: just the hook, no RTK.md
-#[cfg(not(unix))]
-fn run_hook_only_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
-}
-
-#[cfg(unix)]
 fn run_hook_only_mode(
     global: bool,
     patch_mode: PatchMode,
@@ -1038,6 +1068,13 @@ fn run_hook_only_mode(
         eprintln!("[warn] Warning: --hook-only only makes sense with --global");
         eprintln!("    For local projects, use default mode or --claude-md");
         return Ok(());
+    }
+
+    #[cfg(not(unix))]
+    {
+        if verbose > 0 {
+            eprintln!("[info] Installing Bash-based hook for Windows.");
+        }
     }
 
     // Prepare and install hook
