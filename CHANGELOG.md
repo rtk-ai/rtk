@@ -5,6 +5,45 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.0](https://github.com/rtk-ai/rtk/compare/v0.34.3...v0.35.0) (2026-04-06)
+
+
+### Features
+
+* **aws:** expand CLI filters from 8 to 25 subcommands ([402c48e](https://github.com/rtk-ai/rtk/commit/402c48e66988e638a5b4f4dd193238fc1d0fe18f))
+
+
+### Bug Fixes
+
+* **cmd:** read/cat multiple file and consistent behavior ([3f58018](https://github.com/rtk-ai/rtk/commit/3f58018f4af1d7206457929cf80bb4534203c3ee))
+* **docs:** clean some docs + disclaimer ([deda44f](https://github.com/rtk-ai/rtk/commit/deda44f73607981f3d27ecc6341ce927aab34d37))
+* **gh:** pass through gh pr merge instead of canned response ([#938](https://github.com/rtk-ai/rtk/issues/938)) ([8465ca9](https://github.com/rtk-ai/rtk/commit/8465ca953fa9d70dcc971a941c19465d456eb7d4))
+* **gh:** pass through gh pr merge instead of canned response ([#938](https://github.com/rtk-ai/rtk/issues/938)) ([e1f2845](https://github.com/rtk-ai/rtk/commit/e1f2845df06a8d8b8325945dc4940ec5f530e4cc))
+* **git:** inherit stdin for commit and push to preserve SSH signing ([#733](https://github.com/rtk-ai/rtk/issues/733)) ([eefeae4](https://github.com/rtk-ai/rtk/commit/eefeae45656ff2607c3f519c8eae235e3f0fe411))
+* **git:** inherit stdin for commit and push to preserve SSH signing ([#733](https://github.com/rtk-ai/rtk/issues/733)) ([6cee6c6](https://github.com/rtk-ai/rtk/commit/6cee6c60b80f914ed9505e3925d85cadec43ab97))
+* **git:** preserve full diff hunk headers ([62f4452](https://github.com/rtk-ai/rtk/commit/62f445227679f3df293fe35e9b18cc5ab39d7963))
+* **git:** preserve full diff hunk headers ([09b3ff9](https://github.com/rtk-ai/rtk/commit/09b3ff9424e055f5fe25e535e5b60e077f8344f9))
+* **go:** avoid false build errors from download logs ([9c1cf2f](https://github.com/rtk-ai/rtk/commit/9c1cf2f403534fa7874638b1b983c2d7f918a185))
+* **go:** avoid false build errors from download logs ([d44fd3e](https://github.com/rtk-ai/rtk/commit/d44fd3e034208e3bcd59c2c46f7720eec4f10c98))
+* **go:** cover more build failure shapes ([2425ad6](https://github.com/rtk-ai/rtk/commit/2425ad68e5386d19e5ec9ff1ca151a6d2c9a56d3))
+* **go:** preserve failing test location context ([1481bc5](https://github.com/rtk-ai/rtk/commit/1481bc590924031456a6022510275c29c09e330e))
+* **go:** preserve failing test location context ([374fe64](https://github.com/rtk-ai/rtk/commit/374fe64cfbedcd676733973e81a63a6dfecbb1b7))
+* **go:** restore build error coverage ([1177c9c](https://github.com/rtk-ai/rtk/commit/1177c9c873ac63b6c0bcc9e1b664a705baa0ad7a))
+* **grep:** close subprocess stdin to prevent memory leak ([#897](https://github.com/rtk-ai/rtk/issues/897)) ([7217562](https://github.com/rtk-ai/rtk/commit/72175623551f40b581b4a7f6ed966c1e4a9c7358))
+* **grep:** close subprocess stdin to prevent memory leak ([#897](https://github.com/rtk-ai/rtk/issues/897)) ([09979cf](https://github.com/rtk-ai/rtk/commit/09979cf29701a1b775bcac761d24ec0e055d1bec))
+* **hook_check:** detect missing integrations ([9cf9ccc](https://github.com/rtk-ai/rtk/commit/9cf9ccc1ac39f8bba37e932c7d318a3aa7a34ae9))
+* **init:** remove opt-out instruction from telemetry message ([7571c8e](https://github.com/rtk-ai/rtk/commit/7571c8e101c41ee64c51e2bd64697f85f9142423))
+* **init:** remove telemetry info lines from init output ([7dbef2c](https://github.com/rtk-ai/rtk/commit/7dbef2ce00824d26f2057e4c3c76e429e2e23088))
+* **main:** kill zombie processes + path for rtk md ([d16fc6d](https://github.com/rtk-ai/rtk/commit/d16fc6dacbfec912c21522939b15b7bbd9719487))
+* **main:** kill zombie processes + path for rtk md + missing intergrations ([a919335](https://github.com/rtk-ai/rtk/commit/a919335519ed4a5259a212e56407cb312aa99bac))
+* **merge:** changelog conflicts ([d92c5d2](https://github.com/rtk-ai/rtk/commit/d92c5d264a49483c8d6079e04d946a79bc990a74))
+* **proxy:** kill child process on SIGINT/SIGTERM to prevent orphans ([d813919](https://github.com/rtk-ai/rtk/commit/d813919a24546e044e7844fc7ed05fef4ec24033))
+* **proxy:** kill child process on SIGINT/SIGTERM to prevent orphans ([3318510](https://github.com/rtk-ai/rtk/commit/33185101fc122d0c11a25a4e02ac9f3a7dc7e3bb))
+* **review:** address ChildGuard disarm, stdin dedup, hook masking ([d85fe33](https://github.com/rtk-ai/rtk/commit/d85fe3384b87c16fafd25ec7bcadbff6e69f3f1f))
+* **security:** default to ask when no permission rule matches ([#886](https://github.com/rtk-ai/rtk/issues/886)) ([158c745](https://github.com/rtk-ai/rtk/commit/158c74527f6591d372e40a78cd604d73a20649a9))
+* **security:** default to ask when no permission rule matches ([#886](https://github.com/rtk-ai/rtk/issues/886)) ([41a6c6b](https://github.com/rtk-ai/rtk/commit/41a6c6bf6da78a4754794fdc6a1469df2e327920))
+* **tracking:** use std::env::temp_dir() for compatibility (instead of unix tmp) ([e918661](https://github.com/rtk-ai/rtk/commit/e918661440d7b50321f0535032f52c5e87aaf3cb))
+
 ## [Unreleased]
 
 ### Features
