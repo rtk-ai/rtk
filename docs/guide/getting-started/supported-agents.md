@@ -7,7 +7,7 @@ sidebar:
 
 # Supported Agents
 
-RTK supports 9 AI coding agents across 3 integration tiers.
+RTK supports 10 AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
 
 ## How it works
 
@@ -29,14 +29,16 @@ Agent runs "cargo test"
 | Agent | Integration tier | Can rewrite transparently? |
 |-------|-----------------|---------------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Yes |
-| VS Code Copilot Chat | Rust binary | Yes |
-| GitHub Copilot CLI | Rust binary (deny-with-suggestion) | No (agent retries) |
+| VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
+| GitHub Copilot CLI | Shell hook (deny-with-suggestion) | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Yes |
-| Gemini CLI | Rust binary | Yes |
+| Gemini CLI | Rust binary (`BeforeTool`) | Yes |
+| OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
+| OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
-| OpenCode | TypeScript plugin | Yes |
+| Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
 
@@ -78,7 +80,15 @@ rtk init --global --gemini
 rtk init --global --opencode
 ```
 
-Restart OpenCode. The plugin uses the `tool.execute.before` event.
+Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+
+### OpenClaw
+
+```bash
+openclaw plugins install ./openclaw
+```
+
+Plugin in the `openclaw/` directory. Uses the `before_tool_call` hook, delegates to `rtk rewrite`.
 
 ### Cline / Roo Code
 
@@ -99,6 +109,10 @@ rtk init --windsurf    # creates .windsurfrules in current project
 ```bash
 rtk init --codex    # creates AGENTS.md or patches existing one
 ```
+
+### Mistral Vibe (planned)
+
+Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
 
 ## Integration tiers explained
 

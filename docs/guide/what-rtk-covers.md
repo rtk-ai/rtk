@@ -113,6 +113,8 @@ Once RTK is installed with a hook, these commands are automatically intercepted 
 | `grep` | 70% | Truncated lines, grouped by file |
 | `diff` | 65% | Context reduced |
 | `wc` | 60% | Compact counts |
+| `cat` / `head` / `tail <file>` | 60-80% | Smart file reading via `rtk read` |
+| `rtk smart <file>` | 85% | 2-line heuristic code summary (signatures only) |
 
 ## Cloud and Data
 
@@ -121,6 +123,24 @@ Once RTK is installed with a hook, these commands are automatically intercepted 
 | `aws` | 70% | JSON condensed, relevant fields only |
 | `psql` | 65% | Query results without decoration |
 | `curl` | 60% | Response body only, headers stripped |
+
+## Global flags
+
+These flags apply to all RTK commands and can push savings even higher:
+
+| Flag | Description |
+|------|-------------|
+| `-u` / `--ultra-compact` | ASCII icons, inline format — extra token reduction on top of normal filtering |
+| `-v` / `--verbose` | Show filtering details on stderr (`-v`, `-vv`, `-vvv` for increasing detail) |
+
+```bash
+# Ultra-compact: even smaller output
+git log          # → already filtered by RTK
+git log -u       # → ultra-compact variant (if using rtk directly)
+
+# Debug: see what RTK is doing
+RTK_DISABLED=0 git status -vvv
+```
 
 ## Commands that are not rewritten
 

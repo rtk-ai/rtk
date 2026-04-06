@@ -92,12 +92,12 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 
 | Command | Typical savings | Mechanism |
 |---------|----------------|-----------|
-| `rtk git status` | 77-93% | Compact stat format |
-| `rtk eslint` | 84% | Group by rule |
-| `rtk vitest run` | 94-99% | Show failures only |
-| `rtk find` | 75% | Tree format |
-| `rtk pnpm list` | 70-90% | Compact dependencies |
-| `rtk grep` | 70% | Truncate + group |
+| `git status` | 77-93% | Compact stat format |
+| `eslint` | 84% | Group by rule |
+| `vitest run` | 94-99% | Show failures only |
+| `find` | 75% | Tree format |
+| `pnpm list` | 70-90% | Compact dependencies |
+| `grep` | 70% | Truncate + group |
 
 ## How token estimation works
 
@@ -131,19 +131,63 @@ cp ~/.local/share/rtk/history.db ~/backups/rtk-history-$(date +%Y%m%d).db
 rm ~/.local/share/rtk/history.db    # recreated on next command
 ```
 
+## Analysis workflows
+
+```bash
+# Weekly progress: generate a CSV report every Monday
+rtk gain --weekly --format csv > reports/week-$(date +%Y-%W).csv
+
+# Monthly budget review
+rtk gain --monthly --format json | jq '.monthly[] |
+  {month, saved_tokens, quota_pct: (.saved_tokens / 6000000 * 100)}'
+
+# Cron: daily JSON snapshot for a dashboard
+0 0 * * * rtk gain --all --format json > /var/www/dashboard/rtk-stats.json
+```
+
+**Python/pandas:**
+```python
+import pandas as pd
+import subprocess
+
+result = subprocess.run(['rtk', 'gain', '--all', '--format', 'csv'],
+                       capture_output=True, text=True)
+lines = result.stdout.split('\n')
+daily_start = lines.index('# Daily Data') + 2
+daily_end = lines.index('', daily_start)
+daily_df = pd.read_csv(pd.StringIO('\n'.join(lines[daily_start:daily_end])))
+daily_df['date'] = pd.to_datetime(daily_df['date'])
+daily_df.plot(x='date', y='savings_pct', kind='line')
+```
+
+**GitHub Actions (weekly stats):**
+```yaml
+on:
+  schedule:
+    - cron: '0 0 * * 1'
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - run: cargo install rtk
+      - run: rtk gain --weekly --format json > stats/week-$(date +%Y-%W).json
+      - run: git add stats/ && git commit -m "Weekly rtk stats" && git push
+```
+
 ## Troubleshooting
 
 **No data showing:**
 ```bash
 ls -lh ~/.local/share/rtk/history.db
 sqlite3 ~/.local/share/rtk/history.db "SELECT COUNT(*) FROM commands"
-rtk git status    # run a tracked command to generate data
+git status    # run any tracked command to generate data
 ```
 
 **Incorrect statistics:** Token estimation is a heuristic. For precise counts, use `tiktoken`:
 ```bash
 pip install tiktoken
-rtk git status > output.txt
+git status > output.txt
 python -c "
 import tiktoken
 enc = tiktoken.get_encoding('cl100k_base')

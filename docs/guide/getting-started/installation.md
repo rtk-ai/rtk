@@ -71,3 +71,11 @@ For a global install that patches `settings.json` automatically:
 ```bash
 rtk init --global
 ```
+
+## Uninstall
+
+```bash
+rtk init -g --uninstall    # remove hook, RTK.md, and settings.json entry
+cargo uninstall rtk         # remove binary (if installed via Cargo)
+brew uninstall rtk          # remove binary (if installed via Homebrew)
+```

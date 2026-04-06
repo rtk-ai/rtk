@@ -32,33 +32,21 @@ cd /your/project && rtk init
 
 This installs the hook that automatically rewrites commands. Restart your AI assistant after this step.
 
-## Step 2: Run your first RTK commands
+## Step 2: Use your tools normally
 
-You can use RTK directly or let the hook rewrite commands transparently.
+Once the hook is installed, nothing changes in how you work. Your AI assistant runs commands as usual — the hook intercepts them transparently and rewrites them before execution.
 
-```bash
-# Git — compact status and log
-rtk git status
-rtk git log -10
+For example, when Claude Code runs `cargo test`, the hook rewrites it to `rtk cargo test` before it executes. The LLM receives filtered output with only the failures — not 500 lines of passing tests. You never see or type `rtk`.
 
-# Rust — build and test with failures only
-rtk cargo build
-rtk cargo test
-
-# JavaScript — type errors grouped by file
-rtk tsc
-rtk vitest run
-```
+Supported ecosystems: Git, Cargo/Rust, JavaScript (vitest, tsc, eslint, pnpm, Next.js, Prisma), Python, Go, Ruby, .NET, Docker/Kubernetes, GitHub CLI, and more. See [What RTK Optimizes](../what-rtk-covers.md) for the full list.
 
 ## Step 3: Check your savings
 
-After a few commands, see how much you saved:
+After a few commands, see how much was saved:
 
 ```bash
 rtk gain
 ```
-
-Output:
 
 ```
 Total commands : 12
@@ -67,22 +55,16 @@ Output tokens  : 4,890
 Saved          : 40,340  (89.2%)
 ```
 
-## Step 4: Use the proxy for unsupported commands
+## Step 4: Unsupported commands
 
-Any command RTK doesn't know about runs through passthrough — the output is unchanged but usage is tracked:
+Commands RTK doesn't recognize run through passthrough — output is unchanged, usage is tracked:
 
 ```bash
 rtk proxy make install
 ```
 
-## What the hook does
-
-Once installed, the hook intercepts every command your AI assistant runs and rewrites it transparently. You don't need to type `rtk` — the hook does it automatically.
-
-For example, when Claude Code executes `cargo test`, the hook rewrites it to `rtk cargo test` before it runs. The filtered output is what the LLM sees.
-
 ## Next steps
 
+- [What RTK Optimizes](../what-rtk-covers.md) — all supported commands and savings by ecosystem
 - [Supported agents](./supported-agents.md) — Claude Code, Cursor, Copilot, and more
-- [Commands](../commands/git.md) — full reference for each ecosystem
-- [Configuration](../configuration.md) — customize RTK behavior
+- [Configuration](./configuration.md) — customize RTK behavior
