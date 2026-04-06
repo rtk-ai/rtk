@@ -17,8 +17,8 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">Website</a> &bull;
   <a href="#installation">Install</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> &bull;
-  <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">Troubleshooting</a> &bull;
+  <a href="ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -313,152 +313,31 @@ RTK supports 10 AI coding tools. Each integration transparently rewrites shell c
 | Tool | Install | Method |
 |------|---------|--------|
 | **Claude Code** | `rtk init -g` | PreToolUse hook (bash) |
-| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook (`rtk hook copilot`) — transparent rewrite |
+| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
-| **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook (`rtk hook gemini`) |
+| **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
-| **Mistral Vibe** | Planned (#800) | Blocked on upstream BeforeToolCallback |
+| **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
 
-### Claude Code (default)
-
-```bash
-rtk init -g                 # Install hook + RTK.md
-rtk init -g --auto-patch    # Non-interactive (CI/CD)
-rtk init --show             # Verify installation
-rtk init -g --uninstall     # Remove
-```
-
-### GitHub Copilot (VS Code + CLI)
-
-```bash
-rtk init -g --copilot         # Install hook + instructions
-```
-
-Creates `.github/hooks/rtk-rewrite.json` (PreToolUse hook) and `.github/copilot-instructions.md` (prompt-level awareness).
-
-The hook (`rtk hook copilot`) auto-detects the format:
-- **VS Code Copilot Chat**: transparent rewrite via `updatedInput` (same as Claude Code)
-- **Copilot CLI**: deny-with-suggestion (CLI does not support `updatedInput` yet — see [copilot-cli#2013](https://github.com/github/copilot-cli/issues/2013))
-
-### Cursor
-
-```bash
-rtk init -g --agent cursor
-```
-
-Creates `~/.cursor/hooks/rtk-rewrite.sh` + patches `~/.cursor/hooks.json` with preToolUse matcher. Works with both Cursor editor and `cursor-agent` CLI.
-
-### Gemini CLI
-
-```bash
-rtk init -g --gemini
-rtk init -g --gemini --uninstall
-```
-
-Creates `~/.gemini/hooks/rtk-hook-gemini.sh` + patches `~/.gemini/settings.json` with BeforeTool hook.
-
-### Codex (OpenAI)
-
-```bash
-rtk init -g --codex
-```
-
-Creates `~/.codex/RTK.md` + `~/.codex/AGENTS.md` with `@RTK.md` reference. Codex reads these as global instructions.
-
-### Windsurf
-
-```bash
-rtk init --agent windsurf
-```
-
-Creates `.windsurfrules` in the current project. Cascade reads rules and prefixes commands with `rtk`.
-
-### Cline / Roo Code
-
-```bash
-rtk init --agent cline
-```
-
-Creates `.clinerules` in the current project. Cline reads rules and prefixes commands with `rtk`.
-
-### OpenCode
-
-```bash
-rtk init -g --opencode
-```
-
-Creates `~/.config/opencode/plugins/rtk.ts`. Uses `tool.execute.before` hook.
-
-### OpenClaw
-
-```bash
-openclaw plugins install ./openclaw
-```
-
-Plugin in `openclaw/` directory. Uses `before_tool_call` hook, delegates to `rtk rewrite`.
-
-### Mistral Vibe (planned)
-
-Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531), [PR #533](https://github.com/mistralai/mistral-vibe/pull/533)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
-
-### Commands Rewritten
-
-| Raw Command | Rewritten To |
-|-------------|-------------|
-| `git status/diff/log/add/commit/push/pull` | `rtk git ...` |
-| `gh pr/issue/run` | `rtk gh ...` |
-| `cargo test/build/clippy` | `rtk cargo ...` |
-| `cat/head/tail <file>` | `rtk read <file>` |
-| `rg/grep <pattern>` | `rtk grep <pattern>` |
-| `ls` | `rtk ls` |
-| `vitest/jest` | `rtk vitest run` |
-| `tsc` | `rtk tsc` |
-| `eslint/biome` | `rtk lint` |
-| `prettier` | `rtk prettier` |
-| `playwright` | `rtk playwright` |
-| `prisma` | `rtk prisma` |
-| `ruff check/format` | `rtk ruff ...` |
-| `pytest` | `rtk pytest` |
-| `pip list/install` | `rtk pip ...` |
-| `go test/build/vet` | `rtk go ...` |
-| `golangci-lint` | `rtk golangci-lint` |
-| `rake test` / `rails test` | `rtk rake test` |
-| `rspec` / `bundle exec rspec` | `rtk rspec` |
-| `rubocop` / `bundle exec rubocop` | `rtk rubocop` |
-| `bundle install/update` | `rtk bundle ...` |
-| `aws sts/ec2/lambda/...` | `rtk aws ...` |
-| `docker ps/images/logs` | `rtk docker ...` |
-| `kubectl get/logs` | `rtk kubectl ...` |
-| `curl` | `rtk curl` |
-| `pnpm list/outdated` | `rtk pnpm ...` |
-
-Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
+For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents).
 
 ## Configuration
-
-### Config File
 
 `~/.config/rtk/config.toml` (macOS: `~/Library/Application Support/rtk/config.toml`):
 
 ```toml
-[tracking]
-database_path = "/path/to/custom.db"  # default: ~/.local/share/rtk/history.db
-
 [hooks]
 exclude_commands = ["curl", "playwright"]  # skip rewrite for these
 
 [tee]
 enabled = true          # save raw output on failure (default: true)
 mode = "failures"       # "failures", "always", or "never"
-max_files = 20          # rotation limit
 ```
-
-### Tee: Full Output Recovery
 
 When a command fails, RTK saves the full unfiltered output so the LLM can read it without re-executing:
 
@@ -466,6 +345,8 @@ When a command fails, RTK saves the full unfiltered output so the LLM can read i
 FAILED: 2/15 tests
 [full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
 ```
+
+For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://www.rtk-ai.app/guide/getting-started/configuration).
 
 ### Uninstall
 
@@ -477,11 +358,11 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Documentation
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Fix common issues
-- **[INSTALL.md](INSTALL.md)** - Detailed installation guide
-- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Technical architecture
-- **[SECURITY.md](SECURITY.md)** - Security policy and PR review process
-- **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
+- **[rtk-ai.app/guide](https://www.rtk-ai.app/guide)** — full user guide (installation, supported agents, what gets optimized, analytics, configuration, troubleshooting)
+- **[INSTALL.md](INSTALL.md)** — detailed installation reference
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design and technical decisions
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — contribution guide
+- **[SECURITY.md](SECURITY.md)** — security policy
 
 ## Privacy & Telemetry
 
