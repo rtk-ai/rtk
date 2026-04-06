@@ -139,7 +139,10 @@ fn extract_imports(content: &str, lang: &Language) -> Vec<String> {
         _ => return Vec::new(),
     };
 
-    let re = Regex::new(pattern).unwrap();
+    let re = match Regex::new(pattern) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
     let mut imports = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -178,7 +181,10 @@ fn extract_functions(content: &str, lang: &Language) -> Vec<String> {
         _ => return Vec::new(),
     };
 
-    let re = Regex::new(pattern).unwrap();
+    let re = match Regex::new(pattern) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
     let mut functions = Vec::new();
 
     for line in content.lines() {
@@ -205,7 +211,10 @@ fn extract_structs(content: &str, lang: &Language) -> Vec<String> {
         _ => return Vec::new(),
     };
 
-    let re = Regex::new(pattern).unwrap();
+    let re = match Regex::new(pattern) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
     re.captures_iter(content)
         .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
         .take(10)
@@ -219,7 +228,10 @@ fn extract_traits(content: &str, lang: &Language) -> Vec<String> {
         _ => return Vec::new(),
     };
 
-    let re = Regex::new(pattern).unwrap();
+    let re = match Regex::new(pattern) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
     re.captures_iter(content)
         .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
         .take(5)

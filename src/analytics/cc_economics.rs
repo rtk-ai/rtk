@@ -384,12 +384,14 @@ fn compute_totals(periods: &[PeriodEconomics]) -> Totals {
 
     // Compute global dual metrics (legacy)
     if totals.cc_total_tokens > 0 {
-        totals.blended_cpt = Some(totals.cc_cost / totals.cc_total_tokens as f64);
-        totals.savings_blended = Some(totals.rtk_saved_tokens as f64 * totals.blended_cpt.unwrap());
+        let blended = totals.cc_cost / totals.cc_total_tokens as f64;
+        totals.blended_cpt = Some(blended);
+        totals.savings_blended = Some(totals.rtk_saved_tokens as f64 * blended);
     }
     if totals.cc_active_tokens > 0 {
-        totals.active_cpt = Some(totals.cc_cost / totals.cc_active_tokens as f64);
-        totals.savings_active = Some(totals.rtk_saved_tokens as f64 * totals.active_cpt.unwrap());
+        let active = totals.cc_cost / totals.cc_active_tokens as f64;
+        totals.active_cpt = Some(active);
+        totals.savings_active = Some(totals.rtk_saved_tokens as f64 * active);
     }
 
     totals

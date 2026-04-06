@@ -678,6 +678,19 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Check if a command has an RTK equivalent and print the suggestion
+    ///
+    /// Exits 0 and prints the rewritten command if supported.
+    /// Exits 1 with no output if the command has no RTK equivalent.
+    ///
+    /// Used by the suggest hook to avoid duplicating rewrite logic in bash:
+    ///   SUGGESTION=$(rtk suggest "$CMD") || exit 0
+    Suggest {
+        /// Raw command to check (e.g. "git status", "cargo test")
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, etc.)
     Hook {
         #[command(subcommand)]
@@ -1945,6 +1958,12 @@ fn run_cli() -> Result<i32> {
         Commands::Rewrite { args } => {
             let cmd = args.join(" ");
             hooks::rewrite_cmd::run(&cmd)?;
+            0
+        }
+
+        Commands::Suggest { args } => {
+            let cmd = args.join(" ");
+            hooks::suggest_cmd::run(&cmd)?;
             0
         }
 

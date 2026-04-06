@@ -345,6 +345,38 @@ pub fn run(
         println!("+{} more", total_files - shown);
     }
 
+    // Repeated-filename summary: group files with the same name across ≥3 dirs
+    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+    for file in &files {
+        let p = Path::new(file);
+        let name = p
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let dir = p
+            .parent()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        by_name.entry(name).or_default().push(dir);
+    }
+
+    let mut frequent: Vec<(String, usize)> = by_name
+        .iter()
+        .filter(|(_, dirs)| dirs.len() >= 3)
+        .map(|(name, dirs)| (name.clone(), dirs.len()))
+        .collect();
+    frequent.sort_by(|a, b| b.1.cmp(&a.1));
+
+    if !frequent.is_empty() {
+        println!();
+        let summary: Vec<String> = frequent
+            .iter()
+            .take(5)
+            .map(|(name, count)| format!("{}({})", name, count))
+            .collect();
+        println!("repeated: {}", summary.join(" "));
+    }
+
     // Extension summary
     let mut by_ext: HashMap<String, usize> = HashMap::new();
     for file in &files {

@@ -75,9 +75,13 @@ pub fn run(path: &Path, verbose: u8) -> Result<()> {
 
 fn summarize_cargo_str(path: &Path) -> Result<String> {
     let content = fs::read_to_string(path)?;
-    let dep_re =
-        Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap();
-    let section_re = Regex::new(r"^\[([^\]]+)\]").unwrap();
+    lazy_static::lazy_static! {
+        static ref DEP_RE: Regex =
+            Regex::new(r#"^([a-zA-Z0-9_-]+)\s*=\s*(?:"([^"]+)"|.*version\s*=\s*"([^"]+)")"#).unwrap();
+        static ref SECTION_RE: Regex = Regex::new(r"^\[([^\]]+)\]").unwrap();
+    }
+    let dep_re = &*DEP_RE;
+    let section_re = &*SECTION_RE;
     let mut current_section = String::new();
     let mut deps = Vec::new();
     let mut dev_deps = Vec::new();
@@ -164,7 +168,10 @@ fn summarize_package_json_str(path: &Path) -> Result<String> {
 
 fn summarize_requirements_str(path: &Path) -> Result<String> {
     let content = fs::read_to_string(path)?;
-    let dep_re = Regex::new(r"^([a-zA-Z0-9_-]+)([=<>!~]+.*)?$").unwrap();
+    lazy_static::lazy_static! {
+        static ref REQ_DEP_RE: Regex = Regex::new(r"^([a-zA-Z0-9_-]+)([=<>!~]+.*)?$").unwrap();
+    }
+    let dep_re = &*REQ_DEP_RE;
     let mut deps = Vec::new();
     let mut out = String::new();
 

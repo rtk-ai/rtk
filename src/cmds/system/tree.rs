@@ -62,6 +62,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     )
 }
 
+const MAX_TREE_LINES: usize = 200;
+
 fn filter_tree_output(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().collect();
 
@@ -88,6 +90,17 @@ fn filter_tree_output(raw: &str) -> String {
     // Remove trailing empty lines
     while filtered_lines.last().is_some_and(|l| l.trim().is_empty()) {
         filtered_lines.pop();
+    }
+
+    // Cap output at MAX_TREE_LINES to prevent token explosion in large repos
+    if filtered_lines.len() > MAX_TREE_LINES {
+        let total = filtered_lines.len();
+        let mut result = filtered_lines[..MAX_TREE_LINES].join("\n");
+        result.push_str(&format!(
+            "\n... +{} more entries (use native `tree` for full output)\n",
+            total - MAX_TREE_LINES
+        ));
+        return result;
     }
 
     filtered_lines.join("\n") + "\n"
@@ -153,6 +166,36 @@ mod tests {
                 "Should preserve file.txt in output"
             );
         }
+    }
+
+    #[test]
+    fn test_filter_caps_at_max_lines() {
+        // Generate 300 lines of tree output
+        let mut input = String::from(".\n");
+        for i in 0..300 {
+            input.push_str(&format!("├── file{}.rs\n", i));
+        }
+        input.push_str("\n300 directories, 300 files\n");
+
+        let output = filter_tree_output(&input);
+        let line_count = output.lines().count();
+        // Should be capped: MAX_TREE_LINES + the "... +N more" line
+        assert!(
+            line_count <= MAX_TREE_LINES + 2,
+            "Expected capped output, got {} lines",
+            line_count
+        );
+        assert!(
+            output.contains("more entries"),
+            "Expected truncation message"
+        );
+    }
+
+    #[test]
+    fn test_filter_no_cap_under_limit() {
+        let input = ".\n├── src\n│   └── main.rs\n└── Cargo.toml\n\n2 directories, 3 files\n";
+        let output = filter_tree_output(input);
+        assert!(!output.contains("more entries"));
     }
 
     #[test]
