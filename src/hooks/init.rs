@@ -306,42 +306,10 @@ fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     Ok((hook_dir, hook_path))
 }
 
-/// Checks if the hook exists and is executable.
-/// On Windows, it check if the file exists.
-pub fn is_hook_installed(verbose: u8) -> bool {
-    let hook_path = match prepare_hook_paths() {
-        Ok((_, path)) => path,
-        Err(_) => return false,
-    };
-
-    if !hook_path.exists() {
-        if verbose > 1 {
-            eprintln!("Hook missing: {}", hook_path.display());
-        }
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = fs::metadata(&hook_path) {
-            let is_exe = metadata.permissions().mode() & 0o111 != 0;
-            if !is_exe {
-                if verbose > 1 {
-                    eprintln!("Hook not executable: {}", hook_path.display());
-                }
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
 /// Write hook file if missing or outdated, return true if changed.
 /// On Windows, this still writes the bash script, as Claude Code
 /// on Windows often runs in a bash-like environment or uses bash for tools.
-pub fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
+fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
     let changed = if hook_path.exists() {
         let existing = fs::read_to_string(hook_path)
             .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
@@ -386,6 +354,50 @@ pub fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
     }
 
     Ok(changed)
+}
+
+#[cfg(windows)]
+fn validate_windows_hook_runtime() -> Result<()> {
+    if !crate::core::utils::tool_exists("bash") {
+        anyhow::bail!(
+            "Windows hook mode requires bash on PATH. Install Git Bash/WSL or use `rtk init --claude-md`."
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn format_windows_hook_command(hook_path: &Path) -> Result<String> {
+    let hook_command = hook_path.to_string_lossy().replace('\\', "/");
+
+    if hook_command
+        .chars()
+        .any(|ch| matches!(ch, '\n' | '\r' | '$' | '`'))
+    {
+        anyhow::bail!(
+            "Hook path cannot be safely escaped for bash: {}",
+            hook_command
+        );
+    }
+
+    Ok(format!("bash \"{}\"", hook_command))
+}
+
+fn build_hook_command(hook_path: &Path) -> Result<String> {
+    #[cfg(windows)]
+    {
+        validate_windows_hook_runtime()?;
+        format_windows_hook_command(hook_path)
+    }
+
+    #[cfg(not(windows))]
+    {
+        hook_path
+            .to_str()
+            .context("Hook path contains invalid UTF-8")
+            .map(|path| path.to_string())
+    }
 }
 
 /// Idempotent file write: create or update if content differs
@@ -473,13 +485,16 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
 }
 
 /// Print manual instructions for settings.json patching
-fn print_manual_instructions(hook_path: &Path, include_opencode: bool) {
+fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
+    let serialized_hook_command =
+        serde_json::to_string(hook_command).expect("manual hook command should serialize");
+
     println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
     println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_path.display());
+    println!("        \"command\": {}", serialized_hook_command);
     println!("      }}]");
     println!("    }}]}}");
     println!("  }}");
@@ -738,18 +753,7 @@ fn patch_settings_json(
 ) -> Result<PatchResult> {
     let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
-
-    let hook_command = if cfg!(windows) {
-        // On Windows, Claude Code expects a command it can execute.
-        // Even though it's a bash script, Claude Code on Windows often uses bash for executing tools.
-        // We use forward slashes for the path to the hook script.
-        format!("bash \"{}\"", hook_path.to_string_lossy().replace('\\', "/"))
-    } else {
-        hook_path
-            .to_str()
-            .context("Hook path contains invalid UTF-8")?
-            .to_string()
-    };
+    let hook_command = build_hook_command(hook_path)?;
 
     // Read or create settings.json
     let mut root = if settings_path.exists() {
@@ -777,12 +781,12 @@ fn patch_settings_json(
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_path, include_opencode);
+            print_manual_instructions(&hook_command, include_opencode);
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
             if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_path, include_opencode);
+                print_manual_instructions(&hook_command, include_opencode);
                 return Ok(PatchResult::Declined);
             }
         }
@@ -928,14 +932,10 @@ fn run_default_mode(
         return Ok(());
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // On Windows, the hook must be invoked by a shell that Claude Code understands.
-        // We use the bash-based hook even on Windows because Claude Code's shell-exec 
-        // usually provides a bash-like environment or uses bash for tools.
-        if verbose > 0 {
-            eprintln!("[info] Installing Bash-based hook for Windows.");
-        }
+        validate_windows_hook_runtime()?;
+        eprintln!("[info] Windows hook mode uses bash from PATH. The hook script also requires jq at runtime.");
     }
 
     let claude_dir = resolve_claude_dir()?;
@@ -1070,11 +1070,10 @@ fn run_hook_only_mode(
         return Ok(());
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        if verbose > 0 {
-            eprintln!("[info] Installing Bash-based hook for Windows.");
-        }
+        validate_windows_hook_runtime()?;
+        eprintln!("[info] Windows hook mode uses bash from PATH. The hook script also requires jq at runtime.");
     }
 
     // Prepare and install hook
@@ -2770,6 +2769,29 @@ More notes
         assert!(content.contains("<!-- rtk-instructions"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_format_windows_hook_command_wraps_bash() {
+        let hook_path = PathBuf::from(r"C:\Users\test user\.claude\hooks\rtk-rewrite.sh");
+
+        let command = format_windows_hook_command(&hook_path).expect("windows hook command");
+
+        assert_eq!(
+            command,
+            r#"bash "C:/Users/test user/.claude/hooks/rtk-rewrite.sh""#
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_format_windows_hook_command_rejects_unsafe_chars() {
+        let hook_path = PathBuf::from(r"C:\Users\te`st\.claude\hooks\rtk-rewrite.sh");
+
+        let err = format_windows_hook_command(&hook_path).expect_err("unsafe path should fail");
+
+        assert!(err.to_string().contains("cannot be safely escaped"));
+    }
+
     // Tests for hook_already_present()
     #[test]
     fn test_hook_already_present_exact_match() {
@@ -2805,6 +2827,24 @@ More notes
 
         let hook_command = "~/.claude/hooks/rtk-rewrite.sh";
         // Should match on rtk-rewrite.sh substring
+        assert!(hook_already_present(&json_content, hook_command));
+    }
+
+    #[test]
+    fn test_hook_already_present_legacy_path_matches_windows_wrapper() {
+        let json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/Users/test/.claude/hooks/rtk-rewrite.sh"
+                    }]
+                }]
+            }
+        });
+
+        let hook_command = r#"bash "C:/Users/test/.claude/hooks/rtk-rewrite.sh""#;
         assert!(hook_already_present(&json_content, hook_command));
     }
 
@@ -3008,6 +3048,40 @@ More notes
 
         let removed = remove_hook_from_json(&mut json_content);
         assert!(!removed);
+    }
+
+    #[test]
+    fn test_remove_hook_from_json_windows_bash_command() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/some/other/hook.sh"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "bash \"C:/Users/test/.claude/hooks/rtk-rewrite.sh\""
+                        }]
+                    }
+                ]
+            }
+        });
+
+        let removed = remove_hook_from_json(&mut json_content);
+        assert!(removed);
+
+        let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(
+            pre_tool_use[0]["hooks"][0]["command"],
+            "/some/other/hook.sh"
+        );
     }
 
     // ─── Cursor hooks.json tests ───
