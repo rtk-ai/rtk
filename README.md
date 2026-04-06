@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>High-performance CLI proxy that reduces LLM token consumption by 60-90%</strong>
+  <strong>High-performance CLI proxy that reduces LLM context token consumption by 60-90%</strong>
 </p>
 
 <p align="center">
