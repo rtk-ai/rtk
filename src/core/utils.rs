@@ -337,6 +337,18 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 /// # Returns
 /// A `Command` configured with the resolved binary path.
 pub fn resolved_command(name: &str) -> Command {
+    // Honor RTK_BIN override when the basename matches the requested binary.
+    // This preserves the caller's original binary path (e.g. .venv/bin/pytest)
+    // when the rewrite pipeline normalized it for matching purposes.
+    if let Ok(bin) = std::env::var("RTK_BIN") {
+        let bin_basename = std::path::Path::new(&bin)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+        if bin_basename == name {
+            return Command::new(&bin); // nosemgrep: dynamic-command-execution
+        }
+    }
     match resolve_binary(name) {
         Ok(path) => Command::new(path),
         Err(e) => {
@@ -359,6 +371,17 @@ pub fn resolved_command(name: &str) -> Command {
 ///
 /// Replaces manual `Command::new("which").arg(tool)` checks that fail on Windows.
 pub fn tool_exists(name: &str) -> bool {
+    // Check RTK_BIN override first: if it points to this binary and the file
+    // exists, the tool is available even if it's not on PATH.
+    if let Ok(bin) = std::env::var("RTK_BIN") {
+        let bin_basename = std::path::Path::new(&bin)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+        if bin_basename == name && std::path::Path::new(&bin).exists() {
+            return true;
+        }
+    }
     which::which(name).is_ok()
 }
 
@@ -855,5 +878,60 @@ mod tests {
     fn test_count_tokens_multiple_spaces() {
         assert_eq!(count_tokens("hello    world"), 2);
         assert_eq!(count_tokens("  hello   world  "), 2);
+    }
+
+    // ===== RTK_BIN override tests =====
+
+    #[test]
+    fn test_resolved_command_honors_rtk_bin() {
+        // Set RTK_BIN to a known path with matching basename
+        std::env::set_var("RTK_BIN", "/fake/venv/bin/cargo");
+        let cmd = resolved_command("cargo");
+        let program = format!("{:?}", cmd.get_program());
+        assert!(
+            program.contains("/fake/venv/bin/cargo"),
+            "resolved_command should use RTK_BIN when basename matches, got: {}",
+            program
+        );
+        std::env::remove_var("RTK_BIN");
+    }
+
+    #[test]
+    fn test_resolved_command_ignores_rtk_bin_mismatch() {
+        // RTK_BIN basename doesn't match the requested name
+        std::env::set_var("RTK_BIN", "/fake/venv/bin/pytest");
+        let cmd = resolved_command("python");
+        let program = format!("{:?}", cmd.get_program());
+        assert!(
+            !program.contains("pytest"),
+            "resolved_command should ignore RTK_BIN when basename doesn't match, got: {}",
+            program
+        );
+        std::env::remove_var("RTK_BIN");
+    }
+
+    #[test]
+    fn test_tool_exists_honors_rtk_bin() {
+        // Point RTK_BIN at a binary that exists on disk (cargo)
+        let cargo_path = which::which("cargo").expect("cargo must be on PATH for this test");
+        let cargo_str = cargo_path.to_string_lossy().to_string();
+        std::env::set_var("RTK_BIN", &cargo_str);
+        // tool_exists should find it via RTK_BIN even if we ask by basename
+        assert!(
+            tool_exists("cargo"),
+            "tool_exists should return true when RTK_BIN points to an existing file"
+        );
+        std::env::remove_var("RTK_BIN");
+    }
+
+    #[test]
+    fn test_tool_exists_rtk_bin_nonexistent_file() {
+        // RTK_BIN points to a file that doesn't exist, and the tool is not on PATH
+        std::env::set_var("RTK_BIN", "/no/such/path/nonexistent_xyz_99999");
+        assert!(
+            !tool_exists("nonexistent_xyz_99999"),
+            "tool_exists should return false when RTK_BIN file doesn't exist and tool not on PATH"
+        );
+        std::env::remove_var("RTK_BIN");
     }
 }

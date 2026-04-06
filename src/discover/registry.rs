@@ -800,9 +800,14 @@ fn rewrite_segment_inner(
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
+            // Check excludes against both the raw env-stripped command and the
+            // path-normalized form so user patterns like ["pytest"] still exclude
+            // ".venv/bin/pytest" (#1053). Upstream's anchored regex would
+            // otherwise miss path-prefixed invocations.
             let stripped = ENV_PREFIX.replace(cmd_part, "");
             let cmd_clean = stripped.trim();
-            if is_excluded(cmd_clean, excluded) {
+            let cmd_normalized = strip_absolute_path(cmd_clean);
+            if is_excluded(cmd_clean, excluded) || is_excluded(&cmd_normalized, excluded) {
                 return None;
             }
             rtk_equivalent
@@ -813,7 +818,33 @@ fn rewrite_segment_inner(
     // Find the matching rule (rtk_cmd values are unique across all rules)
     let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
 
-    if let Some(parts) = parse_golangci_run_parts(cmd_part) {
+    // Extract env prefix (sudo, env VAR=val, etc.)
+    let stripped_cow = ENV_PREFIX.replace(cmd_part, "");
+    let env_prefix_len = cmd_part.len() - stripped_cow.len();
+    let env_prefix = &cmd_part[..env_prefix_len];
+    let cmd_clean = stripped_cow.trim();
+
+    // Normalize path-prefixed commands for matching: .venv/bin/pytest → pytest
+    // Preserve the original binary path so we can pass it via RTK_BIN.
+    let cmd_normalized = strip_absolute_path(cmd_clean);
+    let original_bin = if cmd_normalized != cmd_clean {
+        let first_word = cmd_clean.split_whitespace().next();
+        first_word
+    } else {
+        None
+    };
+
+    // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
+    // #508: warn on stderr so agents learn to stop overusing it
+    if cmd_has_rtk_disabled_prefix(cmd_part) {
+        eprintln!(
+            "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+             Remove RTK_DISABLED=1 to restore token savings."
+        );
+        return None;
+    }
+
+    if let Some(parts) = parse_golangci_run_parts(cmd_clean) {
         let rewritten = if parts.global_segment.is_empty() {
             format!("rtk golangci-lint {}", parts.run_segment)
         } else {
@@ -837,15 +868,31 @@ fn rewrite_segment_inner(
         }
     }
 
-    // Try each rewrite prefix (longest first) with word-boundary check
+    // Try each rewrite prefix (longest first) with word-boundary check.
+    // Use the normalized command (path stripped) for matching.
+    let match_target = if original_bin.is_some() {
+        cmd_normalized.as_str()
+    } else {
+        cmd_clean
+    };
     for &prefix in rule.rewrite_prefixes {
-        if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
-            let rewritten = if rest.is_empty() {
-                format!("{}{}", rule.rtk_cmd, redirect_suffix)
+        if let Some(rest) = strip_word_prefix(match_target, prefix) {
+            let rtk_part = if rest.is_empty() {
+                format!("{}{}{}", env_prefix, rule.rtk_cmd, redirect_suffix)
             } else {
                 format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
             };
-            return Some(rewritten);
+            // When the original command used an explicit binary path,
+            // carry it via RTK_BIN so the handler invokes the correct binary.
+            // Single-quote the value and escape embedded single quotes with
+            // the POSIX '\'' pattern to handle arbitrary paths.
+            return match original_bin {
+                Some(bin) => {
+                    let escaped = bin.replace('\'', "'\\''");
+                    Some(format!("RTK_BIN='{}' {}", escaped, rtk_part))
+                }
+                None => Some(rtk_part),
+            };
         }
     }
 
@@ -3055,7 +3102,7 @@ mod tests {
     fn test_rewrite_gradlew() {
         assert_eq!(
             rewrite_command_no_prefixes("./gradlew assembleDebug", &[]),
-            Some("rtk gradlew assembleDebug".into())
+            Some("RTK_BIN='./gradlew' rtk gradlew assembleDebug".into())
         );
     }
 
@@ -3970,6 +4017,80 @@ mod tests {
         assert_eq!(
             collapse_line_continuations("git diff HEAD~1"),
             std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
+        );
+    }
+
+    // --- Path-prefixed command rewriting ---
+
+    #[test]
+    fn test_rewrite_venv_pytest() {
+        assert_eq!(
+            rewrite_command(".venv/bin/pytest -v", &[], &[]),
+            Some("RTK_BIN='.venv/bin/pytest' rtk pytest -v".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_venv_ruff() {
+        assert_eq!(
+            rewrite_command(".venv/bin/ruff check .", &[], &[]),
+            Some("RTK_BIN='.venv/bin/ruff' rtk ruff check .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_absolute_path_grep() {
+        assert_eq!(
+            rewrite_command("/usr/bin/grep -rn foo", &[], &[]),
+            Some("RTK_BIN='/usr/bin/grep' rtk grep -rn foo".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_node_modules_bin() {
+        // Upstream collapses "vitest run" to "vitest" (run is vitest's default),
+        // so the "run" arg is absorbed by the matching prefix. RTK_BIN is still preserved.
+        assert_eq!(
+            rewrite_command("./node_modules/.bin/vitest run", &[], &[]),
+            Some("RTK_BIN='./node_modules/.bin/vitest' rtk vitest".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bare_command_no_rtk_bin() {
+        // Bare commands should not include RTK_BIN
+        assert_eq!(
+            rewrite_command("pytest -v", &[], &[]),
+            Some("rtk pytest -v".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_path_prefixed_excluded() {
+        // Exclusions should match against basename, not the full path
+        assert_eq!(
+            rewrite_command(".venv/bin/pytest -v", &["pytest".to_string()], &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_path_without_spaces_is_quoted() {
+        // RTK_BIN value is single-quoted to survive shell parsing
+        let result = rewrite_command("/opt/tools/bin/git status", &[], &[]);
+        assert_eq!(
+            result,
+            Some("RTK_BIN='/opt/tools/bin/git' rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_path_with_embedded_quote_is_escaped() {
+        // Embedded single quotes use the POSIX '\'' escape pattern
+        let result = rewrite_command("/opt/it's/bin/git status", &[], &[]);
+        assert_eq!(
+            result,
+            Some("RTK_BIN='/opt/it'\\''s/bin/git' rtk git status".into())
         );
     }
 }
