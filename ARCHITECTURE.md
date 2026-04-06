@@ -176,7 +176,7 @@ Savings by ecosystem:
   RUST (cmds/rust/)        60-99%    cargo test/build/clippy, err
 ```
 
-**Total: 64 modules** (42 command modules + 22 infrastructure modules)
+**Total: 97 modules** (57 command modules + 40 infrastructure modules)
 
 ### Module Breakdown
 
@@ -187,8 +187,8 @@ Savings by ecosystem:
 
 ### Module Count Breakdown
 
-- **Command Modules**: 42 (directly exposed to users)
-- **Infrastructure Modules**: 22 (utils, filter, tracking, tee, config, init, gain, toml_filter, verify_cmd, etc.)
+- **Command Modules**: 57 (directly exposed to users)
+- **Infrastructure Modules**: 40 (utils, filter, tracking, tee, config, init, gain, toml_filter, verify_cmd, hooks, analytics, discover, learn, parser, etc.)
 - **Git Commands**: 7 operations (status, diff, log, add, commit, push, branch/checkout)
 - **JS/TS Tooling**: 8 modules (modern frontend/fullstack development)
 - **Python Tooling**: 3 modules (ruff, pytest, pip)

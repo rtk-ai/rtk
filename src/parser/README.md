@@ -28,7 +28,8 @@ The parser infrastructure provides a unified, three-tier parsing system for tool
                       │
 ┌─────────────────────▼───────────────────────────────────┐
 │                  Canonical Types                         │
-│  TestResult, LintResult, DependencyState, BuildOutput   │
+│  TestResult, DependencyState  (LintResult, BuildOutput  │
+│  planned — see Roadmap below)                           │
 └─────────────────────┬───────────────────────────────────┘
                       │
 ┌─────────────────────▼───────────────────────────────────┐
@@ -47,22 +48,26 @@ See `src/parser/types.rs` for the `OutputParser` trait and `ParseResult` enum.
 
 ## Canonical Types
 
-### TestResult
+### Implemented
+
+#### TestResult
 For test runners (vitest, playwright, jest, etc.)
 - Fields: `total`, `passed`, `failed`, `skipped`, `duration_ms`, `failures`
 - Formatter: Shows summary + failure details (compact: top 5, verbose: all)
 
-### LintResult
-For linters (eslint, biome, tsc, etc.)
-- Fields: `total_files`, `files_with_issues`, `total_issues`, `errors`, `warnings`, `issues`
-- Formatter: Groups by rule_id, shows top violations
-
-### DependencyState
+#### DependencyState
 For package managers (pnpm, npm, cargo, etc.)
 - Fields: `total_packages`, `outdated_count`, `dependencies`
 - Formatter: Shows upgrade paths (current → latest)
 
-### BuildOutput
+### Planned (not yet implemented)
+
+#### LintResult
+For linters (eslint, biome, tsc, etc.)
+- Fields: `total_files`, `files_with_issues`, `total_issues`, `errors`, `warnings`, `issues`
+- Formatter: Groups by rule_id, shows top violations
+
+#### BuildOutput
 For build tools (next, webpack, vite, cargo, etc.)
 - Fields: `success`, `duration_ms`, `bundles`, `routes`, `warnings`, `errors`
 - Formatter: Shows bundle sizes, route metrics
@@ -132,6 +137,6 @@ Run `cargo test parser::tests`. Each parser should have tier validation tests: a
 - [ ] gh_cmd.rs → GhParser
 
 ### Phase 5: Observability
-- [ ] Extend tracking.db: `parse_tier`, `format_mode`
+- [ ] Extend history.db: `parse_tier`, `format_mode`
 - [ ] `rtk parse-health` command
 - [ ] Alert if degradation > 10%

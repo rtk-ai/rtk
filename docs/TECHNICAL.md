@@ -262,7 +262,7 @@ Command received
 
 ### 3.6 Token Tracking
 
-Every command execution records metrics to SQLite (`~/.local/share/rtk/tracking.db`):
+Every command execution records metrics to SQLite (`~/.local/share/rtk/history.db`):
 
 - Input tokens (raw output size) and output tokens (filtered size)
 - Savings percentage, execution time, project path
