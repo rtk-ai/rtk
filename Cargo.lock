@@ -916,6 +916,7 @@ dependencies = [
  "hostname",
  "ignore",
  "lazy_static",
+ "libc",
  "quick-xml",
  "regex",
  "rusqlite",

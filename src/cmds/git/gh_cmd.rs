@@ -785,31 +785,13 @@ fn pr_create(args: &[String], _verbose: u8) -> Result<i32> {
 }
 
 fn pr_merge(args: &[String], _verbose: u8) -> Result<i32> {
-    let pr_num = args
-        .iter()
-        .find(|a| !a.starts_with('-'))
-        .map(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
-    let mut cmd = resolved_command("gh");
-    cmd.args(["pr", "merge"]);
-    for arg in args {
-        cmd.arg(arg);
-    }
-    runner::run_filtered(
-        cmd,
-        "gh",
-        "pr merge",
-        move |_stdout| {
-            let detail = if !pr_num.is_empty() {
-                format!("#{}", pr_num)
-            } else {
-                String::new()
-            };
-            ok_confirmation("merged", &detail)
-        },
-        RunOptions::stdout_only().early_exit_on_failure(),
-    )
+    // gh pr merge is a destructive action — pass through the real output
+    // so the user (or AI agent) sees exactly what happened.
+    run_passthrough("gh", "pr", &{
+        let mut a = vec!["merge".to_string()];
+        a.extend_from_slice(args);
+        a
+    })
 }
 
 /// Flags that change `gh pr diff` output from unified diff to a different format.
