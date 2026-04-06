@@ -308,7 +308,7 @@ After install, **restart Claude Code**.
 
 ## Supported AI Tools
 
-RTK supports 10 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports 11 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -322,6 +322,7 @@ RTK supports 10 AI coding tools. Each integration transparently rewrites shell c
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
+| **Hermes Agent** | `cp -r hermes ~/.hermes/plugins/rtk-rewrite` | Python plugin (`pre_tool_call`) |
 | **Mistral Vibe** | Planned (#800) | Blocked on upstream BeforeToolCallback |
 
 ### Claude Code (default)
@@ -401,6 +402,15 @@ openclaw plugins install ./openclaw
 ```
 
 Plugin in `openclaw/` directory. Uses `before_tool_call` hook, delegates to `rtk rewrite`.
+
+### Hermes Agent
+
+```bash
+mkdir -p ~/.hermes/plugins/rtk-rewrite
+cp hermes/__init__.py hermes/plugin.yaml hermes/README.md ~/.hermes/plugins/rtk-rewrite/
+```
+
+Plugin in `hermes/` directory. Uses Hermes' Python `pre_tool_call` hook, delegates to `rtk rewrite`, and includes conservative Hermes-specific guards for compound commands, background calls, and PTY calls.
 
 ### Mistral Vibe (planned)
 
