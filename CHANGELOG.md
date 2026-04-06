@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **emots:** replace 📊 with "Summary:" ([495a152](https://github.com/rtk-ai/rtk/commit/495a152059feabc7b516b96e804757608b87a10a))
 * **refacto-codebase:** technical docs & sub folders ([927daef](https://github.com/rtk-ai/rtk/commit/927daef49b8f771d195201d196378e27e0ee8a2b))
+## [Unreleased]
+
+### Features
+
+* **aws:** expand CLI filters from 8 to 25 subcommands — CloudWatch Logs, CloudFormation events, Lambda, IAM, DynamoDB (with type unwrapping), ECS tasks, EC2 security groups, S3API objects, S3 sync/cp, EKS, SQS, Secrets Manager ([#885](https://github.com/rtk-ai/rtk/pull/885))
+* **aws:** add shared runner `run_aws_filtered()` eliminating per-handler boilerplate
+* **tee:** add `force_tee_hint()` — truncated output saves full data to file with recovery hint
 
 ## [0.34.1](https://github.com/rtk-ai/rtk/compare/v0.34.0...v0.34.1) (2026-03-28)
 

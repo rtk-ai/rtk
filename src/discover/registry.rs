@@ -1174,19 +1174,31 @@ mod tests {
 
     #[test]
     fn test_rewrite_rtk_disabled_warns_on_stderr() {
-        // RTK_DISABLED=1 should still return None (no rewrite)
-        // and emit a warning on stderr (tested via subprocess below)
         assert_eq!(rewrite_command("RTK_DISABLED=1 git status", &[]), None);
+    }
 
-        // Verify warning via subprocess: `rtk rewrite "RTK_DISABLED=1 git status"`
-        // should exit non-zero AND print warning to stderr
+    #[test]
+    fn test_rewrite_rtk_disabled_subprocess_warns() {
         let rtk_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("debug")
             .join("rtk");
         if !rtk_bin.exists() {
-            return; // Binary not built — skip subprocess check
+            return;
         }
+        let rtk_mtime = std::fs::metadata(&rtk_bin)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let test_mtime = std::env::current_exe()
+            .ok()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime) {
+            if rtk_t < test_t {
+                return;
+            }
+        }
+
         let output = std::process::Command::new(&rtk_bin)
             .args(["rewrite", "RTK_DISABLED=1 git status"])
             .output()

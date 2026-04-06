@@ -1,6 +1,6 @@
 # Core Infrastructure
 
-> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview
+> See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 
 ## Scope
 
@@ -118,6 +118,8 @@ Consumers must call `timer.track()` on **all** code paths — success, failure, 
 ### Tee (`tee_and_hint`)
 
 Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to save raw output for LLM recovery on failure. Tee must be called before `std::process::exit()`.
+
+For truncation recovery on **success** (e.g., list truncated at 20 items), use `tee::force_tee_hint()` which bypasses the tee mode check and writes regardless of exit code. This ensures LLMs always have a `[full output: ...]` recovery path instead of burning tokens working around missing data.
 
 ## Adding New Functionality
 Place new infrastructure code here if it meets **all** of these criteria: (1) it has no dependencies on command modules or hooks, (2) it is used by two or more other modules, and (3) it provides a general-purpose utility rather than command-specific logic. Follow the existing pattern of lazy-initialized resources (`lazy_static!` for regex, on-demand config loading) to preserve the <10ms startup target. Add `#[cfg(test)] mod tests` with unit tests in the same file.
