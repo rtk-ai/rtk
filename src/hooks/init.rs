@@ -3087,7 +3087,9 @@ More notes
         assert!(CURSOR_REWRITE_HOOK.contains("command -v rtk"));
         assert!(CURSOR_REWRITE_HOOK.contains("command -v jq"));
         let jq_pos = CURSOR_REWRITE_HOOK.find("command -v jq").unwrap();
-        let rtk_delegate_pos = CURSOR_REWRITE_HOOK.find("rtk rewrite \"$CMD\"").unwrap();
+        let rtk_delegate_pos = CURSOR_REWRITE_HOOK
+            .find("rtk rewrite \"$NORM_CMD\"")
+            .unwrap();
         assert!(
             jq_pos < rtk_delegate_pos,
             "Guards must appear before rtk rewrite delegation"
