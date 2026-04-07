@@ -63,6 +63,15 @@ pub fn run(
         );
     }
 
+    // Capture post-filter content before user-requested truncation.
+    // --max-lines/--tail-lines is a user choice, not RTK compression — savings
+    // are tracked against filtered (not truncated) output to avoid inflation.
+    let filtered_for_tracking = if max_lines.is_some() || tail_lines.is_some() {
+        Some(filtered.clone())
+    } else {
+        None
+    };
+
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
     let rtk_output = if line_numbers {
@@ -70,12 +79,14 @@ pub fn run(
     } else {
         filtered.clone()
     };
-    print!("{}", rtk_output);
+    println!("{}", rtk_output);
+
+    let tracking_output = filtered_for_tracking.as_deref().unwrap_or(&rtk_output);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk read",
         &content,
-        &rtk_output,
+        tracking_output,
     );
     Ok(())
 }
@@ -127,6 +138,12 @@ pub fn run_stdin(
         );
     }
 
+    let filtered_for_tracking = if max_lines.is_some() || tail_lines.is_some() {
+        Some(filtered.clone())
+    } else {
+        None
+    };
+
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
     let rtk_output = if line_numbers {
@@ -136,7 +153,8 @@ pub fn run_stdin(
     };
     print!("{}", rtk_output);
 
-    timer.track("cat - (stdin)", "rtk read -", &content, &rtk_output);
+    let tracking_output = filtered_for_tracking.as_deref().unwrap_or(&rtk_output);
+    timer.track("cat - (stdin)", "rtk read -", &content, tracking_output);
     Ok(())
 }
 
@@ -294,6 +312,108 @@ fn main() {{
             stderr.contains("stdin specified more than once"),
             "should warn about duplicate stdin, got stderr: {}",
             stderr
+        );
+    }
+
+    // ── Helpers for savings-tracking logic tests ──────────────────────────────
+
+    /// Simulate the filtered_for_tracking / tracking_output logic from run().
+    /// Returns (tracking_output_len, truncated_len, full_filtered_len).
+    fn simulate_tracking(
+        full_content: &str,
+        max_lines: Option<usize>,
+        tail_lines: Option<usize>,
+    ) -> (usize, usize, usize) {
+        let filtered = full_content.to_string();
+        let filtered_for_tracking = if max_lines.is_some() || tail_lines.is_some() {
+            Some(filtered.clone())
+        } else {
+            None
+        };
+        let truncated = apply_line_window(&filtered, max_lines, tail_lines, &Language::Unknown);
+        let tracking_output = filtered_for_tracking
+            .as_deref()
+            .unwrap_or(truncated.as_str());
+        (tracking_output.len(), truncated.len(), filtered.len())
+    }
+
+    // ── Regression tests for #1045 ─────────────────────────────────────────
+
+    /// When --max-lines is active, savings must be calculated against the
+    /// pre-truncation (filtered) content, not the truncated output.
+    /// Without this fix: savings ≈ 100k tokens for a 100k-line file.
+    /// With this fix   : savings ≈ 0 tokens (no RTK compression happened).
+    #[test]
+    fn test_max_lines_tracking_uses_pretruncation_content() {
+        let content: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let (tracking_len, truncated_len, full_len) =
+            simulate_tracking(&content, Some(5), None);
+
+        assert_eq!(
+            tracking_len, full_len,
+            "tracking_output must equal full filtered content, not the truncated slice"
+        );
+        assert!(
+            truncated_len < full_len,
+            "sanity check: truncation must have reduced content"
+        );
+        assert!(
+            tracking_len > truncated_len,
+            "tracking_output must be larger than truncated_output to prevent savings inflation"
+        );
+    }
+
+    /// Same invariant for --tail-lines.
+    #[test]
+    fn test_tail_lines_tracking_uses_pretruncation_content() {
+        let content: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let (tracking_len, truncated_len, full_len) =
+            simulate_tracking(&content, None, Some(5));
+
+        assert_eq!(tracking_len, full_len);
+        assert!(truncated_len < full_len);
+        assert!(tracking_len > truncated_len);
+    }
+
+    /// Without any truncation flag, tracking_output == rtk_output (no change
+    /// in behaviour for the normal code path).
+    #[test]
+    fn test_no_truncation_tracking_unchanged() {
+        let content: String = (0..10).map(|i| format!("line {i}\n")).collect();
+        let (tracking_len, truncated_len, _full_len) =
+            simulate_tracking(&content, None, None);
+
+        assert_eq!(
+            tracking_len, truncated_len,
+            "without truncation flags, tracking_output must equal rtk_output"
+        );
+    }
+
+    /// Numerical proof: the bug would have reported huge artificial savings;
+    /// the fix reports ≈0 savings (content unchanged by RTK filtering).
+    #[test]
+    fn test_savings_inflation_is_zero_with_fix() {
+        use crate::core::tracking::estimate_tokens;
+
+        // 1000-line file, each line ~20 chars = ~5k tokens input
+        let content: String = (0..1000).map(|i| format!("{:020}\n", i)).collect();
+        let (tracking_len, truncated_len, _) = simulate_tracking(&content, Some(5), None);
+
+        let input_tokens = estimate_tokens(&content);
+
+        // Savings reported by the BUGGY version (tracking against truncated output)
+        let buggy_savings = input_tokens as i64 - estimate_tokens(&content[..truncated_len]) as i64;
+
+        // Savings reported by the FIXED version (tracking against pre-truncation content)
+        let fixed_savings = input_tokens as i64 - estimate_tokens(&content[..tracking_len]) as i64;
+
+        assert!(
+            buggy_savings > 1_000,
+            "bug would report >1k fake token savings, got {buggy_savings}"
+        );
+        assert_eq!(
+            fixed_savings, 0,
+            "fix must report 0 savings when content wasn't actually compressed, got {fixed_savings}"
         );
     }
 }
