@@ -118,4 +118,55 @@ mod tests {
         let filtered = filter_ssh_output("", "");
         assert_eq!(filtered, "");
     }
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_token_savings_long_output() {
+        // Simulate verbose ssh output (200 lines of systemctl-style output)
+        let input: String = (0..200)
+            .map(|i| format!("    Active: active (running) since Mon; {}d ago", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let filtered = filter_ssh_output(&input, "");
+
+        let input_tokens = count_tokens(&input);
+        let output_tokens = count_tokens(&filtered);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(
+            savings >= 50.0,
+            "SSH filter: expected ≥50% savings on long output, got {:.1}%",
+            savings
+        );
+    }
+
+    #[test]
+    fn test_truncated_output_format() {
+        let input: String = (0..100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let filtered = filter_ssh_output(&input, "");
+        // First line preserved
+        assert!(filtered.starts_with("line 0\n"));
+        // Last real line is line 79
+        assert!(filtered.contains("line 79\n"));
+        // Line 80 is NOT in output
+        assert!(!filtered.contains("line 80\n"));
+        // Truncation message at the end
+        assert!(filtered.trim_end().ends_with("... +20 lines truncated"));
+    }
+
+    #[test]
+    fn test_stderr_not_in_filtered_output() {
+        let stdout = "connected to host\ncommand output line 1\ncommand output line 2\n";
+        let stderr = "Warning: Permanently added 'host' to known hosts.\n";
+        let filtered = filter_ssh_output(stdout, stderr);
+        // stderr goes to eprintln, not into the returned filtered string
+        assert!(!filtered.contains("Warning"));
+        assert!(filtered.contains("connected to host"));
+    }
 }
