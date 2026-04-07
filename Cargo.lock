@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "rtk"
-version = "0.34.1"
+version = "0.34.3"
 dependencies = [
  "anyhow",
  "automod",
@@ -916,6 +916,7 @@ dependencies = [
  "hostname",
  "ignore",
  "lazy_static",
+ "libc",
  "quick-xml",
  "regex",
  "rusqlite",

@@ -34,7 +34,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
                 let _ = std::io::stdout().flush();
                 Ok(())
             }
-            PermissionVerdict::Ask => {
+            PermissionVerdict::Ask | PermissionVerdict::Default => {
                 print!("{}", rewritten);
                 let _ = std::io::stdout().flush();
                 std::process::exit(3);

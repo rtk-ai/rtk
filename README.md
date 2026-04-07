@@ -18,7 +18,7 @@
   <a href="https://www.rtk-ai.app">Website</a> &bull;
   <a href="#installation">Install</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> &bull;
-  <a href="ARCHITECTURE.md">Architecture</a> &bull;
+  <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -199,6 +199,18 @@ rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
+```
+
+### AWS
+```bash
+rtk aws sts get-caller-identity # One-line identity
+rtk aws ec2 describe-instances  # Compact instance list
+rtk aws lambda list-functions   # Name/runtime/memory (strips secrets)
+rtk aws logs get-log-events     # Timestamped messages only
+rtk aws cloudformation describe-stack-events  # Failures first
+rtk aws dynamodb scan           # Unwraps type annotations
+rtk aws iam list-roles          # Strips policy documents
+rtk aws s3 ls                   # Truncated with tee recovery
 ```
 
 ### Containers
@@ -419,6 +431,7 @@ Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://githu
 | `rspec` / `bundle exec rspec` | `rtk rspec` |
 | `rubocop` / `bundle exec rubocop` | `rtk rubocop` |
 | `bundle install/update` | `rtk bundle ...` |
+| `aws sts/ec2/lambda/...` | `rtk aws ...` |
 | `docker ps/images/logs` | `rtk docker ...` |
 | `kubectl get/logs` | `rtk kubectl ...` |
 | `curl` | `rtk curl` |
@@ -466,7 +479,7 @@ brew uninstall rtk           # If installed via Homebrew
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Fix common issues
 - **[INSTALL.md](INSTALL.md)** - Detailed installation guide
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Technical architecture
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Technical architecture
 - **[SECURITY.md](SECURITY.md)** - Security policy and PR review process
 - **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
 
@@ -501,3 +514,7 @@ Join the community on [Discord](https://discord.gg/RySmvNF5kF).
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+## Disclaimer
+
+See [DISCLAIMER.md](DISCLAIMER.md).

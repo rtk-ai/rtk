@@ -184,6 +184,44 @@ pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<Str
     Some(format_hint(&path))
 }
 
+/// Force tee output regardless of exit code (used when filters truncate).
+/// Always writes file if size >= MIN_TEE_SIZE and tee is enabled.
+/// Returns hint string if file was written, None if skipped/disabled.
+///
+/// Used by AWS filters when FilterResult.truncated = true, ensuring
+/// the LLM has access to full untruncated output via the hint path.
+pub fn force_tee_hint(raw: &str, command_slug: &str) -> Option<String> {
+    // Check RTK_TEE=0 env override (disable)
+    if std::env::var("RTK_TEE").ok().as_deref() == Some("0") {
+        return None;
+    }
+
+    // Skip if output too small
+    if raw.len() < MIN_TEE_SIZE {
+        return None;
+    }
+
+    let config = Config::load().ok()?;
+
+    // Respect enabled flag but ignore mode (force tee)
+    if !config.tee.enabled {
+        return None;
+    }
+
+    let tee_dir = get_tee_dir(&config)?;
+    let tee_dir = std::fs::create_dir_all(&tee_dir).ok().and(Some(tee_dir))?;
+
+    let path = write_tee_file(
+        raw,
+        command_slug,
+        &tee_dir,
+        config.tee.max_file_size,
+        config.tee.max_files,
+    )?;
+
+    Some(format_hint(&path))
+}
+
 /// TeeMode controls when tee writes files.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -399,5 +437,23 @@ directory = "/tmp/rtk-tee"
 
         let mode: TeeMode = serde_json::from_str(r#""never""#).unwrap();
         assert_eq!(mode, TeeMode::Never);
+    }
+
+    #[test]
+    fn test_force_tee_hint_skip_small_output() {
+        // force_tee_hint should respect MIN_TEE_SIZE
+        let small_output = "short error";
+        let hint = force_tee_hint(small_output, "test_cmd");
+        assert!(hint.is_none(), "Should skip output < MIN_TEE_SIZE");
+    }
+
+    #[test]
+    fn test_force_tee_hint_respects_env_disable() {
+        // When RTK_TEE=0, force_tee_hint should return None
+        std::env::set_var("RTK_TEE", "0");
+        let large_output = "x".repeat(1000);
+        let hint = force_tee_hint(&large_output, "test_cmd");
+        std::env::remove_var("RTK_TEE");
+        assert!(hint.is_none(), "Should respect RTK_TEE=0");
     }
 }
