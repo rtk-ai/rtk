@@ -935,7 +935,7 @@ fn run_default_mode(
     #[cfg(windows)]
     {
         validate_windows_hook_runtime()?;
-        eprintln!("[info] Windows hook mode uses bash from PATH. The hook script also requires jq at runtime.");
+        eprintln!("[info] Windows hook mode uses bash from PATH.");
     }
 
     let claude_dir = resolve_claude_dir()?;
@@ -1073,7 +1073,7 @@ fn run_hook_only_mode(
     #[cfg(windows)]
     {
         validate_windows_hook_runtime()?;
-        eprintln!("[info] Windows hook mode uses bash from PATH. The hook script also requires jq at runtime.");
+        eprintln!("[info] Windows hook mode uses bash from PATH.");
     }
 
     // Prepare and install hook
@@ -1880,9 +1880,9 @@ fn show_claude_config() -> Result<()> {
             let is_executable = perms.mode() & 0o111 != 0;
 
             let hook_content = fs::read_to_string(&hook_path)?;
-            let has_guards =
-                hook_content.contains("command -v rtk") && hook_content.contains("command -v jq");
-            let is_thin_delegator = hook_content.contains("rtk rewrite");
+            let has_guards = hook_content.contains("command -v rtk");
+            let is_thin_delegator = hook_content.contains("rtk hook claude-code")
+                || hook_content.contains("rtk rewrite");
             let hook_version = super::hook_check::parse_hook_version(&hook_content);
 
             if !is_executable {
@@ -2485,14 +2485,17 @@ mod tests {
     #[test]
     fn test_hook_has_guards() {
         assert!(REWRITE_HOOK.contains("command -v rtk"));
-        assert!(REWRITE_HOOK.contains("command -v jq"));
-        // Guards (rtk/jq availability checks) must appear before the actual delegation call.
-        // The thin delegating hook no longer uses set -euo pipefail.
-        let jq_pos = REWRITE_HOOK.find("command -v jq").unwrap();
-        let rtk_delegate_pos = REWRITE_HOOK.find("rtk rewrite \"$CMD\"").unwrap();
+        // jq is no longer required — all JSON handling is in `rtk hook claude-code`.
         assert!(
-            jq_pos < rtk_delegate_pos,
-            "Guards must appear before rtk rewrite delegation"
+            !REWRITE_HOOK.contains("command -v jq"),
+            "Hook should not require jq"
+        );
+        // Guard must appear before the delegation call.
+        let rtk_guard_pos = REWRITE_HOOK.find("command -v rtk").unwrap();
+        let rtk_delegate_pos = REWRITE_HOOK.find("exec rtk hook claude-code").unwrap();
+        assert!(
+            rtk_guard_pos < rtk_delegate_pos,
+            "Guard must appear before rtk hook delegation"
         );
     }
 

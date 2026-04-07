@@ -8,6 +8,69 @@ use std::io::{self, Read};
 use crate::discover::registry::rewrite_command;
 use crate::hooks::permissions::{check_command, PermissionVerdict};
 
+// ── Claude Code hook ─────────────────────────────────────────
+
+/// Run the Claude Code PreToolUse hook.
+/// Reads JSON from stdin, rewrites shell commands to rtk equivalents,
+/// outputs JSON to stdout in Claude Code hook format.
+///
+/// This replaces the previous bash+jq hook script, removing the jq dependency.
+/// The input/output format is identical to the VS Code Copilot format
+/// (`tool_name` + `tool_input.command`).
+pub fn run_claude_code() -> Result<()> {
+    let mut input = String::new();
+    io::stdin()
+        .read_to_string(&mut input)
+        .context("Failed to read stdin")?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    // Extract command from tool_input.command
+    let cmd = match v.pointer("/tool_input/command").and_then(|c| c.as_str()) {
+        Some(c) if !c.is_empty() => c,
+        _ => return Ok(()),
+    };
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => return Ok(()),
+    };
+
+    let verdict = check_command(cmd);
+
+    if verdict == PermissionVerdict::Deny {
+        return Ok(());
+    }
+
+    let output = match verdict {
+        PermissionVerdict::Allow => json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "RTK auto-rewrite",
+                "updatedInput": { "command": rewritten }
+            }
+        }),
+        _ => json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "updatedInput": { "command": rewritten }
+            }
+        }),
+    };
+
+    println!("{output}");
+    Ok(())
+}
+
 // ── Copilot hook (VS Code + Copilot CLI) ──────────────────────
 
 /// Format detected from the preToolUse JSON input.
