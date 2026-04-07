@@ -64,7 +64,7 @@ Project-scoped queries use GLOB patterns (not LIKE) to avoid `_`/`%` wildcard is
 [tracking]
 enabled = true
 history_days = 90
-database_path = "/custom/path/to/history.db"  # Optional
+database_path = "/custom/path/to/tracking.db"  # Optional
 
 [display]
 colors = true

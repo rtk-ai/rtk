@@ -1,7 +1,3 @@
-# RTK - Complete Feature Reference
-
-> **Note:** This document is written in French. For the English overview, see [README.md](../README.md). A full English translation is tracked in [docs/FEATURES_en.md](FEATURES_en.md) (contributions welcome).
-
 # RTK - Documentation fonctionnelle complete
 
 > **rtk (Rust Token Killer)** -- Proxy CLI haute performance qui reduit la consommation de tokens LLM de 60 a 90%.
@@ -1057,7 +1053,7 @@ Les sous-commandes non reconnues sont transmises directement ou detectees comme 
 
 RTK enregistre chaque execution de commande dans une base SQLite :
 
-- **Emplacement :** `~/.local/share/rtk/history.db` (Linux), `~/Library/Application Support/rtk/history.db` (macOS)
+- **Emplacement :** `~/.local/share/rtk/tracking.db` (Linux), `~/Library/Application Support/rtk/tracking.db` (macOS)
 - **Retention :** 90 jours automatique
 - **Metriques :** tokens entree/sortie, pourcentage d'economies, temps d'execution, projet
 
@@ -1308,7 +1304,7 @@ rtk config --create       # Creer le fichier avec les valeurs par defaut
 [tracking]
 enabled = true              # Activer/desactiver le suivi
 history_days = 90           # Jours de retention (nettoyage automatique)
-database_path = "/custom/path/history.db"  # Chemin personnalise (optionnel)
+database_path = "/custom/path/tracking.db"  # Chemin personnalise (optionnel)
 
 [display]
 colors = true               # Sortie coloree

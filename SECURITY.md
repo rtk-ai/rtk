@@ -21,7 +21,7 @@ RTK is a CLI tool that executes shell commands and handles user input. PRs from 
 - **Shell injection** (command execution vulnerabilities)
 - **Supply chain attacks** (malicious dependencies)
 - **Backdoors** (logic bombs, exfiltration code)
-- **Data leaks** (history.db exposure, telemetry abuse)
+- **Data leaks** (tracking.db exposure, telemetry abuse)
 
 ---
 
