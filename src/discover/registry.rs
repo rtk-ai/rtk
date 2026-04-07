@@ -1846,6 +1846,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_classify_git_tag_list() {
+        assert!(matches!(
+            classify_command("git tag -l 'v*'"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_git_tag_annotated() {
+        assert_eq!(
+            rewrite_command("git tag -a v2.0.0 -m 'release'", &[]),
+            Some("rtk git tag -a v2.0.0 -m 'release'".into())
+        );
+    }
+
     // --- Go tooling ---
 
     #[test]
