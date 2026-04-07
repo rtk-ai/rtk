@@ -263,18 +263,66 @@ fn strip_git_global_opts(cmd: &str) -> String {
     format!("git {}", stripped.trim())
 }
 
-/// Strip `uv run` transparent prefix: `uv run pytest -v` → `pytest -v`.
+/// Split a `uv run [flags] <inner_cmd>` string into the uv prefix and the inner command.
+/// Returns `Some((prefix, inner))` where `prefix` includes `"uv run "` and any uv-specific
+/// flags (e.g. `"uv run --frozen "`), and `inner` is the real command (e.g. `"pytest -v"`).
+/// Returns `None` if there's no `uv run ` prefix or no inner command after the flags.
+fn split_uv_run(cmd: &str) -> Option<(&str, &str)> {
+    let after_uv_run = cmd.strip_prefix("uv run ")?;
+
+    // Known uv flags that consume the next token as a value
+    const VALUE_FLAGS: &[&str] = &[
+        "--with",
+        "--without",
+        "--python",
+        "-p",
+        "--extra",
+        "--group",
+        "--only-group",
+    ];
+
+    let bytes = after_uv_run.as_bytes();
+    let mut pos = 0;
+
+    loop {
+        // Skip whitespace
+        while pos < bytes.len() && bytes[pos] == b' ' {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            return None; // only flags, no inner command
+        }
+        if bytes[pos] != b'-' {
+            break; // found inner command
+        }
+        // Consume flag token
+        let tok_start = pos;
+        while pos < bytes.len() && bytes[pos] != b' ' {
+            pos += 1;
+        }
+        let tok = &after_uv_run[tok_start..pos];
+        // Value-taking flag: also skip the next token
+        if VALUE_FLAGS.contains(&tok) {
+            while pos < bytes.len() && bytes[pos] == b' ' {
+                pos += 1;
+            }
+            while pos < bytes.len() && bytes[pos] != b' ' {
+                pos += 1;
+            }
+        }
+    }
+
+    let prefix_end = "uv run ".len() + pos;
+    Some((&cmd[..prefix_end], &cmd[prefix_end..]))
+}
+
+/// Strip `uv run [flags]` transparent prefix: `uv run --frozen pytest -v` → `pytest -v`.
 /// `uv run` is a virtualenv wrapper — the real command follows it.
 /// Returns a Cow to avoid allocation when no prefix is present.
 fn strip_uv_run_prefix(cmd: &str) -> std::borrow::Cow<'_, str> {
-    if let Some(rest) = cmd.strip_prefix("uv run ") {
-        let inner = rest.trim_start();
-        if inner.is_empty() {
-            return std::borrow::Cow::Borrowed(cmd);
-        }
-        std::borrow::Cow::Owned(inner.to_string())
-    } else {
-        std::borrow::Cow::Borrowed(cmd)
+    match split_uv_run(cmd) {
+        Some((_, inner)) => std::borrow::Cow::Owned(inner.to_string()),
+        None => std::borrow::Cow::Borrowed(cmd),
     }
 }
 
@@ -548,12 +596,11 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let env_prefix = &cmd_part[..env_prefix_len];
     let after_env = stripped_cow.trim();
 
-    // Strip `uv run` transparent prefix — preserve it so the rewritten command
-    // keeps the virtualenv active: `uv run pytest` → `uv run rtk pytest`
-    let (uv_prefix, cmd_clean) = if let Some(rest) = after_env.strip_prefix("uv run ") {
-        ("uv run ", rest.trim_start())
-    } else {
-        ("", after_env)
+    // Strip `uv run [flags]` transparent prefix — preserve it so the rewritten
+    // command keeps the virtualenv active: `uv run --frozen pytest` → `uv run --frozen rtk pytest`
+    let (uv_prefix, cmd_clean) = match split_uv_run(after_env) {
+        Some((prefix, inner)) => (prefix, inner),
+        None => ("", after_env),
     };
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
@@ -1912,6 +1959,68 @@ mod tests {
         assert_eq!(
             rewrite_command("uv run python -m pytest tests/", &[]),
             Some("uv run rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_alone() {
+        // "uv run" with no inner command should not be rewritten
+        assert_eq!(rewrite_command("uv run", &[]), None);
+    }
+
+    #[test]
+    fn test_classify_uv_run_frozen_pytest() {
+        // uv flags like --frozen should be skipped to find the inner command
+        assert!(matches!(
+            classify_command("uv run --frozen pytest tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pytest",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_frozen_pytest() {
+        assert_eq!(
+            rewrite_command("uv run --frozen pytest tests/", &[]),
+            Some("uv run --frozen rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_with_pkg_pytest() {
+        // --with takes a value argument
+        assert_eq!(
+            rewrite_command("uv run --with coverage pytest tests/", &[]),
+            Some("uv run --with coverage rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefix_uv_run_pytest() {
+        // env prefix + uv run should both be preserved
+        assert_eq!(
+            rewrite_command("PYTHONPATH=. uv run pytest tests/", &[]),
+            Some("PYTHONPATH=. uv run rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rtk_disabled_uv_run_pytest() {
+        // RTK_DISABLED=1 should suppress rewrite even with uv run
+        assert_eq!(
+            rewrite_command("RTK_DISABLED=1 uv run pytest tests/", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_pytest_redirect() {
+        // Redirect suffix should be preserved
+        assert_eq!(
+            rewrite_command("uv run pytest tests/ 2>&1", &[]),
+            Some("uv run rtk pytest tests/ 2>&1".into())
         );
     }
 
