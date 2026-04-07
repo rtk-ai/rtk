@@ -1,0 +1,37 @@
+[filters.poe]
+description = "Compact poethepoet (poe) task runner output — strip Poe header lines, keep command output"
+match_command = "^poe\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Poe => ",
+  "^Poe the Poet ",
+  "^version \\d",
+  "^USAGE\\b",
+  "^GLOBAL OPTIONS\\b",
+  "^CONFIGURED TASKS\\b",
+  "^Result: Task ",
+]
+truncate_lines_at = 150
+max_lines = 50
+on_empty = "poe: ok"
+
+[[tests.poe]]
+name = "strips Poe header, keeps command output"
+input = "Poe => pytest tests/\n============================= test session starts ==============================\n42 passed in 1.23s"
+expected = "============================= test session starts ==============================\n42 passed in 1.23s"
+
+[[tests.poe]]
+name = "preserves error output"
+input = "Poe => pytest tests/\nFAILED tests/test_foo.py::test_bar - AssertionError\n1 failed, 41 passed"
+expected = "FAILED tests/test_foo.py::test_bar - AssertionError\n1 failed, 41 passed"
+
+[[tests.poe]]
+name = "all stripped → on_empty"
+input = "Poe => echo done\n\nResult: Task succeeded\n"
+expected = "poe: ok"
+
+[[tests.poe]]
+name = "empty input"
+input = ""
+expected = ""
