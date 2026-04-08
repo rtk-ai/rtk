@@ -61,10 +61,34 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
     let arch = std::env::consts::ARCH.to_string();
     let install_method = detect_install_method();
 
-    // Get stats from tracking DB
+    // Get stats from tracking DB (single connection for both basic + enriched)
+    let tracker = tracking::Tracker::new().ok();
     let (commands_24h, top_commands, savings_pct, tokens_saved_24h, tokens_saved_total) =
-        get_stats();
-    let enriched = get_enriched_stats();
+        match &tracker {
+            Some(t) => get_stats(t),
+            None => (0, vec![], None, 0, 0),
+        };
+    let enriched = match &tracker {
+        Some(t) => get_enriched_stats(t),
+        None => EnrichedStats {
+            passthrough_top: vec![],
+            parse_failures_24h: 0,
+            low_savings_commands: vec![],
+            avg_savings_per_command: 0.0,
+            hook_type: detect_hook_type(),
+            custom_toml_filters: count_custom_toml_filters(),
+            first_seen_days: 0,
+            active_days_30d: 0,
+            commands_total: 0,
+            ecosystem_mix: serde_json::json!({}),
+            tokens_saved_30d: 0,
+            estimated_savings_usd_30d: 0.0,
+            has_config_toml: detect_has_config(),
+            exclude_commands_count: count_exclude_commands(),
+            projects_count: 0,
+            meta_usage: serde_json::json!({}),
+        },
+    };
 
     let payload = serde_json::json!({
         "device_hash": device_hash,
@@ -183,23 +207,13 @@ fn salt_file_path() -> PathBuf {
         .join(".device_salt")
 }
 
-fn get_stats() -> (i64, Vec<String>, Option<f64>, i64, i64) {
-    let tracker = match tracking::Tracker::new() {
-        Ok(t) => t,
-        Err(_) => return (0, vec![], None, 0, 0),
-    };
-
+fn get_stats(tracker: &tracking::Tracker) -> (i64, Vec<String>, Option<f64>, i64, i64) {
     let since_24h = chrono::Utc::now() - chrono::Duration::hours(24);
 
-    // Get 24h command count and top commands from tracking DB
     let commands_24h = tracker.count_commands_since(since_24h).unwrap_or(0);
-
     let top_commands = tracker.top_commands(5).unwrap_or_default();
-
     let savings_pct = tracker.overall_savings_pct().ok();
-
     let tokens_saved_24h = tracker.tokens_saved_24h(since_24h).unwrap_or(0);
-
     let tokens_saved_total = tracker.total_tokens_saved().unwrap_or(0);
 
     (
@@ -237,31 +251,7 @@ struct EnrichedStats {
     meta_usage: serde_json::Value,
 }
 
-fn get_enriched_stats() -> EnrichedStats {
-    let defaults = || EnrichedStats {
-        passthrough_top: vec![],
-        parse_failures_24h: 0,
-        low_savings_commands: vec![],
-        avg_savings_per_command: 0.0,
-        hook_type: detect_hook_type(),
-        custom_toml_filters: count_custom_toml_filters(),
-        first_seen_days: 0,
-        active_days_30d: 0,
-        commands_total: 0,
-        ecosystem_mix: serde_json::json!({}),
-        tokens_saved_30d: 0,
-        estimated_savings_usd_30d: 0.0,
-        has_config_toml: detect_has_config(),
-        exclude_commands_count: count_exclude_commands(),
-        projects_count: 0,
-        meta_usage: serde_json::json!({}),
-    };
-
-    let tracker = match tracking::Tracker::new() {
-        Ok(t) => t,
-        Err(_) => return defaults(),
-    };
-
+fn get_enriched_stats(tracker: &tracking::Tracker) -> EnrichedStats {
     let since_24h = chrono::Utc::now() - chrono::Duration::hours(24);
 
     let passthrough_top = tracker
@@ -296,9 +286,9 @@ fn get_enriched_stats() -> EnrichedStats {
     );
 
     let tokens_saved_30d = tracker.tokens_saved_30d().unwrap_or(0);
-    // Estimate USD savings: Claude Sonnet input $3/Mtok, output $15/Mtok
-    // Weighted average ~$5/Mtok for typical input-heavy agent usage
-    let estimated_savings_usd_30d = tokens_saved_30d as f64 / 1_000_000.0 * 5.0;
+    // Estimate USD savings: tokens_saved are input tokens (CLI output compressed before
+    // reaching the LLM). Use input pricing: Claude Sonnet $3/Mtok.
+    let estimated_savings_usd_30d = tokens_saved_30d as f64 / 1_000_000.0 * 3.0;
 
     let projects_count = tracker.projects_count().unwrap_or(0);
 
@@ -324,13 +314,12 @@ fn get_enriched_stats() -> EnrichedStats {
     }
 }
 
-/// Build meta-command usage counts (gain, discover, proxy, verify, learn).
+/// Build meta-command usage counts (gain, discover, proxy, verify, learn, init).
 fn build_meta_usage(tracker: &tracking::Tracker) -> serde_json::Value {
     let meta_cmds = ["gain", "discover", "proxy", "verify", "learn", "init"];
-    let top = tracker.top_commands(50).unwrap_or_default();
     let mut usage = serde_json::Map::new();
     for meta in &meta_cmds {
-        let count = top.iter().filter(|c| c == meta).count();
+        let count = tracker.count_meta_command(meta).unwrap_or(0);
         if count > 0 {
             usage.insert(meta.to_string(), serde_json::json!(count));
         }
@@ -551,7 +540,11 @@ mod tests {
 
     #[test]
     fn test_get_stats_returns_tuple() {
-        let (cmds, top, pct, saved_24h, saved_total) = get_stats();
+        let tracker = match tracking::Tracker::new() {
+            Ok(t) => t,
+            Err(_) => return, // No DB — skip
+        };
+        let (cmds, top, pct, saved_24h, saved_total) = get_stats(&tracker);
         assert!(cmds >= 0);
         assert!(top.len() <= 5);
         assert!(saved_24h >= 0);
@@ -563,7 +556,11 @@ mod tests {
 
     #[test]
     fn test_enriched_stats_returns_valid_data() {
-        let stats = get_enriched_stats();
+        let tracker = match tracking::Tracker::new() {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let stats = get_enriched_stats(&tracker);
         assert!(stats.passthrough_top.len() <= 5);
         assert!(stats.parse_failures_24h >= 0);
         assert!(stats.low_savings_commands.len() <= 5);

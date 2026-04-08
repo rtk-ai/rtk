@@ -958,17 +958,18 @@ impl Tracker {
     }
 
     /// Top N passthrough commands (0% savings) — commands missing a filter.
+    /// Groups by first word only to avoid leaking arguments into telemetry.
     pub fn top_passthrough(&self, limit: usize) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT original_cmd, COUNT(*) as cnt FROM commands
+            "SELECT TRIM(SUBSTR(original_cmd, 1, INSTR(original_cmd || ' ', ' ') - 1)) as tool,
+             COUNT(*) as cnt FROM commands
              WHERE input_tokens = 0 AND output_tokens = 0
-             GROUP BY original_cmd ORDER BY cnt DESC LIMIT ?1",
+             GROUP BY tool ORDER BY cnt DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
             let cmd: String = row.get(0)?;
             let count: i64 = row.get(1)?;
-            let short = cmd.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
-            Ok((short, count))
+            Ok((cmd, count))
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -1002,22 +1003,42 @@ impl Tracker {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Average savings percentage per command (unweighted by volume).
+    /// Average savings percentage per command (unweighted — each command name counts once).
     pub fn avg_savings_per_command(&self) -> Result<f64> {
         let avg: f64 = self.conn.query_row(
-            "SELECT COALESCE(AVG(savings_pct), 0.0) FROM commands WHERE input_tokens > 0",
+            "SELECT COALESCE(AVG(avg_sav), 0.0) FROM (
+                SELECT rtk_cmd, AVG(savings_pct) as avg_sav
+                FROM commands WHERE input_tokens > 0
+                GROUP BY rtk_cmd
+            )",
             [],
             |row| row.get(0),
         )?;
         Ok(avg)
     }
 
+    /// Count invocations of a specific meta-command (by rtk_cmd suffix).
+    pub fn count_meta_command(&self, name: &str) -> Result<i64> {
+        let pattern = format!("rtk {}", name);
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM commands WHERE rtk_cmd LIKE ?1 || '%'",
+            params![pattern],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Days since first recorded command (installation age).
     pub fn first_seen_days(&self) -> Result<i64> {
-        let oldest: Option<String> = self
-            .conn
-            .query_row("SELECT MIN(timestamp) FROM commands", [], |row| row.get(0))
-            .unwrap_or(None);
+        let oldest: Option<String> =
+            match self
+                .conn
+                .query_row("SELECT MIN(timestamp) FROM commands", [], |row| row.get(0))
+            {
+                Ok(v) => v,
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(anyhow::anyhow!("Failed to query first seen timestamp: {e}")),
+            };
         match oldest {
             Some(ts) => {
                 let first = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%dT%H:%M:%S")
@@ -1055,7 +1076,7 @@ impl Tracker {
     /// Ecosystem distribution as percentages (top categories by command prefix).
     pub fn ecosystem_mix(&self) -> Result<Vec<(String, f64)>> {
         let total: f64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM commands WHERE input_tokens > 0",
+            "SELECT COUNT(*) FROM commands WHERE input_tokens > 0 AND timestamp >= datetime('now', '-90 days')",
             [],
             |row| row.get(0),
         )?;
@@ -1064,7 +1085,7 @@ impl Tracker {
         }
         let mut stmt = self.conn.prepare(
             "SELECT rtk_cmd, COUNT(*) as cnt FROM commands
-             WHERE input_tokens > 0
+             WHERE input_tokens > 0 AND timestamp >= datetime('now', '-90 days')
              GROUP BY rtk_cmd ORDER BY cnt DESC",
         )?;
         let mut categories: std::collections::HashMap<String, f64> =
