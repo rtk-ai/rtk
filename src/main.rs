@@ -1693,7 +1693,7 @@ fn run_cli() -> Result<i32> {
                 let tracker = crate::core::tracking::Tracker::new()
                     .context("Failed to initialize tracking database")?;
                 analytics::gain::show_quality(&tracker)?;
-                return Ok(());
+                return Ok(0);
             }
 
             analytics::gain::run(
