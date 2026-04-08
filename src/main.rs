@@ -348,6 +348,11 @@ enum Commands {
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
+
+        /// Use native cross-platform hook (rtk binary) instead of bash script.
+        /// Required on Windows; opt-in on Unix. No bash or jq dependency.
+        #[arg(long = "native-hook")]
+        native_hook: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -1607,6 +1612,7 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            native_hook,
         } => {
             if show {
                 hooks::init::show_config(codex)?;
@@ -1648,6 +1654,7 @@ fn run_cli() -> Result<i32> {
                     claude_md,
                     hook_only,
                     codex,
+                    native_hook,
                     patch_mode,
                     cli.verbose,
                 )?;
