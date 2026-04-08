@@ -19,8 +19,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read, summary,
-    tree, wc_cmd,
+    deps, env_cmd, eza_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read,
+    summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -78,6 +78,13 @@ enum Commands {
     /// Directory tree with token-optimized output (proxy to native tree)
     Tree {
         /// Arguments passed to tree (supports all native tree flags like -L, -d, -a)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// eza directory listing with token-optimized output (proxy to eza)
+    Eza {
+        /// Arguments passed to eza (supports flat, -l/--long, -T/--tree, -a/--all, --git)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1246,6 +1253,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Tree { args } => tree::run(&args, cli.verbose)?,
 
+        Commands::Eza { args } => eza_cmd::run(&args, cli.verbose)?,
+
         // ISSUE #989: support multiple files (cat file1 file2 → rtk read file1 file2)
         Commands::Read {
             files,
@@ -2165,6 +2174,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
         cmd,
         Commands::Ls { .. }
             | Commands::Tree { .. }
+            | Commands::Eza { .. }
             | Commands::Read { .. }
             | Commands::Smart { .. }
             | Commands::Git { .. }

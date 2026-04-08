@@ -98,6 +98,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^eza(\s|$)",
+        rtk_cmd: "rtk eza",
+        rewrite_prefixes: &["eza"],
+        category: "Files",
+        savings_pct: 70.0,
+        subcmd_savings: &[("--long", 75.0), ("--tree", 70.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^find\s+",
         rtk_cmd: "rtk find",
         rewrite_prefixes: &["find"],
