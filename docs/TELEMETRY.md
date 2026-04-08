@@ -55,7 +55,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 
 | Field | Example | Purpose |
 |-------|---------|---------|
-| `passthrough_top` | `["git tag:15", "npm ci:8"]` | Top 5 commands with 0% savings — these need filters |
+| `passthrough_top` | `["git:15", "npm:8"]` | Top 5 commands with 0% savings — these need filters |
 | `parse_failures_24h` | `3` | Filter fragility — high count means filters are breaking |
 | `low_savings_commands` | `["rtk docker ps:25%"]` | Commands averaging <30% savings — filters to improve |
 | `avg_savings_per_command` | `68.5` | Unweighted average (vs global which is volume-biased) |
@@ -78,7 +78,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 | Field | Example | Purpose |
 |-------|---------|---------|
 | `tokens_saved_30d` | `12000000` | 30-day token savings for trend analysis |
-| `estimated_savings_usd_30d` | `60.0` | Estimated dollar value saved (at ~$5/Mtok average API pricing) |
+| `estimated_savings_usd_30d` | `36.0` | Estimated dollar value saved (at ~$3/Mtok input pricing, Claude Sonnet) |
 
 ### Adoption
 

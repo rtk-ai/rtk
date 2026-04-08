@@ -292,7 +292,7 @@ fn get_enriched_stats(tracker: &tracking::Tracker) -> EnrichedStats {
 
     let projects_count = tracker.projects_count().unwrap_or(0);
 
-    let meta_usage = build_meta_usage(&tracker);
+    let meta_usage = build_meta_usage(tracker);
 
     EnrichedStats {
         passthrough_top,
