@@ -835,7 +835,7 @@ pub fn show_quality(tracker: &Tracker) -> Result<()> {
     );
     if gross > 0 {
         let efficiency = (net.max(0) as f64 / gross as f64) * 100.0;
-        println!("  Efficiency:        {:.0}%", efficiency);
+        println!("  Efficiency:        {:.1}%", efficiency);
     }
     println!();
 
