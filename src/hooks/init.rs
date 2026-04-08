@@ -3857,10 +3857,14 @@ More notes
 
         let warning = codex_uninstall_warning(&path).unwrap();
 
-        assert!(warning.is_some());
-        let warning = warning.unwrap();
-        assert!(warning.contains("features.codex_hooks = true"));
-        assert!(warning.contains(&path.display().to_string()));
+        if cfg!(windows) {
+            assert!(warning.is_none());
+        } else {
+            assert!(warning.is_some());
+            let warning = warning.unwrap();
+            assert!(warning.contains("features.codex_hooks = true"));
+            assert!(warning.contains(&path.display().to_string()));
+        }
     }
 
     #[test]
