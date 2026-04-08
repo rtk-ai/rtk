@@ -538,6 +538,7 @@ impl Tracker {
              WHERE savings_pct < 30.0
                AND input_tokens > 50
                AND rtk_cmd NOT LIKE '%proxy%'
+               AND rtk_cmd NOT LIKE '%passthrough%'
                AND rtk_cmd NOT LIKE '%fallback%'
              GROUP BY rtk_cmd
              HAVING runs >= 3
