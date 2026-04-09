@@ -106,6 +106,8 @@ rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
 rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
+rtk init --agent kilocode       # Kilo Code
+rtk init --agent antigravity    # Google Antigravity
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -308,7 +310,7 @@ After install, **restart Claude Code**.
 
 ## Supported AI Tools
 
-RTK supports 10 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports 12 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -323,6 +325,8 @@ RTK supports 10 AI coding tools. Each integration transparently rewrites shell c
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
+| **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
+| **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents).
 

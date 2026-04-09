@@ -1245,6 +1245,86 @@ fn run_windsurf_mode(verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ─── Kilo Code support ────────────────────────────────────────
+
+const KILOCODE_RULES: &str = include_str!("../../hooks/kilocode/rules.md");
+
+pub fn run_kilocode_mode(verbose: u8) -> Result<()> {
+    run_kilocode_mode_at(&std::env::current_dir()?, verbose)
+}
+
+fn run_kilocode_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
+    // Kilo Code reads .kilocode/rules/ from the project root (workspace-scoped)
+    let target_dir = base_dir.join(".kilocode/rules");
+    let rules_path = target_dir.join("rtk-rules.md");
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        println!("\nRTK already configured for Kilo Code in this project.\n");
+        println!("  Rules: .kilocode/rules/rtk-rules.md (already present)");
+    } else {
+        fs::create_dir_all(&target_dir).context("Failed to create .kilocode/rules directory")?;
+        let new_content = if existing.trim().is_empty() {
+            KILOCODE_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), KILOCODE_RULES)
+        };
+        fs::write(&rules_path, &new_content)
+            .context("Failed to write .kilocode/rules/rtk-rules.md")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote .kilocode/rules/rtk-rules.md");
+        }
+
+        println!("\nRTK configured for Kilo Code.\n");
+        println!("  Rules: .kilocode/rules/rtk-rules.md (installed)");
+    }
+    println!("  Kilo Code will now use rtk commands for token savings.");
+    println!("  Test with: git status\n");
+
+    Ok(())
+}
+
+// ─── Google Antigravity support ───────────────────────────────
+
+const ANTIGRAVITY_RULES: &str = include_str!("../../hooks/antigravity/rules.md");
+
+pub fn run_antigravity_mode(verbose: u8) -> Result<()> {
+    run_antigravity_mode_at(&std::env::current_dir()?, verbose)
+}
+
+fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
+    // Antigravity reads .agents/rules/ from the project root (workspace-scoped)
+    let target_dir = base_dir.join(".agents/rules");
+    let rules_path = target_dir.join("antigravity-rtk-rules.md");
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        println!("\nRTK already configured for Antigravity in this project.\n");
+        println!("  Rules: .agents/rules/antigravity-rtk-rules.md (already present)");
+    } else {
+        fs::create_dir_all(&target_dir).context("Failed to create .agents/rules directory")?;
+        let new_content = if existing.trim().is_empty() {
+            ANTIGRAVITY_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), ANTIGRAVITY_RULES)
+        };
+        fs::write(&rules_path, &new_content)
+            .context("Failed to write .agents/rules/antigravity-rtk-rules.md")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote .agents/rules/antigravity-rtk-rules.md");
+        }
+
+        println!("\nRTK configured for Google Antigravity.\n");
+        println!("  Rules: .agents/rules/antigravity-rtk-rules.md (installed)");
+    }
+    println!("  Antigravity will now use rtk commands for token savings.");
+    println!("  Test with: git status\n");
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -2667,6 +2747,56 @@ More notes
             err.to_string(),
             "--codex cannot be combined with --no-patch"
         );
+    }
+
+    #[test]
+    fn test_kilocode_mode_creates_rules_file() {
+        let temp = TempDir::new().unwrap();
+        run_kilocode_mode_at(temp.path(), 0).unwrap();
+
+        let rules_path = temp.path().join(".kilocode/rules/rtk-rules.md");
+        assert!(rules_path.exists(), "Rules file should be created");
+        let content = fs::read_to_string(&rules_path).unwrap();
+        assert!(content.contains("RTK"), "Rules file should contain RTK");
+    }
+
+    #[test]
+    fn test_kilocode_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_kilocode_mode_at(temp.path(), 0).unwrap();
+
+        let path = temp.path().join(".kilocode/rules/rtk-rules.md");
+        let first = fs::read_to_string(&path).unwrap();
+
+        // Second run should not overwrite
+        run_kilocode_mode_at(temp.path(), 0).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_antigravity_mode_creates_rules_file() {
+        let temp = TempDir::new().unwrap();
+        run_antigravity_mode_at(temp.path(), 0).unwrap();
+
+        let rules_path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
+        assert!(rules_path.exists(), "Rules file should be created");
+        let content = fs::read_to_string(&rules_path).unwrap();
+        assert!(content.contains("RTK"), "Rules file should contain RTK");
+    }
+
+    #[test]
+    fn test_antigravity_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_antigravity_mode_at(temp.path(), 0).unwrap();
+
+        let path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
+        let first = fs::read_to_string(&path).unwrap();
+
+        // Second run should not overwrite
+        run_antigravity_mode_at(temp.path(), 0).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "Idempotent: content should not change");
     }
 
     #[test]
