@@ -285,7 +285,10 @@ pub fn run_claude() -> Result<()> {
 
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
-        Err(_) => return Ok(()),
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
     };
 
     let cmd = match v

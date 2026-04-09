@@ -2028,7 +2028,6 @@ fn run_cli() -> Result<i32> {
             if raw.trim().is_empty() {
                 0
             } else {
-                // Execute via shell passthrough with token tracking
                 use std::process::Command as ProcCommand;
                 let shell = if cfg!(windows) { "cmd" } else { "sh" };
                 let flag = if cfg!(windows) { "/C" } else { "-c" };
@@ -2079,8 +2078,30 @@ fn run_cli() -> Result<i32> {
                 eprintln!("Proxy mode: {} {}", cmd_name, cmd_args.join(" "));
             }
 
-            // ISSUE #897: ChildGuard kills child on error/panic to prevent
-            // orphan processes that caused a 514GB memory leak + kernel panic.
+            // ISSUE #897: Kill proxy child on SIGINT/SIGTERM to prevent orphan
+            // processes. Drop-based ChildGuard doesn't run on signals with
+            // panic=abort, so we register a signal handler that kills the child
+            // PID stored in this atomic.
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static PROXY_CHILD_PID: AtomicU32 = AtomicU32::new(0);
+
+            #[cfg(unix)]
+            {
+                unsafe extern "C" fn handle_signal(sig: libc::c_int) {
+                    let pid = PROXY_CHILD_PID.load(Ordering::SeqCst);
+                    if pid != 0 {
+                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                        libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
+                    }
+                    libc::signal(sig, libc::SIG_DFL);
+                    libc::raise(sig);
+                }
+                unsafe {
+                    libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
+                    libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+                }
+            }
+
             struct ChildGuard(Option<std::process::Child>);
             impl Drop for ChildGuard {
                 fn drop(&mut self) {
@@ -2088,6 +2109,7 @@ fn run_cli() -> Result<i32> {
                         let _ = child.kill();
                         let _ = child.wait();
                     }
+                    PROXY_CHILD_PID.store(0, Ordering::SeqCst);
                 }
             }
 
@@ -2099,6 +2121,11 @@ fn run_cli() -> Result<i32> {
                     .spawn()
                     .context(format!("Failed to execute command: {}", cmd_name))?,
             ));
+
+            // Store child PID for signal handler before anything can fail
+            if let Some(ref inner) = child.0 {
+                PROXY_CHILD_PID.store(inner.id(), Ordering::SeqCst);
+            }
 
             let inner = child.0.as_mut().context("Child process missing")?;
             let stdout_pipe = inner

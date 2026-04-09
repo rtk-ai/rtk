@@ -34,6 +34,7 @@ flate2 = "1.0"
 quick-xml = "0.37"
 which = "8"
 automod = "1"
+libc = "0.2"
 
 [build-dependencies]
 toml = "0.8"

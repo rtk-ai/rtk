@@ -3,9 +3,8 @@
 use anyhow::{Context, Result};
 use std::process::Command;
 
-use crate::core::stream::{self, FilterMode, StdinMode};
+use crate::core::stream::{self, FilterMode, StdinMode, StreamFilter};
 use crate::core::tracking;
-use crate::core::utils::exit_code_from_status;
 
 pub fn print_with_hint(filtered: &str, raw: &str, tee_label: &str, exit_code: i32) {
     if let Some(hint) = crate::core::tee::tee_and_hint(raw, tee_label, exit_code) {
@@ -54,8 +53,98 @@ impl<'a> RunOptions<'a> {
     }
 }
 
-pub fn run_filtered<F>(
+pub enum RunMode<'a> {
+    Filtered(Box<dyn Fn(&str) -> String + 'a>),
+    Streamed(Box<dyn StreamFilter + 'a>),
+    Passthrough,
+}
+
+pub fn run(
     mut cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    mode: RunMode<'_>,
+    opts: RunOptions<'_>,
+) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let cmd_label = format!("{} {}", tool_name, args_display);
+
+    match mode {
+        RunMode::Filtered(filter_fn) => {
+            let result = stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
+                .with_context(|| format!("Failed to run {}", tool_name))?;
+
+            let exit_code = result.exit_code;
+            let raw = &result.raw;
+            let raw_stdout = &result.raw_stdout;
+
+            if opts.skip_filter_on_failure && exit_code != 0 {
+                timer.track(&cmd_label, &format!("rtk {}", cmd_label), raw, raw);
+                return Ok(exit_code);
+            }
+
+            let text_to_filter = if opts.filter_stdout_only {
+                raw_stdout
+            } else {
+                raw
+            };
+            let filtered = filter_fn(text_to_filter);
+
+            if let Some(label) = opts.tee_label {
+                print_with_hint(&filtered, raw, label, exit_code);
+            } else if opts.no_trailing_newline {
+                print!("{}", filtered);
+            } else {
+                println!("{}", filtered);
+            }
+
+            let raw_for_tracking = if opts.filter_stdout_only {
+                raw_stdout
+            } else {
+                raw
+            };
+            timer.track(
+                &cmd_label,
+                &format!("rtk {}", cmd_label),
+                raw_for_tracking,
+                &filtered,
+            );
+            Ok(exit_code)
+        }
+        RunMode::Streamed(filter) => {
+            let result =
+                stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::Streaming(filter))
+                    .with_context(|| format!("Failed to run {}", tool_name))?;
+
+            if let Some(label) = opts.tee_label {
+                if let Some(hint) =
+                    crate::core::tee::tee_and_hint(&result.raw, label, result.exit_code)
+                {
+                    println!("{}", hint);
+                }
+            }
+
+            timer.track(
+                &cmd_label,
+                &format!("rtk {}", cmd_label),
+                &result.raw,
+                &result.filtered,
+            );
+            Ok(result.exit_code)
+        }
+        RunMode::Passthrough => {
+            let result =
+                stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
+                    .with_context(|| format!("Failed to run {}", tool_name))?;
+
+            timer.track_passthrough(&cmd_label, &format!("rtk {} (passthrough)", cmd_label));
+            Ok(result.exit_code)
+        }
+    }
+}
+
+pub fn run_filtered<F>(
+    cmd: Command,
     tool_name: &str,
     args_display: &str,
     filter_fn: F,
@@ -64,70 +153,43 @@ pub fn run_filtered<F>(
 where
     F: Fn(&str) -> String,
 {
-    let timer = tracking::TimedExecution::start();
-
-    // CaptureOnly: stderr streams live, stdout buffered silently.
-    // result.filtered = raw_stdout, result.raw = stdout + stderr
-    let result = stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
-        .with_context(|| format!("Failed to run {}", tool_name))?;
-
-    let exit_code = result.exit_code;
-    let raw_stdout = &result.filtered;
-    let raw = &result.raw;
-
-    if opts.skip_filter_on_failure && exit_code != 0 {
-        timer.track(
-            &format!("{} {}", tool_name, args_display),
-            &format!("rtk {} {}", tool_name, args_display),
-            raw,
-            raw,
-        );
-        return Ok(exit_code);
-    }
-
-    let text_to_filter = if opts.filter_stdout_only {
-        raw_stdout
-    } else {
-        raw
-    };
-    let filtered = filter_fn(text_to_filter);
-
-    if let Some(label) = opts.tee_label {
-        print_with_hint(&filtered, raw, label, exit_code);
-    } else if opts.no_trailing_newline {
-        print!("{}", filtered);
-    } else {
-        println!("{}", filtered);
-    }
-
-    let raw_for_tracking = if opts.filter_stdout_only {
-        raw_stdout
-    } else {
-        raw
-    };
-    timer.track(
-        &format!("{} {}", tool_name, args_display),
-        &format!("rtk {} {}", tool_name, args_display),
-        raw_for_tracking,
-        &filtered,
-    );
-
-    Ok(exit_code)
+    run(
+        cmd,
+        tool_name,
+        args_display,
+        RunMode::Filtered(Box::new(filter_fn)),
+        opts,
+    )
 }
 
 pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
     if verbose > 0 {
         eprintln!("{} passthrough: {:?}", tool, args);
     }
-    let status = crate::core::utils::resolved_command(tool)
-        .args(args)
-        .status()
-        .with_context(|| format!("Failed to run {}", tool))?;
+    let mut cmd = crate::core::utils::resolved_command(tool);
+    cmd.args(args);
     let args_str = tracking::args_display(args);
-    timer.track_passthrough(
-        &format!("{} {}", tool, args_str),
-        &format!("rtk {} {} (passthrough)", tool, args_str),
-    );
-    Ok(exit_code_from_status(&status, tool))
+    run(
+        cmd,
+        tool,
+        &args_str,
+        RunMode::Passthrough,
+        RunOptions::default(),
+    )
+}
+
+pub fn run_streamed(
+    cmd: Command,
+    tool_name: &str,
+    args_display: &str,
+    filter: Box<dyn StreamFilter + '_>,
+    opts: RunOptions<'_>,
+) -> Result<i32> {
+    run(
+        cmd,
+        tool_name,
+        args_display,
+        RunMode::Streamed(filter),
+        opts,
+    )
 }

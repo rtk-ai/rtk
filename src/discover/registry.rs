@@ -347,7 +347,8 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
-/// For pipes (`|`), only rewrites the first command (the filter stays raw).
+/// For pipes (`|`), only rewrites the left-hand command (pipe targets stay raw),
+/// but continues rewriting segments after subsequent `&&`/`||`/`;` operators.
 pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
@@ -381,6 +382,9 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
     let mut seg_start: usize = 0;
 
     for tok in &tokens {
+        if tok.offset < seg_start {
+            continue;
+        }
         match tok.kind {
             TokenKind::Operator => {
                 let seg = cmd[seg_start..tok.offset].trim();
@@ -420,9 +424,25 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                result.push(' ');
-                result.push_str(cmd[tok.offset..].trim_start());
-                return if any_changed { Some(result) } else { None };
+
+                let pipe_group_end = tokens.iter().find(|t| {
+                    t.offset > tok.offset
+                        && (t.kind == TokenKind::Operator
+                            || (t.kind == TokenKind::Shellism && t.value == "&"))
+                });
+
+                match pipe_group_end {
+                    Some(next_op) => {
+                        result.push(' ');
+                        result.push_str(cmd[tok.offset..next_op.offset].trim());
+                        seg_start = next_op.offset;
+                    }
+                    None => {
+                        result.push(' ');
+                        result.push_str(cmd[tok.offset..].trim_start());
+                        return if any_changed { Some(result) } else { None };
+                    }
+                }
             }
             TokenKind::Shellism if tok.value == "&" => {
                 let seg = cmd[seg_start..tok.offset].trim();
@@ -2505,6 +2525,59 @@ mod tests {
         assert_ne!(
             classify_command("command git status"),
             Classification::Ignored
+        );
+    }
+
+    // --- Pipe + operator rewrite ---
+
+    #[test]
+    fn test_rewrite_pipe_then_and() {
+        assert_eq!(
+            rewrite_command("git log | head -5 && git stash", &[]),
+            Some("rtk git log | head -5 && rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_then_semicolon() {
+        assert_eq!(
+            rewrite_command("cargo test | head; git status", &[]),
+            Some("rtk cargo test | head; rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_then_or() {
+        assert_eq!(
+            rewrite_command("cargo test | grep FAIL || git stash", &[]),
+            Some("rtk cargo test | grep FAIL || rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_pipe_then_and() {
+        assert_eq!(
+            rewrite_command(
+                "RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && git stash",
+                &[]
+            ),
+            Some("RUST_BACKTRACE=1 rtk cargo test 2>&1 | grep FAILED && rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_and_then_pipe() {
+        assert_eq!(
+            rewrite_command("git status && cargo test | grep FAIL", &[]),
+            Some("rtk git status && rtk cargo test | grep FAIL".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_multi_pipe_then_and() {
+        assert_eq!(
+            rewrite_command("git log | head | tail && git status", &[]),
+            Some("rtk git log | head | tail && rtk git status".into())
         );
     }
 }
