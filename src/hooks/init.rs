@@ -27,6 +27,9 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded Pi extension (auto-rewrite)
 const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 
+// Embedded Swival adapter
+const SWIVAL_ADAPTER: &str = include_str!("../../hooks/swival/rtk-adapter.py");
+
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
@@ -613,13 +616,14 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, Cursor, or Pi artifacts.
+/// Full uninstall for Claude, Gemini, Codex, Cursor, Pi, or Swival artifacts.
 pub fn uninstall(
     global: bool,
     gemini: bool,
     codex: bool,
     cursor: bool,
     pi: bool,
+    swival: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
@@ -660,6 +664,19 @@ pub fn uninstall(
 
     if pi {
         uninstall_pi(global, ctx)?;
+        return Ok(());
+    }
+
+    if swival {
+        let removed = remove_swival(global, verbose)?;
+        if removed.is_empty() {
+            println!("RTK Swival support was not installed (nothing to remove)");
+        } else {
+            println!("RTK uninstalled (Swival):");
+            for item in &removed {
+                println!("  - {}", item);
+            }
+        }
         return Ok(());
     }
 
@@ -1897,6 +1914,169 @@ fn uninstall_hermes_at(hermes_home: &Path, ctx: InitContext) -> Result<Vec<Strin
     Ok(removed)
 }
 
+// ─── Swival support ──────────────────────────────────────────────────────────
+
+fn resolve_swival_paths(global: bool) -> Result<(PathBuf, PathBuf, String)> {
+    if global {
+        let config_dir = resolve_home_subdir(".config/swival")?;
+        let adapter = config_dir.join("rtk-adapter.py");
+        let value = format!("\"{}\"", adapter.display());
+        Ok((adapter, config_dir.join("config.toml"), value))
+    } else {
+        Ok((
+            PathBuf::from(".rtk/swival-rtk-adapter.py"),
+            PathBuf::from("swival.toml"),
+            "\".rtk/swival-rtk-adapter.py\"".to_string(),
+        ))
+    }
+}
+
+pub fn run_swival(global: bool, verbose: u8) -> Result<()> {
+    let (adapter_path, config_path, config_value) = resolve_swival_paths(global)?;
+    if let Some(dir) = adapter_path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    }
+
+    let changed = write_if_changed(
+        &adapter_path,
+        SWIVAL_ADAPTER,
+        "Swival adapter",
+        InitContext {
+            verbose,
+            dry_run: false,
+        },
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&adapter_path, fs::Permissions::from_mode(0o755))
+            .context("Failed to chmod Swival adapter")?;
+    }
+
+    let config_status = upsert_swival_config(&config_path, &config_value, verbose)?;
+
+    println!("\nRTK configured for Swival.\n");
+    println!(
+        "  Adapter: {} ({})",
+        adapter_path.display(),
+        if changed { "updated" } else { "up to date" }
+    );
+    println!("  Config:  {} ({})", config_path.display(), config_status);
+    println!("  Test with: swival \"run git status\"\n");
+    Ok(())
+}
+
+fn upsert_swival_config(path: &Path, value: &str, verbose: u8) -> Result<String> {
+    let existing = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", path.display())),
+    };
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let key = trimmed.split('=').next().map(str::trim).unwrap_or("");
+        if key != "command_middleware" {
+            continue;
+        }
+        let current_value = trimmed
+            .split_once('=')
+            .map(|x| x.1)
+            .map(str::trim)
+            .unwrap_or("");
+        if current_value == value {
+            return Ok("up to date".to_string());
+        }
+        if verbose > 0 {
+            eprintln!(
+                "rtk: {} already has command_middleware = {} — not overwriting",
+                path.display(),
+                current_value
+            );
+        }
+        return Ok(format!("conflict: existing value {}", current_value));
+    }
+
+    let new_line = format!("command_middleware = {}\n", value);
+    let new_content = if existing.trim().is_empty() {
+        new_line
+    } else {
+        format!("{}\n{}", existing.trim_end(), new_line)
+    };
+    fs::write(path, &new_content).with_context(|| format!("Failed to write {}", path.display()))?;
+    if verbose > 0 {
+        eprintln!("Patched {}", path.display());
+    }
+    Ok("added".to_string())
+}
+
+fn remove_swival(global: bool, verbose: u8) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+
+    let (adapter_path, config_path, managed_value) = resolve_swival_paths(global)?;
+
+    if adapter_path.exists() {
+        fs::remove_file(&adapter_path)
+            .with_context(|| format!("Failed to remove {}", adapter_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Removed {}", adapter_path.display());
+        }
+        removed.push(format!("Swival adapter: {}", adapter_path.display()));
+    }
+
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+
+        let mut touched = false;
+        let new_content: String = content
+            .lines()
+            .filter(|l| {
+                let trimmed = l.trim();
+                if trimmed.starts_with('#') {
+                    return true;
+                }
+                let key = trimmed.split('=').next().map(str::trim).unwrap_or("");
+                if key != "command_middleware" {
+                    return true;
+                }
+                let current = trimmed
+                    .split_once('=')
+                    .map(|x| x.1)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if current == managed_value {
+                    touched = true;
+                    false
+                } else {
+                    if verbose > 0 {
+                        eprintln!(
+                            "rtk: leaving command_middleware = {} (not managed by rtk)",
+                            current
+                        );
+                    }
+                    true
+                }
+            })
+            .map(|l| format!("{}\n", l))
+            .collect();
+
+        if touched {
+            fs::write(&config_path, clean_double_blanks(&new_content))
+                .with_context(|| format!("Failed to write {}", config_path.display()))?;
+            removed.push(format!(
+                "{}: removed command_middleware",
+                config_path.display()
+            ));
+        }
+    }
+
+    Ok(removed)
+}
+
 fn patch_hermes_config(existing: &str) -> String {
     rewrite_hermes_config(existing, true)
 }
@@ -2251,6 +2431,66 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
     let without_comment = value.split_once('#').map_or(value, |(item, _)| item);
     let trimmed = without_comment.trim().trim_matches(['\'', '"']);
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn show_swival_config(global: bool) -> Result<()> {
+    let (adapter_path, config_path, managed_value) = resolve_swival_paths(global)?;
+    println!("rtk Swival Configuration:\n");
+
+    if adapter_path.exists() {
+        let ok = fs::read_to_string(&adapter_path).ok().as_deref() == Some(SWIVAL_ADAPTER);
+        println!(
+            "[{}] Adapter: {}{}",
+            if ok { "ok" } else { "warn" },
+            adapter_path.display(),
+            if ok {
+                ""
+            } else {
+                " (stale — run: rtk init --agent swival)"
+            },
+        );
+    } else {
+        println!("[missing] Adapter: {}", adapter_path.display());
+    }
+
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path).unwrap_or_default();
+        let line = content.lines().find(|l| {
+            let t = l.trim();
+            !t.starts_with('#')
+                && t.split('=').next().map(str::trim).unwrap_or("") == "command_middleware"
+        });
+        match line {
+            None => println!(
+                "[missing] Config: {} has no command_middleware",
+                config_path.display()
+            ),
+            Some(l) => {
+                let v = l
+                    .trim()
+                    .split_once('=')
+                    .map(|(_, v)| v.trim())
+                    .unwrap_or("");
+                if v == managed_value {
+                    println!(
+                        "[ok] Config: {} (command_middleware = {})",
+                        config_path.display(),
+                        v
+                    );
+                } else {
+                    println!(
+                        "[warn] Config: {} has command_middleware = {} (not RTK's adapter)",
+                        config_path.display(),
+                        v
+                    );
+                }
+            }
+        }
+    } else {
+        println!("[missing] Config: {} not found", config_path.display());
+    }
+
+    Ok(())
 }
 
 fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
@@ -3274,11 +3514,13 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool) -> Result<()> {
+pub fn show_config(codex: bool, swival: bool, global: bool) -> Result<()> {
     if codex {
         return show_codex_config();
     }
-
+    if swival {
+        return show_swival_config(global);
+    }
     show_claude_config()
 }
 
@@ -5869,7 +6111,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -5997,7 +6248,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -6223,7 +6474,16 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                true,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -6237,7 +6497,15 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, InitContext::default());
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        );
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -6336,6 +6604,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 InitContext {
                     verbose: 0,
                     dry_run: true,
@@ -6374,6 +6643,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             InitContext {
                 verbose: 0,
                 dry_run: true,
@@ -6833,5 +7103,64 @@ mod tests {
             "Hook config must not be written when the upsert aborts: {}",
             hook_path.display()
         );
+    }
+
+    #[test]
+    fn test_upsert_swival_config_absent() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("swival.toml");
+        let status = upsert_swival_config(&path, "\".rtk/swival-rtk-adapter.py\"", 0).unwrap();
+        assert_eq!(status, "added");
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("command_middleware = \".rtk/swival-rtk-adapter.py\""));
+    }
+
+    #[test]
+    fn test_upsert_swival_config_up_to_date() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("swival.toml");
+        fs::write(
+            &path,
+            "command_middleware = \".rtk/swival-rtk-adapter.py\"\n",
+        )
+        .unwrap();
+        let status = upsert_swival_config(&path, "\".rtk/swival-rtk-adapter.py\"", 0).unwrap();
+        assert_eq!(status, "up to date");
+    }
+
+    #[test]
+    fn test_upsert_swival_config_conflict() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("swival.toml");
+        fs::write(&path, "command_middleware = \"./other.py\"\n").unwrap();
+        let status = upsert_swival_config(&path, "\".rtk/swival-rtk-adapter.py\"", 0).unwrap();
+        assert!(status.starts_with("conflict"));
+        assert!(fs::read_to_string(&path).unwrap().contains("./other.py"));
+    }
+
+    #[test]
+    fn test_upsert_ignores_commented_and_prefixed_keys() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("swival.toml");
+        fs::write(
+            &path,
+            "# command_middleware = \"./something.py\"\ncommand_middleware_extra = \"./other.py\"\n",
+        )
+        .unwrap();
+        let status = upsert_swival_config(&path, "\".rtk/swival-rtk-adapter.py\"", 0).unwrap();
+        assert_eq!(status, "added");
+    }
+
+    #[test]
+    fn test_local_uninstall_does_not_hit_global_only_bail() {
+        let removed = remove_swival(false, 0);
+        assert!(removed.is_ok());
+    }
+
+    #[test]
+    fn test_show_config_swival_routes_to_swival_output() {
+        let result = show_swival_config(false);
+        assert!(result.is_ok());
     }
 }
