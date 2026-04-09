@@ -192,6 +192,7 @@ rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk rubocop                     # Ruby linting (JSON, -60%+)
+rtk phpstan analyse             # PHP static analysis (JSON, -75%+)
 ```
 
 ### Package Managers

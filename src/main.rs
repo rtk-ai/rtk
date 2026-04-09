@@ -15,6 +15,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
+use cmds::php::phpstan_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -629,6 +630,13 @@ enum Commands {
     /// RSpec test runner with compact output (Rails/Ruby)
     Rspec {
         /// RSpec arguments (e.g., spec/models, --tag focus)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// PHPStan static analysis with compact output (PHP)
+    Phpstan {
+        /// PHPStan arguments (e.g., analyse, --level 8, src/)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1924,6 +1932,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Rspec { args } => rspec_cmd::run(&args, cli.verbose)?,
 
+        Commands::Phpstan { args } => phpstan_cmd::run(&args, cli.verbose)?,
+
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
         Commands::Go { command } => match command {
@@ -2216,6 +2226,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
+            | Commands::Phpstan { .. }
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }

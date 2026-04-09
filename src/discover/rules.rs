@@ -327,6 +327,20 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(?:php\s+)?(?:\.?/?vendor/bin/)?phpstan\s+analy[sz]e\b",
+        rtk_cmd: "rtk phpstan",
+        rewrite_prefixes: &[
+            "php vendor/bin/phpstan",
+            "vendor/bin/phpstan",
+            "./vendor/bin/phpstan",
+            "phpstan",
+        ],
+        category: "Build",
+        savings_pct: 65.0,
+        subcmd_savings: &[("analyse", 65.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^aws\s+",
         rtk_cmd: "rtk aws",
         rewrite_prefixes: &["aws"],

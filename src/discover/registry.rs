@@ -2405,6 +2405,68 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_phpstan() {
+        assert!(matches!(
+            classify_command("vendor/bin/phpstan analyse src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpstan",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_phpstan_direct() {
+        assert!(matches!(
+            classify_command("phpstan analyse --level=9"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpstan",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_vendor_bin() {
+        assert_eq!(
+            rewrite_command("vendor/bin/phpstan analyse src/", &[]),
+            Some("rtk phpstan analyse src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_direct() {
+        assert_eq!(
+            rewrite_command("phpstan analyse --level=9", &[]),
+            Some("rtk phpstan analyse --level=9".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_php_prefix() {
+        assert_eq!(
+            rewrite_command("php vendor/bin/phpstan analyse", &[]),
+            Some("rtk phpstan analyse".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_dot_slash() {
+        assert_eq!(
+            rewrite_command("./vendor/bin/phpstan analyse src/", &[]),
+            Some("rtk phpstan analyse src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan_version_not_rewritten() {
+        // Utility subcommands must not be intercepted
+        assert_eq!(rewrite_command("phpstan --version", &[]), None);
+        assert_eq!(rewrite_command("phpstan list", &[]), None);
+        assert_eq!(rewrite_command("phpstan clear-result-cache", &[]), None);
+    }
+
+    #[test]
     fn test_split_command_substitution_no_split() {
         assert_eq!(
             split_command_chain("git log $(git rev-parse HEAD~1)"),
