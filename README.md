@@ -17,8 +17,8 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">Website</a> &bull;
   <a href="#installation">Install</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> &bull;
-  <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">Troubleshooting</a> &bull;
+  <a href="ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -313,16 +313,16 @@ RTK supports 10 AI coding tools. Each integration transparently rewrites shell c
 | Tool | Install | Method |
 |------|---------|--------|
 | **Claude Code** | `rtk init -g` | PreToolUse hook (bash) |
-| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook (`rtk hook copilot`) — transparent rewrite |
+| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook (`rtk hook gemini`) |
-| **Codex** | `rtk init -g --codex` | PreToolUse deny-with-suggestion (`.codex/hooks.json` + `.codex/config.toml`) |
+| **Codex** | `rtk init -g --codex` | PreToolUse deny-with-suggestion + inline `AGENTS.md` guidance |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
-| **Mistral Vibe** | Planned (#800) | Blocked on upstream BeforeToolCallback |
+| **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
 
 Codex on Windows currently falls back to prompt-only setup because upstream Codex does not run lifecycle hooks there.
 
@@ -453,27 +453,20 @@ Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://githu
 | `pnpm list/outdated` | `rtk pnpm ...` |
 
 Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
+For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents).
 
 ## Configuration
-
-### Config File
 
 `~/.config/rtk/config.toml` (macOS: `~/Library/Application Support/rtk/config.toml`):
 
 ```toml
-[tracking]
-database_path = "/path/to/custom.db"  # default: ~/.local/share/rtk/history.db
-
 [hooks]
 exclude_commands = ["curl", "playwright"]  # skip rewrite for these
 
 [tee]
 enabled = true          # save raw output on failure (default: true)
 mode = "failures"       # "failures", "always", or "never"
-max_files = 20          # rotation limit
 ```
-
-### Tee: Full Output Recovery
 
 When a command fails, RTK saves the full unfiltered output so the LLM can read it without re-executing:
 
@@ -481,6 +474,8 @@ When a command fails, RTK saves the full unfiltered output so the LLM can read i
 FAILED: 2/15 tests
 [full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
 ```
+
+For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://www.rtk-ai.app/guide/getting-started/configuration).
 
 ### Uninstall
 
@@ -492,23 +487,34 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Documentation
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Fix common issues
-- **[INSTALL.md](INSTALL.md)** - Detailed installation guide
-- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Technical architecture
-- **[SECURITY.md](SECURITY.md)** - Security policy and PR review process
-- **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
+- **[rtk-ai.app/guide](https://www.rtk-ai.app/guide)** — full user guide (installation, supported agents, what gets optimized, analytics, configuration, troubleshooting)
+- **[INSTALL.md](INSTALL.md)** — detailed installation reference
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design and technical decisions
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — contribution guide
+- **[SECURITY.md](SECURITY.md)** — security policy
 
 ## Privacy & Telemetry
 
-RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This helps prioritize development. See opt-out options below.
+RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers. For the full list of fields, data handling, and contributor guidelines, see **[docs/TELEMETRY.md](docs/TELEMETRY.md)**.
 
-**What is collected:**
-- Device hash (salted SHA-256 — per-user random salt stored locally, not reversible)
-- RTK version, OS, architecture
-- Command count (last 24h) and top command names (e.g. "git", "cargo" — no arguments, no file paths)
-- Token savings percentage
+**What is collected and why:**
 
-**What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, or any personally identifiable information.
+| Category | Data | Why |
+|----------|------|-----|
+| Identity | Salted device hash (SHA-256, not reversible) | Count unique installations without tracking individuals |
+| Environment | RTK version, OS, architecture, install method | Know which platforms to support and test |
+| Usage volume | Command count (24h), total commands, tokens saved (24h/30d/total) | Measure adoption and value delivered |
+| Quality | Top 5 passthrough commands (0% savings), parse failure count, commands with <30% savings | Identify missing filters and weak ones to improve |
+| Ecosystem | Command category distribution (e.g. git 45%, cargo 20%, js 15%) | Prioritize filter development for popular ecosystems |
+| Retention | Days since first use, active days in last 30 | Understand engagement and detect churn |
+| Adoption | AI agent hook type (claude/gemini/codex), custom TOML filter count | Track integration coverage and DSL adoption |
+| Configuration | Whether config.toml exists, number of excluded commands, project count | Understand user maturity and customization patterns |
+| Features | Usage counts for meta-commands (gain, discover, proxy, verify) | Know which RTK features are valued vs unused |
+| Economics | Estimated USD savings (based on API token pricing) | Quantify the value RTK provides to users |
+
+All data is **aggregate counts or anonymized command names** (first 3 words, no arguments). Top commands report only tool names (e.g. "git", "cargo"), never full command lines.
+
+**What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, personal data, or repository contents.
 
 **Opt-out** (any of these):
 ```bash
@@ -519,6 +525,26 @@ export RTK_TELEMETRY_DISABLED=1
 [telemetry]
 enabled = false
 ```
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=rtk-ai%2Frtk&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=rtk-ai/rtk&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=rtk-ai/rtk&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=rtk-ai/rtk&type=date&legend=top-left" />
+ </picture>
+</a>
+
+## StarMapper
+
+<a href="https://starmapper.bruniaux.com/rtk-ai/rtk">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://starmapper.bruniaux.com/api/map-image/rtk-ai/rtk?theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://starmapper.bruniaux.com/api/map-image/rtk-ai/rtk?theme=light" />
+    <img alt="StarMapper" src="https://starmapper.bruniaux.com/api/map-image/rtk-ai/rtk" />
+  </picture>
+</a>
 
 ## Contributing
 
