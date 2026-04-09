@@ -253,7 +253,7 @@ rtk session                     # Show RTK adoption across recent sessions
 ## Global Flags
 
 ```bash
--u, --ultra-compact    # ASCII icons, inline format (extra token savings)
+-U, --ultra-compact    # ASCII icons, inline format (extra token savings)
 -v, --verbose          # Increase verbosity (-v, -vv, -vvv)
 ```
 
