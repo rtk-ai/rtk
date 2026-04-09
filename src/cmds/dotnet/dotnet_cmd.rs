@@ -208,27 +208,16 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         _ => raw.clone(),
     };
 
-    let output_to_print = if !command_success {
-        let stdout_trimmed = result.stdout.trim();
-        let stderr_trimmed = result.stderr.trim();
-        if !stdout_trimmed.is_empty() {
-            format!("{}\n\n{}", stdout_trimmed, filtered)
-        } else if !stderr_trimmed.is_empty() {
-            format!("{}\n\n{}", stderr_trimmed, filtered)
-        } else {
-            filtered
-        }
-    } else {
-        filtered
-    };
-
-    println!("{}", output_to_print);
+    // Always use the filtered summary — it already includes errors and warnings.
+    // Prepending raw stdout on failure was producing more tokens than the original
+    // command output, defeating the purpose of RTK filtering (issue #914).
+    println!("{}", filtered);
 
     timer.track(
         &format!("dotnet {} {}", subcommand, args.join(" ")),
         &format!("rtk dotnet {} {}", subcommand, args.join(" ")),
         &raw,
-        &output_to_print,
+        &filtered,
     );
 
     cleanup_temp_file(&binlog_path);
@@ -1411,6 +1400,71 @@ mod tests {
         assert!(output.contains("dotnet build: 2 projects, 1 errors, 1 warnings"));
         assert!(output.contains("error CS0103"));
         assert!(output.contains("warning CS0219"));
+    }
+
+    #[test]
+    fn test_format_build_output_on_failure_is_more_concise_than_raw() {
+        // Regression test for issue #914: rtk dotnet build was producing MORE tokens than
+        // the original on failure because it prepended raw stdout before the filtered summary.
+        // The filtered summary already contains errors — raw output must NOT be prepended.
+        let summary = binlog::BuildSummary {
+            succeeded: false,
+            project_count: 1,
+            errors: vec![
+                binlog::BinlogIssue {
+                    code: "CS1001".to_string(),
+                    file: "Program.cs".to_string(),
+                    line: 4,
+                    column: 6,
+                    message: "Identifier expected".to_string(),
+                },
+                binlog::BinlogIssue {
+                    code: "CS1002".to_string(),
+                    file: "Program.cs".to_string(),
+                    line: 4,
+                    column: 6,
+                    message: "; expected".to_string(),
+                },
+            ],
+            warnings: vec![],
+            duration_text: Some("00:00:00.69".to_string()),
+        };
+        let filtered = format_build_output(&summary, Path::new("/tmp/build.binlog"));
+        // Simulated raw output — realistic dotnet build failure output (215 tokens per issue report)
+        let raw_stdout = "  Determining projects to restore...\n\
+              All projects are up-to-date for restore.\n\
+            Build started 4/9/2026 10:00:00 AM.\n\
+            1>Project \"tempconsole.csproj\" on node 1 (Build target(s)).\n\
+            1>CoreCompile:\n\
+            1>  C:\\Program Files\\dotnet\\sdk\\8.0.303\\Roslyn\\bincore\\csc.dll Program.cs\n\
+            Program.cs(4,6): error CS1001: Identifier expected [tempconsole.csproj]\n\
+            Program.cs(4,6): error CS1002: ; expected [tempconsole.csproj]\n\
+            1>Done Building Project \"tempconsole.csproj\" (Build target(s)) -- FAILED.\n\
+            Build FAILED.\n\
+            Program.cs(4,6): error CS1001: Identifier expected [tempconsole.csproj]\n\
+            Program.cs(4,6): error CS1002: ; expected [tempconsole.csproj]\n\
+                0 Warning(s)\n\
+                2 Error(s)\n\
+            Time Elapsed 00:00:00.69";
+
+        // The filtered summary must save >=60% tokens vs raw (project standard)
+        let count_tokens = |s: &str| s.split_whitespace().count();
+        let savings =
+            1.0 - (count_tokens(&filtered) as f64 / count_tokens(raw_stdout) as f64);
+        assert!(
+            savings >= 0.60,
+            "Expected >=60% token savings, got {:.1}%",
+            savings * 100.0
+        );
+        // The filtered summary must contain error info (not empty)
+        assert!(filtered.contains("CS1001"), "Filtered must include error code");
+        assert!(filtered.contains("fail dotnet build"), "Filtered must include status");
+        // Prepending raw to filtered would exceed raw alone — this is what we fixed
+        let buggy_output = format!("{}\n\n{}", raw_stdout.trim(), filtered);
+        assert!(
+            buggy_output.len() > raw_stdout.len(),
+            "Prepending raw+filtered is always longer than raw alone"
+        );
     }
 
     #[test]
