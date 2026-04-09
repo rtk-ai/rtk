@@ -143,6 +143,7 @@ rtk init --agent hermes         # Hermes
 rtk init -g --agent droid       # Factory Droid
 rtk init --agent trae           # Trae (project: .trae/hooks.json)
 rtk init -g --agent trae        # Trae global: ~/.trae and existing ~/.trae-cn
+rtk init --agent swival         # Swival
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -472,6 +473,7 @@ RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rt
 | **Factory Droid** | `rtk init -g --agent droid` (or per-project) | PreToolUse hook in `~/.factory/hooks.json` (matcher `Execute`) |
 | **Trae** | `rtk init --agent trae` | Native `PreToolUse` hook in `.trae/hooks.json` (`RunCommand`) |
 | **Trae (global)** | `rtk init -g --agent trae` | `~/.trae/hooks.json`, plus `~/.trae-cn/hooks.json` when that directory exists |
+| **Swival** | `rtk init --agent swival` (project) / `rtk init -g --agent swival` (global) | Python adapter (`command_middleware` in `swival.toml` or `~/.config/swival/config.toml`) |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 

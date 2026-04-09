@@ -292,7 +292,9 @@ impl AgentPath {
             // settings (#3908). Its deny gate is unaffected -- see
             // `ApprovalOwner`.
             "openclaw" => Some(Self::ViaRewrite(ApprovalOwner::Delegate)),
-            "hermes" | "omp" | "opencode" | "pi" => Some(Self::ViaRewrite(ApprovalOwner::Rtk)),
+            "hermes" | "omp" | "opencode" | "pi" | "swival" => {
+                Some(Self::ViaRewrite(ApprovalOwner::Rtk))
+            }
             "vibe" => Some(Self::InProcess(Host::Vibe)),
             _ => None,
         }
@@ -315,6 +317,7 @@ impl AgentPath {
         "openclaw",
         "opencode",
         "pi",
+        "swival",
         "trae",
         "vibe",
         "windsurf",
