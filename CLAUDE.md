@@ -75,8 +75,6 @@ For the full architecture, component details, and module development patterns, s
 
 Module responsibilities are documented in each folder's `README.md` and each file's `//!` doc header. Browse `src/cmds/*/` to discover available filters.
 
-Supported ecosystems: git/gh/gt, cargo, go/golangci-lint, npm/pnpm/npx, ruff/pytest/pip/mypy, rspec/rubocop/rake, dotnet, playwright/vitest/jest, docker/kubectl/aws.
-
 ### Proxy Mode
 
 **Purpose**: Execute commands without filtering but track usage for metrics.
