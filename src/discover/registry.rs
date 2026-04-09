@@ -63,11 +63,21 @@ lazy_static! {
     static ref GIT_GLOBAL_OPT: Regex =
         Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(.+)$").unwrap();
+    static ref HEAD_N_SPACE: Regex = Regex::new(r"^head\s+-n\s+(\d+)\s+(.+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(.+)$").unwrap();
+    static ref HEAD_LINES_SPACE: Regex = Regex::new(r"^head\s+--lines\s+(\d+)\s+(.+)$").unwrap();
+    static ref HEAD_FILTER_N: Regex = Regex::new(r"^head\s+-(\d+)$").unwrap();
+    static ref HEAD_FILTER_N_SPACE: Regex = Regex::new(r"^head\s+-n\s+(\d+)$").unwrap();
+    static ref HEAD_FILTER_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)$").unwrap();
+    static ref HEAD_FILTER_LINES_SPACE: Regex = Regex::new(r"^head\s+--lines\s+(\d+)$").unwrap();
     static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(.+)$").unwrap();
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(.+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(.+)$").unwrap();
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(.+)$").unwrap();
+    static ref SED_RANGE_FROM_START: Regex =
+        Regex::new(r#"^sed\s+-n\s+['"]1,(\d+)p['"]\s+(.+)$"#).unwrap();
+    static ref SED_FILTER_RANGE_FROM_START: Regex =
+        Regex::new(r#"^sed\s+-n\s+['"]1,(\d+)p['"]$"#).unwrap();
 }
 
 fn is_shell_var_name(name: &str) -> bool {
@@ -278,6 +288,24 @@ pub fn classify_command(cmd: &str) -> Classification {
                     .to_string(),
             };
         }
+    }
+
+    // `rg --files` has directory enumeration semantics that do not match `rtk grep`.
+    // Passing it through raw is safer than rewriting to a broken equivalent.
+    if cmd_clean == "rg --files" || cmd_clean.starts_with("rg --files ") {
+        return Classification::Unsupported {
+            base_command: "rg".to_string(),
+        };
+    }
+
+    // Safe prefix-only file reads can be normalized to `rtk read`.
+    if SED_RANGE_FROM_START.is_match(cmd_clean) {
+        return Classification::Supported {
+            rtk_equivalent: "rtk read",
+            category: "Files",
+            estimated_savings_pct: 60.0,
+            status: super::report::RtkStatus::Existing,
+        };
     }
 
     // Fast check with RegexSet — take the last (most specific) match
@@ -507,6 +535,98 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
     (cmd_part, redir_part)
 }
 
+fn strip_optional_rtk_prefix(cmd: &str) -> &str {
+    cmd.strip_prefix("rtk ").unwrap_or(cmd).trim_start()
+}
+
+fn parse_head_limit(cmd: &str) -> Option<&str> {
+    let inner = strip_optional_rtk_prefix(cmd.trim());
+    for re in [
+        &*HEAD_FILTER_N,
+        &*HEAD_FILTER_N_SPACE,
+        &*HEAD_FILTER_LINES,
+        &*HEAD_FILTER_LINES_SPACE,
+        &*HEAD_N,
+        &*HEAD_N_SPACE,
+        &*HEAD_LINES,
+        &*HEAD_LINES_SPACE,
+    ] {
+        if let Some(caps) = re.captures(inner) {
+            return Some(caps.get(1)?.as_str());
+        }
+    }
+    None
+}
+
+fn parse_sed_limit_from_start(cmd: &str) -> Option<&str> {
+    let inner = strip_optional_rtk_prefix(cmd.trim());
+    let caps = SED_FILTER_RANGE_FROM_START
+        .captures(inner)
+        .or_else(|| SED_RANGE_FROM_START.captures(inner))?;
+    Some(caps.get(1)?.as_str())
+}
+
+fn grep_rest(cmd: &str) -> Option<&str> {
+    let inner = strip_optional_rtk_prefix(cmd.trim());
+    if inner == "rg --files" || inner.starts_with("rg --files ") {
+        return None;
+    }
+    strip_word_prefix(inner, "rg").or_else(|| strip_word_prefix(inner, "grep"))
+}
+
+fn nl_ba_file(cmd: &str) -> Option<&str> {
+    let inner = strip_optional_rtk_prefix(cmd.trim());
+    strip_word_prefix(inner, "nl -ba")
+}
+
+fn rewrite_bounded_pipe(lhs: &str, rhs: &str, excluded: &[String]) -> Option<String> {
+    let lhs = lhs.trim();
+    let rhs = rhs.trim();
+
+    if lhs.is_empty() || rhs.is_empty() {
+        return None;
+    }
+
+    if let Some(limit) = parse_head_limit(rhs) {
+        let (lhs_cmd, lhs_redirects) = strip_trailing_redirects(lhs);
+        let lhs_is_rtk = lhs_cmd.starts_with("rtk ");
+
+        if let Some(rest) = grep_rest(lhs_cmd) {
+            let base = strip_optional_rtk_prefix(lhs_cmd)
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            if lhs_is_rtk || !excluded.iter().any(|e| e == base) {
+                if !rest.starts_with("--max ") && !rest.contains(" --max ") {
+                    return Some(format!(
+                        "rtk grep --max {} {}{}",
+                        limit, rest, lhs_redirects
+                    ));
+                }
+            }
+        }
+
+        if let Some(file) = nl_ba_file(lhs_cmd) {
+            return Some(format!(
+                "rtk read -n --level none {} --max-lines {}{}",
+                file, limit, lhs_redirects
+            ));
+        }
+    }
+
+    if let Some(limit) = parse_sed_limit_from_start(rhs) {
+        let (lhs_cmd, lhs_redirects) = strip_trailing_redirects(lhs);
+        if let Some(file) = nl_ba_file(lhs_cmd) {
+            return Some(format!(
+                "rtk read -n --level none {} --max-lines {}{}",
+                file, limit, lhs_redirects
+            ));
+        }
+    }
+
+    None
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
@@ -531,6 +651,9 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
         || trimmed.contains('|')
         || trimmed.contains(" & ");
     if !has_compound && (trimmed.starts_with("rtk ") || trimmed == "rtk") {
+        if let Some(rewritten) = rewrite_segment(trimmed, excluded) {
+            return Some(rewritten);
+        }
         return Some(trimmed.to_string());
     }
 
@@ -571,6 +694,10 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
             }
             TokenKind::Pipe => {
                 let seg = cmd[seg_start..tok.offset].trim();
+                let rhs = cmd[tok.offset + tok.value.len()..].trim();
+                if let Some(rewritten) = rewrite_bounded_pipe(seg, rhs, excluded) {
+                    return Some(rewritten);
+                }
                 let is_pipe_incompatible = seg.starts_with("find ")
                     || seg == "find"
                     || seg.starts_with("fd ")
@@ -620,7 +747,7 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_N_SPACE, &*HEAD_LINES, &*HEAD_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
@@ -642,6 +769,11 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
             return Some(format!("rtk read {} --tail-lines {}", file, n));
         }
     }
+    if let Some(caps) = SED_RANGE_FROM_START.captures(cmd) {
+        let n = caps.get(1)?.as_str();
+        let file = caps.get(2)?.as_str();
+        return Some(format!("rtk read {} --max-lines {}", file, n));
+    }
     None
 }
 
@@ -658,13 +790,35 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
     let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
 
-    // Already RTK — pass through unchanged
+    // Already RTK — normalize obvious fallback-y file reads, otherwise pass through unchanged.
     if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
+        if let Some(inner) = cmd_part.strip_prefix("rtk ") {
+            if let Some(rewritten) = rewrite_line_range(inner.trim()) {
+                return Some(format!("{}{}", rewritten, redirect_suffix));
+            }
+        }
         return Some(trimmed.to_string());
     }
 
-    if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
-        return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+    if cmd_part.starts_with("head ")
+        || cmd_part.starts_with("tail ")
+        || cmd_part.starts_with("sed -n ")
+    {
+        if let Some(rewritten) = rewrite_line_range(cmd_part) {
+            return Some(format!("{}{}", rewritten, redirect_suffix));
+        }
+        if let Some(args) = cmd_part.strip_prefix("head ") {
+            if args.trim_start().starts_with('-') {
+                return None;
+            }
+        }
+        if cmd_part.starts_with("tail ") || cmd_part.starts_with("sed -n ") {
+            return None;
+        }
+    }
+
+    if cmd_part == "rg --files" || cmd_part.starts_with("rg --files ") {
+        return None;
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
@@ -1475,6 +1629,19 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_rg_files_unsupported() {
+        match classify_command("rg --files src") {
+            Classification::Unsupported { base_command } => assert_eq!(base_command, "rg"),
+            other => panic!("expected Unsupported, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_skipped() {
+        assert_eq!(rewrite_command("rg --files src", &[]), None);
+    }
+
+    #[test]
     fn test_rewrite_rg_pattern() {
         assert_eq!(
             rewrite_command("rg \"fn main\"", &[]),
@@ -1775,6 +1942,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_head_n_space_flag() {
+        assert_eq!(
+            rewrite_command("head -n 50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --max-lines 50".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_head_no_flag_still_rewrites() {
         // plain `head file` → `rtk read file` (no numeric flag)
         assert_eq!(
@@ -1829,6 +2004,70 @@ mod tests {
     #[test]
     fn test_rewrite_tail_plain_file_skipped() {
         assert_eq!(rewrite_command("tail src/main.rs", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_sed_range_from_start() {
+        assert_eq!(
+            rewrite_command("sed -n '1,220p' src/main.rs", &[]),
+            Some("rtk read src/main.rs --max-lines 220".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_existing_rtk_sed_range_from_start() {
+        assert_eq!(
+            rewrite_command("rtk sed -n '1,220p' src/main.rs", &[]),
+            Some("rtk read src/main.rs --max-lines 220".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_existing_rtk_head_n_space_flag() {
+        assert_eq!(
+            rewrite_command("rtk head -n 50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --max-lines 50".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_existing_rtk_tail_n_space_flag() {
+        assert_eq!(
+            rewrite_command("rtk tail -n 12 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --tail-lines 12".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_pipe_head_to_grep_max() {
+        assert_eq!(
+            rewrite_command("rg -n duplicate src | head -n 20", &[]),
+            Some("rtk grep --max 20 -n duplicate src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_existing_rtk_rg_pipe_head_to_grep_max() {
+        assert_eq!(
+            rewrite_command("rtk rg -n duplicate src | head -n 20", &[]),
+            Some("rtk grep --max 20 -n duplicate src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_nl_pipe_sed_range_to_read_max_lines() {
+        assert_eq!(
+            rewrite_command("nl -ba src/main.rs | sed -n '1,40p'", &[]),
+            Some("rtk read -n --level none src/main.rs --max-lines 40".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_existing_rtk_nl_pipe_sed_range_to_read_max_lines() {
+        assert_eq!(
+            rewrite_command("rtk nl -ba src/main.rs | sed -n '1,40p'", &[]),
+            Some("rtk read -n --level none src/main.rs --max-lines 40".into())
+        );
     }
 
     // --- New registry entries ---
