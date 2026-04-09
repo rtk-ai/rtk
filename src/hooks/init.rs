@@ -306,8 +306,14 @@ fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     Ok((hook_dir, hook_path))
 }
 
-/// Write hook file if missing or outdated, return true if changed
-#[cfg(unix)]
+/// Write hook file if missing or outdated, return true if changed.
+///
+/// Cross-platform: matches the Cursor (`install_cursor_hooks`) and Gemini
+/// (`install_gemini_hook`) hook installers in this file, which already use
+/// a unified body with an inline `#[cfg(unix)]` guard around the chmod call.
+/// On Windows the hook is invoked via `bash /path/to/rtk-rewrite.sh` from
+/// Claude Code's PreToolUse hook entry, so no execute bit is required —
+/// git-bash runs the script directly.
 fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
     let changed = if hook_path.exists() {
         let existing = fs::read_to_string(hook_path)
@@ -335,10 +341,13 @@ fn ensure_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
         true
     };
 
-    // Set executable permissions
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
-        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    // Set executable permissions (Unix only; Windows invokes via `bash script.sh`)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
 
     // Store SHA-256 hash for runtime integrity verification.
     // Always store (idempotent) to ensure baseline exists even for
@@ -869,21 +878,13 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         })
 }
 
-/// Default mode: hook + slim RTK.md + @RTK.md reference
-#[cfg(not(unix))]
-fn run_default_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    eprintln!("[warn] Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose, _install_opencode)
-}
-
-#[cfg(unix)]
+/// Default mode: hook + slim RTK.md + @RTK.md reference.
+///
+/// Previously Unix-only (Windows fell back to `--claude-md` mode with a warning),
+/// but the hook installer now compiles on all platforms — the only OS-specific
+/// call (chmod) is guarded inline inside `ensure_hook_installed`. Claude Code's
+/// PreToolUse hook executes `bash /path/to/rtk-rewrite.sh`, which works under
+/// git-bash on Windows without the execute bit.
 fn run_default_mode(
     global: bool,
     patch_mode: PatchMode,
@@ -1016,18 +1017,9 @@ fn generate_global_filters_template(verbose: u8) -> Result<()> {
     Ok(())
 }
 
-/// Hook-only mode: just the hook, no RTK.md
-#[cfg(not(unix))]
-fn run_hook_only_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
-}
-
-#[cfg(unix)]
+/// Hook-only mode: just the hook, no RTK.md.
+///
+/// Cross-platform for the same reason as `run_default_mode` — see its doc comment.
 fn run_hook_only_mode(
     global: bool,
     patch_mode: PatchMode,
