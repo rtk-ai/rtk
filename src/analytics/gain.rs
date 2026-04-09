@@ -339,6 +339,9 @@ fn format_pct(pct: f64) -> String {
     if !pct.is_finite() {
         return "0.0%".to_string();
     }
+    if pct > 99.0 && pct < 100.0 {
+        return format!("{pct:.3}%");
+    }
     if pct >= 10.0 {
         format!("{pct:.1}%")
     } else if pct >= 1.0 {
@@ -346,6 +349,20 @@ fn format_pct(pct: f64) -> String {
     } else {
         format!("{pct:.3}%")
     }
+}
+
+fn meter_fill_units(pct: f64, width: usize) -> usize {
+    if width == 0 || !pct.is_finite() {
+        return 0;
+    }
+    if pct <= 0.0 {
+        return 0;
+    }
+    if pct >= 100.0 {
+        return width;
+    }
+    let filled = ((pct / 100.0) * width as f64).floor() as usize;
+    filled.clamp(1, width.saturating_sub(1))
 }
 
 fn format_int_with_commas(n: usize) -> String {
@@ -422,7 +439,7 @@ fn mini_bar(value: usize, max: usize, width: usize) -> String {
 /// Print an efficiency meter with colored progress bar (TTY-aware). // added
 fn print_efficiency_meter(pct: f64) {
     let width = 24usize;
-    let filled = (((pct / 100.0) * width as f64).round() as usize).min(width);
+    let filled = meter_fill_units(pct, width);
     let meter = format!("{}{}", "█".repeat(filled), "░".repeat(width - filled));
     if std::io::stdout().is_terminal() {
         let pct_str = format_pct(pct);
@@ -774,13 +791,22 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_int_with_commas, format_pct, format_token_metric};
+    use super::{format_int_with_commas, format_pct, format_token_metric, meter_fill_units};
 
     #[test]
     fn test_format_pct_uses_adaptive_precision() {
         assert_eq!(format_pct(42.0), "42.0%");
         assert_eq!(format_pct(1.234), "1.23%");
         assert_eq!(format_pct(0.4567), "0.457%");
+        assert_eq!(format_pct(99.958), "99.958%");
+    }
+
+    #[test]
+    fn test_meter_fill_units_never_shows_full_bar_below_100() {
+        assert_eq!(meter_fill_units(0.0, 24), 0);
+        assert_eq!(meter_fill_units(0.1, 24), 1);
+        assert_eq!(meter_fill_units(99.958, 24), 23);
+        assert_eq!(meter_fill_units(100.0, 24), 24);
     }
 
     #[test]
