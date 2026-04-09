@@ -1898,48 +1898,48 @@ A  added.rs
 
     #[test]
     fn test_format_status_output_truncation() {
-        // Test that >15 staged files show "... +N more"
+        // Test that >30 staged files show "... +N more" (default status_max_files=30)
         let mut porcelain = String::from("## main\n");
-        for i in 1..=20 {
+        for i in 1..=35 {
             porcelain.push_str(&format!("M  file{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
-        assert!(result.contains("+ Staged: 20 files"));
+        assert!(result.contains("+ Staged: 35 files"));
         assert!(result.contains("file1.rs"));
-        assert!(result.contains("file15.rs"));
+        assert!(result.contains("file30.rs"));
         assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file16.rs"));
-        assert!(!result.contains("file20.rs"));
+        assert!(!result.contains("file31.rs"));
+        assert!(!result.contains("file35.rs"));
     }
 
     #[test]
     fn test_format_status_modified_truncation() {
-        // Test that >15 modified files show "... +N more"
+        // Test that >30 modified files show "... +N more" (default status_max_files=30)
         let mut porcelain = String::from("## main\n");
-        for i in 1..=20 {
+        for i in 1..=35 {
             porcelain.push_str(&format!(" M file{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
-        assert!(result.contains("~ Modified: 20 files"));
+        assert!(result.contains("~ Modified: 35 files"));
         assert!(result.contains("file1.rs"));
-        assert!(result.contains("file15.rs"));
+        assert!(result.contains("file30.rs"));
         assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file16.rs"));
+        assert!(!result.contains("file31.rs"));
     }
 
     #[test]
     fn test_format_status_untracked_truncation() {
-        // Test that >10 untracked files show "... +N more"
+        // Test that >20 untracked files show "... +N more" (default status_max_untracked=20)
         let mut porcelain = String::from("## main\n");
-        for i in 1..=15 {
+        for i in 1..=25 {
             porcelain.push_str(&format!("?? file{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
-        assert!(result.contains("? Untracked: 15 files"));
+        assert!(result.contains("? Untracked: 25 files"));
         assert!(result.contains("file1.rs"));
-        assert!(result.contains("file10.rs"));
+        assert!(result.contains("file20.rs"));
         assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file11.rs"));
+        assert!(!result.contains("file21.rs"));
     }
 
     #[test]
@@ -2350,21 +2350,21 @@ no changes added to commit (use "git add" and/or "git commit -a")
 
     #[test]
     fn test_format_status_overflow_count_exact() {
-        // 25 staged files, default status_max_files = 15
-        // Should show 15, overflow = 25 - 15 = 10, report "+10 more"
+        // 40 staged files, default status_max_files = 30
+        // Should show 30, overflow = 40 - 30 = 10, report "+10 more"
         let mut porcelain = String::from("## main...origin/main\n");
-        for i in 0..25 {
+        for i in 0..40 {
             porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
         assert!(
             result.contains("+10 more"),
-            "Expected '+10 more' for 25 staged files (max_files=15), got:\n{}",
+            "Expected '+10 more' for 40 staged files (max_files=30), got:\n{}",
             result
         );
         assert!(
-            result.contains("Staged: 25 files"),
-            "Expected 'Staged: 25 files', got:\n{}",
+            result.contains("Staged: 40 files"),
+            "Expected 'Staged: 40 files', got:\n{}",
             result
         );
     }

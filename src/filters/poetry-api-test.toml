@@ -1,0 +1,34 @@
+[filters.poetry-api-test]
+description = "Show only the trailing summary for poetry run api_test"
+match_command = "^poetry\\s+run\\s+api_test\\b"
+strip_ansi = true
+tail_lines = 10
+max_lines = 10
+on_empty = "poetry api_test: no output"
+
+[[tests.poetry-api-test]]
+name = "keeps the last 10 lines only"
+input = """
+line 1
+line 2
+line 3
+line 4
+line 5
+line 6
+line 7
+line 8
+line 9
+line 10
+line 11
+line 12
+"""
+expected = "line 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12"
+
+[[tests.poetry-api-test]]
+name = "strips ansi before tailing"
+input = """
+\u001b[32msetup\u001b[0m
+\u001b[31mFAIL\u001b[0m
+summary
+"""
+expected = "setup\nFAIL\nsummary"

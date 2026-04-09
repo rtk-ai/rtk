@@ -1,6 +1,6 @@
 [filters.mvn-build]
-description = "Compact Maven build output"
-match_command = "^mvn\\s+(compile|package|clean|install)\\b"
+description = "Compact Maven output"
+match_command = "^(mvn|mvnw)\\b.*\\b(compile|package|clean|install|test|verify)\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\[INFO\\] ---",
@@ -13,7 +13,8 @@ strip_lines_matching = [
   "^Downloaded:",
   "^Progress",
 ]
-max_lines = 50
+tail_lines = 25
+max_lines = 30
 on_empty = "mvn: ok"
 
 [[tests.mvn-build]]
@@ -42,3 +43,37 @@ input = """
 [INFO] Finished at: 2024-01-15T10:30:00Z
 """
 expected = "[INFO] BUILD SUCCESS\n[INFO] Total time: 4.123 s\n[INFO] Finished at: 2024-01-15T10:30:00Z"
+
+[[tests.mvn-build]]
+name = "long output keeps trailing summary"
+input = """
+[INFO] line 1
+[INFO] line 2
+[INFO] line 3
+[INFO] line 4
+[INFO] line 5
+[INFO] line 6
+[INFO] line 7
+[INFO] line 8
+[INFO] line 9
+[INFO] line 10
+[INFO] line 11
+[INFO] line 12
+[INFO] line 13
+[INFO] line 14
+[INFO] line 15
+[INFO] line 16
+[INFO] line 17
+[INFO] line 18
+[INFO] line 19
+[INFO] line 20
+[INFO] line 21
+[INFO] line 22
+[INFO] line 23
+[INFO] line 24
+[INFO] line 25
+[INFO] line 26
+[INFO] BUILD SUCCESS
+[INFO] Total time: 6.001 s
+"""
+expected = "[INFO] line 4\n[INFO] line 5\n[INFO] line 6\n[INFO] line 7\n[INFO] line 8\n[INFO] line 9\n[INFO] line 10\n[INFO] line 11\n[INFO] line 12\n[INFO] line 13\n[INFO] line 14\n[INFO] line 15\n[INFO] line 16\n[INFO] line 17\n[INFO] line 18\n[INFO] line 19\n[INFO] line 20\n[INFO] line 21\n[INFO] line 22\n[INFO] line 23\n[INFO] line 24\n[INFO] line 25\n[INFO] line 26\n[INFO] BUILD SUCCESS\n[INFO] Total time: 6.001 s"

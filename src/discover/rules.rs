@@ -12,7 +12,7 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree|rev-parse|remote|checkout|config|merge-base)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git"],
         category: "Git",
@@ -22,8 +22,19 @@ pub const RULES: &[RtkRule] = &[
             ("show", 80.0),
             ("add", 59.0),
             ("commit", 59.0),
+            ("rev-parse", 0.0),
+            ("remote", 0.0),
+            ("checkout", 0.0),
+            ("config", 0.0),
+            ("merge-base", 0.0),
         ],
-        subcmd_status: &[],
+        subcmd_status: &[
+            ("rev-parse", RtkStatus::Passthrough),
+            ("remote", RtkStatus::Passthrough),
+            ("checkout", RtkStatus::Passthrough),
+            ("config", RtkStatus::Passthrough),
+            ("merge-base", RtkStatus::Passthrough),
+        ],
     },
     RtkRule {
         pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
@@ -78,6 +89,15 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 60.0,
         subcmd_savings: &[],
         subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^nl\s+-(ba)\s+",
+        rtk_cmd: "rtk read -n --level none",
+        rewrite_prefixes: &["nl -ba"],
+        category: "Files",
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[("ba", RtkStatus::Passthrough)],
     },
     RtkRule {
         pattern: r"^(rg|grep)\s+",
@@ -267,13 +287,22 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^go\s+(test|build|vet)",
+        pattern: r"^go\s+(test|build|vet|run|version)",
         rtk_cmd: "rtk go",
         rewrite_prefixes: &["go"],
         category: "Go",
         savings_pct: 85.0,
-        subcmd_savings: &[("test", 90.0), ("build", 80.0), ("vet", 75.0)],
-        subcmd_status: &[],
+        subcmd_savings: &[
+            ("test", 90.0),
+            ("build", 80.0),
+            ("vet", 75.0),
+            ("run", 0.0),
+            ("version", 0.0),
+        ],
+        subcmd_status: &[
+            ("run", RtkStatus::Passthrough),
+            ("version", RtkStatus::Passthrough),
+        ],
     },
     RtkRule {
         pattern: r"^golangci-lint(\s|$)",
@@ -396,6 +425,51 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^shasum(\s|$)",
+        rtk_cmd: "rtk proxy shasum",
+        rewrite_prefixes: &["shasum"],
+        category: "System",
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^pgrep(\s|$)",
+        rtk_cmd: "rtk proxy pgrep",
+        rewrite_prefixes: &["pgrep"],
+        category: "System",
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^mount(\s|$)",
+        rtk_cmd: "rtk proxy mount",
+        rewrite_prefixes: &["mount"],
+        category: "System",
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^date(\s|$)",
+        rtk_cmd: "rtk proxy date",
+        rewrite_prefixes: &["date"],
+        category: "System",
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^(?:/usr/libexec/)?java_home(\s|$)",
+        rtk_cmd: "rtk proxy /usr/libexec/java_home",
+        rewrite_prefixes: &["/usr/libexec/java_home", "java_home"],
+        category: "System",
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^dotnet\s+build\b",
         rtk_cmd: "rtk dotnet",
         rewrite_prefixes: &["dotnet"],
@@ -486,9 +560,18 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^mvn\s+(compile|package|clean|install)\b",
+        pattern: r"^mvn\b.*\b(?:compile|package|clean|install|test|verify)\b",
         rtk_cmd: "rtk mvn",
         rewrite_prefixes: &["mvn"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^(?:\./)?mvnw\b.*\b(?:compile|package|clean|install|test|verify)\b",
+        rtk_cmd: "rtk ./mvnw",
+        rewrite_prefixes: &["./mvnw", "mvnw"],
         category: "Build",
         savings_pct: 70.0,
         subcmd_savings: &[],
@@ -513,7 +596,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^poetry\s+(install|lock|update)\b",
+        pattern: r"^poetry\s+(?:(?:install|lock|update)\b|run\s+api_test\b)",
         rtk_cmd: "rtk poetry",
         rewrite_prefixes: &["poetry"],
         category: "Python",
@@ -660,7 +743,9 @@ pub const RULES: &[RtkRule] = &[
 
 pub const IGNORED_PREFIXES: &[&str] = &[
     "cd ",
+    "(test ",
     "cd\t",
+    "done ",
     "echo ",
     "printf ",
     "export ",
@@ -707,8 +792,11 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "while ",
     "if ",
     "case ",
+    "exit ",
+    "return ",
 ];
 
 pub const IGNORED_EXACT: &[&str] = &[
-    "cd", "echo", "true", "false", "wait", "pwd", "bash", "sh", "fi", "done",
+    "cd", "do", "done", "echo", "else", "exit", "false", "fi", "pwd", "return", "sh", "then",
+    "true", "wait", "bash",
 ];

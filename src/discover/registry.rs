@@ -70,10 +70,168 @@ lazy_static! {
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(.+)$").unwrap();
 }
 
+fn is_shell_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_quoted_literal(value: &str) -> bool {
+    value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+}
+
+fn is_command_substitution(value: &str) -> bool {
+    if !value.starts_with("$(") || !value.ends_with(')') {
+        return false;
+    }
+
+    let mut chars = value[2..].chars().peekable();
+    let mut depth = 1usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    while let Some(c) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if c == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+
+        if c == '\'' || c == '"' {
+            quote = Some(c);
+            continue;
+        }
+
+        if c == '(' {
+            depth += 1;
+            continue;
+        }
+
+        if c == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return chars.peek().is_none();
+            }
+        }
+    }
+
+    false
+}
+
+fn is_pure_shell_assignment(cmd: &str) -> bool {
+    let Some(eq_idx) = cmd.find('=') else {
+        return false;
+    };
+
+    let name = &cmd[..eq_idx];
+    if !is_shell_var_name(name) {
+        return false;
+    }
+
+    let value = &cmd[eq_idx + 1..];
+    if value.is_empty() {
+        return true;
+    }
+
+    if value == "$?" {
+        return true;
+    }
+
+    if value.starts_with('$') && !value.starts_with("$(") && !value.contains(char::is_whitespace) {
+        return true;
+    }
+
+    if !value.contains(char::is_whitespace) {
+        return true;
+    }
+
+    is_quoted_literal(value) || is_command_substitution(value)
+}
+
+fn split_top_level_lines(cmd: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut backtick = false;
+
+    for (idx, ch) in cmd.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+
+        if backtick {
+            if ch == '`' {
+                backtick = false;
+            }
+            continue;
+        }
+
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '`' => backtick = true,
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '\n' if paren_depth == 0 && brace_depth == 0 => {
+                let part = cmd[start..idx].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let tail = cmd[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+
+    parts
+}
+
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
+        return Classification::Ignored;
+    }
+
+    if is_pure_shell_assignment(trimmed) {
         return Classification::Ignored;
     }
 
@@ -210,6 +368,19 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     }
 
     if trimmed.contains("<<") || trimmed.contains("$((") {
+        return vec![trimmed];
+    }
+
+    if trimmed.contains('\n') {
+        let lines = split_top_level_lines(trimmed);
+        if lines.len() > 1 {
+            let mut results = Vec::new();
+            for line in lines {
+                results.extend(split_command_chain(line));
+            }
+            return results;
+        }
+
         return vec![trimmed];
     }
 
@@ -499,8 +670,8 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
-    if cmd_part.starts_with("cat ") {
-        let args = cmd_part["cat ".len()..].trim_start();
+    if let Some(rest) = cmd_part.strip_prefix("cat ") {
+        let args = rest.trim_start();
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
             return None;
         }
@@ -612,6 +783,71 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_git_rev_parse_passthrough() {
+        assert_eq!(
+            classify_command("git rev-parse --show-toplevel"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_remote_passthrough() {
+        assert_eq!(
+            classify_command("git remote -v"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_checkout_passthrough() {
+        assert_eq!(
+            classify_command("git checkout -b feature"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_config_passthrough() {
+        assert_eq!(
+            classify_command("git config branch.main.remote origin"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_merge_base_passthrough() {
+        assert_eq!(
+            classify_command("git merge-base HEAD origin/master"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
     fn test_classify_cargo_test_filter() {
         assert_eq!(
             classify_command("cargo test filter::"),
@@ -651,6 +887,19 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_nl_ba_file() {
+        assert_eq!(
+            classify_command("nl -ba src/main.rs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk read -n --level none",
+                category: "Files",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
     fn test_classify_cat_redirect_not_supported() {
         // cat > file and cat >> file are writes, not reads — should not be classified as supported
         let write_commands = [
@@ -684,6 +933,118 @@ mod tests {
         assert_eq!(
             classify_command("echo hello world"),
             Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_exit_with_code_ignored() {
+        assert_eq!(classify_command("exit $rc"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_rc_assignment_ignored() {
+        assert_eq!(classify_command("rc=$?"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_mktemp_assignment_ignored() {
+        assert_eq!(
+            classify_command("tmp=$(mktemp /tmp/rtk-test.XXXX.log)"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_command_sub_assignment_ignored() {
+        assert_eq!(
+            classify_command("base=$(rtk jq -r .gitlab.base_url creds.json)"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_parenthesized_test_ignored() {
+        assert_eq!(
+            classify_command("(test -f AGENTS.md"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_done_with_redirect_ignored() {
+        assert_eq!(
+            classify_command("done 2>/dev/null"),
+            Classification::Ignored
+        );
+    }
+
+    #[test]
+    fn test_classify_do_ignored() {
+        assert_eq!(classify_command("do"), Classification::Ignored);
+    }
+
+    #[test]
+    fn test_classify_shasum_passthrough() {
+        assert_eq!(
+            classify_command("shasum file.txt"),
+            Classification::Supported {
+                rtk_equivalent: "rtk proxy shasum",
+                category: "System",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_pgrep_passthrough() {
+        assert_eq!(
+            classify_command("pgrep -af mvnw"),
+            Classification::Supported {
+                rtk_equivalent: "rtk proxy pgrep",
+                category: "System",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_mount_passthrough() {
+        assert_eq!(
+            classify_command("mount"),
+            Classification::Supported {
+                rtk_equivalent: "rtk proxy mount",
+                category: "System",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_date_passthrough() {
+        assert_eq!(
+            classify_command("date '+local %Y-%m-%d %H:%M:%S %Z'"),
+            Classification::Supported {
+                rtk_equivalent: "rtk proxy date",
+                category: "System",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_java_home_passthrough() {
+        assert_eq!(
+            classify_command("/usr/libexec/java_home -v 21"),
+            Classification::Supported {
+                rtk_equivalent: "rtk proxy /usr/libexec/java_home",
+                category: "System",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Existing,
+            }
         );
     }
 
@@ -792,8 +1153,20 @@ mod tests {
     fn test_registry_covers_all_git_subcommands() {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
-            "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "status",
+            "log",
+            "diff",
+            "show",
+            "add",
+            "commit",
+            "push",
+            "pull",
+            "branch",
+            "fetch",
+            "stash",
+            "worktree",
+            "rev-parse",
+            "remote",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {
@@ -862,6 +1235,27 @@ mod tests {
     fn test_split_heredoc_no_split() {
         let cmd = "cat <<'EOF'\nhello && world\nEOF";
         assert_eq!(split_command_chain(cmd), vec![cmd]);
+    }
+
+    #[test]
+    fn test_split_multiline_script() {
+        let cmd = "tmp=$(mktemp /tmp/rtk.log)\ngit status\nexit $rc";
+        assert_eq!(
+            split_command_chain(cmd),
+            vec!["tmp=$(mktemp /tmp/rtk.log)", "git status", "exit $rc"]
+        );
+    }
+
+    #[test]
+    fn test_split_multiline_command_substitution_keeps_block() {
+        let cmd = "USER_ID=$(printf %s \"ROBOT@guandata.com\"\n | shasum)\ngit status";
+        assert_eq!(
+            split_command_chain(cmd),
+            vec![
+                "USER_ID=$(printf %s \"ROBOT@guandata.com\"\n | shasum)",
+                "git status",
+            ]
+        );
     }
 
     #[test]
@@ -1069,6 +1463,14 @@ mod tests {
         assert_eq!(
             rewrite_command("cat -n file.txt", &[]),
             Some("rtk read -n file.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_nl_ba_file() {
+        assert_eq!(
+            rewrite_command("nl -ba file.txt", &[]),
+            Some("rtk read -n --level none file.txt".into())
         );
     }
 
@@ -1837,6 +2239,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_classify_poetry_run_api_test() {
+        assert_eq!(
+            classify_command("poetry run api_test --module=DB_DATAFLOW"),
+            Classification::Supported {
+                rtk_equivalent: "rtk poetry",
+                category: "Python",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_poetry_run_api_test() {
+        assert_eq!(
+            rewrite_command("poetry run api_test --module=DB_DATAFLOW", &[]),
+            Some("rtk poetry run api_test --module=DB_DATAFLOW".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_mvn_test() {
+        assert_eq!(
+            classify_command("mvn -pl api test -DskipITs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                category: "Build",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvn_test() {
+        assert_eq!(
+            rewrite_command("mvn -pl api test -DskipITs", &[]),
+            Some("rtk mvn -pl api test -DskipITs".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_mvnw_verify() {
+        assert_eq!(
+            classify_command("./mvnw -pl api verify -DskipITs"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ./mvnw",
+                category: "Build",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvnw_verify() {
+        assert_eq!(
+            rewrite_command("./mvnw -pl api verify -DskipITs", &[]),
+            Some("rtk ./mvnw -pl api verify -DskipITs".into())
+        );
+    }
+
     // --- Go tooling ---
 
     #[test]
@@ -1873,6 +2338,32 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_go_run_passthrough() {
+        assert_eq!(
+            classify_command("go run ./cmd/skill"),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                category: "Go",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_go_version_passthrough() {
+        assert_eq!(
+            classify_command("go version"),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                category: "Go",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
     fn test_classify_golangci_lint() {
         assert!(matches!(
             classify_command("golangci-lint run"),
@@ -1904,6 +2395,22 @@ mod tests {
         assert_eq!(
             rewrite_command("go vet ./...", &[]),
             Some("rtk go vet ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_go_run() {
+        assert_eq!(
+            rewrite_command("go run ./cmd/skill get-issue GALAXY-35773", &[]),
+            Some("rtk go run ./cmd/skill get-issue GALAXY-35773".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_go_version() {
+        assert_eq!(
+            rewrite_command("go version", &[]),
+            Some("rtk go version".into())
         );
     }
 
@@ -2330,11 +2837,91 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_git_rev_parse() {
+        assert_eq!(
+            rewrite_command("git rev-parse --show-toplevel", &[]),
+            Some("rtk git rev-parse --show-toplevel".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_remote_v() {
+        assert_eq!(
+            rewrite_command("git remote -v", &[]),
+            Some("rtk git remote -v".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_checkout_with_redirect() {
+        assert_eq!(
+            rewrite_command("git checkout -b feature >/dev/null", &[]),
+            Some("rtk git checkout -b feature >/dev/null".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_config() {
+        assert_eq!(
+            rewrite_command("git config branch.main.remote origin", &[]),
+            Some("rtk git config branch.main.remote origin".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_merge_base() {
+        assert_eq!(
+            rewrite_command("git merge-base HEAD origin/master", &[]),
+            Some("rtk git merge-base HEAD origin/master".to_string())
+        );
+    }
+
+    #[test]
     fn test_strip_git_global_opts_helper() {
         assert_eq!(strip_git_global_opts("git -C /tmp status"), "git status");
         assert_eq!(strip_git_global_opts("git --no-pager log"), "git log");
         assert_eq!(strip_git_global_opts("git status"), "git status");
         assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn test_rewrite_shasum() {
+        assert_eq!(
+            rewrite_command("shasum file.txt", &[]),
+            Some("rtk proxy shasum file.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pgrep() {
+        assert_eq!(
+            rewrite_command("pgrep -af mvnw", &[]),
+            Some("rtk proxy pgrep -af mvnw".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mount() {
+        assert_eq!(
+            rewrite_command("mount", &[]),
+            Some("rtk proxy mount".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_date() {
+        assert_eq!(
+            rewrite_command("date '+local %Y-%m-%d %H:%M:%S %Z'", &[]),
+            Some("rtk proxy date '+local %Y-%m-%d %H:%M:%S %Z'".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_java_home_absolute_path() {
+        assert_eq!(
+            rewrite_command("/usr/libexec/java_home -v 21", &[]),
+            Some("rtk proxy /usr/libexec/java_home -v 21".to_string())
+        );
     }
 
     // --- #wc: wc filter was silently ignored by the hook ---

@@ -400,6 +400,10 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
 
 lazy_static! {
     static ref REGISTRY: TomlFilterRegistry = TomlFilterRegistry::load();
+    static ref ERROR_SIGNAL_RE: Regex = Regex::new(
+        r"(?im)\b(error|failed|panic|traceback|exception|fatal|permission denied|timed?\s*out)\b"
+    )
+    .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +468,11 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
                         continue; // errors/warnings present — skip this rule
                     }
                 }
+                // Safety rail: when output clearly contains failures, avoid
+                // collapsing everything into a generic "ok" short-circuit.
+                if looks_like_success_message(&rule.message) && ERROR_SIGNAL_RE.is_match(&blob) {
+                    continue;
+                }
                 return rule.message.clone();
             }
         }
@@ -524,6 +533,11 @@ pub fn apply_filter(filter: &CompiledFilter, stdout: &str) -> String {
     }
 
     result
+}
+
+fn looks_like_success_message(message: &str) -> bool {
+    let lower = message.trim().to_lowercase();
+    lower.starts_with("ok") || lower.contains("success")
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,7 +1327,8 @@ match_output = [
 
     #[test]
     fn test_match_output_unless_falls_through_to_next_rule() {
-        // First rule blocked by unless; second rule (no unless) should match.
+        // First rule is blocked by unless; the second rule also gets skipped by the
+        // generic success-message safety rail because the blob still contains errors.
         let f = first_filter(
             r#"
 schema_version = 1
@@ -1327,8 +1342,7 @@ match_output = [
         );
         let input = "success\nerror: something went wrong\n";
         let out = apply_filter(&f, input);
-        // First rule skipped (unless matched), second rule (no unless) fires
-        assert_eq!(out.trim(), "ok with warnings");
+        assert_eq!(out.trim(), "success\nerror: something went wrong");
     }
 
     #[test]
@@ -1361,6 +1375,23 @@ match_output = [
 "#,
         );
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_match_output_success_message_not_used_when_blob_has_errors() {
+        let f = first_filter(
+            r#"
+schema_version = 1
+[filters.f]
+match_command = "^cmd"
+match_output = [
+  { pattern = "done", message = "ok" },
+]
+"#,
+        );
+        let out = apply_filter(&f, "done\nfatal: permission denied");
+        assert_ne!(out.trim(), "ok");
+        assert!(out.contains("permission denied"));
     }
 
     // --- replace tests (PR1) ---
@@ -1577,6 +1608,7 @@ match_command = "^make\\b"
             "mvn-build",
             "ping",
             "pio-run",
+            "poetry-api-test",
             "poetry-install",
             "pre-commit",
             "ps",
@@ -1613,8 +1645,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            58,
-            "Expected exactly 58 built-in filters, got {}. \
+            59,
+            "Expected exactly 59 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1671,11 +1703,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 58 existing filters still present + 1 new = 59
+        // All 59 existing filters still present + 1 new = 60
         assert_eq!(
             filters.len(),
-            59,
-            "Expected 59 filters after concat (58 built-in + 1 new)"
+            60,
+            "Expected 60 filters after concat (59 built-in + 1 new)"
         );
 
         // New filter is discoverable
