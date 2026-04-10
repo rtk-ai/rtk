@@ -1568,6 +1568,8 @@ match_command = "^make\\b"
             "ansible-playbook",
             "bq",
             "brew-install",
+            "conda-install",
+            "conda-list",
             "composer-install",
             "df",
             "dotnet-build",
@@ -1592,6 +1594,7 @@ match_command = "^make\\b"
             "mvn-build",
             "ping",
             "pio-run",
+            "pip-install",
             "poetry-install",
             "pre-commit",
             "ps",
@@ -1608,6 +1611,9 @@ match_command = "^make\\b"
             "tofu-plan",
             "tofu-validate",
             "trunk-build",
+            "uv-add",
+            "uv-init",
+            "uv-lock",
             "uv-sync",
             "yamllint",
         ];
@@ -1628,8 +1634,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            67,
-            "Expected exactly 67 built-in filters, got {}. \
+            73,
+            "Expected exactly 73 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1686,11 +1692,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 67 existing filters still present + 1 new = 68
+        // All 73 existing filters still present + 1 new = 74
         assert_eq!(
             filters.len(),
-            68,
-            "Expected 68 filters after concat (67 built-in + 1 new)"
+            74,
+            "Expected 74 filters after concat (73 built-in + 1 new)"
         );
 
         // New filter is discoverable
