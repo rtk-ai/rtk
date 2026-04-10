@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub git: GitConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -110,6 +112,24 @@ impl Default for FilterConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GitConfig {
+    /// Inject --no-merges into git log output (default: true for backward compat).
+    /// Set to false to include merge commits in git log output.
+    #[serde(default = "default_true")]
+    pub no_merges: bool,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self { no_merges: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     pub enabled: bool,
@@ -148,6 +168,11 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+/// Get git config. Falls back to defaults if config can't be loaded.
+pub fn git() -> GitConfig {
+    Config::load().map(|c| c.git).unwrap_or_default()
 }
 
 impl Config {
@@ -295,5 +320,32 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    #[test]
+    fn test_git_config_default_no_merges_true() {
+        let config = Config::default();
+        assert!(config.git.no_merges);
+    }
+
+    #[test]
+    fn test_git_config_no_merges_false() {
+        let toml = r#"
+[git]
+no_merges = false
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(!config.git.no_merges);
+    }
+
+    #[test]
+    fn test_git_config_absent_defaults_to_true() {
+        let toml = r#"
+[tracking]
+enabled = true
+history_days = 90
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.git.no_merges);
     }
 }

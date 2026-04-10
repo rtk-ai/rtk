@@ -1,5 +1,6 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
+use crate::core::config;
 use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
@@ -520,12 +521,15 @@ fn run_log(
         (10, false)
     };
 
-    // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args
+    // Inject --no-merges unless:
+    //   1. User explicitly passed --merges / --min-parents=2
+    //   2. User explicitly passed --no-merges (avoid duplicate)
+    //   3. User requested an exact count (-n N / --max-count)
+    //   4. Config has [git] no_merges = false (#1113)
+    let has_merge_flag = args
         .iter()
         .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
-    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
+    if !has_merge_flag && !has_limit_flag && config::git().no_merges {
         cmd.arg("--no-merges");
     }
 
