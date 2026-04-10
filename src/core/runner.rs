@@ -88,7 +88,12 @@ pub fn run(
             } else {
                 raw
             };
-            let filtered = filter_fn(text_to_filter);
+            let skip_filter = std::env::var("RTK_RAW_MODE").unwrap_or_default() == "1";
+            let filtered = if skip_filter {
+                text_to_filter.to_string()
+            } else {
+                filter_fn(text_to_filter)
+            };
 
             if let Some(label) = opts.tee_label {
                 print_with_hint(&filtered, raw, label, exit_code);
@@ -192,4 +197,52 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_raw_mode_env_check() {
+        // Ensure RTK_RAW_MODE is not set by default
+        std::env::remove_var("RTK_RAW_MODE");
+        assert_ne!(std::env::var("RTK_RAW_MODE").unwrap_or_default(), "1");
+
+        // Set it and verify detection
+        std::env::set_var("RTK_RAW_MODE", "1");
+        assert_eq!(std::env::var("RTK_RAW_MODE").unwrap_or_default(), "1");
+
+        // Cleanup
+        std::env::remove_var("RTK_RAW_MODE");
+    }
+
+    #[test]
+    fn test_raw_mode_skip_filter() {
+        std::env::set_var("RTK_RAW_MODE", "1");
+
+        let text = "hello world";
+        let skip_filter = std::env::var("RTK_RAW_MODE").unwrap_or_default() == "1";
+        let result = if skip_filter {
+            text.to_string()
+        } else {
+            String::from("FILTERED")
+        };
+
+        assert_eq!(result, "hello world");
+        std::env::remove_var("RTK_RAW_MODE");
+    }
+
+    #[test]
+    fn test_normal_mode_applies_filter() {
+        std::env::remove_var("RTK_RAW_MODE");
+
+        let text = "hello world";
+        let skip_filter = std::env::var("RTK_RAW_MODE").unwrap_or_default() == "1";
+        let result = if skip_filter {
+            text.to_string()
+        } else {
+            String::from("FILTERED")
+        };
+
+        assert_eq!(result, "FILTERED");
+    }
 }
