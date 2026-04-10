@@ -67,10 +67,14 @@ lazy_static! {
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
     // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
+    // Issue #1108: also accept the joined `-n<N>` form (`-n\s*`) and the
+    // `head -n` / `head --lines <space>` variants.
     static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_N_FLAG: Regex = Regex::new(r"^head\s+-n\s*(\d+)\s+(\S+)$").unwrap();
     static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_LINES_SPACE: Regex = Regex::new(r"^head\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap();
-    static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
+    static ref TAIL_N_FLAG: Regex = Regex::new(r"^tail\s+-n\s*(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
 }
@@ -625,7 +629,7 @@ fn rewrite_compound(
 }
 
 fn rewrite_line_range(cmd: &str) -> Option<String> {
-    for re in [&*HEAD_N, &*HEAD_LINES] {
+    for re in [&*HEAD_N, &*HEAD_N_FLAG, &*HEAD_LINES, &*HEAD_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
@@ -635,12 +639,7 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     if cmd.starts_with("head -") {
         return None;
     }
-    for re in [
-        &*TAIL_N,
-        &*TAIL_N_SPACE,
-        &*TAIL_LINES_EQ,
-        &*TAIL_LINES_SPACE,
-    ] {
+    for re in [&*TAIL_N, &*TAIL_N_FLAG, &*TAIL_LINES_EQ, &*TAIL_LINES_SPACE] {
         if let Some(caps) = re.captures(cmd) {
             let n = caps.get(1)?.as_str();
             let file = caps.get(2)?.as_str();
@@ -1884,6 +1883,44 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("tail --lines 7 a.log b.log", &[]),
             None
+        );
+    }
+
+    // --- Issue #1108: tail/head -n<N> (no space) rewrite ---
+
+    #[test]
+    fn test_rewrite_tail_n_joined_flag() {
+        // tail -n20 file → rtk read file --tail-lines 20 (#1108)
+        assert_eq!(
+            rewrite_command("tail -n20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --tail-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_n_space_flag() {
+        // head -n 20 file → rtk read file --max-lines 20 (#1108)
+        assert_eq!(
+            rewrite_command("head -n 20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --max-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_n_joined_flag() {
+        // head -n20 file → rtk read file --max-lines 20 (#1108)
+        assert_eq!(
+            rewrite_command("head -n20 src/main.rs", &[]),
+            Some("rtk read src/main.rs --max-lines 20".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_head_lines_space_flag() {
+        // head --lines 50 file → rtk read file --max-lines 50 (#1108)
+        assert_eq!(
+            rewrite_command("head --lines 50 src/lib.rs", &[]),
+            Some("rtk read src/lib.rs --max-lines 50".into())
         );
     }
 
