@@ -97,6 +97,16 @@ pub struct TelemetryConfig {
     pub consent_date: Option<String>,
 }
 
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            consent_given: None,
+            consent_date: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LimitsConfig {
     /// Max total grep results to show (default: 200)
