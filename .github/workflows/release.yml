@@ -201,6 +201,9 @@ jobs:
         run: |
           cd release
           sha256sum * > checksums.txt
+          for f in *.tar.gz *.zip; do
+            [ -f "$f" ] && sha256sum "$f" > "${f}.sha256"
+          done
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2

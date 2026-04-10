@@ -83,6 +83,17 @@ install() {
         error "Failed to download binary"
     fi
 
+    # Download and verify SHA-256 checksum
+    info "Verifying checksum..."
+    if curl -fsSL "${DOWNLOAD_URL}.sha256" -o "${ARCHIVE}.sha256" 2>/dev/null; then
+        if ! (cd "$(dirname "$ARCHIVE")" && sha256sum -c "$(basename "${ARCHIVE}.sha256")"); then
+            error "Checksum verification failed — binary may be corrupted or tampered with"
+        fi
+        info "Checksum verified"
+    else
+        warn "No checksum file found — skipping verification (release $VERSION)"
+    fi
+
     info "Extracting..."
     tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
 
