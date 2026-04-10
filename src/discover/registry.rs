@@ -1837,6 +1837,40 @@ mod tests {
         );
     }
 
+    // --- uv run wrappers ---
+
+    #[test]
+    fn test_rewrite_uv_run_pytest() {
+        assert_eq!(
+            rewrite_command("uv run pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_python_m_pytest() {
+        assert_eq!(
+            rewrite_command("uv run python -m pytest -x tests/", &[]),
+            Some("rtk pytest -x tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_ruff_check() {
+        assert_eq!(
+            rewrite_command("uv run ruff check src/", &[]),
+            Some("rtk ruff check src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_mypy() {
+        assert_eq!(
+            rewrite_command("uv run mypy src/", &[]),
+            Some("rtk mypy src/".into())
+        );
+    }
+
     // --- Go tooling ---
 
     #[test]
