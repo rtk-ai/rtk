@@ -62,7 +62,7 @@ struct Cli {
     verbose: u8,
 
     /// Ultra-compact mode: ASCII icons, inline format (Level 2 optimizations)
-    #[arg(short = 'u', long, global = true)]
+    #[arg(long, global = true)]
     ultra_compact: bool,
 
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
@@ -2666,6 +2666,28 @@ mod tests {
     }
 
     #[test]
+    fn test_git_push_u_flag_passes_through() {
+        let cli = Cli::try_parse_from(["rtk", "git", "push", "-u", "origin", "my-branch"]).unwrap();
+        assert!(
+            !cli.ultra_compact,
+            "-u on git push must NOT be consumed as --ultra-compact"
+        );
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Push { args },
+                ..
+            } => {
+                assert!(
+                    args.contains(&"-u".to_string()),
+                    "-u must be forwarded to git push, got: {:?}",
+                    args
+                );
+            }
+            _ => panic!("Expected Git Push command"),
+        }
+    }
+
+    #[test]
     fn test_pnpm_subcommand_with_short_filter() {
         // -F is the short form of --filter in pnpm
         let cli =
@@ -2726,5 +2748,14 @@ mod tests {
             }
             _ => panic!("Expected Pnpm Build command"),
         }
+    }
+
+    #[test]
+    fn test_ultra_compact_long_form_still_works() {
+        let cli = Cli::try_parse_from(["rtk", "--ultra-compact", "git", "status"]).unwrap();
+        assert!(
+            cli.ultra_compact,
+            "--ultra-compact long form must still enable ultra-compact mode"
+        );
     }
 }
