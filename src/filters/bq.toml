@@ -1,0 +1,25 @@
+[filters.bq]
+description = "Compact BigQuery CLI output"
+match_command = "^bq\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^Waiting on ", "^\\s*\\+[-+]+\\+\\s*$"]
+truncate_lines_at = 120
+max_lines = 40
+
+[[tests.bq]]
+name = "strips separator lines and blanks"
+input = """
++-----+----------+
+| id  | name     |
++-----+----------+
+| 1   | alice    |
+| 2   | bob      |
++-----+----------+
+
+"""
+expected = "| id  | name     |\n| 1   | alice    |\n| 2   | bob      |"
+
+[[tests.bq]]
+name = "single line passthrough"
+input = "BigQuery error: Not found: Dataset myproject:missing"
+expected = "BigQuery error: Not found: Dataset myproject:missing"

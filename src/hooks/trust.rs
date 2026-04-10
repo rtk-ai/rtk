@@ -97,17 +97,24 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
     // Fast path: env var override for CI pipelines only.
     // Requires a known CI env var to be set to prevent .envrc injection attacks.
     if std::env::var("RTK_TRUST_PROJECT_FILTERS").as_deref() == Ok("1") {
-        let in_ci = std::env::var("CI").is_ok()
-            || std::env::var("GITHUB_ACTIONS").is_ok()
-            || std::env::var("GITLAB_CI").is_ok()
-            || std::env::var("JENKINS_URL").is_ok()
-            || std::env::var("BUILDKITE").is_ok();
-        if in_ci {
-            return Ok(TrustStatus::EnvOverride);
+        use std::io::IsTerminal;
+        let is_interactive = (std::io::stdin().is_terminal() || std::io::stdout().is_terminal())
+            && std::env::var("RTK_TEST_FORCE_NON_INTERACTIVE").is_err();
+        if is_interactive {
+            eprintln!("[rtk] WARNING: RTK_TRUST_PROJECT_FILTERS=1 ignored (interactive terminal detected)");
+        } else {
+            let in_ci = std::env::var("CI").is_ok()
+                || std::env::var("GITHUB_ACTIONS").is_ok()
+                || std::env::var("GITLAB_CI").is_ok()
+                || std::env::var("JENKINS_URL").is_ok()
+                || std::env::var("BUILDKITE").is_ok();
+            if in_ci {
+                return Ok(TrustStatus::EnvOverride);
+            }
+            eprintln!(
+                "[rtk] WARNING: RTK_TRUST_PROJECT_FILTERS=1 ignored (CI environment not detected)"
+            );
         }
-        eprintln!(
-            "[rtk] WARNING: RTK_TRUST_PROJECT_FILTERS=1 ignored (CI environment not detected)"
-        );
     }
 
     let key = canonical_key(filter_path)?;
@@ -442,11 +449,17 @@ mod tests {
         std::env::set_var("RTK_TRUST_PROJECT_FILTERS", "1");
         #[allow(deprecated)]
         std::env::set_var("CI", "true");
+        #[allow(deprecated)]
+        std::env::set_var("RTK_TEST_FORCE_NON_INTERACTIVE", "1");
+
         let status = check_trust(&filter).unwrap();
+
         #[allow(deprecated)]
         std::env::remove_var("RTK_TRUST_PROJECT_FILTERS");
         #[allow(deprecated)]
         std::env::remove_var("CI");
+        #[allow(deprecated)]
+        std::env::remove_var("RTK_TEST_FORCE_NON_INTERACTIVE");
 
         assert_eq!(status, TrustStatus::EnvOverride);
     }

@@ -1634,12 +1634,7 @@ fn run_cli() -> Result<i32> {
                 }
                 hooks::init::run_kilocode_mode(cli.verbose)?;
             } else if agent == Some(AgentTarget::Antigravity) {
-                if global {
-                    anyhow::bail!(
-                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
-                    );
-                }
-                hooks::init::run_antigravity_mode(cli.verbose)?;
+                hooks::init::run_antigravity_mode(global, cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2022,8 +2017,14 @@ fn run_cli() -> Result<i32> {
                     libc::raise(sig);
                 }
                 unsafe {
-                    libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
-                    libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+                    libc::signal(
+                        libc::SIGINT,
+                        handle_signal as *const () as libc::sighandler_t,
+                    );
+                    libc::signal(
+                        libc::SIGTERM,
+                        handle_signal as *const () as libc::sighandler_t,
+                    );
                 }
             }
 
