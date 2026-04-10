@@ -46,7 +46,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets
+      - run: cargo clippy --all-targets -- -D unsafe_code
 
   # ─── Parallel gates (all need code to compile) ───
 
@@ -184,6 +184,20 @@ jobs:
           echo "**For high-risk PRs (critical files modified):**" >> $GITHUB_STEP_SUMMARY
           echo "- Require approval from 2 maintainers" >> $GITHUB_STEP_SUMMARY
           echo "- Test in isolated environment before merge" >> $GITHUB_STEP_SUMMARY
+
+  semgrep:
+    name: semgrep security scan
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: returntocorp/semgrep-action@v1
+        with:
+          config: .semgrep.yml
+        env:
+          SEMGREP_BASELINE_REF: ${{ github.event.pull_request.base.sha }}
 
   benchmark:
     name: benchmark
