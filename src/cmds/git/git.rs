@@ -1,4 +1,4 @@
-//! Filters git output — log, status, diff, and more — keeping just the essential info.
+﻿//! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::config;
 use crate::core::tracking;
@@ -635,7 +635,7 @@ fn format_status_output(porcelain: &str) -> String {
         }
 
         match status.chars().nth(1).unwrap_or(' ') {
-            'M' | 'D' => {
+            'M' | 'D' | 'A' => {
                 modified += 1;
                 modified_files.push(file);
             }
