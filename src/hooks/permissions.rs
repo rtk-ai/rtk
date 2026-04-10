@@ -253,9 +253,12 @@ fn glob_matches(cmd: &str, pattern: &str) -> bool {
                 return false;
             }
         } else {
-            // Middle segment: find next occurrence
-            match cmd[search_from..].find(*part) {
-                Some(pos) => search_from += pos + part.len(),
+            // Middle segment: find next occurrence.
+            // Trim trailing whitespace so "git -C * diff *" matches
+            // "git -C /path diff" (where command ends at the segment).
+            let trimmed = part.trim_end();
+            match cmd[search_from..].find(trimmed) {
+                Some(pos) => search_from += pos + trimmed.len(),
                 None => return false,
             }
         }
@@ -430,6 +433,17 @@ mod tests {
     fn test_middle_wildcard() {
         assert!(command_matches_pattern("git push main", "git * main"));
         assert!(command_matches_pattern("git rebase main", "git * main"));
+    }
+
+    // Issue #1105: middle wildcard with no trailing arguments
+    #[test]
+    fn test_middle_wildcard_no_trailing_args() {
+        assert!(command_matches_pattern("git -C /path diff", "git -C * diff:*"));
+        assert!(command_matches_pattern(
+            "git -C /path diff --stat",
+            "git -C * diff:*"
+        ));
+        assert!(command_matches_pattern("git -C /path status", "git -C * status:*"));
     }
 
     // Bug 3: middle wildcard — negative
