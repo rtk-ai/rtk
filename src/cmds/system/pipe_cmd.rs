@@ -1,6 +1,8 @@
 use anyhow::Result;
 use std::io::Read;
 
+use crate::core::stream::RAW_CAP;
+
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
         "cargo-test" | "cargo" => Some(crate::cmds::rust::cargo_cmd::filter_cargo_test),
@@ -128,7 +130,10 @@ fn find_wrapper(input: &str) -> String {
 }
 
 pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
-    let first_1k = &input[..input.len().min(1024)];
+    let end = input.len().min(1024);
+    // Avoid panic: byte 1024 may fall inside a multi-byte UTF-8 char
+    let end = input.floor_char_boundary(end);
+    let first_1k = &input[..end];
 
     if first_1k.contains("test result:") && first_1k.contains("passed;") {
         return crate::cmds::rust::cargo_cmd::filter_cargo_test;
@@ -189,8 +194,12 @@ fn identity_filter(input: &str) -> String {
 pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
     let mut buf = String::new();
     std::io::stdin()
+        .take((RAW_CAP + 1) as u64)
         .read_to_string(&mut buf)
         .map_err(|e| anyhow::anyhow!("Failed to read stdin: {}", e))?;
+    if buf.len() > RAW_CAP {
+        anyhow::bail!("stdin exceeds {} byte limit", RAW_CAP);
+    }
 
     if passthrough {
         print!("{}", buf);
@@ -403,6 +412,16 @@ mod tests {
         let f = auto_detect_filter("");
         let out = f("");
         assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_auto_detect_multibyte_at_1024_boundary() {
+        // Build input where byte 1024 falls inside a multi-byte char (é = 2 bytes)
+        let mut input = "a".repeat(1023);
+        input.push('é'); // 2-byte char starting at byte 1023, ends at 1025
+        let f = auto_detect_filter(&input);
+        let out = f(&input);
+        assert_eq!(out, input);
     }
 
     #[test]

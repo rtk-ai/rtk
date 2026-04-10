@@ -121,17 +121,15 @@ fn get_rewritten(cmd: &str) -> Option<String> {
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
+    let verdict = permissions::check_command(cmd);
+    if verdict == PermissionVerdict::Deny {
+        return Ok(());
+    }
+
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
         None => return Ok(()),
     };
-
-    let verdict = permissions::check_command(cmd);
-
-    // Deny: pass through without rewrite — let the host tool handle it.
-    if verdict == PermissionVerdict::Deny {
-        return Ok(());
-    }
 
     // Allow (explicit rule matched): auto-allow the rewritten command.
     // Ask/Default (no allow rule matched): rewrite but let the host tool prompt.
@@ -247,7 +245,10 @@ fn audit_log(action: &str, original: &str, rewritten: &str) {
 
 /// Escape newlines to prevent log-line injection in the pipe-delimited audit log.
 fn sanitize_log_field(s: &str) -> String {
-    s.replace('\n', "\\n").replace('\r', "\\r")
+    s.replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
@@ -820,6 +821,17 @@ mod tests {
         let sanitized = sanitize_log_field("git status\nfake | inject | evil");
         assert!(!sanitized.contains('\n'));
         assert!(sanitized.contains("\\n"));
+    }
+
+    #[test]
+    fn test_audit_log_sanitizes_pipe_delimiter() {
+        let sanitized = sanitize_log_field("git log | head");
+        assert!(
+            !sanitized.contains(" | "),
+            "unescaped ' | ' breaks field parsing: {}",
+            sanitized
+        );
+        assert!(sanitized.contains("\\|"));
     }
 
     #[test]

@@ -216,6 +216,8 @@ pub fn status_to_exit_code(status: std::process::ExitStatus) -> i32 {
 }
 
 // ISSUE #897: ChildGuard RAII prevents zombie processes that caused kernel panic
+pub const RAW_CAP: usize = 10_485_760; // 10 MiB
+
 pub fn run_streaming(
     cmd: &mut Command,
     stdin_mode: StdinMode,
@@ -313,7 +315,6 @@ pub fn run_streaming(
     });
 
     let stdout = child.0.stdout.take().context("No child stdout handle")?;
-    const RAW_CAP: usize = 10_485_760;
     let mut raw_stdout = String::new();
     let mut filtered = String::new();
     let mut capped = false;
