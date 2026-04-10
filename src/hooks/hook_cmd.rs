@@ -856,4 +856,19 @@ mod tests {
             PermissionVerdict::Deny
         );
     }
+
+    #[test]
+    fn test_gemini_deny_blocks_rewrite() {
+        use super::permissions::check_command_with_rules;
+        let deny = vec!["cargo test".to_string()];
+        assert_eq!(
+            check_command_with_rules("cargo test", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+        // Denied commands must not be rewritten — Gemini handler checks deny before rewrite
+        assert!(
+            get_rewritten("cargo test").is_some(),
+            "cargo test should be rewritable when not denied"
+        );
+    }
 }

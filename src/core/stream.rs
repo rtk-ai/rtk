@@ -297,18 +297,28 @@ pub fn run_streaming(
     let stderr = child.0.stderr.take().context("No child stderr handle")?;
     let stderr_thread = std::thread::spawn(move || -> String {
         let mut raw_err = String::new();
+        let mut capped = false;
         if live_stderr {
             let stderr_out = io::stderr();
             let mut err_out = stderr_out.lock();
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 writeln!(err_out, "{}", line).ok();
-                raw_err.push_str(&line);
-                raw_err.push('\n');
+                if raw_err.len() + line.len() < RAW_CAP {
+                    raw_err.push_str(&line);
+                    raw_err.push('\n');
+                } else if !capped {
+                    capped = true;
+                    eprintln!("[rtk] warning: stderr exceeds 10 MiB — capture truncated");
+                }
             }
         } else {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                raw_err.push_str(&line);
-                raw_err.push('\n');
+                if raw_err.len() + line.len() < RAW_CAP {
+                    raw_err.push_str(&line);
+                    raw_err.push('\n');
+                } else if !capped {
+                    capped = true;
+                }
             }
         }
         raw_err
@@ -400,7 +410,11 @@ pub fn run_streaming(
     if let Some(mut f) = saved_filter {
         if let Some(post) = f.on_exit(exit_code, &raw) {
             filtered.push_str(&post);
-            print!("{}", post);
+            match write!(io::stdout(), "{}", post) {
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+                Err(e) => return Err(e.into()),
+                Ok(_) => {}
+            }
         }
     }
 
@@ -613,6 +627,23 @@ pub(crate) mod tests {
         assert!(
             result.raw.len() > 1_000_000,
             "Should have captured significant data"
+        );
+    }
+
+    #[test]
+    fn test_run_streaming_stderr_cap_at_10mb() {
+        let mut cmd = Command::new("sh");
+        // ~11 MiB on stderr, nothing on stdout
+        cmd.args([
+            "-c",
+            "dd if=/dev/zero bs=1024 count=11264 2>/dev/null | tr '\\0' 'a' | fold -w 80 1>&2",
+        ]);
+        let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly).unwrap();
+        // raw = raw_stdout + raw_stderr; stdout is empty so raw ≈ stderr size
+        assert!(
+            result.raw.len() <= RAW_CAP + 200,
+            "stderr in raw should be capped at ~10 MiB, got {} bytes",
+            result.raw.len()
         );
     }
 

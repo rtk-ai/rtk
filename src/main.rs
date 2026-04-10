@@ -560,7 +560,7 @@ enum Commands {
         min_occurrences: usize,
     },
 
-    /// Execute a shell command via the RTK native executor (filters + tracking)
+    /// Execute a shell command via sh -c (raw, no filtering or tracking)
     Run {
         /// Command string to execute (use -c for shell-like invocation)
         #[arg(short = 'c', long = "command")]

@@ -191,6 +191,14 @@ fn identity_filter(input: &str) -> String {
     input.to_string()
 }
 
+fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input)))
+        .unwrap_or_else(|_| {
+            eprintln!("[rtk] warning: filter panicked — passing through raw output");
+            input.to_string()
+        })
+}
+
 pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
     let mut buf = String::new();
     std::io::stdin()
@@ -218,7 +226,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         None => auto_detect_filter(&buf),
     };
 
-    let output = filter_fn(&buf);
+    let output = apply_filter(filter_fn, &buf);
     print!("{}", output);
     Ok(())
 }
@@ -455,6 +463,62 @@ mod tests {
     #[test]
     fn test_resolve_filter_prettier() {
         assert!(resolve_filter("prettier").is_some());
+    }
+
+    #[test]
+    fn test_panicking_filter_returns_passthrough() {
+        fn panicking_filter(_input: &str) -> String {
+            panic!("filter bug");
+        }
+        let input = "some output\n";
+        let result = super::apply_filter(panicking_filter, input);
+        assert_eq!(result, input);
+    }
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_grep_wrapper_token_savings() {
+        // Realistic rg output: 200 matches across 10 files (20 per file → 10 shown + truncation)
+        let mut input = String::new();
+        for file_idx in 1..=10 {
+            for line in 1..=20 {
+                input.push_str(&format!(
+                    "src/cmds/module{}/handler.rs:{}:    let result = process_request(ctx, &payload).await?;\n",
+                    file_idx, line * 10
+                ));
+            }
+        }
+        let output = grep_wrapper(&input);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
+        assert!(
+            savings >= 40.0,
+            "grep filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
+            savings, count_tokens(&input), count_tokens(&output)
+        );
+    }
+
+    #[test]
+    fn test_find_wrapper_token_savings() {
+        // Realistic find output: 500 files across 30 dirs (20-dir cap + 10-file cap both trigger)
+        let mut input = String::new();
+        for dir in 1..=30 {
+            for file in 1..=17 {
+                input.push_str(&format!(
+                    "./src/components/feature{}/sub_{}/component_{}.tsx\n",
+                    dir, dir, file
+                ));
+            }
+        }
+        let output = find_wrapper(&input);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
+        assert!(
+            savings >= 40.0,
+            "find filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
+            savings, count_tokens(&input), count_tokens(&output)
+        );
     }
 
     #[test]
