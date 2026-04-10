@@ -2161,6 +2161,23 @@ no changes added to commit (use "git add" and/or "git commit -a")
         assert!(result.contains("* main"));
     }
 
+    /// Regression test: files added with `git add -N` (intent-to-add) have
+    /// porcelain status ` A` (space + A). They must not be silently dropped,
+    /// which would cause a false "clean — nothing to commit" result.
+    #[test]
+    fn test_format_status_output_intent_to_add() {
+        let porcelain = "## main\n A new_file.txt\n";
+        let result = format_status_output(porcelain);
+        assert!(
+            !result.contains("clean"),
+            "intent-to-add files should not produce a 'clean' status: {result}"
+        );
+        assert!(
+            result.contains("new_file.txt"),
+            "intent-to-add file should appear in status output: {result}"
+        );
+    }
+
     /// Regression test: --oneline and other user format flags must preserve all commits.
     /// Before fix, filter_log_output split on ---END--- which doesn't exist when
     /// the user specifies their own format, resulting in only 2 commits surviving.
