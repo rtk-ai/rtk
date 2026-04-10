@@ -1,0 +1,17 @@
+[filters.eza]
+description = "Compact eza (modern ls) output — strip metadata columns"
+match_command = "^eza(\\s|$)"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$"]
+truncate_lines_at = 120
+max_lines = 40
+
+[[tests.eza]]
+name = "preserves file listing"
+input = """
+drwxr-xr-x  - user 10 Apr 12:00 src
+.rw-r--r-- 42k user 10 Apr 11:30 Cargo.toml
+.rw-r--r-- 12k user 10 Apr 11:30 Cargo.lock
+
+"""
+expected = "drwxr-xr-x  - user 10 Apr 12:00 src\n.rw-r--r-- 42k user 10 Apr 11:30 Cargo.toml\n.rw-r--r-- 12k user 10 Apr 11:30 Cargo.lock"

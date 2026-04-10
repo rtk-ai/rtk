@@ -3,23 +3,23 @@ description = "Strip pip install progress bars and download noise"
 match_command = "^(pip3?|python3?\\s+-m\\s+pip)\\s+install\\b"
 strip_ansi = true
 strip_lines_matching = [
-    "^\\s*$",
-    "^\\s*━",
-    "^\\s*\\|.*\\d+\\.\\d+\\s+[MkG]B",
-    "^Downloading ",
-    "^\\s+Downloading ",
-    "^Using cached ",
-    "^\\s+Using cached ",
-    "^Collecting ",
-    "^  Downloading ",
-    "^  Using cached ",
-    "^Requirement already satisfied",
-    "^\\[notice\\]",
-    "^WARNING: You are using pip version",
-    "^WARNING: There is a new pip version",
+  "^\\s*$",
+  "^\\s*━",
+  "^\\s*\\|.*\\d+\\.\\d+\\s+[MkG]B",
+  "^Downloading ",
+  "^\\s+Downloading ",
+  "^Using cached ",
+  "^\\s+Using cached ",
+  "^Collecting ",
+  "^  Downloading ",
+  "^  Using cached ",
+  "^Requirement already satisfied",
+  "^\\[notice\\]",
+  "^WARNING: You are using pip version",
+  "^WARNING: There is a new pip version",
 ]
 match_output = [
-    { pattern = "Requirement already satisfied", message = "ok (already installed)" },
+  { pattern = "Requirement already satisfied", message = "ok (already installed)" },
 ]
 truncate_lines_at = 120
 max_lines = 30

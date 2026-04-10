@@ -1,0 +1,87 @@
+[filters.bazel-build]
+description = "Strip bazel build action progress and loading noise"
+match_command = "^bazel\\s+(build|run)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Loading:",
+  "^Analyzing:",
+  "^\\[\\d+",
+  "^INFO: Analyzed",
+  "^INFO: Found \\d+ target",
+  "^INFO: From ",
+  "^INFO: Elapsed time:",
+  "^INFO: \\d+ process",
+]
+truncate_lines_at = 120
+max_lines = 40
+
+[filters.bazel-test]
+description = "Compact bazel test output — strip passing, keep failures"
+match_command = "^bazel\\s+test\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Loading:",
+  "^Analyzing:",
+  "^\\[\\d+",
+  "^INFO: Analyzed",
+  "^INFO: Found \\d+ test target",
+  "^INFO: Elapsed time:",
+  "^INFO: \\d+ process",
+  "^INFO: From ",
+  "^//.*PASSED in",
+]
+truncate_lines_at = 120
+max_lines = 50
+
+[filters.bazel-query]
+description = "Compact bazel query output"
+match_command = "^bazel\\s+query\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^Loading:"]
+truncate_lines_at = 120
+max_lines = 40
+
+[[tests.bazel-build]]
+name = "strips progress and action noise"
+input = """
+Loading: 0 packages loaded
+Analyzing: target //src:main (3 packages loaded, 12 targets configured)
+INFO: Analyzed target //src:main (3 packages loaded, 12 targets configured).
+INFO: Found 1 target...
+[3 / 7] Compiling src/main.cc
+[5 / 7] Linking src/main
+INFO: Elapsed time: 4.234s, Critical Path: 2.31s
+INFO: 7 processes: 3 internal, 4 darwin-sandbox.
+INFO: Build completed successfully, 7 total actions
+Target //src:main up-to-date:
+  bazel-bin/src/main
+"""
+expected = "INFO: Build completed successfully, 7 total actions\nTarget //src:main up-to-date:\n  bazel-bin/src/main"
+
+[[tests.bazel-test]]
+name = "strips passing tests keeps failures"
+input = """
+INFO: Analyzed 5 test targets (0 packages loaded, 0 targets configured).
+INFO: Found 5 test targets...
+[2 / 5] Testing //tests:unit_test
+//tests:unit_test PASSED in 0.3s
+//tests:integration_test FAILED in 2.1s
+  /tmp/.../test.log
+  FAILED: exit code 1
+INFO: Elapsed time: 5.123s
+INFO: 5 processes: 2 internal, 3 darwin-sandbox.
+//tests:integration_test FAILED
+"""
+expected = "//tests:integration_test FAILED in 2.1s\n  /tmp/.../test.log\n  FAILED: exit code 1\n//tests:integration_test FAILED"
+
+[[tests.bazel-query]]
+name = "strips loading noise"
+input = """
+Loading: 0 packages loaded
+//src:main
+//src:lib
+//tests:unit_test
+"""
+expected = "//src:main\n//src:lib\n//tests:unit_test"

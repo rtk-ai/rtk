@@ -1566,15 +1566,26 @@ match_command = "^make\\b"
 
         let expected = [
             "ansible-playbook",
+            "bazel-build",
+            "bazel-query",
+            "bazel-test",
             "bq",
             "brew-install",
+            "bun-build",
+            "bun-install",
+            "bun-test",
             "conda-install",
             "conda-list",
             "composer-install",
             "df",
             "dotnet-build",
             "du",
+            "eza",
             "fail2ban-client",
+            "flutter-analyze",
+            "flutter-build",
+            "flutter-pub",
+            "flutter-test",
             "gcloud",
             "gcloud_compute",
             "gcloud_container",
@@ -1616,6 +1627,8 @@ match_command = "^make\\b"
             "uv-lock",
             "uv-sync",
             "yamllint",
+            "yarn-install",
+            "yarn-test",
         ];
 
         for name in &expected {
@@ -1634,8 +1647,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            73,
-            "Expected exactly 73 built-in filters, got {}. \
+            86,
+            "Expected exactly 86 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1692,11 +1705,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 73 existing filters still present + 1 new = 74
+        // All 86 existing filters still present + 1 new = 87
         assert_eq!(
             filters.len(),
-            74,
-            "Expected 74 filters after concat (73 built-in + 1 new)"
+            87,
+            "Expected 87 filters after concat (86 built-in + 1 new)"
         );
 
         // New filter is discoverable
