@@ -40,10 +40,6 @@ pub enum AgentTarget {
     Windsurf,
     /// Cline / Roo Code (VS Code)
     Cline,
-    /// Kilo Code
-    Kilocode,
-    /// Google Antigravity
-    Antigravity,
 }
 
 #[derive(Parser)]
@@ -205,16 +201,16 @@ enum Commands {
         command: Vec<String>,
     },
 
-    /// Show JSON (compact values by default, or keys-only with --keys-only)
+    /// Show JSON (compact values, or schema-only with --schema)
     Json {
         /// JSON file
         file: PathBuf,
         /// Max depth
         #[arg(short, long, default_value = "5")]
         depth: usize,
-        /// Show keys only (strip all values, show structure)
+        /// Show structure only (strip all values)
         #[arg(long)]
-        keys_only: bool,
+        schema: bool,
     },
 
     /// Summarize project dependencies
@@ -288,10 +284,10 @@ enum Commands {
         #[arg(default_value = ".")]
         path: String,
         /// Max line length
-        #[arg(short = 'l', long, default_value = "80")]
+        #[arg(short = 'l', long, default_value = "200")]
         max_len: usize,
         /// Max results to show
-        #[arg(short, long, default_value = "200")]
+        #[arg(short, long, default_value = "500")]
         max: usize,
         /// Show only match context (not full line)
         #[arg(short, long)]
@@ -302,6 +298,9 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Show full lines without truncation
+        #[arg(long)]
+        full_lines: bool,
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -1568,12 +1567,12 @@ fn run_cli() -> Result<i32> {
         Commands::Json {
             file,
             depth,
-            keys_only,
+            schema,
         } => {
             if file == Path::new("-") {
-                json_cmd::run_stdin(depth, keys_only, cli.verbose)?;
+                json_cmd::run_stdin(depth, schema, cli.verbose)?;
             } else {
-                json_cmd::run(&file, depth, keys_only, cli.verbose)?;
+                json_cmd::run(&file, depth, schema, cli.verbose)?;
             }
             0
         }
@@ -1689,6 +1688,7 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            full_lines,
             extra_args,
         } => grep_cmd::run(
             &pattern,
@@ -1699,6 +1699,7 @@ fn run_cli() -> Result<i32> {
             file_type.as_deref(),
             &extra_args,
             cli.verbose,
+            full_lines,
         )?,
 
         Commands::Init {
@@ -1731,18 +1732,6 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
             } else if copilot {
                 hooks::init::run_copilot(cli.verbose)?;
-            } else if agent == Some(AgentTarget::Kilocode) {
-                if global {
-                    anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
-                }
-                hooks::init::run_kilocode_mode(cli.verbose)?;
-            } else if agent == Some(AgentTarget::Antigravity) {
-                if global {
-                    anyhow::bail!(
-                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
-                    );
-                }
-                hooks::init::run_antigravity_mode(cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
