@@ -189,15 +189,13 @@ jobs:
     name: semgrep security scan
     needs: clippy
     runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: returntocorp/semgrep-action@v1
-        with:
-          config: .semgrep.yml
-        env:
-          SEMGREP_BASELINE_REF: ${{ github.event.pull_request.base.sha }}
+      - run: semgrep scan --config .semgrep.yml --baseline-commit ${{ github.event.pull_request.base.sha }} --error
 
   benchmark:
     name: benchmark
