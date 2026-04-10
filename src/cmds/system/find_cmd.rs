@@ -212,7 +212,7 @@ pub fn run(
 
     let mut builder = WalkBuilder::new(path);
     builder
-        .hidden(true) // skip hidden files/dirs
+        .hidden(false) // include dotfiles (match native find behavior)
         .git_ignore(true) // respect .gitignore
         .git_global(true)
         .git_exclude(true);
@@ -423,6 +423,15 @@ mod tests {
         assert!(glob_match("test_*", "test_foo"));
         assert!(glob_match("test_*", "test_"));
         assert!(!glob_match("test_*", "test"));
+    }
+
+    // --- dotfile glob matching (issue #1101) ---
+
+    #[test]
+    fn glob_match_dotfile() {
+        assert!(glob_match(".claude.json", ".claude.json"));
+        assert!(glob_match(".*", ".claude.json"));
+        assert!(glob_match("*.json", ".claude.json"));
     }
 
     // --- dot pattern treated as star ---
