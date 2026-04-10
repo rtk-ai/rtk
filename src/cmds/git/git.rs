@@ -635,7 +635,7 @@ fn format_status_output(porcelain: &str) -> String {
         }
 
         match status.chars().nth(1).unwrap_or(' ') {
-            'M' | 'D' => {
+            'M' | 'D' | 'A' => {
                 modified += 1;
                 modified_files.push(file);
             }
