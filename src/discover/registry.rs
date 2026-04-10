@@ -3884,4 +3884,38 @@ mod tests {
             Some("rtk git log | head | tail && rtk git status".into())
         );
     }
+
+    /// Regression: commands where `git` appears only inside `$(...)` must NOT be
+    /// rewritten to `git rtk ...` (wrong prefix insertion) or `rtk git ...` (would
+    /// silently change what the subshell runs).  They must pass through unchanged
+    /// so the shell executes the native `git` inside the substitution.
+    ///
+    /// The outer command (echo, cd, VAR=..., for) is what matters for classification;
+    /// the inner git subshell is just a shell expansion that happens at runtime.
+    #[test]
+    fn test_rewrite_git_inside_subshell_passthrough() {
+        // echo/cd/for wrappers — outer command is ignored; inner git stays native
+        assert_eq!(
+            rewrite_command(r#"echo "Branch: $(git rev-parse --abbrev-ref HEAD)""#, &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command(r#"cd "$(git rev-parse --show-toplevel)""#, &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command("for f in $(git ls-files); do echo \"$f\"; done", &[]),
+            None
+        );
+        // Variable assignment — whole line has no outer command to rewrite
+        assert_eq!(
+            rewrite_command("BRANCH=$(git branch --show-current)", &[]),
+            None
+        );
+        // Outer git command IS rewritten; inner subshell passes through verbatim
+        assert_eq!(
+            rewrite_command("git log $(git rev-parse HEAD~1)", &[]),
+            Some("rtk git log $(git rev-parse HEAD~1)".into())
+        );
+    }
 }
