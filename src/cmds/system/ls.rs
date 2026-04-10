@@ -4,7 +4,18 @@ use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::resolved_command;
 use anyhow::Result;
+use lazy_static::lazy_static;
+use regex::Regex;
 use std::io::IsTerminal;
+
+lazy_static! {
+    // Parse ls -la lines: extract size and filename regardless of owner/group token count.
+    // Pattern: ...SIZE MONTH DAY TIME_OR_YEAR FILENAME
+    // Works with any locale (month is matched as \S+) and any number of group tokens.
+    static ref LS_ENTRY_RE: Regex = Regex::new(
+        r"(\d+)\s+\S+\s+\d{1,2}\s+(?:\d{1,2}:\d{2}|\d{4})\s+(.+)$"
+    ).unwrap();
+}
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let show_all = args
@@ -123,8 +134,20 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
             continue;
         }
 
-        // Filename is everything from column 9 onward (handles spaces)
-        let name = parts[8..].join(" ");
+        // Use regex to extract size and filename from ls -la output.
+        // This handles any number of owner/group tokens and any locale. (#1084)
+        // Falls back to parts[4]/parts[8] for non-standard formats (e.g. --full-time).
+        let (file_size, name) = if let Some(caps) = LS_ENTRY_RE.captures(line) {
+            let size: u64 = caps[1].parse().unwrap_or(0);
+            let name = caps[2].to_string();
+            (size, name)
+        } else if parts.len() >= 9 {
+            let size: u64 = parts[4].parse().unwrap_or(0);
+            let name = parts[8..].join(" ");
+            (size, name)
+        } else {
+            continue;
+        };
 
         // Skip . and ..
         if name == "." || name == ".." {
@@ -141,7 +164,7 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
         if is_dir {
             dirs.push(name);
         } else if parts[0].starts_with('-') || parts[0].starts_with('l') {
-            let size: u64 = parts[4].parse().unwrap_or(0);
+            let size = file_size;
             let ext = if let Some(pos) = name.rfind('.') {
                 name[pos..].to_string()
             } else {
@@ -323,6 +346,132 @@ mod tests {
             line_count, 3,
             "pipe should see exactly 3 lines (1 dir + 2 files), got {}",
             line_count
+        );
+    }
+
+    #[test]
+    fn test_compact_windows_group_with_space() {
+        // Windows: group name may contain a space (e.g. "Domain Users"),
+        // shifting all subsequent columns by one. (#1084)
+        let input = "total 8\n\
+                     drwxr-xr-x  1 WBPC.VN Domain Users     0 Apr  6 15:16 docs\n\
+                     -rw-r--r--  1 WBPC.VN Domain Users    59 Apr  6 15:16 projects.json\n\
+                     -rw-r--r--  1 WBPC.VN Domain Users  2048 Apr  6 15:16 README.md\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(entries.contains("docs/"), "should list dirs");
+        assert!(
+            entries.contains("projects.json  59B"),
+            "should show 59B not 0B, got: {}",
+            entries
+        );
+        assert!(
+            entries.contains("README.md  2.0K"),
+            "should show 2.0K, got: {}",
+            entries
+        );
+    }
+
+    #[test]
+    fn test_compact_windows_numeric_group() {
+        // Windows Git Bash: group is numeric (e.g. 197121)
+        let input = "total 136\n\
+                     drwxr-xr-x 1 szk 197121     0 Apr 10 22:05 src\n\
+                     -rw-r--r-- 1 szk 197121  1729 Apr 10 22:05 Cargo.toml\n\
+                     -rw-r--r-- 1 szk 197121 87474 Apr 10 23:25 main.rs\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(entries.contains("Cargo.toml  1.7K"), "got: {}", entries);
+        assert!(entries.contains("main.rs  85.4K"), "got: {}", entries);
+    }
+
+    #[test]
+    fn test_compact_owner_named_like_month() {
+        // User or group named like a month abbreviation should not
+        // confuse the month-detection heuristic (Codex review P3).
+        let input = "total 8\n\
+                     -rw-r--r--  1 Jan  staff  1234 Feb  1 12:00 data.csv\n\
+                     -rw-r--r--  1 user May    5678 Jun 15 09:00 report.md\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("data.csv  1.2K"),
+            "owner 'Jan' must not confuse month detection, got: {}",
+            entries
+        );
+        assert!(
+            entries.contains("report.md  5.5K"),
+            "group 'May' must not confuse month detection, got: {}",
+            entries
+        );
+    }
+
+    #[test]
+    fn test_compact_non_english_locale_fallback() {
+        // Non-English locale: month names won't match, should fall back
+        // to parts[4] for size and parts[8] for name (Codex review P2).
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  1234 janv.  1 12:00 notes.txt\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("notes.txt  1.2K"),
+            "non-English locale should fall back to parts[4], got: {}",
+            entries
+        );
+    }
+
+    #[test]
+    fn test_compact_filename_containing_month_name() {
+        // Filename contains a month abbreviation — must not confuse
+        // the parser (Codex review round 2).
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  4096 janv.  1 12:00 meeting May notes.txt\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("meeting May notes.txt  4.0K"),
+            "month in filename must not shift columns, got: {}",
+            entries
+        );
+    }
+
+    #[test]
+    fn test_compact_windows_three_token_group() {
+        // Windows: group with 3 tokens (e.g. "Remote Desktop Users")
+        // Codex review round 3: must handle >1 extra token.
+        let input = "total 8\n\
+                     -rw-r--r--  1 user Remote Desktop Users  2048 Apr  6 15:16 data.csv\n\
+                     drwxr-xr-x  1 user Remote Desktop Users     0 Apr  6 15:16 docs\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("data.csv  2.0K"),
+            "3-token group must work, got: {}",
+            entries
+        );
+        assert!(entries.contains("docs/"), "dirs should still be listed");
+    }
+
+    #[test]
+    fn test_compact_non_english_locale_with_spaced_group() {
+        // Non-English locale + spaced group name: worst-case combo.
+        // Codex review round 3.
+        let input = "total 8\n\
+                     -rw-r--r--  1 user Domain Users  59 avr.  6 15:16 file.txt\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("file.txt  59B"),
+            "non-English + spaced group must work, got: {}",
+            entries
+        );
+    }
+
+    #[test]
+    fn test_compact_full_time_format() {
+        // ls --full-time produces ISO timestamps — regex won't match,
+        // should fall back to parts[4]/parts[8]. (Codex review round 4)
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  1234 2026-04-10 22:05:30.000000000 +0900 notes.txt\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("notes.txt  1.2K"),
+            "--full-time fallback must work, got: {}",
+            entries
         );
     }
 }
