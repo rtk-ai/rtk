@@ -61,7 +61,6 @@ priority = "optional"
 assets = [
     ["target/release/rtk", "usr/bin/", "755"],
 ]
-
 # cargo-generate-rpm configuration
 [package.metadata.generate-rpm]
 assets = [
