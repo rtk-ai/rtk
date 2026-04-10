@@ -103,6 +103,12 @@ enum Commands {
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Start reading from this line number (1-based)
+        #[arg(long)]
+        offset: Option<usize>,
+        /// Read only this many lines (from offset)
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -1257,6 +1263,8 @@ fn run_cli() -> Result<i32> {
             max_lines,
             tail_lines,
             line_numbers,
+            offset,
+            limit,
         } => {
             let mut had_error = false;
             let mut stdin_seen = false;
@@ -1275,6 +1283,8 @@ fn run_cli() -> Result<i32> {
                         max_lines,
                         tail_lines,
                         line_numbers,
+                        offset,
+                        limit,
                         cli.verbose,
                     )
                 };
