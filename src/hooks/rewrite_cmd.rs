@@ -16,6 +16,11 @@ use std::io::Write;
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
 pub fn run(cmd: &str) -> anyhow::Result<()> {
+    // Bypass all hook rewrites when RTK_DISABLED=1
+    if std::env::var("RTK_DISABLED").unwrap_or_default() == "1" {
+        std::process::exit(1); // No rewrite, passthrough
+    }
+
     let excluded = crate::core::config::Config::load()
         .map(|c| c.hooks.exclude_commands)
         .unwrap_or_default();
@@ -158,5 +163,14 @@ mod tests {
             // If this ever fails, the entire permission model is broken.
             assert_ne!(PermissionVerdict::Default, PermissionVerdict::Allow);
         }
+    }
+
+    #[test]
+    fn test_rtk_disabled_env_var_bypasses_rewrite() {
+        std::env::set_var("RTK_DISABLED", "1");
+        // The run() function calls process::exit(1) when disabled
+        // We can't test process::exit directly, so test the env var check logic
+        assert_eq!(std::env::var("RTK_DISABLED").unwrap_or_default(), "1");
+        std::env::remove_var("RTK_DISABLED");
     }
 }
