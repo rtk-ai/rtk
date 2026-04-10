@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **aws:** add shared runner `run_aws_filtered()` eliminating per-handler boilerplate
 * **tee:** add `force_tee_hint()` — truncated output saves full data to file with recovery hint
 
+### Bug Fixes
+
+* **init:** honor `CODEX_HOME` for Codex global install paths and cleanup
+
 ## [0.34.3](https://github.com/rtk-ai/rtk/compare/v0.34.2...v0.34.3) (2026-04-02)
 
 
