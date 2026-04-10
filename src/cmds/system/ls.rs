@@ -1,42 +1,24 @@
 //! Filters directory listings into a compact tree format.
 
-use crate::core::tracking;
+use super::constants::NOISE_DIRS;
+use crate::core::runner::{self, RunOptions};
 use crate::core::utils::resolved_command;
-use anyhow::{Context, Result};
+use anyhow::Result;
+use lazy_static::lazy_static;
+use regex::Regex;
 use std::io::IsTerminal;
 
-/// Noise directories commonly excluded from LLM context
-const NOISE_DIRS: &[&str] = &[
-    "node_modules",
-    ".git",
-    "target",
-    "__pycache__",
-    ".next",
-    "dist",
-    "build",
-    ".cache",
-    ".turbo",
-    ".vercel",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".tox",
-    ".venv",
-    "venv",
-    "coverage",
-    ".nyc_output",
-    ".DS_Store",
-    "Thumbs.db",
-    ".idea",
-    ".vscode",
-    ".vs",
-    "*.egg-info",
-    ".eggs",
-];
+lazy_static! {
+    /// Matches the date+time portion in `ls -la` output, which serves as a
+    /// stable anchor regardless of owner/group column width.
+    /// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
+    static ref LS_DATE_RE: Regex = Regex::new(
+        r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})\s+"
+    )
+    .unwrap();
+}
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
-    // Separate flags from paths
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let show_all = args
         .iter()
         .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
@@ -52,13 +34,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         .map(|s| s.as_str())
         .collect();
 
-    // Build ls -la + any extra flags the user passed (e.g. -R)
-    // Strip -l, -a, -h (we handle all of these ourselves)
     let mut cmd = resolved_command("ls");
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
-            // Long flags: skip --all (already handled)
             if *flag != "--all" {
                 cmd.arg(flag);
             }
@@ -74,7 +53,6 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         }
     }
 
-    // Add paths (default to "." if none)
     if paths.is_empty() {
         cmd.arg(".");
     } else {
@@ -83,52 +61,45 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         }
     }
 
-    let output = cmd.output().context("Failed to run ls")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprint!("{}", stderr);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let (entries, summary) = compact_ls(&raw, show_all);
-
-    // Only show summary in interactive mode (not when piped)
-    let is_tty = std::io::stdout().is_terminal();
-    let filtered = if is_tty {
-        format!("{}{}", entries, summary)
-    } else {
-        entries
-    };
-
-    if verbose > 0 {
-        eprintln!(
-            "Chars: {} → {} ({}% reduction)",
-            raw.len(),
-            filtered.len(),
-            if !raw.is_empty() {
-                100 - (filtered.len() * 100 / raw.len())
-            } else {
-                0
-            }
-        );
-    }
-
     let target_display = if paths.is_empty() {
         ".".to_string()
     } else {
         paths.join(" ")
     };
-    print!("{}", filtered);
-    timer.track(
-        &format!("ls -la {}", target_display),
-        "rtk ls",
-        &raw,
-        &filtered,
-    );
 
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "ls",
+        &format!("-la {}", target_display),
+        |raw| {
+            let (entries, summary) = compact_ls(raw, show_all);
+
+            // Only show summary in interactive mode (not when piped)
+            let is_tty = std::io::stdout().is_terminal();
+            let filtered = if is_tty {
+                format!("{}{}", entries, summary)
+            } else {
+                entries
+            };
+
+            if verbose > 0 {
+                eprintln!(
+                    "Chars: {} → {} ({}% reduction)",
+                    raw.len(),
+                    filtered.len(),
+                    if !raw.is_empty() {
+                        100 - (filtered.len() * 100 / raw.len())
+                    } else {
+                        0
+                    }
+                );
+            }
+            filtered
+        },
+        RunOptions::stdout_only()
+            .early_exit_on_failure()
+            .no_trailing_newline(),
+    )
 }
 
 /// Format bytes into human-readable size
@@ -140,6 +111,40 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{}B", bytes)
     }
+}
+
+/// Parse a single `ls -la` line, returning `(file_type_char, size, name)`.
+///
+/// Uses the date field as a stable anchor — the date format in `ls -la` is
+/// always three tokens (`Mon DD HH:MM` or `Mon DD  YYYY`), so we locate it
+/// with a regex, then extract size (rightmost number before the date) and
+/// filename (everything after the date). This handles owner/group names that
+/// contain spaces, which break the old fixed-column approach.
+fn parse_ls_line(line: &str) -> Option<(char, u64, String)> {
+    let date_match = LS_DATE_RE.find(line)?;
+    let name = line[date_match.end()..].to_string();
+
+    let before_date = &line[..date_match.start()];
+    let before_parts: Vec<&str> = before_date.split_whitespace().collect();
+    if before_parts.len() < 4 {
+        return None;
+    }
+
+    let perms = before_parts[0];
+    let file_type = perms.chars().next()?;
+
+    // Size is the rightmost parseable number before the date.
+    // nlinks is also numeric but appears earlier; scanning from the end
+    // guarantees we hit the size field first.
+    let mut size: u64 = 0;
+    for part in before_parts.iter().rev() {
+        if let Ok(s) = part.parse::<u64>() {
+            size = s;
+            break;
+        }
+    }
+
+    Some((file_type, size, name))
 }
 
 /// Parse ls -la output into compact format:
@@ -154,18 +159,13 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
     let mut by_ext: HashMap<String, usize> = HashMap::new();
 
     for line in raw.lines() {
-        // Skip total, empty, . and ..
         if line.starts_with("total ") || line.is_empty() {
             continue;
         }
 
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 9 {
+        let Some((file_type, size, name)) = parse_ls_line(line) else {
             continue;
-        }
-
-        // Filename is everything from column 9 onward (handles spaces)
-        let name = parts[8..].join(" ");
+        };
 
         // Skip . and ..
         if name == "." || name == ".." {
@@ -177,12 +177,9 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
             continue;
         }
 
-        let is_dir = parts[0].starts_with('d');
-
-        if is_dir {
+        if file_type == 'd' {
             dirs.push(name);
-        } else if parts[0].starts_with('-') || parts[0].starts_with('l') {
-            let size: u64 = parts[4].parse().unwrap_or(0);
+        } else if file_type == '-' || file_type == 'l' {
             let ext = if let Some(pos) = name.rfind('.') {
                 name[pos..].to_string()
             } else {
@@ -214,7 +211,7 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
     }
 
     // Summary line (separate so caller can suppress when piped)
-    let mut summary = format!("\n📊 {} files, {} dirs", files.len(), dirs.len());
+    let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
     if !by_ext.is_empty() {
         let mut ext_counts: Vec<_> = by_ext.iter().collect();
         ext_counts.sort_by(|a, b| b.1.cmp(a.1));
@@ -302,7 +299,7 @@ mod tests {
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n\
                      -rw-r--r--  1 user  staff   100 Jan  1 12:00 Cargo.toml\n";
         let (_entries, summary) = compact_ls(input, false);
-        assert!(summary.contains("📊 3 files, 1 dirs"));
+        assert!(summary.contains("Summary: 3 files, 1 dirs"));
         assert!(summary.contains(".rs"));
         assert!(summary.contains(".toml"));
     }
@@ -340,8 +337,14 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
         let (entries, summary) = compact_ls(input, false);
-        assert!(!entries.contains("📊"), "entries must not contain summary");
-        assert!(summary.contains("📊"), "summary must contain the icon");
+        assert!(
+            !entries.contains("Summary:"),
+            "entries must not contain summary"
+        );
+        assert!(
+            summary.contains("Summary:"),
+            "summary must contain the icon"
+        );
     }
 
     #[test]
@@ -359,5 +362,110 @@ mod tests {
             "pipe should see exactly 3 lines (1 dir + 2 files), got {}",
             line_count
         );
+    }
+
+    // Regression test for #948: owner/group with spaces breaks fixed-column parsing
+    #[test]
+    fn test_compact_multiline_group() {
+        let input = "total 8\n\
+                     -rw-r--r--  1 fjeanne utilisa. du domaine    0 Mar 31 16:18 empty.txt\n\
+                     -rw-r--r--  1 fjeanne utilisa. du domaine 1234 Mar 31 16:18 data.json\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("empty.txt"),
+            "should contain 'empty.txt', got: {entries}"
+        );
+        assert!(
+            entries.contains("data.json"),
+            "should contain 'data.json', got: {entries}"
+        );
+        assert!(
+            !entries.contains("16:18"),
+            "time should not leak into filename, got: {entries}"
+        );
+        assert!(
+            entries.contains("0B"),
+            "empty.txt should show 0B, got: {entries}"
+        );
+        assert!(
+            entries.contains("1.2K"),
+            "data.json should show 1.2K (1234 bytes), got: {entries}"
+        );
+    }
+
+    #[test]
+    fn test_compact_year_format_date() {
+        // Some systems show year instead of time for old files
+        let input = "total 8\n\
+                     -rw-r--r--  1 user staff  5678 Dec 25  2024 archive.tar\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("archive.tar"),
+            "should contain filename, got: {entries}"
+        );
+        assert!(
+            entries.contains("5.5K"),
+            "should show 5.5K, got: {entries}"
+        );
+    }
+
+    #[test]
+    fn test_parse_ls_line_basic() {
+        let (ft, size, name) = parse_ls_line(
+            "-rw-r--r--  1 user staff 1234 Jan  1 12:00 file.txt",
+        )
+        .unwrap();
+        assert_eq!(ft, '-');
+        assert_eq!(size, 1234);
+        assert_eq!(name, "file.txt");
+    }
+
+    #[test]
+    fn test_parse_ls_line_multiline_group() {
+        let (ft, size, name) = parse_ls_line(
+            "-rw-r--r--  1 fjeanne utilisa. du domaine 0 Mar 31 16:18 empty.txt",
+        )
+        .unwrap();
+        assert_eq!(ft, '-');
+        assert_eq!(size, 0);
+        assert_eq!(name, "empty.txt");
+    }
+
+    #[test]
+    fn test_parse_ls_line_dir_with_space_in_group() {
+        let (ft, size, name) = parse_ls_line(
+            "drwxr-xr-x  2 fjeanne utilisa. du domaine 64 Mar 31 16:18 my dir",
+        )
+        .unwrap();
+        assert_eq!(ft, 'd');
+        assert_eq!(size, 64);
+        assert_eq!(name, "my dir");
+    }
+
+    #[test]
+    fn test_parse_ls_line_symlink() {
+        let (ft, size, name) = parse_ls_line(
+            "lrwxr-xr-x  1 user staff 10 Jan  1 12:00 link -> target",
+        )
+        .unwrap();
+        assert_eq!(ft, 'l');
+        assert_eq!(size, 10);
+        assert_eq!(name, "link -> target");
+    }
+
+    #[test]
+    fn test_parse_ls_line_returns_none_for_total() {
+        assert!(parse_ls_line("total 48").is_none());
+    }
+
+    #[test]
+    fn test_parse_ls_line_year_format() {
+        let (ft, size, name) = parse_ls_line(
+            "-rw-r--r--  1 user staff 5678 Dec 25  2024 old.tar.gz",
+        )
+        .unwrap();
+        assert_eq!(ft, '-');
+        assert_eq!(size, 5678);
+        assert_eq!(name, "old.tar.gz");
     }
 }

@@ -12,6 +12,7 @@
 //! - `RTK_TRUST_PROJECT_FILTERS=1` overrides for CI pipelines
 
 use super::integrity;
+use crate::core::constants::{RTK_DATA_DIR, TRUSTED_FILTERS_JSON};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,7 +48,7 @@ pub enum TrustStatus {
 
 fn store_path() -> Result<PathBuf> {
     let data_dir = dirs::data_local_dir().context("Cannot determine local data directory")?;
-    Ok(data_dir.join("rtk").join("trusted_filters.json"))
+    Ok(data_dir.join(RTK_DATA_DIR).join(TRUSTED_FILTERS_JSON))
 }
 
 fn read_store() -> Result<TrustStore> {
@@ -137,14 +138,6 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
             actual: actual_hash,
         })
     }
-}
-
-/// Store current SHA-256 hash as trusted (computes hash from file).
-#[allow(dead_code)]
-pub fn trust_filter(filter_path: &Path) -> Result<()> {
-    let hash = integrity::compute_hash(filter_path)
-        .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
-    trust_filter_with_hash(filter_path, &hash)
 }
 
 /// Store a pre-computed SHA-256 hash as trusted (avoids TOCTOU re-read).

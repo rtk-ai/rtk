@@ -52,7 +52,7 @@ PRs target the **`develop`** branch, not `main`. All commits require a DCO sign-
 
 rtk routes CLI commands via a Clap `Commands` enum in `main.rs` to specialized filter modules in `src/cmds/*/`, each executing the underlying command and compressing output. Token savings are tracked in SQLite via `src/core/tracking.rs`.
 
-For full details see [ARCHITECTURE.md](../ARCHITECTURE.md) and [docs/TECHNICAL.md](../docs/TECHNICAL.md). Module responsibilities are documented in each folder's `README.md` and each file's `//!` doc header.
+For full details see [ARCHITECTURE.md](../docs/contributing/ARCHITECTURE.md) and [docs/contributing/TECHNICAL.md](../docs/contributing/TECHNICAL.md). Module responsibilities are documented in each folder's `README.md` and each file's `//!` doc header.
 
 ## Key Conventions
 

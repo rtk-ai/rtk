@@ -1,6 +1,6 @@
 # Hook System
 
-> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview | [hooks/](../../hooks/README.md) for deployed hook artifacts
+> See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview | [hooks/](../../hooks/README.md) for deployed hook artifacts
 
 ## Scope
 
@@ -61,13 +61,42 @@ Controls how `rtk init` modifies agent settings files:
 
 All file operations use atomic writes (tempfile + rename) to prevent corruption on crash. Settings files are backed up to `.bak` before modification. All operations are idempotent -- running `rtk init` multiple times is safe.
 
+## Permission Model
+
+RTK enforces a permission precedence that matches Claude Code's least-privilege default:
+
+```
+Deny > Ask > Allow (explicit) > Default (ask)
+```
+
+Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
+
+| Verdict | Trigger | rewrite_cmd exit | Hook behavior |
+|---------|---------|-----------------|---------------|
+| Deny | `permissions.deny` rule matched | 2 | Passthrough — host tool handles denial |
+| Ask | `permissions.ask` rule matched | 3 | Rewrite + let host tool prompt user |
+| Allow | `permissions.allow` rule matched | 0 | Rewrite + auto-allow |
+| Default | No rule matched | 3 | Rewrite + let host tool prompt user |
+
+### Per-tool support
+
+| Tool | ask support | Behavior on Default |
+|------|------------|-------------------|
+| Claude Code (rtk-rewrite.sh) | Yes | `permissionDecision: "ask"` — user prompted |
+| Copilot VS Code (rtk hook copilot) | Yes | `permissionDecision: "ask"` — user prompted |
+| Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
+| Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
+| Codex | ask parsed but no-op | allow (limitation — fails open) |
+
+### Implementation
+
+- `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
+- `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
+- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini)
+
 ## Exit Code Contract
 
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
-
-### Gaps (to be fixed)
-
-- `hook_cmd.rs::run_gemini()` — uses `.context()?` on JSON parse, which returns `Err` on malformed input
 
 ## Adding New Functionality
 To add support for a new AI coding agent: (1) add the hook installation logic to `init.rs` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool`), add a processor function in `hook_cmd.rs`, (3) add the agent's hook file path to `hook_check.rs` for validation, and (4) update `integrity.rs` with the expected hash for the new hook file. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.

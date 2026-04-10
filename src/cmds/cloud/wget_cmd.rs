@@ -1,9 +1,9 @@
 use crate::core::tracking;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{exit_code_from_output, resolved_command};
 use anyhow::{Context, Result};
 
 /// Compact wget - strips progress bars, shows only result
-pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
+pub fn run(url: &str, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -45,14 +45,14 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<()> {
         let msg = format!("{} FAILED: {}", compact_url(url), error);
         println!("{}", msg);
         timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
-        std::process::exit(output.status.code().unwrap_or(1));
+        return Ok(exit_code_from_output(&output, "wget"));
     }
 
-    Ok(())
+    Ok(0)
 }
 
 /// Run wget and output to stdout (for piping)
-pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
+pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -108,10 +108,10 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<()> {
         let msg = format!("{} FAILED: {}", compact_url(url), error);
         println!("{}", msg);
         timer.track(&format!("wget -O - {}", url), "rtk wget -o", &stderr, &msg);
-        std::process::exit(output.status.code().unwrap_or(1));
+        return Ok(exit_code_from_output(&output, "wget"));
     }
 
-    Ok(())
+    Ok(0)
 }
 
 fn extract_filename_from_output(stderr: &str, url: &str, args: &[String]) -> String {
@@ -259,5 +259,116 @@ fn truncate_line(line: &str, max: usize) -> String {
     } else {
         let t: String = line.chars().take(max.saturating_sub(3)).collect();
         format!("{}...", t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compact_url_strips_protocol() {
+        assert_eq!(compact_url("https://example.com/file.zip"), "example.com/file.zip");
+        assert_eq!(compact_url("http://example.com/file.zip"), "example.com/file.zip");
+    }
+
+    #[test]
+    fn test_compact_url_truncates_long_url() {
+        let long = "https://example.com/very/long/path/that/exceeds/fifty/characters/file.zip";
+        let result = compact_url(long);
+        assert!(result.contains("..."), "Long URL should be truncated with ...");
+        assert!(result.len() < long.len());
+    }
+
+    #[test]
+    fn test_compact_url_short_unchanged() {
+        let short = "https://x.com/f";
+        assert_eq!(compact_url(short), "x.com/f");
+    }
+
+    #[test]
+    fn test_format_size_zero() {
+        assert_eq!(format_size(0), "?");
+    }
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(512), "512B");
+    }
+
+    #[test]
+    fn test_format_size_kilobytes() {
+        let result = format_size(2048);
+        assert!(result.ends_with("KB"), "Expected KB, got {}", result);
+    }
+
+    #[test]
+    fn test_format_size_megabytes() {
+        let result = format_size(2 * 1024 * 1024);
+        assert!(result.ends_with("MB"), "Expected MB, got {}", result);
+    }
+
+    #[test]
+    fn test_parse_error_404() {
+        assert_eq!(parse_error("HTTP request failed: 404", ""), "404 Not Found");
+    }
+
+    #[test]
+    fn test_parse_error_dns() {
+        assert_eq!(
+            parse_error("unable to resolve host example.com", ""),
+            "DNS lookup failed"
+        );
+    }
+
+    #[test]
+    fn test_parse_error_ssl() {
+        assert_eq!(
+            parse_error("SSL certificate verification failed", ""),
+            "SSL/TLS error"
+        );
+    }
+
+    #[test]
+    fn test_parse_error_unknown() {
+        assert_eq!(parse_error("", ""), "Unknown error");
+    }
+
+    #[test]
+    fn test_truncate_line_short() {
+        assert_eq!(truncate_line("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_line_exact() {
+        assert_eq!(truncate_line("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_line_long() {
+        let result = truncate_line("hello world this is long", 10);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 10);
+    }
+
+    #[test]
+    fn test_extract_filename_from_output_flag() {
+        let args = vec!["-O".to_string(), "myfile.zip".to_string()];
+        assert_eq!(
+            extract_filename_from_output("", "https://example.com/x", &args),
+            "myfile.zip"
+        );
+    }
+
+    #[test]
+    fn test_extract_filename_from_url_fallback() {
+        let result = extract_filename_from_output("", "https://example.com/file.tar.gz", &[]);
+        assert_eq!(result, "file.tar.gz");
+    }
+
+    #[test]
+    fn test_extract_filename_empty_url_fallback() {
+        let result = extract_filename_from_output("", "https://example.com/", &[]);
+        assert_eq!(result, "index.html");
     }
 }

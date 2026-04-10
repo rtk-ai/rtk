@@ -14,6 +14,18 @@ env:
 jobs:
   # ─── Fast gates (fail early, save CI minutes) ───
 
+  check-test-presence:
+    name: test presence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      - name: Check filter modules have tests
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1 || true
+          bash scripts/check-test-presence.sh "origin/${{ github.base_ref }}"
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest

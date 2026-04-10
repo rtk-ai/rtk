@@ -1,6 +1,6 @@
 # rtk Architecture Documentation
 
-> **Deep reference** for RTK's system design, filtering taxonomy, performance characteristics, and architecture decisions. For a guided tour of the end-to-end flow, start with [docs/TECHNICAL.md](docs/TECHNICAL.md).
+> **Deep reference** for RTK's system design, filtering taxonomy, performance characteristics, and architecture decisions. For a guided tour of the end-to-end flow, start with [TECHNICAL.md](TECHNICAL.md).
 
 **rtk (Rust Token Killer)** is a high-performance CLI proxy that minimizes LLM token consumption through intelligent output filtering and compression.
 
@@ -26,7 +26,7 @@
 
 ## System Overview
 
-> For the proxy pattern diagram and key components table, see [docs/TECHNICAL.md](docs/TECHNICAL.md#2-architecture-overview).
+> For the proxy pattern diagram and key components table, see [TECHNICAL.md](TECHNICAL.md#2-architecture-overview).
 
 ### Design Principles
 
@@ -38,7 +38,7 @@
 
 ### Hook Architecture (v0.9.5+)
 
-> For the hook interception diagram and agent-specific JSON formats, see [docs/TECHNICAL.md](docs/TECHNICAL.md#32-hook-interception-command-rewriting) and [hooks/README.md](hooks/README.md).
+> For the hook interception diagram and agent-specific JSON formats, see [TECHNICAL.md](TECHNICAL.md#32-hook-interception-command-rewriting) and [hooks/README.md](hooks/README.md).
 
 Two hook strategies:
 
@@ -159,7 +159,7 @@ Database: ~/.local/share/rtk/history.db
 
 ### Module Map
 
-> For the full file-level module tree, see [docs/TECHNICAL.md](docs/TECHNICAL.md#4-folder-map) and each folder's README.
+> For the full file-level module tree, see [TECHNICAL.md](TECHNICAL.md#4-folder-map) and each folder's README.
 
 **Token savings by ecosystem:**
 
@@ -1034,7 +1034,7 @@ Overhead Sources:
 
 ## Resources
 
-- **[docs/TECHNICAL.md](docs/TECHNICAL.md)**: Guided tour of end-to-end flow
+- **[TECHNICAL.md](TECHNICAL.md)**: Guided tour of end-to-end flow
 - **[CONTRIBUTING.md](CONTRIBUTING.md)**: Design philosophy, contribution workflow, checklist
 - **CLAUDE.md**: Quick reference for AI agents (dev commands, build verification)
 - **README.md**: User guide, installation, examples

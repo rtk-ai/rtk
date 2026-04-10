@@ -18,7 +18,7 @@
   <a href="https://www.rtk-ai.app">Site web</a> &bull;
   <a href="#installation">Installer</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Depannage</a> &bull;
-  <a href="ARCHITECTURE.md">Architecture</a> &bull;
+  <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -184,7 +184,7 @@ mode = "failures"
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resoudre les problemes courants
 - **[INSTALL.md](INSTALL.md)** - Guide d'installation detaille
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Architecture technique
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Architecture technique
 
 ## Contribuer
 
@@ -195,3 +195,7 @@ Rejoignez la communaute sur [Discord](https://discord.gg/RySmvNF5kF).
 ## Licence
 
 Licence MIT - voir [LICENSE](LICENSE) pour les details.
+
+## Avertissement
+
+Voir [DISCLAIMER.md](DISCLAIMER.md).
