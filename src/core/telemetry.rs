@@ -27,6 +27,12 @@ pub fn maybe_ping() {
         return;
     }
 
+    // RGPD: require explicit consent before any telemetry
+    match config::telemetry_consent() {
+        Some(true) => {}
+        Some(false) | None => return,
+    }
+
     // Check opt-out: config.toml
     if let Some(false) = config::telemetry_enabled() {
         return;
@@ -139,21 +145,10 @@ fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn generate_device_hash() -> String {
+pub fn generate_device_hash() -> String {
     let salt = get_or_create_salt();
-    let hostname = hostname::get()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let username = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_default();
-
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
-    hasher.update(b":");
-    hasher.update(hostname.as_bytes());
-    hasher.update(b":");
-    hasher.update(username.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -200,7 +195,7 @@ fn random_salt() -> String {
     buf.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn salt_file_path() -> PathBuf {
+pub fn salt_file_path() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("rtk")
@@ -426,7 +421,7 @@ fn install_method_from_path(path: &str) -> &'static str {
     }
 }
 
-fn telemetry_marker_path() -> PathBuf {
+pub fn telemetry_marker_path() -> PathBuf {
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(RTK_DATA_DIR);
