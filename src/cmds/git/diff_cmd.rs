@@ -22,7 +22,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
     let diff = compute_diff(&lines1, &lines2);
     let mut rtk = String::new();
 
-    if diff.added == 0 && diff.removed == 0 {
+    if diff.added == 0 && diff.removed == 0 && diff.modified == 0 {
         rtk.push_str("[ok] Files are identical");
         println!("{}", rtk);
         timer.track(
@@ -305,6 +305,47 @@ mod tests {
         assert_eq!(result.added, 0);
         assert_eq!(result.removed, 0);
         assert!(result.changes.is_empty());
+    }
+
+    #[test]
+    fn test_identical_check_requires_zero_modified() {
+        // When modified > 0, identical must be false even when added==0 and removed==0
+        let result = DiffResult {
+            added: 0,
+            removed: 0,
+            modified: 1,
+            changes: vec![],
+        };
+        // The only correct interpretation: NOT identical
+        assert!(
+            result.added > 0 || result.removed > 0 || result.modified > 0,
+            "a diff with modifications must not be reported as identical"
+        );
+    }
+
+    #[test]
+    fn test_modified_lines_not_reported_as_identical() {
+        // Regression: "abcd" vs "abce" — similarity 0.6 > 0.5 → classified as Modified.
+        // compute_diff returns modified=1, added=0, removed=0.
+        // The identical check must also require modified==0 or the diff is silently lost.
+        let a = vec!["abcd"];
+        let b = vec!["abce"];
+        let result = compute_diff(&a, &b);
+        assert_eq!(result.modified, 1, "should be Modified, not identical");
+        assert_eq!(result.added, 0);
+        assert_eq!(result.removed, 0);
+    }
+
+    #[test]
+    fn test_modified_line_with_common_prefix() {
+        // "foo bar" vs "foo baz" — same character set sans r/z, similarity > 0.5
+        let a = vec!["foo bar"];
+        let b = vec!["foo baz"];
+        let result = compute_diff(&a, &b);
+        assert_eq!(
+            result.modified, 1,
+            "lines differing only at suffix must be Modified"
+        );
     }
 
     // --- condense_unified_diff ---
