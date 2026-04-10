@@ -3740,18 +3740,24 @@ rtk proxy <cmd>       # Run raw (no filtering) but track usage
 <!-- /rtk-instructions -->
 "#;
 
-/// Entry point for `rtk init --copilot`.
+/// Entry point for `rtk init --copilot` / `rtk init -g --copilot`.
 ///
-/// Installs in the current working directory's `.github/` subdirectory.
-pub fn run_copilot(ctx: InitContext) -> Result<()> {
-    run_copilot_at(Path::new("."), ctx)
+/// Global: installs in `~/.github/`. Local: installs in the current working
+/// directory's `.github/` subdirectory (#1107).
+pub fn run_copilot(global: bool, ctx: InitContext) -> Result<()> {
+    let base = if global {
+        dirs::home_dir().context("Could not determine home directory")?
+    } else {
+        PathBuf::from(".")
+    };
+    run_copilot_at(&base, global, ctx)
 }
 
 /// Same as [`run_copilot`] but operates relative to an explicit base path.
 ///
 /// Used by tests to avoid mutating process-global `cwd` (which is racy under
 /// `cargo test`'s default parallel execution).
-fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
+fn run_copilot_at(base: &Path, global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
     let github_dir = base.join(".github");
     let hooks_dir = github_dir.join("hooks");
@@ -3780,7 +3786,8 @@ fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
     if dry_run {
         print_dry_run_footer();
     } else {
-        println!("\nGitHub Copilot integration installed (project-scoped).\n");
+        let scope = if global { "global" } else { "project-scoped" };
+        println!("\nGitHub Copilot integration installed ({}).\n", scope);
         println!("  Hook config:    {}", hook_path.display());
         println!("  Instructions:   {}", instructions_path.display());
         println!("\n  Works with VS Code Copilot Chat (transparent rewrite)");
@@ -5691,7 +5698,7 @@ mod tests {
             Never suggest npm; prefer pnpm.\n";
         fs::write(&instructions_path, user_content).unwrap();
 
-        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_at(temp.path(), false, InitContext::default()).unwrap();
 
         let final_content = fs::read_to_string(&instructions_path).unwrap();
 
@@ -5719,10 +5726,10 @@ mod tests {
         let github_dir = temp.path().join(".github");
         fs::create_dir_all(&github_dir).unwrap();
 
-        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_at(temp.path(), false, InitContext::default()).unwrap();
         let after_first = fs::read_to_string(github_dir.join("copilot-instructions.md")).unwrap();
 
-        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_at(temp.path(), false, InitContext::default()).unwrap();
         let after_second = fs::read_to_string(github_dir.join("copilot-instructions.md")).unwrap();
 
         assert_eq!(
@@ -5755,7 +5762,7 @@ mod tests {
         );
         fs::write(&instructions_path, &stale).unwrap();
 
-        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_at(temp.path(), false, InitContext::default()).unwrap();
 
         let updated = fs::read_to_string(&instructions_path).unwrap();
 
@@ -5783,7 +5790,7 @@ mod tests {
             dry_run: true,
             ..InitContext::default()
         };
-        run_copilot_at(temp.path(), ctx).unwrap();
+        run_copilot_at(temp.path(), false, ctx).unwrap();
 
         assert!(
             !instructions_path.exists(),
@@ -5797,7 +5804,7 @@ mod tests {
         let instructions_path = temp.path().join(".github").join("copilot-instructions.md");
         assert!(!instructions_path.exists());
 
-        run_copilot_at(temp.path(), InitContext::default()).unwrap();
+        run_copilot_at(temp.path(), false, InitContext::default()).unwrap();
 
         assert!(
             instructions_path.exists(),
@@ -5819,7 +5826,7 @@ mod tests {
         let malformed = format!("# My rules\n\n{}\nincomplete RTK block\n", RTK_BLOCK_START);
         fs::write(&instructions_path, &malformed).unwrap();
 
-        let result = run_copilot_at(temp.path(), InitContext::default());
+        let result = run_copilot_at(temp.path(), false, InitContext::default());
 
         assert!(
             result.is_err(),
@@ -5846,7 +5853,7 @@ mod tests {
 
         let hook_path = github_dir.join("hooks").join("rtk-rewrite.json");
 
-        let result = run_copilot_at(temp.path(), InitContext::default());
+        let result = run_copilot_at(temp.path(), false, InitContext::default());
 
         assert!(result.is_err(), "Malformed file must cause a hard error");
         assert!(
