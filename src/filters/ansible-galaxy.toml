@@ -1,0 +1,32 @@
+[filters.ansible-galaxy]
+description = "Compact ansible-galaxy output — strip download/progress noise, keep install results"
+match_command = "^ansible-galaxy\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Starting galaxy",
+  "^Process install dependency map",
+  "^Starting collection install process",
+  "^Downloading\\s+https?://",
+]
+max_lines = 30
+
+[[tests.ansible-galaxy]]
+name = "strips download and progress lines, keeps install results"
+input = """
+Starting galaxy collection install process
+Process install dependency map
+Starting collection install process
+Downloading https://galaxy.ansible.com/download/community-general-7.5.0.tar.gz
+Installing 'community.general:7.5.0' to '/home/user/.ansible/collections'
+community.general:7.5.0 was installed successfully
+"""
+expected = "Installing 'community.general:7.5.0' to '/home/user/.ansible/collections'\ncommunity.general:7.5.0 was installed successfully"
+
+[[tests.ansible-galaxy]]
+name = "already installed message preserved"
+input = """
+Starting galaxy collection install process
+community.general:7.5.0 is already installed, skipping.
+"""
+expected = "community.general:7.5.0 is already installed, skipping."

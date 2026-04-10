@@ -1,0 +1,29 @@
+[filters.ansible]
+description = "Compact ansible ad-hoc command output — strip blank lines and trim large JSON blocks"
+match_command = "^ansible\\s+"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+truncate_lines_at = 200
+max_lines = 40
+
+[[tests.ansible]]
+name = "preserves host status lines"
+input = """
+web01 | SUCCESS => {
+    "changed": false,
+    "ping": "pong"
+}
+
+web02 | UNREACHABLE! => {
+    "changed": false,
+    "msg": "Failed to connect to the host via ssh"
+}
+"""
+expected = "web01 | SUCCESS => {\n    \"changed\": false,\n    \"ping\": \"pong\"\n}\nweb02 | UNREACHABLE! => {\n    \"changed\": false,\n    \"msg\": \"Failed to connect to the host via ssh\"\n}"
+
+[[tests.ansible]]
+name = "strips blank lines between blocks"
+input = "web01 | SUCCESS => {\n    \"ping\": \"pong\"\n}\n\n\nweb02 | SUCCESS => {\n    \"ping\": \"pong\"\n}"
+expected = "web01 | SUCCESS => {\n    \"ping\": \"pong\"\n}\nweb02 | SUCCESS => {\n    \"ping\": \"pong\"\n}"

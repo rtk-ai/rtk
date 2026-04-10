@@ -1,0 +1,33 @@
+[filters.ansible-lint]
+description = "Compact ansible-lint output — strip blank lines and config warnings, keep violations and summary"
+match_command = "^ansible-lint\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^WARNING\\s+Overriding detected file type",
+  "^WARNING\\s+Listing \\d+ violation",
+]
+max_lines = 60
+on_empty = "ansible-lint: no violations found"
+
+[[tests.ansible-lint]]
+name = "strips blank lines and overriding warnings, keeps violations"
+input = """
+WARNING  Overriding detected file type of 'yaml' to 'playbook'
+WARNING  Listing 2 violation(s) that are fatal
+
+tasks/main.yml:5: [yaml[truthy]] Truthy value should be one of [true, false]
+tasks/main.yml:12: [name[missing]] All tasks should be named.
+
+Finished with 2 failure(s), 1 warning(s) on 3 files.
+"""
+expected = "tasks/main.yml:5: [yaml[truthy]] Truthy value should be one of [true, false]\ntasks/main.yml:12: [name[missing]] All tasks should be named.\nFinished with 2 failure(s), 1 warning(s) on 3 files."
+
+[[tests.ansible-lint]]
+name = "on_empty when no violations"
+input = """
+
+WARNING  Overriding detected file type of 'yaml' to 'playbook'
+
+"""
+expected = "ansible-lint: no violations found"
