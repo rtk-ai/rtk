@@ -1,6 +1,6 @@
 [filters.gradle]
 description = "Compact Gradle build output — strip progress, keep tasks and errors"
-match_command = "^(gradle|gradlew|\\./)gradlew?\\b"
+match_command = "^gradlew?\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\s*$",
@@ -14,6 +14,9 @@ strip_lines_matching = [
   "^> Task :.*FROM-CACHE$",
   "^Starting a Gradle Daemon",
   "^Daemon will be stopped",
+  "^Calculating task graph",
+  "^Reusing configuration cache",
+  "^Configuration cache",
 ]
 truncate_lines_at = 150
 max_lines = 50
@@ -33,3 +36,13 @@ expected = "BUILD SUCCESSFUL in 8s\n7 actionable tasks: 7 executed"
 name = "empty after stripping"
 input = "> Configuring project :app\n"
 expected = "gradle: ok"
+
+[[tests.gradle]]
+name = "strips configuration cache chatter, keeps task output"
+input = "Calculating task graph as no cached configuration is available for tasks: build\nReusing configuration cache.\nConfiguration cache entry stored.\n> Task :compileJava\n> Task :test\nBUILD SUCCESSFUL in 5s"
+expected = "> Task :compileJava\n> Task :test\nBUILD SUCCESSFUL in 5s"
+
+[[tests.gradle]]
+name = "gradlew help output — daemon and daemon-stopped stripped"
+input = "Starting a Gradle Daemon (subsequent builds will be faster)\n> Task :help\n\nWelcome to Gradle 8.6.\n\nDaemon will be stopped at the end of the build stopping after idling timeout of 3 hours"
+expected = "> Task :help\nWelcome to Gradle 8.6."

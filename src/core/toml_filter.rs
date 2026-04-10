@@ -1694,4 +1694,38 @@ expected = "output line 1\noutput line 2"
         );
         assert_eq!(found.unwrap().name, "my-new-tool");
     }
+
+    /// Verify the gradle filter matches the normalized lookup string RTK actually
+    /// produces at runtime. RTK strips leading `./` and uses the basename, so
+    /// `rtk ./gradlew tasks` produces lookup `"gradlew tasks"`, not `"./gradlew tasks"`.
+    /// Regression test for #1177: the old regex `^(gradle|gradlew|\\./)gradlew?\b`
+    /// never matched the basename form and caused every Gradle invocation to fall
+    /// through to passthrough.
+    #[test]
+    fn test_gradle_filter_matches_normalized_lookup() {
+        let filters = make_filters(BUILTIN_TOML);
+
+        // These are the exact strings RTK's basename-normalisation produces at runtime.
+        for lookup in &["gradlew tasks", "gradle build", "gradlew --version"] {
+            let found = find_filter_in(lookup, &filters);
+            assert!(
+                found.is_some(),
+                "gradle filter must match normalized lookup {:?} (basename, no ./)",
+                lookup
+            );
+            assert_eq!(
+                found.unwrap().name,
+                "gradle",
+                "wrong filter matched for {:?}",
+                lookup
+            );
+        }
+
+        // Must NOT match unrelated commands.
+        assert!(
+            find_filter_in("gradlewrapper build", &filters).map(|f| f.name.as_str())
+                != Some("gradle"),
+            "gradle filter must not match 'gradlewrapper'"
+        );
+    }
 }
