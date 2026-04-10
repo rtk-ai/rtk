@@ -8,7 +8,7 @@ strip_lines_matching = [
   "^task: Task .* is up to date",
 ]
 truncate_lines_at = 150
-max_lines = 50
+tail_lines = 200
 on_empty = "task: ok"
 
 [[tests.task]]

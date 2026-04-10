@@ -8,7 +8,7 @@ strip_lines_matching = [
   "^\\s*just --list",
 ]
 truncate_lines_at = 150
-max_lines = 50
+tail_lines = 200
 
 [[tests.just]]
 name = "preserves command output"
@@ -24,3 +24,8 @@ expected = "error: Compilation failed\nsrc/main.rs:10: expected `;`"
 name = "empty input"
 input = ""
 expected = ""
+
+[[tests.just]]
+name = "tail keeps failure summary from long output"
+input = "running 300 tests\n...................................................\n...................................................\n...................................................\n...................................................\n...................................................\nFAILED tests/foo_test.rs — assertion failed at line 42\nFAILED tests/bar_test.rs — expected 1, got 2\ntest result: FAILED. 298 passed; 2 failed"
+expected = "running 300 tests\n...................................................\n...................................................\n...................................................\n...................................................\n...................................................\nFAILED tests/foo_test.rs — assertion failed at line 42\nFAILED tests/bar_test.rs — expected 1, got 2\ntest result: FAILED. 298 passed; 2 failed"

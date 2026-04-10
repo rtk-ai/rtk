@@ -11,7 +11,7 @@ strip_lines_matching = [
   "^mise\\s+\\w+@[\\d.]+ installed",
 ]
 truncate_lines_at = 150
-max_lines = 50
+tail_lines = 200
 on_empty = "mise: ok"
 
 [[tests.mise]]
