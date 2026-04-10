@@ -12,4 +12,3 @@ pub const OPENCODE_PLUGIN_PATH: &str = ".config/opencode/plugins/rtk.ts";
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
-pub const ANTIGRAVITY_DIR: &str = ".antigravity";

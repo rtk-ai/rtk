@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use super::constants::{
-    ANTIGRAVITY_DIR, BEFORE_TOOL_KEY, CLAUDE_DIR, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -17,9 +17,6 @@ const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
 
 // Embedded Cursor hook script (preToolUse format)
 const CURSOR_REWRITE_HOOK: &str = include_str!("../../hooks/cursor/rtk-rewrite.sh");
-
-// Embedded Antigravity hook script (preToolUse format, same as Cursor)
-const ANTIGRAVITY_REWRITE_HOOK: &str = include_str!("../../hooks/antigravity/rtk-rewrite.sh");
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
@@ -637,10 +634,6 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     // 6. Remove Cursor hooks
     let cursor_removed = remove_cursor_hooks(verbose)?;
     removed.extend(cursor_removed);
-
-    // 7. Remove Antigravity hooks
-    let antigravity_removed = remove_antigravity_hooks(verbose)?;
-    removed.extend(antigravity_removed);
 
     // Report results
     if removed.is_empty() {
@@ -1296,15 +1289,19 @@ fn run_kilocode_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
 
 const ANTIGRAVITY_RULES: &str = include_str!("../../hooks/antigravity/rules.md");
 
-/// Entry point for `rtk init --agent antigravity [--global]`
-/// Without --global: project-scoped rules file (.agents/rules/)
-/// With --global: programmatic hook (~/.antigravity/hooks/) + hooks.json patching
+/// Entry point for `rtk init --agent antigravity`
+/// Installs project-scoped rules to .agents/rules/ (read by Antigravity's Cascade AI).
+/// For transparent command rewriting, use Claude Code hooks instead: `rtk init -g`
 pub fn run_antigravity_mode(global: bool, verbose: u8) -> Result<()> {
     if global {
-        install_antigravity_hooks(verbose)
-    } else {
-        run_antigravity_rules_at(&std::env::current_dir()?, verbose)
+        anyhow::bail!(
+            "Antigravity does not support hooks.json. Use project-scoped rules instead:\n  \
+             rtk init --agent antigravity\n\n\
+             For transparent command rewriting via Claude Code (installed in Antigravity):\n  \
+             rtk init -g"
+        );
     }
+    run_antigravity_rules_at(&std::env::current_dir()?, verbose)
 }
 
 fn run_antigravity_rules_at(base_dir: &Path, verbose: u8) -> Result<()> {
@@ -1337,234 +1334,6 @@ fn run_antigravity_rules_at(base_dir: &Path, verbose: u8) -> Result<()> {
     println!("  Test with: git status\n");
 
     Ok(())
-}
-
-fn resolve_antigravity_dir() -> Result<PathBuf> {
-    resolve_home_subdir(ANTIGRAVITY_DIR)
-}
-
-/// Install Antigravity hooks: hook script + hooks.json
-/// Mirrors `install_cursor_hooks()` pattern.
-#[cfg(unix)]
-fn install_antigravity_hooks(verbose: u8) -> Result<()> {
-    let ag_dir = resolve_antigravity_dir()?;
-    let hooks_dir = ag_dir.join(HOOKS_SUBDIR);
-    fs::create_dir_all(&hooks_dir).with_context(|| {
-        format!(
-            "Failed to create Antigravity hooks directory: {}",
-            hooks_dir.display()
-        )
-    })?;
-
-    // 1. Write hook script
-    let hook_path = hooks_dir.join(REWRITE_HOOK_FILE);
-    let hook_changed = write_if_changed(
-        &hook_path,
-        ANTIGRAVITY_REWRITE_HOOK,
-        "Antigravity hook",
-        verbose,
-    )?;
-
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755)).with_context(|| {
-            format!(
-                "Failed to set Antigravity hook permissions: {}",
-                hook_path.display()
-            )
-        })?;
-    }
-
-    // 2. Create or patch hooks.json
-    let hooks_json_path = ag_dir.join(HOOKS_JSON);
-    let patched = patch_antigravity_hooks_json(&hooks_json_path, verbose)?;
-
-    // Report
-    let hook_status = if hook_changed {
-        "installed/updated"
-    } else {
-        "already up to date"
-    };
-    println!("\nAntigravity hook {hook_status} (global).\n");
-    println!("  Hook:       {}", hook_path.display());
-    println!("  hooks.json: {}", hooks_json_path.display());
-
-    if patched {
-        println!("  hooks.json: RTK preToolUse entry added");
-    } else {
-        println!("  hooks.json: RTK preToolUse entry already present");
-    }
-
-    println!("  Antigravity reloads hooks.json automatically. Test with: git status\n");
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn install_antigravity_hooks(_verbose: u8) -> Result<()> {
-    anyhow::bail!("Antigravity hook install requires Unix (macOS/Linux). Use project-scoped rules instead: rtk init --agent antigravity")
-}
-
-/// Patch ~/.antigravity/hooks.json to add RTK preToolUse hook.
-/// Returns true if the file was modified.
-fn patch_antigravity_hooks_json(path: &Path, verbose: u8) -> Result<bool> {
-    let mut root = if path.exists() {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        if content.trim().is_empty() {
-            serde_json::json!({ "version": 1 })
-        } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
-        }
-    } else {
-        serde_json::json!({ "version": 1 })
-    };
-
-    // Check idempotency — reuse the Cursor pattern (same key structure)
-    if antigravity_hook_already_present(&root) {
-        if verbose > 0 {
-            eprintln!("Antigravity hooks.json: RTK hook already present");
-        }
-        return Ok(false);
-    }
-
-    // Backup before mutation
-    if path.exists() {
-        let backup_path = path.with_extension("json.bak");
-        fs::copy(path, &backup_path)
-            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
-        if verbose > 0 {
-            eprintln!("Backup: {}", backup_path.display());
-        }
-    }
-
-    // Insert the RTK preToolUse entry
-    insert_antigravity_hook_entry(&mut root)?;
-
-    // Atomic write
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
-    atomic_write(path, &serialized)?;
-
-    Ok(true)
-}
-
-/// Check if RTK preToolUse hook is already present in Antigravity hooks.json
-fn antigravity_hook_already_present(root: &serde_json::Value) -> bool {
-    let Some(hooks) = root
-        .get("hooks")
-        .and_then(|h| h.get("preToolUse"))
-        .and_then(|p| p.as_array())
-    else {
-        return false;
-    };
-
-    hooks.iter().any(|entry| {
-        entry
-            .get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
-    })
-}
-
-/// Insert RTK preToolUse entry into Antigravity hooks.json
-fn insert_antigravity_hook_entry(root: &mut serde_json::Value) -> Result<()> {
-    let root_obj = if let Some(obj) = root.as_object_mut() {
-        obj
-    } else {
-        *root = serde_json::json!({ "version": 1 });
-        root.as_object_mut()
-            .context("Internal error: just created object is not an object")?
-    };
-
-    // Ensure version key
-    root_obj.entry("version").or_insert(serde_json::json!(1));
-
-    let hooks = root_obj
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .with_context(|| "hooks.json: 'hooks' key is not an object — fix or delete the file")?;
-
-    let pre_tool_use = hooks
-        .entry("preToolUse")
-        .or_insert_with(|| serde_json::json!([]))
-        .as_array_mut()
-        .with_context(|| "hooks.json: 'preToolUse' key is not an array — fix or delete the file")?;
-
-    pre_tool_use.push(serde_json::json!({
-        "command": "./hooks/rtk-rewrite.sh",
-        "matcher": "Shell"
-    }));
-
-    Ok(())
-}
-
-/// Remove Antigravity RTK artifacts: hook script + hooks.json entry
-fn remove_antigravity_hooks(verbose: u8) -> Result<Vec<String>> {
-    let Ok(ag_dir) = resolve_antigravity_dir() else {
-        return Ok(Vec::new());
-    };
-    let mut removed = Vec::new();
-
-    // 1. Remove hook script
-    let hook_path = ag_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
-    if hook_path.exists() {
-        fs::remove_file(&hook_path).with_context(|| {
-            format!("Failed to remove Antigravity hook: {}", hook_path.display())
-        })?;
-        removed.push(format!("Antigravity hook: {}", hook_path.display()));
-    }
-
-    // 2. Remove RTK entry from hooks.json
-    let hooks_json_path = ag_dir.join(HOOKS_JSON);
-    if hooks_json_path.exists() {
-        let content = fs::read_to_string(&hooks_json_path)
-            .with_context(|| format!("Failed to read {}", hooks_json_path.display()))?;
-
-        if !content.trim().is_empty() {
-            if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) {
-                if remove_antigravity_hook_from_json(&mut root) {
-                    let backup_path = hooks_json_path.with_extension("json.bak");
-                    fs::copy(&hooks_json_path, &backup_path).ok();
-
-                    let serialized = serde_json::to_string_pretty(&root)
-                        .context("Failed to serialize hooks.json")?;
-                    atomic_write(&hooks_json_path, &serialized)?;
-
-                    removed.push("Antigravity hooks.json: removed RTK entry".to_string());
-
-                    if verbose > 0 {
-                        eprintln!("Removed RTK hook from Antigravity hooks.json");
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(removed)
-}
-
-/// Remove RTK preToolUse entry from Antigravity hooks.json
-fn remove_antigravity_hook_from_json(root: &mut serde_json::Value) -> bool {
-    let Some(pre_tool_use) = root
-        .get_mut("hooks")
-        .and_then(|h| h.get_mut("preToolUse"))
-        .and_then(|p| p.as_array_mut())
-    else {
-        return false;
-    };
-
-    let original_len = pre_tool_use.len();
-    pre_tool_use.retain(|entry| {
-        !entry
-            .get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
-    });
-
-    pre_tool_use.len() < original_len
 }
 
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
@@ -3474,170 +3243,13 @@ More notes
     }
 
     #[test]
-    fn test_antigravity_hook_script_has_guards() {
-        assert!(ANTIGRAVITY_REWRITE_HOOK.contains("command -v rtk"));
-        assert!(ANTIGRAVITY_REWRITE_HOOK.contains("command -v jq"));
-        let jq_pos = ANTIGRAVITY_REWRITE_HOOK.find("command -v jq").unwrap();
-        let rtk_delegate_pos = ANTIGRAVITY_REWRITE_HOOK
-            .find("rtk rewrite \"$CMD\"")
-            .unwrap();
+    fn test_antigravity_global_mode_bails() {
+        let result = run_antigravity_mode(true, 0);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            jq_pos < rtk_delegate_pos,
-            "Guards must appear before rtk rewrite delegation"
-        );
-    }
-
-    #[test]
-    fn test_antigravity_hook_outputs_cursor_format() {
-        assert!(ANTIGRAVITY_REWRITE_HOOK.contains("\"permission\": \"allow\""));
-        assert!(ANTIGRAVITY_REWRITE_HOOK.contains("\"updated_input\""));
-        assert!(!ANTIGRAVITY_REWRITE_HOOK.contains("hookSpecificOutput"));
-    }
-
-    #[test]
-    fn test_antigravity_hook_already_present_true() {
-        let json_content = serde_json::json!({
-            "version": 1,
-            "hooks": {
-                "preToolUse": [{
-                    "command": "./hooks/rtk-rewrite.sh",
-                    "matcher": "Shell"
-                }]
-            }
-        });
-        assert!(antigravity_hook_already_present(&json_content));
-    }
-
-    #[test]
-    fn test_antigravity_hook_already_present_false() {
-        let json_content = serde_json::json!({ "version": 1 });
-        assert!(!antigravity_hook_already_present(&json_content));
-    }
-
-    #[test]
-    fn test_insert_antigravity_hook_entry_empty() {
-        let mut json_content = serde_json::json!({ "version": 1 });
-        insert_antigravity_hook_entry(&mut json_content).unwrap();
-
-        let hooks = json_content["hooks"]["preToolUse"].as_array().unwrap();
-        assert_eq!(hooks.len(), 1);
-        assert_eq!(hooks[0]["command"], "./hooks/rtk-rewrite.sh");
-        assert_eq!(hooks[0]["matcher"], "Shell");
-        assert_eq!(json_content["version"], 1);
-    }
-
-    #[test]
-    fn test_insert_antigravity_hook_preserves_existing() {
-        let mut json_content = serde_json::json!({
-            "version": 1,
-            "hooks": {
-                "preToolUse": [{
-                    "command": "./hooks/other.sh",
-                    "matcher": "Shell"
-                }]
-            }
-        });
-
-        insert_antigravity_hook_entry(&mut json_content).unwrap();
-
-        let pre_tool_use = json_content["hooks"]["preToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 2);
-        assert_eq!(pre_tool_use[0]["command"], "./hooks/other.sh");
-        assert_eq!(pre_tool_use[1]["command"], "./hooks/rtk-rewrite.sh");
-    }
-
-    #[test]
-    fn test_remove_antigravity_hook_from_json() {
-        let mut json_content = serde_json::json!({
-            "version": 1,
-            "hooks": {
-                "preToolUse": [
-                    { "command": "./hooks/other.sh", "matcher": "Shell" },
-                    { "command": "./hooks/rtk-rewrite.sh", "matcher": "Shell" }
-                ]
-            }
-        });
-
-        let removed = remove_antigravity_hook_from_json(&mut json_content);
-        assert!(removed);
-
-        let hooks = json_content["hooks"]["preToolUse"].as_array().unwrap();
-        assert_eq!(hooks.len(), 1);
-        assert_eq!(hooks[0]["command"], "./hooks/other.sh");
-    }
-
-    #[test]
-    fn test_remove_antigravity_hook_not_present() {
-        let mut json_content = serde_json::json!({
-            "version": 1,
-            "hooks": {
-                "preToolUse": [
-                    { "command": "./hooks/other.sh", "matcher": "Shell" }
-                ]
-            }
-        });
-
-        let removed = remove_antigravity_hook_from_json(&mut json_content);
-        assert!(!removed);
-    }
-
-    #[test]
-    fn test_patch_antigravity_hooks_json_creates_file() {
-        let temp = TempDir::new().unwrap();
-        let hooks_json = temp.path().join("hooks.json");
-
-        let patched = patch_antigravity_hooks_json(&hooks_json, 0).unwrap();
-        assert!(patched);
-
-        let content = fs::read_to_string(&hooks_json).unwrap();
-        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(antigravity_hook_already_present(&root));
-    }
-
-    #[test]
-    fn test_patch_antigravity_hooks_json_idempotent() {
-        let temp = TempDir::new().unwrap();
-        let hooks_json = temp.path().join("hooks.json");
-
-        let first = patch_antigravity_hooks_json(&hooks_json, 0).unwrap();
-        assert!(first);
-
-        let second = patch_antigravity_hooks_json(&hooks_json, 0).unwrap();
-        assert!(!second);
-
-        let content = fs::read_to_string(&hooks_json).unwrap();
-        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let hooks = root["hooks"]["preToolUse"].as_array().unwrap();
-        assert_eq!(hooks.len(), 1, "Should not duplicate hook entry");
-    }
-
-    #[test]
-    fn test_patch_antigravity_hooks_json_malformed_hooks_key() {
-        let temp = TempDir::new().unwrap();
-        let hooks_json = temp.path().join("hooks.json");
-
-        // hooks is a string instead of object — should error, not panic
-        fs::write(&hooks_json, r#"{"version": 1, "hooks": "bad"}"#).unwrap();
-        let result = patch_antigravity_hooks_json(&hooks_json, 0);
-        assert!(
-            result.is_err(),
-            "Malformed hooks key should return Err, not panic"
-        );
-    }
-
-    #[test]
-    fn test_insert_antigravity_hook_entry_malformed_hooks_object() {
-        // preToolUse is a string instead of array — should error, not panic
-        let mut root = serde_json::json!({
-            "version": 1,
-            "hooks": {
-                "preToolUse": "not-an-array"
-            }
-        });
-        let result = insert_antigravity_hook_entry(&mut root);
-        assert!(
-            result.is_err(),
-            "Malformed preToolUse should return Err, not panic"
+            err_msg.contains("does not support hooks.json"),
+            "Should guide user to alternatives"
         );
     }
 }
