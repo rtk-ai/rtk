@@ -15,6 +15,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
+use cmds::jvm::{gradle_cmd, maven_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -646,6 +647,18 @@ enum Commands {
         command: GoCommands,
     },
 
+    /// Gradle commands with compact output (75-90% token reduction)
+    Gradle {
+        #[command(subcommand)]
+        command: GradleCommands,
+    },
+
+    /// Maven commands with compact output (70-90% token reduction)
+    Mvn {
+        #[command(subcommand)]
+        command: MavenCommands,
+    },
+
     /// Graphite (gt) stacked PR commands with compact output
     Gt {
         #[command(subcommand)]
@@ -1033,6 +1046,50 @@ enum GoCommands {
         args: Vec<String>,
     },
     /// Passthrough: runs any unsupported go subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum GradleCommands {
+    /// Run tests with compact output (85-90% token reduction)
+    Test {
+        /// Additional gradle test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Build with compact output (75-85% token reduction)
+    Build {
+        /// Additional gradle build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported gradle subcommand directly
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum MavenCommands {
+    /// Run tests with compact Surefire output (85-90% token reduction)
+    Test {
+        /// Additional mvn test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compile with compact output (70-80% token reduction)
+    Compile {
+        /// Additional mvn compile arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Package with compact output (70-80% token reduction)
+    Package {
+        /// Additional mvn package arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: runs any unsupported mvn subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
 }
@@ -1933,6 +1990,19 @@ fn run_cli() -> Result<i32> {
             GoCommands::Other(args) => go_cmd::run_other(&args, cli.verbose)?,
         },
 
+        Commands::Gradle { command } => match command {
+            GradleCommands::Test { args } => gradle_cmd::run_test(&args, cli.verbose)?,
+            GradleCommands::Build { args } => gradle_cmd::run_build(&args, cli.verbose)?,
+            GradleCommands::Other(args) => gradle_cmd::run_other(&args, cli.verbose)?,
+        },
+
+        Commands::Mvn { command } => match command {
+            MavenCommands::Test { args } => maven_cmd::run_test(&args, cli.verbose)?,
+            MavenCommands::Compile { args } => maven_cmd::run_compile(&args, cli.verbose)?,
+            MavenCommands::Package { args } => maven_cmd::run_package(&args, cli.verbose)?,
+            MavenCommands::Other(args) => maven_cmd::run_other(&args, cli.verbose)?,
+        },
+
         Commands::Gt { command } => match command {
             GtCommands::Log { args } => gt_cmd::run_log(&args, cli.verbose)?,
             GtCommands::Submit { args } => gt_cmd::run_submit(&args, cli.verbose)?,
@@ -2218,6 +2288,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
             | Commands::Go { .. }
+            | Commands::Gradle { .. }
+            | Commands::Mvn { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
     )

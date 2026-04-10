@@ -1,0 +1,81 @@
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO]
+[INFO] E-DEAL Parent                                                      [pom]
+[INFO] edeal-common                                                       [jar]
+[INFO] edeal-concurrent                                                   [jar]
+[INFO] edeal-rules-engine                                                 [jar]
+[INFO] edeal-webapp                                                       [war]
+[INFO] edeal-rest-api-core                                                [jar]
+[INFO]
+[INFO] ----------------< com.edeal.frontline:edeal-parent >----------------
+[INFO] Building E-DEAL Parent 2027-000-SNAPSHOT                           [1/6]
+[INFO]   from pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO]
+[INFO] ----------------< com.edeal.frontline:edeal-common >----------------
+[INFO] Building edeal-common 2027-000-SNAPSHOT                            [2/6]
+[INFO]   from edeal-common/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ edeal-common ---
+[INFO] Copying 12 resources from src/main/resources to target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ edeal-common ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO]
+[INFO] ----------------< com.edeal.frontline:edeal-concurrent >----------------
+[INFO] Building edeal-concurrent 2027-000-SNAPSHOT                        [3/6]
+[INFO]   from edeal-concurrent/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ edeal-concurrent ---
+[INFO] Copying 3 resources from src/main/resources to target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ edeal-concurrent ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO]
+[INFO] ----------------< com.edeal.frontline:edeal-webapp >----------------
+[INFO] Building edeal-webapp 2027-000-SNAPSHOT                            [4/6]
+[INFO]   from edeal-webapp/pom.xml
+[INFO] --------------------------------[ war ]---------------------------------
+[INFO]
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.pom (3.2 kB at 12 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/commons/commons-lang3/3.14.0/commons-lang3-3.14.0.jar (658 kB at 2.1 MB/s)
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ edeal-webapp ---
+[INFO] Copying 45 resources from src/main/resources to target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ edeal-webapp ---
+[INFO] Compiling 342 source files to /home/dev/e-deal/edeal-webapp/target/classes
+[INFO] /home/dev/e-deal/edeal-webapp/src/main/java/com/edeal/frontline/Utils.java: Some input files use or override a deprecated API.
+[INFO] /home/dev/e-deal/edeal-webapp/src/main/java/com/edeal/frontline/Utils.java: Recompile with -Xlint:deprecation for details.
+[INFO]
+[INFO] ----------------< com.edeal.frontline:edeal-rest-api-core >----------------
+[INFO] Building edeal-rest-api-core 2027-000-SNAPSHOT                     [5/6]
+[INFO]   from edeal-rest-api-core/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ edeal-rest-api-core ---
+[INFO] Copying 8 resources from src/main/resources to target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ edeal-rest-api-core ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO]
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for E-DEAL Parent 2027-000-SNAPSHOT:
+[INFO]
+[INFO] E-DEAL Parent ...................................... SUCCESS [  0.234 s]
+[INFO] edeal-common ....................................... SUCCESS [  1.123 s]
+[INFO] edeal-concurrent ................................... SUCCESS [  0.456 s]
+[INFO] edeal-webapp ....................................... SUCCESS [ 12.345 s]
+[INFO] edeal-rest-api-core ................................ SUCCESS [  0.789 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  18.234 s
+[INFO] Finished at: 2026-03-21T10:30:00+01:00
+[INFO] ------------------------------------------------------------------------
