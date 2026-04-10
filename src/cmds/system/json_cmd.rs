@@ -35,7 +35,7 @@ fn validate_json_extension(file: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Show JSON (compact with values, or schema-only with --schema)
+/// Show JSON (compact with values by default, or keys-only with --keys-only)
 pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Result<()> {
     validate_json_extension(file)?;
     let timer = tracking::TimedExecution::start();

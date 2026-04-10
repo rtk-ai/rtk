@@ -38,6 +38,8 @@ struct PackageResult {
     build_failed: bool,
     build_errors: Vec<String>,
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
+    package_failed: bool,                     // package-level failure (timeout, signal, etc.)
+    package_fail_output: Vec<String>,         // output lines collected before the package fail
 }
 
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
@@ -350,6 +352,10 @@ fn filter_go_test_json(output: &str) -> String {
                             pkg_result.build_errors = errors;
                         }
                     }
+                } else {
+                    // Package-level failure without a specific test or build error
+                    // (timeout, signal kill, panic before test execution, etc.)
+                    pkg_result.package_failed = true;
                 }
             }
             "skip" => {
@@ -358,13 +364,21 @@ fn filter_go_test_json(output: &str) -> String {
                 }
             }
             "output" => {
-                // Collect output for current test
-                if let (Some(test), Some(output_text)) = (&event.test, &event.output) {
-                    let key = (package.clone(), test.clone());
-                    current_test_output
-                        .entry(key)
-                        .or_default()
-                        .push(output_text.trim_end().to_string());
+                if let Some(output_text) = &event.output {
+                    if let Some(test) = &event.test {
+                        // Collect output for current test
+                        let key = (package.clone(), test.clone());
+                        current_test_output
+                            .entry(key)
+                            .or_default()
+                            .push(output_text.trim_end().to_string());
+                    } else {
+                        // Package-level output (timeout messages, signal info, etc.)
+                        let trimmed = output_text.trim();
+                        if !trimmed.is_empty() {
+                            pkg_result.package_fail_output.push(trimmed.to_string());
+                        }
+                    }
                 }
             }
             _ => {} // run, pause, cont, etc.
@@ -377,8 +391,9 @@ fn filter_go_test_json(output: &str) -> String {
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
     let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
+    let total_pkg_fail: usize = packages.values().filter(|p| p.package_failed).count();
 
-    let has_failures = total_fail > 0 || total_build_fail > 0;
+    let has_failures = total_fail > 0 || total_build_fail > 0 || total_pkg_fail > 0;
 
     if !has_failures && total_pass == 0 {
         return "Go test: No tests found".to_string();
@@ -395,7 +410,7 @@ fn filter_go_test_json(output: &str) -> String {
     result.push_str(&format!(
         "Go test: {} passed, {} failed",
         total_pass,
-        total_fail + total_build_fail
+        total_fail + total_build_fail + total_pkg_fail
     ));
     if total_skip > 0 {
         result.push_str(&format!(", {} skipped", total_skip));
@@ -403,7 +418,23 @@ fn filter_go_test_json(output: &str) -> String {
     result.push_str(&format!(" in {} packages\n", total_packages));
     result.push_str("═══════════════════════════════════════\n");
 
-    // Show build failures first
+    // Show package-level failures first (timeouts, signals, panics)
+    for (package, pkg_result) in packages.iter() {
+        if !pkg_result.package_failed {
+            continue;
+        }
+
+        result.push_str(&format!("\n{} [FAIL]\n", compact_package_name(package)));
+
+        for line in &pkg_result.package_fail_output {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                result.push_str(&format!("  {}\n", truncate(trimmed, 120)));
+            }
+        }
+    }
+
+    // Show build failures
     for (package, pkg_result) in packages.iter() {
         if !pkg_result.build_failed {
             continue;
@@ -693,6 +724,34 @@ mod tests {
         let result = filter_go_test_json(output);
         assert!(result.contains("foo_test.go:42:"));
         assert!(result.contains("values differ after normalization"));
+    }
+
+    #[test]
+    fn test_filter_go_test_timeout_package_fail() {
+        // When go test times out, the JSON stream has a package-level "fail"
+        // with no Test field and no FailedBuild field. This should be reported
+        // as a failure, not "No tests found".
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"start","Package":"example.com/foo"}
+{"Time":"2024-01-01T10:01:03Z","Action":"output","Package":"example.com/foo","Output":"*** Test killed with quit: ran too long (1m3s).\n"}
+{"Time":"2024-01-01T10:01:03Z","Action":"output","Package":"example.com/foo","Output":"FAIL\texample.com/foo\t63.001s\n"}
+{"Time":"2024-01-01T10:01:03Z","Action":"fail","Package":"example.com/foo","Elapsed":63.003}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("1 failed"),
+            "Expected '1 failed' in output, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Should not say 'No tests found' on timeout, got: {}",
+            result
+        );
+        assert!(
+            result.contains("FAIL"),
+            "Expected failure output in summary, got: {}",
+            result
+        );
     }
 
     #[test]
