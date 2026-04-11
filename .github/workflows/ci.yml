@@ -77,15 +77,19 @@ jobs:
           - codex_version: 0.120.0
             expect_hooks: "true"
     env:
-      CODEX_HOME: ${{ runner.temp }}\codex-home
-      RTK_INSTALL_ROOT: ${{ runner.temp }}\rtk-root
-      CODEX_STUB_DIR: ${{ runner.temp }}\codex-bin
       CODEX_VERSION: ${{ matrix.codex_version }}
       EXPECT_HOOKS: ${{ matrix.expect_hooks }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      - name: Prepare Windows smoke-test paths
+        shell: pwsh
+        run: |
+          "CODEX_HOME=$(Join-Path $env:RUNNER_TEMP 'codex-home')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RTK_INSTALL_ROOT=$(Join-Path $env:RUNNER_TEMP 'rtk-root')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEX_STUB_DIR=$(Join-Path $env:RUNNER_TEMP 'codex-bin')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install RTK from workspace
         shell: pwsh
