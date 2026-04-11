@@ -31,7 +31,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "tsc",
         &args.join(" "),
-        |raw| filter_tsc_output(raw),
+        filter_tsc_output,
         runner::RunOptions::with_tee("tsc"),
     )
 }

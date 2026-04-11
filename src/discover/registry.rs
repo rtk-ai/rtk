@@ -499,8 +499,8 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
-    if cmd_part.starts_with("cat ") {
-        let args = cmd_part["cat ".len()..].trim_start();
+    if let Some(cmd_args) = cmd_part.strip_prefix("cat ") {
+        let args = cmd_args.trim_start();
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
             return None;
         }
