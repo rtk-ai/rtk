@@ -183,6 +183,10 @@ enum Commands {
 
     /// pnpm commands with ultra-compact output
     Pnpm {
+        /// pnpm filter arguments (can be repeated: --filter @app1 --filter @app2)
+        #[arg(long, short = 'F')]
+        filter: Vec<String>,
+
         #[command(subcommand)]
         command: PnpmCommands,
     },
@@ -803,12 +807,6 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Build (generic passthrough, no framework-specific filter)
-    Build {
-        /// Additional build arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Typecheck (delegates to tsc filter)
     Typecheck {
         /// Additional typecheck arguments
@@ -1207,6 +1205,47 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
+/// Merge pnpm global filters args with other ones for standard String-based commands
+fn merge_pnpm_args(filters: &[String], args: &[String]) -> Vec<String> {
+    filters
+        .iter()
+        .map(|filter| format!("--filter={}", filter))
+        .chain(args.iter().cloned())
+        .collect()
+}
+
+/// Merge pnpm global filters args with other ones, using OsString for passthrough compatibility
+fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
+    filters
+        .iter()
+        .map(|filter| OsString::from(format!("--filter={}", filter)))
+        .chain(args.iter().cloned())
+        .collect()
+}
+
+/// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
+fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
+    // Check if this is a Build or Typecheck command with filters
+    match command {
+        PnpmCommands::Typecheck { .. } => {
+            // FIXME: if filters are present, we should find out which workspaces are selected before running rtk dedicated commands
+            if !filters.is_empty() {
+                let cmd_name = match command {
+                    PnpmCommands::Typecheck { .. } => "tsc",
+                    _ => unreachable!(),
+                };
+                let msg = format!(
+                    "[rtk] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
+                    cmd_name
+                );
+                return Some(msg);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn main() {
     let code = match run_cli() {
         Ok(code) => code,
@@ -1430,27 +1469,34 @@ fn run_cli() -> Result<i32> {
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
-        Commands::Pnpm { command } => match command {
-            PnpmCommands::List { depth, args } => {
-                pnpm_cmd::run(pnpm_cmd::PnpmCommand::List { depth }, &args, cli.verbose)?
+        Commands::Pnpm { filter, command } => {
+            // Warns user if filters are used with unsupported subcommands like typecheck
+            if let Some(warning) = validate_pnpm_filters(&filter, &command) {
+                eprintln!("{}", warning);
             }
-            PnpmCommands::Outdated { args } => {
-                pnpm_cmd::run(pnpm_cmd::PnpmCommand::Outdated, &args, cli.verbose)?
+
+            match command {
+                PnpmCommands::List { depth, args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::List { depth },
+                    &merge_pnpm_args(&filter, &args),
+                    cli.verbose,
+                )?,
+                PnpmCommands::Outdated { args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Outdated,
+                    &merge_pnpm_args(&filter, &args),
+                    cli.verbose,
+                )?,
+                PnpmCommands::Install { packages, args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Install { packages },
+                    &merge_pnpm_args(&filter, &args),
+                    cli.verbose,
+                )?,
+                PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
+                PnpmCommands::Other(args) => {
+                    pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
+                }
             }
-            PnpmCommands::Install { packages, args } => pnpm_cmd::run(
-                pnpm_cmd::PnpmCommand::Install { packages },
-                &args,
-                cli.verbose,
-            )?,
-            PnpmCommands::Build { args } => {
-                let mut build_args: Vec<String> = vec!["build".into()];
-                build_args.extend(args);
-                let os_args: Vec<OsString> = build_args.into_iter().map(OsString::from).collect();
-                pnpm_cmd::run_passthrough(&os_args, cli.verbose)?
-            }
-            PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
-            PnpmCommands::Other(args) => pnpm_cmd::run_passthrough(&args, cli.verbose)?,
-        },
+        }
 
         Commands::Err { command } => {
             let cmd = command.join(" ");
@@ -2548,6 +2594,137 @@ mod tests {
                 }
                 _ => panic!("expected Rewrite command"),
             }
+        }
+    }
+
+    #[test]
+    fn test_merge_filters_with_no_args() {
+        let filters = vec![];
+        let args = vec!["--depth=0".to_string(), "--no-verbose".to_string()];
+        let expected_args = vec!["--depth=0", "--no-verbose"];
+        assert_eq!(merge_pnpm_args(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_merge_filters_with_args() {
+        let filters = vec!["@app1".to_string(), "@app2".to_string()];
+        let args = vec![
+            "--filter=@app3".to_string(),
+            "--depth=0".to_string(),
+            "--no-verbose".to_string(),
+        ];
+        let expected_args = vec![
+            "--filter=@app1",
+            "--filter=@app2",
+            "--filter=@app3",
+            "--depth=0",
+            "--no-verbose",
+        ];
+        assert_eq!(merge_pnpm_args(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_merge_filters_with_no_args_os() {
+        let filters = vec![];
+        let args = vec![OsString::from("--depth=0")];
+        let expected_args = vec![OsString::from("--depth=0")];
+        assert_eq!(merge_pnpm_args_os(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_merge_filters_with_args_os() {
+        let filters = vec!["@app1".to_string()];
+        let args = vec![OsString::from("--depth=0")];
+        let expected_args = vec![
+            OsString::from("--filter=@app1"),
+            OsString::from("--depth=0"),
+        ];
+        assert_eq!(merge_pnpm_args_os(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_pnpm_subcommand_with_filter() {
+        let cli = Cli::try_parse_from([
+            "rtk", "pnpm", "--filter", "@app1", "--filter", "@app2", "list", "--filter", "@app3",
+            "--filter", "@app4", "--prod",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                filter,
+                command: PnpmCommands::List { depth, args },
+            } => {
+                assert_eq!(depth, 0);
+                assert_eq!(filter, vec!["@app1", "@app2"]);
+                assert_eq!(
+                    args,
+                    vec!["--filter", "@app3", "--filter", "@app4", "--prod"]
+                );
+            }
+            _ => panic!("Expected Pnpm List command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_subcommand_with_short_filter() {
+        // -F is the short form of --filter in pnpm
+        let cli =
+            Cli::try_parse_from(["rtk", "pnpm", "-F", "@app1", "-F", "@app2", "list"]).unwrap();
+        match cli.command {
+            Commands::Pnpm { filter, .. } => {
+                assert_eq!(filter, vec!["@app1", "@app2"]);
+            }
+            _ => panic!("Expected Pnpm command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_typecheck_without_filters() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "pnpm",
+            "typecheck",
+            "--filter",
+            "@app3",
+            "--filter",
+            "@app4",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Pnpm { filter, command } => {
+                let warning = validate_pnpm_filters(&filter, &command);
+
+                assert!(filter.is_empty());
+                assert!(warning.is_none())
+            }
+            _ => panic!("Expected Pnpm Build command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_typecheck_with_filters() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "pnpm",
+            "--filter",
+            "@app1",
+            "--filter",
+            "@app2",
+            "typecheck",
+            "--filter",
+            "@app3",
+            "--filter",
+            "@app4",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Pnpm { filter, command } => {
+                let warning = validate_pnpm_filters(&filter, &command).unwrap();
+
+                assert_eq!(filter, vec!["@app1", "@app2"]);
+                assert_eq!(warning, "[rtk] warning: --filter is not yet supported for pnpm tsc, filters preceding the subcommand will be ignored")
+            }
+            _ => panic!("Expected Pnpm Build command"),
         }
     }
 }
