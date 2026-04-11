@@ -35,9 +35,15 @@ openclaw gateway restart
 
 ### Or install via OpenClaw CLI
 
+Run from the **repository root** (not inside the `openclaw/` directory):
+
 ```bash
-openclaw plugins install ./openclaw
+openclaw plugins install ./openclaw --dangerously-force-unsafe-install
 ```
+
+The `--dangerously-force-unsafe-install` flag is required because the plugin
+uses `child_process` to call `rtk rewrite`. This is safe: it only shells out
+to the `rtk` binary you installed in the prerequisite step.
 
 ## Configuration
 
