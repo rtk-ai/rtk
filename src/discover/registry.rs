@@ -3,7 +3,7 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
-use super::lexer::{tokenize, TokenKind};
+use super::lexer::{split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
@@ -221,36 +221,7 @@ pub fn split_command_chain(cmd: &str) -> Vec<&str> {
         return vec![trimmed];
     }
 
-    let tokens = tokenize(trimmed);
-    let mut results = Vec::new();
-    let mut seg_start: usize = 0;
-
-    for tok in &tokens {
-        match tok.kind {
-            TokenKind::Operator => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            TokenKind::Pipe => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                return results;
-            }
-            _ => {}
-        }
-    }
-
-    let segment = trimmed[seg_start..].trim();
-    if !segment.is_empty() {
-        results.push(segment);
-    }
-
-    results
+    split_on_operators(trimmed, true)
 }
 
 /// Strip git global options before the subcommand (#163).

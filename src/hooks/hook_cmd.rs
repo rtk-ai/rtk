@@ -275,6 +275,75 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
 
 // ── Claude Code native hook ────────────────────────────────────
 
+enum PayloadAction {
+    Rewrite {
+        cmd: String,
+        rewritten: String,
+        output: Value,
+    },
+    Skip {
+        reason: &'static str,
+        cmd: String,
+    },
+    Ignore,
+}
+
+fn process_claude_payload(v: &Value) -> PayloadAction {
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return PayloadAction::Ignore,
+    };
+
+    let verdict = permissions::check_command(cmd);
+    if verdict == PermissionVerdict::Deny {
+        return PayloadAction::Skip {
+            reason: "skip:deny_rule",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_match",
+                cmd: cmd.to_string(),
+            }
+        }
+    };
+
+    let updated_input = {
+        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = ti.as_object_mut() {
+            obj.insert("command".into(), Value::String(rewritten.clone()));
+        }
+        ti
+    };
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "updatedInput": updated_input
+    });
+
+    if verdict == PermissionVerdict::Allow {
+        hook_output
+            .as_object_mut()
+            .unwrap()
+            .insert("permissionDecision".into(), json!("allow"));
+    }
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output: json!({ "hookSpecificOutput": hook_output }),
+    }
+}
+
 /// Run the Claude Code PreToolUse hook natively.
 pub fn run_claude() -> Result<()> {
     let input = read_stdin_limited()?;
@@ -292,99 +361,31 @@ pub fn run_claude() -> Result<()> {
         }
     };
 
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
-        Some(c) => c.to_string(),
-        None => return Ok(()),
-    };
-
-    let verdict = permissions::check_command(&cmd);
-    if verdict == PermissionVerdict::Deny {
-        audit_log("skip:deny_rule", &cmd, "");
-        return Ok(());
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
     }
 
-    let rewritten = match get_rewritten(&cmd) {
-        Some(r) => r,
-        None => {
-            audit_log("skip:no_match", &cmd, "");
-            return Ok(());
-        }
-    };
-
-    audit_log("rewrite", &cmd, &rewritten);
-
-    // Clone original tool_input, replace only "command"
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten));
-        }
-        ti
-    };
-
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": updated_input
-    });
-
-    // Only include permissionDecision for Allow (not Ask)
-    if verdict == PermissionVerdict::Allow {
-        hook_output
-            .as_object_mut()
-            .unwrap()
-            .insert("permissionDecision".into(), json!("allow"));
-    }
-
-    let output = json!({ "hookSpecificOutput": hook_output });
-    let _ = writeln!(io::stdout(), "{output}");
     Ok(())
 }
 
-/// Process a Claude hook payload from a string (for testing).
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-
-    let cmd = v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())?;
-
-    let verdict = permissions::check_command(cmd);
-    if verdict == PermissionVerdict::Deny {
-        return None;
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
     }
-
-    let rewritten = get_rewritten(cmd)?;
-
-    let updated_input = {
-        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-        if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten));
-        }
-        ti
-    };
-
-    let mut hook_output = json!({
-        "hookEventName": PRE_TOOL_USE_KEY,
-        "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": updated_input
-    });
-
-    if verdict == PermissionVerdict::Allow {
-        hook_output
-            .as_object_mut()
-            .unwrap()
-            .insert("permissionDecision".into(), json!("allow"));
-    }
-
-    let output = json!({ "hookSpecificOutput": hook_output });
-    Some(output.to_string())
 }
 
 // ── Cursor native hook ─────────────────────────────────────────

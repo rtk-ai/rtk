@@ -200,6 +200,12 @@ fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
 }
 
 pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
+    if passthrough {
+        std::io::copy(&mut std::io::stdin(), &mut std::io::stdout())
+            .map_err(|e| anyhow::anyhow!("Failed to relay stdin: {}", e))?;
+        return Ok(());
+    }
+
     let mut buf = String::new();
     std::io::stdin()
         .take((RAW_CAP + 1) as u64)
@@ -207,11 +213,6 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to read stdin: {}", e))?;
     if buf.len() > RAW_CAP {
         anyhow::bail!("stdin exceeds {} byte limit", RAW_CAP);
-    }
-
-    if passthrough {
-        print!("{}", buf);
-        return Ok(());
     }
 
     let filter_fn = match filter_name {

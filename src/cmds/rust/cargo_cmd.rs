@@ -791,98 +791,56 @@ fn filter_cargo_nextest(output: &str) -> String {
 }
 
 fn filter_cargo_build(output: &str) -> String {
-    let mut errors: Vec<String> = Vec::new();
-    let mut warnings = 0;
-    let mut error_count = 0;
-    let mut compiled = 0;
-    let mut in_error = false;
-    let mut current_error = Vec::new();
-    let mut finished_line: Option<String> = None;
+    let mut handler = CargoBuildHandler::new();
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    let mut current_block: Vec<String> = Vec::new();
+    let mut in_block = false;
 
     for line in output.lines() {
-        if line.trim_start().starts_with("Compiling") || line.trim_start().starts_with("Checking") {
-            compiled += 1;
+        if handler.should_skip(line) {
             continue;
         }
-        if line.trim_start().starts_with("Downloading")
-            || line.trim_start().starts_with("Downloaded")
-        {
-            continue;
-        }
-        if line.trim_start().starts_with("Finished") {
-            finished_line = Some(line.trim_start().to_string());
-            continue;
-        }
-
-        // Detect error/warning blocks
-        if line.starts_with("error[") || line.starts_with("error:") {
-            // Skip "error: aborting due to" summary lines
-            if line.contains("aborting due to") || line.contains("could not compile") {
-                continue;
+        if handler.is_block_start(line) {
+            if in_block && !current_block.is_empty() {
+                blocks.push(std::mem::take(&mut current_block));
             }
-            if in_error && !current_error.is_empty() {
-                errors.push(current_error.join("\n"));
-                current_error.clear();
-            }
-            error_count += 1;
-            in_error = true;
-            current_error.push(line.to_string());
-        } else if line.starts_with("warning:")
-            && line.contains("generated")
-            && line.contains("warning")
-        {
-            // "warning: `crate` generated N warnings" summary line
-            continue;
-        } else if line.starts_with("warning:") || line.starts_with("warning[") {
-            if in_error && !current_error.is_empty() {
-                errors.push(current_error.join("\n"));
-                current_error.clear();
-            }
-            warnings += 1;
-            in_error = true;
-            current_error.push(line.to_string());
-        } else if in_error {
-            if line.trim().is_empty() && current_error.len() > 3 {
-                errors.push(current_error.join("\n"));
-                current_error.clear();
-                in_error = false;
+            in_block = true;
+            current_block.push(line.to_string());
+        } else if in_block {
+            if handler.is_block_continuation(line, &current_block) {
+                current_block.push(line.to_string());
             } else {
-                current_error.push(line.to_string());
+                blocks.push(std::mem::take(&mut current_block));
+                in_block = false;
             }
         }
     }
-
-    if !current_error.is_empty() {
-        errors.push(current_error.join("\n"));
+    if !current_block.is_empty() {
+        blocks.push(current_block);
     }
 
-    if error_count == 0 && warnings == 0 {
-        return if let Some(finished) = finished_line {
-            format!("cargo build ({} crates compiled)\n{}", compiled, finished)
-        } else {
-            format!("cargo build ({} crates compiled)", compiled)
-        };
+    if handler.error_count == 0 && handler.warnings == 0 {
+        let mut s = format!("cargo build ({} crates compiled)", handler.compiled);
+        if let Some(ref finished) = handler.finished_line {
+            s = format!("{}\n{}", s, finished);
+        }
+        return s;
     }
 
-    let mut result = String::new();
-    result.push_str(&format!(
-        "cargo build: {} errors, {} warnings ({} crates)\n",
-        error_count, warnings, compiled
-    ));
-    result.push_str("═══════════════════════════════════════\n");
-
-    for (i, err) in errors.iter().enumerate().take(15) {
-        result.push_str(err);
+    let mut result = format!(
+        "cargo build: {} errors, {} warnings ({} crates)\n═══════════════════════════════════════\n",
+        handler.error_count, handler.warnings, handler.compiled
+    );
+    for (i, blk) in blocks.iter().enumerate().take(15) {
+        result.push_str(&blk.join("\n"));
         result.push('\n');
-        if i < errors.len() - 1 {
+        if i < blocks.len() - 1 {
             result.push('\n');
         }
     }
-
-    if errors.len() > 15 {
-        result.push_str(&format!("\n... +{} more issues\n", errors.len() - 15));
+    if blocks.len() > 15 {
+        result.push_str(&format!("\n... +{} more issues\n", blocks.len() - 15));
     }
-
     result.trim().to_string()
 }
 

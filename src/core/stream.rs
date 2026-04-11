@@ -303,7 +303,7 @@ pub fn run_streaming(
             let mut err_out = stderr_out.lock();
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 writeln!(err_out, "{}", line).ok();
-                if raw_err.len() + line.len() < RAW_CAP {
+                if raw_err.len() + line.len() + 1 <= RAW_CAP {
                     raw_err.push_str(&line);
                     raw_err.push('\n');
                 } else if !capped {
@@ -313,7 +313,7 @@ pub fn run_streaming(
             }
         } else {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if raw_err.len() + line.len() < RAW_CAP {
+                if raw_err.len() + line.len() + 1 <= RAW_CAP {
                     raw_err.push_str(&line);
                     raw_err.push('\n');
                 } else if !capped {
@@ -338,12 +338,16 @@ pub fn run_streaming(
             FilterMode::Passthrough => unreachable!("handled by early-return above"),
             FilterMode::Streaming(mut filter) => {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if raw_stdout.len() + line.len() < RAW_CAP {
+                    if capped {
+                        continue;
+                    }
+                    if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
-                    } else if !capped {
+                    } else {
                         capped = true;
                         eprintln!("[rtk] warning: output exceeds 10 MiB — filter input truncated");
+                        continue;
                     }
                     if let Some(output) = filter.feed_line(&line) {
                         filtered.push_str(&output);
@@ -365,7 +369,7 @@ pub fn run_streaming(
             }
             FilterMode::Buffered(filter_fn) => {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if raw_stdout.len() + line.len() < RAW_CAP {
+                    if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
                     } else if !capped {
@@ -373,7 +377,13 @@ pub fn run_streaming(
                         eprintln!("[rtk] warning: output exceeds 10 MiB — filter input truncated");
                     }
                 }
-                filtered = filter_fn(&raw_stdout);
+                filtered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    filter_fn(&raw_stdout)
+                }))
+                .unwrap_or_else(|_| {
+                    eprintln!("[rtk] warning: filter panicked — passing through raw output");
+                    raw_stdout.clone()
+                });
                 match write!(out, "{}", filtered) {
                     Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
                     Err(e) => return Err(e.into()),
@@ -382,7 +392,7 @@ pub fn run_streaming(
             }
             FilterMode::CaptureOnly => {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if raw_stdout.len() + line.len() < RAW_CAP {
+                    if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
                     } else if !capped {
