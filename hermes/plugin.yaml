@@ -1,0 +1,8 @@
+name: rtk-rewrite
+version: "1.0.0"
+description: "Initial Hermes support: rewrite shell commands to RTK equivalents for 60-90% LLM token savings"
+author: rtk-ai
+requires_env: []
+provides_tools: []
+provides_hooks:
+  - pre_tool_call
