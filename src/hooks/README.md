@@ -85,7 +85,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Claude Code (rtk-rewrite.sh) | Yes | `permissionDecision: "ask"` — user prompted |
 | Copilot VS Code (rtk hook copilot) | Yes | `permissionDecision: "ask"` — user prompted |
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
-| Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
+| Copilot CLI (rtk hook copilot) | Yes (v1.0.24+) | `permissionDecision: "ask"` + `updatedInput`/`modifiedArgs` rewrite |
 | Codex | ask parsed but no-op | allow (limitation — fails open) |
 
 ### Implementation

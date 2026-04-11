@@ -2529,8 +2529,8 @@ pub fn run_copilot(verbose: u8) -> Result<()> {
     println!("\nGitHub Copilot integration installed (project-scoped).\n");
     println!("  Hook config:    {}", hook_path.display());
     println!("  Instructions:   {}", instructions_path.display());
-    println!("\n  Works with VS Code Copilot Chat (transparent rewrite)");
-    println!("  and Copilot CLI (deny-with-suggestion).");
+    println!("\n  Works with VS Code Copilot Chat and Copilot CLI v1.0.24+");
+    println!("  (transparent rewrite via updatedInput/modifiedArgs).");
     println!("\n  Restart your IDE or Copilot CLI session to activate.\n");
 
     Ok(())
