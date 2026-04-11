@@ -32,7 +32,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd,
         "next build",
         &args.join(" "),
-        |raw| filter_next_build(raw),
+        filter_next_build,
         runner::RunOptions::default(),
     )
 }

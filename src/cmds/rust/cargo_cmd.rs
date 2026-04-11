@@ -3,6 +3,7 @@
 use crate::core::runner;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::OnceLock;
@@ -461,12 +462,10 @@ fn filter_cargo_nextest(output: &str) -> String {
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
 
-        let binary_text = if binaries == 1 {
-            "1 binary".to_string()
-        } else if binaries > 1 {
-            format!("{} binaries", binaries)
-        } else {
-            String::new()
+        let binary_text = match binaries.cmp(&1) {
+            Ordering::Greater => format!("{} binaries", binaries),
+            Ordering::Equal => "1 binary".to_string(),
+            Ordering::Less => String::new(),
         };
 
         if failed == 0 {
