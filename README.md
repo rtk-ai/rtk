@@ -328,7 +328,7 @@ RTK supports 12 AI coding tools. Each integration transparently rewrites shell c
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 
-Codex on Windows currently falls back to prompt-only setup because upstream Codex does not run lifecycle hooks there.
+Codex on Windows now supports lifecycle hooks in Codex CLI `0.120.0+`. Older Windows builds still fall back to prompt-only setup.
 
 ### Claude Code (default)
 
@@ -376,7 +376,7 @@ rtk init --codex
 rtk init -g --codex --uninstall
 ```
 
-On macOS and Linux, global install writes `${CODEX_HOME:-~/.codex}/RTK.md`, `${CODEX_HOME:-~/.codex}/AGENTS.md`, `${CODEX_HOME:-~/.codex}/config.toml`, and `${CODEX_HOME:-~/.codex}/hooks.json`. Project-scoped install writes the same files under `./.codex/`.
+On macOS and Linux, global install writes `${CODEX_HOME:-~/.codex}/RTK.md`, `${CODEX_HOME:-~/.codex}/AGENTS.md`, `${CODEX_HOME:-~/.codex}/config.toml`, and `${CODEX_HOME:-~/.codex}/hooks.json`. Project-scoped install writes the same files under `./.codex/`. On Windows, native hook files are also installed when Codex CLI is `0.120.0+`.
 
 RTK writes Codex guidance inline into `AGENTS.md` so Codex does not need to resolve `@RTK.md` includes for either global or project-local installs.
 
@@ -386,7 +386,7 @@ Codex does not support transparent `updatedInput` rewrites yet, so supported raw
 
 Notes:
 - If `CODEX_HOME` is set, `rtk init -g --codex` uses that directory instead of `~/.codex`.
-- On Windows, RTK falls back to inline `AGENTS.md` guidance plus `RTK.md` because Codex lifecycle hooks are currently disabled upstream.
+- On Windows, Codex CLI `0.120.0+` uses the same native `config.toml` + `hooks.json` setup. Older Codex versions fall back to inline `AGENTS.md` guidance plus `RTK.md`.
 - Project-scoped `.codex/` installs only activate when Codex trusts the project.
 
 ### Windsurf

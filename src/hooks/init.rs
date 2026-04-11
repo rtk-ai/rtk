@@ -1,6 +1,8 @@
 //! Sets up RTK hooks so AI coding agents automatically route commands through RTK.
 
+use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,6 +25,11 @@ const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
 const RTK_MD_REF: &str = "@RTK.md";
 const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
 const CODEX_HOOK_TIMEOUT_SEC: u64 = 5;
+const CODEX_WINDOWS_HOOKS_MIN_VERSION: CodexCliVersion = CodexCliVersion {
+    major: 0,
+    minor: 120,
+    patch: 0,
+};
 
 #[derive(Debug, Clone)]
 struct CodexPaths {
@@ -45,11 +52,39 @@ pub(crate) enum CodexVerifyStatus {
     HookEntryMissing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CodexCliVersion {
+    pub(crate) major: u64,
+    pub(crate) minor: u64,
+    pub(crate) patch: u64,
+}
+
+impl fmt::Display for CodexCliVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexHooksSupport {
+    Supported,
+    WindowsVersionUnsupported {
+        detected_version: Option<CodexCliVersion>,
+    },
+}
+
+impl CodexHooksSupport {
+    fn supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CodexVerifyEntry {
     pub(crate) scope: &'static str,
     pub(crate) agents_md: PathBuf,
     pub(crate) agents_state: CodexAgentsState,
+    pub(crate) hooks_support: CodexHooksSupport,
     pub(crate) status: CodexVerifyStatus,
     pub(crate) config_toml: PathBuf,
     pub(crate) hooks_json: PathBuf,
@@ -73,8 +108,90 @@ pub(crate) enum CodexAgentsState {
     NotConfigured,
 }
 
-fn codex_lifecycle_hooks_supported() -> bool {
-    !cfg!(windows)
+fn parse_codex_cli_version(output: &str) -> Option<CodexCliVersion> {
+    output.split_whitespace().find_map(|token| {
+        let start = token.find(|ch: char| ch.is_ascii_digit())?;
+        let numeric_prefix: String = token[start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+            .collect();
+        let mut parts = numeric_prefix.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts.next()?.parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(CodexCliVersion {
+            major,
+            minor,
+            patch,
+        })
+    })
+}
+
+fn detect_codex_cli_version() -> Option<CodexCliVersion> {
+    let output = resolved_command("codex").arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_codex_cli_version(&String::from_utf8_lossy(&output.stdout))
+        .or_else(|| parse_codex_cli_version(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn codex_hooks_support_for_platform(
+    is_windows: bool,
+    detected_version: Option<CodexCliVersion>,
+) -> CodexHooksSupport {
+    if !is_windows {
+        return CodexHooksSupport::Supported;
+    }
+
+    match detected_version {
+        Some(version) if version >= CODEX_WINDOWS_HOOKS_MIN_VERSION => CodexHooksSupport::Supported,
+        _ => CodexHooksSupport::WindowsVersionUnsupported { detected_version },
+    }
+}
+
+fn codex_lifecycle_hooks_support() -> CodexHooksSupport {
+    codex_hooks_support_for_platform(cfg!(windows), detect_codex_cli_version())
+}
+
+pub(crate) fn codex_windows_prompt_only_reason(support: CodexHooksSupport) -> Option<String> {
+    match support {
+        CodexHooksSupport::Supported => None,
+        CodexHooksSupport::WindowsVersionUnsupported {
+            detected_version: Some(version),
+        } => Some(format!(
+            "Codex Windows lifecycle hooks require codex-cli {}+; detected {}. RTK is using prompt-only guidance.",
+            CODEX_WINDOWS_HOOKS_MIN_VERSION, version
+        )),
+        CodexHooksSupport::WindowsVersionUnsupported {
+            detected_version: None,
+        } => Some(format!(
+            "Codex Windows lifecycle hooks require codex-cli {}+; RTK could not detect a compatible `codex --version`, so it is using prompt-only guidance.",
+            CODEX_WINDOWS_HOOKS_MIN_VERSION
+        )),
+    }
+}
+
+fn codex_windows_inactive_artifacts_reason(support: CodexHooksSupport) -> Option<String> {
+    match support {
+        CodexHooksSupport::Supported => None,
+        CodexHooksSupport::WindowsVersionUnsupported {
+            detected_version: Some(version),
+        } => Some(format!(
+            "Codex Windows lifecycle hooks require codex-cli {}+; detected {}. `hooks.json` and `features.codex_hooks` stay inactive until Codex is upgraded.",
+            CODEX_WINDOWS_HOOKS_MIN_VERSION, version
+        )),
+        CodexHooksSupport::WindowsVersionUnsupported {
+            detected_version: None,
+        } => Some(format!(
+            "Codex Windows lifecycle hooks require codex-cli {}+; RTK could not detect a compatible `codex --version`, so `hooks.json` and `features.codex_hooks` may stay inactive.",
+            CODEX_WINDOWS_HOOKS_MIN_VERSION
+        )),
+    }
 }
 
 /// Template written by `rtk init` when no filters.toml exists yet.
@@ -718,6 +835,7 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
 fn uninstall_codex(global: bool, verbose: u8) -> Result<()> {
     let paths = codex_paths(global)?;
     let removed = uninstall_codex_at(&paths, verbose)?;
+    let hooks_support = codex_lifecycle_hooks_support();
 
     if removed.is_empty() {
         println!("RTK was not installed for Codex CLI (nothing to remove)");
@@ -727,7 +845,7 @@ fn uninstall_codex(global: bool, verbose: u8) -> Result<()> {
             println!("  - {}", item);
         }
 
-        match codex_uninstall_warning(&paths.config_toml) {
+        match codex_uninstall_warning_with_support(&paths.config_toml, hooks_support) {
             Ok(Some(warning)) => {
                 println!("\n  Warning: {warning}");
             }
@@ -1462,8 +1580,9 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
 
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let paths = codex_paths(global)?;
+    let hooks_support = codex_lifecycle_hooks_support();
 
-    if global || codex_lifecycle_hooks_supported() {
+    if global || hooks_support.supported() {
         fs::create_dir_all(&paths.codex_dir).with_context(|| {
             format!(
                 "Failed to create Codex config directory: {}",
@@ -1485,11 +1604,15 @@ fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
         CodexAgentsPatchStatus::Malformed => unreachable!("handled above"),
     };
 
-    if !codex_lifecycle_hooks_supported() {
+    if !hooks_support.supported() {
         println!("\nRTK configured for Codex CLI (prompt-only fallback).\n");
         println!("  RTK.md:    {}", paths.rtk_md.display());
         println!("  AGENTS.md: {agents_summary}");
-        println!("  Warning: Codex lifecycle hooks are not supported on Windows yet.");
+        println!(
+            "  Warning: {}",
+            codex_windows_prompt_only_reason(hooks_support)
+                .expect("prompt-only install requires an unsupported hooks state")
+        );
         println!(
             "           Installed inline AGENTS.md guidance plus RTK.md; no hook files were patched."
         );
@@ -1558,7 +1681,14 @@ fn patch_codex_hook_files(paths: &CodexPaths, verbose: u8) -> Result<(bool, bool
 }
 
 fn codex_uninstall_warning(path: &Path) -> Result<Option<String>> {
-    if !codex_lifecycle_hooks_supported() || !path.exists() {
+    codex_uninstall_warning_with_support(path, codex_lifecycle_hooks_support())
+}
+
+fn codex_uninstall_warning_with_support(
+    path: &Path,
+    hooks_support: CodexHooksSupport,
+) -> Result<Option<String>> {
+    if !hooks_support.supported() || !path.exists() {
         return Ok(None);
     }
 
@@ -2074,7 +2204,7 @@ fn codex_artifacts_present(paths: &CodexPaths) -> bool {
 fn codex_verify_entry(
     scope: &'static str,
     paths: &CodexPaths,
-    hooks_supported: bool,
+    hooks_support: CodexHooksSupport,
 ) -> Result<Option<CodexVerifyEntry>> {
     if !codex_artifacts_present(paths) {
         return Ok(None);
@@ -2088,11 +2218,12 @@ fn codex_verify_entry(
         CodexAgentsState::Missing
     };
 
-    if !hooks_supported {
+    if !hooks_support.supported() {
         return Ok(Some(CodexVerifyEntry {
             scope,
             agents_md: paths.agents_md.clone(),
             agents_state,
+            hooks_support,
             status: CodexVerifyStatus::PromptOnly,
             config_toml: paths.config_toml.clone(),
             hooks_json: paths.hooks_json.clone(),
@@ -2104,6 +2235,7 @@ fn codex_verify_entry(
             scope,
             agents_md: paths.agents_md.clone(),
             agents_state,
+            hooks_support,
             status: CodexVerifyStatus::ConfigTomlMissing,
             config_toml: paths.config_toml.clone(),
             hooks_json: paths.hooks_json.clone(),
@@ -2117,6 +2249,7 @@ fn codex_verify_entry(
             scope,
             agents_md: paths.agents_md.clone(),
             agents_state,
+            hooks_support,
             status: CodexVerifyStatus::ConfigTomlInvalid,
             config_toml: paths.config_toml.clone(),
             hooks_json: paths.hooks_json.clone(),
@@ -2128,6 +2261,7 @@ fn codex_verify_entry(
             scope,
             agents_md: paths.agents_md.clone(),
             agents_state,
+            hooks_support,
             status: CodexVerifyStatus::HooksDisabled,
             config_toml: paths.config_toml.clone(),
             hooks_json: paths.hooks_json.clone(),
@@ -2139,6 +2273,7 @@ fn codex_verify_entry(
             scope,
             agents_md: paths.agents_md.clone(),
             agents_state,
+            hooks_support,
             status: CodexVerifyStatus::HooksJsonMissing,
             config_toml: paths.config_toml.clone(),
             hooks_json: paths.hooks_json.clone(),
@@ -2152,6 +2287,7 @@ fn codex_verify_entry(
             scope,
             agents_md: paths.agents_md.clone(),
             agents_state,
+            hooks_support,
             status: CodexVerifyStatus::HooksJsonInvalid,
             config_toml: paths.config_toml.clone(),
             hooks_json: paths.hooks_json.clone(),
@@ -2168,6 +2304,7 @@ fn codex_verify_entry(
         scope,
         agents_md: paths.agents_md.clone(),
         agents_state,
+        hooks_support,
         status,
         config_toml: paths.config_toml.clone(),
         hooks_json: paths.hooks_json.clone(),
@@ -2175,15 +2312,15 @@ fn codex_verify_entry(
 }
 
 pub(crate) fn codex_verify_entries() -> Result<Vec<CodexVerifyEntry>> {
-    let hooks_supported = codex_lifecycle_hooks_supported();
+    let hooks_support = codex_lifecycle_hooks_support();
     let global_paths = codex_paths(true)?;
     let local_paths = codex_paths(false)?;
     let mut entries = Vec::new();
 
-    if let Some(entry) = codex_verify_entry("global", &global_paths, hooks_supported)? {
+    if let Some(entry) = codex_verify_entry("global", &global_paths, hooks_support)? {
         entries.push(entry);
     }
-    if let Some(entry) = codex_verify_entry("local", &local_paths, hooks_supported)? {
+    if let Some(entry) = codex_verify_entry("local", &local_paths, hooks_support)? {
         entries.push(entry);
     }
 
@@ -2691,9 +2828,9 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
-    println!("  rtk init --codex            # Inline RTK guidance into local AGENTS.md (+ .codex hooks on macOS/Linux)");
+    println!("  rtk init --codex            # Inline RTK guidance into local AGENTS.md (+ .codex hooks when supported)");
     println!(
-        "  rtk init -g --codex         # Configure $CODEX_HOME or ~/.codex (Windows: prompt-only)"
+        "  rtk init -g --codex         # Configure $CODEX_HOME or ~/.codex (Windows hooks need codex-cli 0.120.0+)"
     );
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
@@ -2704,14 +2841,12 @@ fn show_claude_config() -> Result<()> {
 fn show_codex_config() -> Result<()> {
     let global_paths = codex_paths(true)?;
     let local_paths = codex_paths(false)?;
-    let hooks_supported = codex_lifecycle_hooks_supported();
+    let hooks_support = codex_lifecycle_hooks_support();
 
     println!("rtk Configuration (Codex CLI):\n");
 
-    if !hooks_supported {
-        println!(
-            "[warn] Codex lifecycle hooks are not supported on Windows; hooks.json and codex_hooks are ignored."
-        );
+    if let Some(message) = codex_windows_inactive_artifacts_reason(hooks_support) {
+        println!("[warn] {message}");
     }
 
     if global_paths.rtk_md.exists() {
@@ -2751,8 +2886,10 @@ fn show_codex_config() -> Result<()> {
         if content.trim().is_empty() {
             println!("[--] Global .codex/config.toml: empty");
         } else if let Ok(root) = toml::from_str::<toml::Value>(&content) {
-            if !hooks_supported {
-                println!("[warn] Global .codex/config.toml: present but ignored on Windows");
+            if !hooks_support.supported() {
+                println!(
+                    "[warn] Global .codex/config.toml: present but inactive under current Windows Codex version"
+                );
             } else if codex_hooks_enabled(&root) {
                 println!("[ok] Global .codex/config.toml: codex_hooks enabled");
             } else {
@@ -2770,8 +2907,10 @@ fn show_codex_config() -> Result<()> {
         if content.trim().is_empty() {
             println!("[--] Global .codex/hooks.json: empty");
         } else if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-            if !hooks_supported {
-                println!("[warn] Global .codex/hooks.json: present but ignored on Windows");
+            if !hooks_support.supported() {
+                println!(
+                    "[warn] Global .codex/hooks.json: present but inactive under current Windows Codex version"
+                );
             } else if codex_hook_already_present(&root) {
                 println!("[ok] Global .codex/hooks.json: RTK PreToolUse configured");
             } else {
@@ -2821,8 +2960,10 @@ fn show_codex_config() -> Result<()> {
         if content.trim().is_empty() {
             println!("[--] Local .codex/config.toml: empty");
         } else if let Ok(root) = toml::from_str::<toml::Value>(&content) {
-            if !hooks_supported {
-                println!("[warn] Local .codex/config.toml: present but ignored on Windows");
+            if !hooks_support.supported() {
+                println!(
+                    "[warn] Local .codex/config.toml: present but inactive under current Windows Codex version"
+                );
             } else if codex_hooks_enabled(&root) {
                 println!("[ok] Local .codex/config.toml: codex_hooks enabled");
             } else {
@@ -2840,8 +2981,10 @@ fn show_codex_config() -> Result<()> {
         if content.trim().is_empty() {
             println!("[--] Local .codex/hooks.json: empty");
         } else if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
-            if !hooks_supported {
-                println!("[warn] Local .codex/hooks.json: present but ignored on Windows");
+            if !hooks_support.supported() {
+                println!(
+                    "[warn] Local .codex/hooks.json: present but inactive under current Windows Codex version"
+                );
             } else if codex_hook_already_present(&root) {
                 println!("[ok] Local .codex/hooks.json: RTK PreToolUse configured");
             } else {
@@ -2855,8 +2998,8 @@ fn show_codex_config() -> Result<()> {
     }
 
     println!("\nUsage:");
-    println!("  rtk init --codex              # Inline RTK guidance into local AGENTS.md (+ .codex hooks on macOS/Linux)");
-    println!("  rtk init -g --codex           # Configure $CODEX_HOME or ~/.codex (Windows: prompt-only)");
+    println!("  rtk init --codex              # Inline RTK guidance into local AGENTS.md (+ .codex hooks when supported)");
+    println!("  rtk init -g --codex           # Configure $CODEX_HOME or ~/.codex (Windows hooks need codex-cli 0.120.0+)");
     println!("  rtk init --codex --uninstall  # Remove local Codex RTK artifacts");
     println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
     println!("  Note: local .codex hooks only load for trusted projects.");
@@ -3384,6 +3527,62 @@ More notes
     }
 
     #[test]
+    fn test_parse_codex_cli_version_extracts_semver() {
+        assert_eq!(
+            parse_codex_cli_version("codex-cli 0.120.0"),
+            Some(CodexCliVersion {
+                major: 0,
+                minor: 120,
+                patch: 0,
+            })
+        );
+        assert_eq!(
+            parse_codex_cli_version("codex-cli.exe v0.120.0-beta.1"),
+            Some(CodexCliVersion {
+                major: 0,
+                minor: 120,
+                patch: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_codex_hooks_support_requires_0_120_0_on_windows() {
+        assert_eq!(
+            codex_hooks_support_for_platform(
+                true,
+                Some(CodexCliVersion {
+                    major: 0,
+                    minor: 119,
+                    patch: 0,
+                }),
+            ),
+            CodexHooksSupport::WindowsVersionUnsupported {
+                detected_version: Some(CodexCliVersion {
+                    major: 0,
+                    minor: 119,
+                    patch: 0,
+                }),
+            }
+        );
+        assert_eq!(
+            codex_hooks_support_for_platform(
+                true,
+                Some(CodexCliVersion {
+                    major: 0,
+                    minor: 120,
+                    patch: 0,
+                }),
+            ),
+            CodexHooksSupport::Supported
+        );
+        assert_eq!(
+            codex_hooks_support_for_platform(false, None),
+            CodexHooksSupport::Supported
+        );
+    }
+
+    #[test]
     fn test_codex_mode_rejects_auto_patch() {
         let err = run(
             false,
@@ -3640,9 +3839,12 @@ More notes
         )
         .unwrap();
 
-        let entry = codex_verify_entry("global", &paths, true).unwrap().unwrap();
+        let entry = codex_verify_entry("global", &paths, CodexHooksSupport::Supported)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(entry.agents_state, CodexAgentsState::InlineCurrent);
+        assert_eq!(entry.hooks_support, CodexHooksSupport::Supported);
         assert_eq!(entry.status, CodexVerifyStatus::HooksConfigured);
         assert_eq!(entry.scope, "global");
     }
@@ -3663,7 +3865,9 @@ More notes
 
         fs::write(&paths.agents_md, codex_agents_block()).unwrap();
 
-        let entry = codex_verify_entry("global", &paths, true).unwrap().unwrap();
+        let entry = codex_verify_entry("global", &paths, CodexHooksSupport::Supported)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(entry.agents_state, CodexAgentsState::InlineCurrent);
         assert_eq!(entry.status, CodexVerifyStatus::ConfigTomlMissing);
@@ -3702,7 +3906,9 @@ More notes
         )
         .unwrap();
 
-        let entry = codex_verify_entry("global", &paths, true).unwrap().unwrap();
+        let entry = codex_verify_entry("global", &paths, CodexHooksSupport::Supported)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(entry.agents_state, CodexAgentsState::InlineCurrent);
         assert_eq!(entry.status, CodexVerifyStatus::HookEntryMissing);
@@ -3723,11 +3929,31 @@ More notes
 
         fs::write(&paths.agents_md, codex_agents_block()).unwrap();
 
-        let entry = codex_verify_entry("global", &paths, false)
-            .unwrap()
-            .unwrap();
+        let entry = codex_verify_entry(
+            "global",
+            &paths,
+            CodexHooksSupport::WindowsVersionUnsupported {
+                detected_version: Some(CodexCliVersion {
+                    major: 0,
+                    minor: 119,
+                    patch: 0,
+                }),
+            },
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(entry.agents_state, CodexAgentsState::InlineCurrent);
+        assert_eq!(
+            entry.hooks_support,
+            CodexHooksSupport::WindowsVersionUnsupported {
+                detected_version: Some(CodexCliVersion {
+                    major: 0,
+                    minor: 119,
+                    patch: 0,
+                }),
+            }
+        );
         assert_eq!(entry.status, CodexVerifyStatus::PromptOnly);
     }
 
@@ -3763,7 +3989,7 @@ More notes
         )
         .unwrap();
 
-        let entry = codex_verify_entry("global", &paths, true).unwrap();
+        let entry = codex_verify_entry("global", &paths, CodexHooksSupport::Supported).unwrap();
 
         assert!(entry.is_none());
     }
@@ -3802,7 +4028,9 @@ More notes
         )
         .unwrap();
 
-        let entry = codex_verify_entry("global", &paths, true).unwrap().unwrap();
+        let entry = codex_verify_entry("global", &paths, CodexHooksSupport::Supported)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(entry.agents_state, CodexAgentsState::Missing);
         assert_eq!(entry.status, CodexVerifyStatus::HooksConfigured);
@@ -3984,16 +4212,34 @@ More notes
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "[features]\ncodex_hooks = true\n").unwrap();
 
-        let warning = codex_uninstall_warning(&path).unwrap();
+        let warning = codex_uninstall_warning_with_support(&path, CodexHooksSupport::Supported)
+            .unwrap()
+            .unwrap();
 
-        if cfg!(windows) {
-            assert!(warning.is_none());
-        } else {
-            assert!(warning.is_some());
-            let warning = warning.unwrap();
-            assert!(warning.contains("features.codex_hooks = true"));
-            assert!(warning.contains(&path.display().to_string()));
-        }
+        assert!(warning.contains("features.codex_hooks = true"));
+        assert!(warning.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn test_codex_uninstall_warning_omitted_when_windows_hooks_need_upgrade() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join(".codex").join("config.toml");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "[features]\ncodex_hooks = true\n").unwrap();
+
+        let warning = codex_uninstall_warning_with_support(
+            &path,
+            CodexHooksSupport::WindowsVersionUnsupported {
+                detected_version: Some(CodexCliVersion {
+                    major: 0,
+                    minor: 119,
+                    patch: 0,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert!(warning.is_none());
     }
 
     #[test]

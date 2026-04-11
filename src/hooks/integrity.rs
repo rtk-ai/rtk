@@ -13,7 +13,10 @@
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
 use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
-use super::init::{codex_verify_entries, CodexAgentsState, CodexVerifyEntry, CodexVerifyStatus};
+use super::init::{
+    codex_verify_entries, codex_windows_prompt_only_reason, CodexAgentsState, CodexCliVersion,
+    CodexHooksSupport, CodexVerifyEntry, CodexVerifyStatus,
+};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -300,10 +303,11 @@ fn codex_verify_lines(entry: &CodexVerifyEntry) -> Vec<String> {
             lines.push(format!(
                 "SKIP  Codex {scope} hook verification not applicable"
             ));
-            lines.push(
-                "      Codex lifecycle hooks are unsupported on Windows; RTK is using prompt-only guidance."
-                    .to_string(),
-            );
+            lines.push(format!(
+                "      {}",
+                codex_windows_prompt_only_reason(entry.hooks_support)
+                    .expect("prompt-only verification requires an unsupported hooks state")
+            ));
         }
         CodexVerifyStatus::ConfigTomlMissing => {
             lines.push(format!("WARN  Codex {scope} config.toml missing"));
@@ -643,6 +647,7 @@ mod tests {
             scope: "global",
             agents_md: PathBuf::from("/tmp/.codex/AGENTS.md"),
             agents_state: CodexAgentsState::InlineCurrent,
+            hooks_support: CodexHooksSupport::Supported,
             status: CodexVerifyStatus::HooksConfigured,
             config_toml: PathBuf::from("/tmp/.codex/config.toml"),
             hooks_json: PathBuf::from("/tmp/.codex/hooks.json"),
@@ -668,6 +673,7 @@ mod tests {
             scope: "local",
             agents_md: PathBuf::from("/repo/AGENTS.md"),
             agents_state: CodexAgentsState::LegacyReference,
+            hooks_support: CodexHooksSupport::Supported,
             status: CodexVerifyStatus::HooksConfigured,
             config_toml: PathBuf::from("/repo/.codex/config.toml"),
             hooks_json: PathBuf::from("/repo/.codex/hooks.json"),
@@ -689,6 +695,7 @@ mod tests {
             scope: "global",
             agents_md: PathBuf::from("/tmp/.codex/AGENTS.md"),
             agents_state: CodexAgentsState::Missing,
+            hooks_support: CodexHooksSupport::Supported,
             status: CodexVerifyStatus::HooksJsonMissing,
             config_toml: PathBuf::from("/tmp/.codex/config.toml"),
             hooks_json: PathBuf::from("/tmp/.codex/hooks.json"),
@@ -699,5 +706,35 @@ mod tests {
         assert_eq!(lines[0], "WARN  Codex global AGENTS.md missing");
         assert_eq!(lines[1], "      expected: /tmp/.codex/AGENTS.md");
         assert_eq!(lines[2], "WARN  Codex global hooks.json missing");
+    }
+
+    #[test]
+    fn test_codex_verify_lines_explain_windows_version_gating() {
+        let entry = CodexVerifyEntry {
+            scope: "global",
+            agents_md: PathBuf::from("/tmp/.codex/AGENTS.md"),
+            agents_state: CodexAgentsState::InlineCurrent,
+            hooks_support: CodexHooksSupport::WindowsVersionUnsupported {
+                detected_version: Some(CodexCliVersion {
+                    major: 0,
+                    minor: 119,
+                    patch: 0,
+                }),
+            },
+            status: CodexVerifyStatus::PromptOnly,
+            config_toml: PathBuf::from("/tmp/.codex/config.toml"),
+            hooks_json: PathBuf::from("/tmp/.codex/hooks.json"),
+        };
+
+        let lines = codex_verify_lines(&entry);
+
+        assert_eq!(
+            lines[2],
+            "SKIP  Codex global hook verification not applicable"
+        );
+        assert_eq!(
+            lines[3],
+            "      Codex Windows lifecycle hooks require codex-cli 0.120.0+; detected 0.119.0. RTK is using prompt-only guidance."
+        );
     }
 }

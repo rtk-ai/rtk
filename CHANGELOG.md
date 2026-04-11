@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **aws:** expand CLI filters from 8 to 25 subcommands — CloudWatch Logs, CloudFormation events, Lambda, IAM, DynamoDB (with type unwrapping), ECS tasks, EC2 security groups, S3API objects, S3 sync/cp, EKS, SQS, Secrets Manager ([#885](https://github.com/rtk-ai/rtk/pull/885))
 * **aws:** add shared runner `run_aws_filtered()` eliminating per-handler boilerplate
 * **tee:** add `force_tee_hint()` — truncated output saves full data to file with recovery hint
-* **codex:** add native Codex hook integration with `PreToolUse` deny-and-retry, `CODEX_HOME` support, and Windows prompt-only fallback
+* **codex:** add native Codex hook integration with `PreToolUse` deny-and-retry, `CODEX_HOME` support, and Windows `0.120.0+` hooks with prompt-only fallback on older Codex builds
 
 ### Bug Fixes
 
@@ -88,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **codex:** add native Codex hook integration with `PreToolUse` deny-and-retry, `CODEX_HOME` support, and Windows prompt-only fallback
+* **codex:** add native Codex hook integration with `PreToolUse` deny-and-retry, `CODEX_HOME` support, and Windows `0.120.0+` hooks with prompt-only fallback on older Codex builds
 
 ### Bug Fixes
 
