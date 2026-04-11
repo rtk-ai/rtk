@@ -222,6 +222,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^xh\s+",
+        rtk_cmd: "rtk xh",
+        rewrite_prefixes: &["xh"],
+        category: "Network",
+        savings_pct: 70.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^wget\s+",
         rtk_cmd: "rtk wget",
         rewrite_prefixes: &["wget"],
