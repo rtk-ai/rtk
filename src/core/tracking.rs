@@ -253,12 +253,18 @@ impl Tracker {
         }
 
         let conn = Connection::open(&db_path)?;
-        // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
+        // Set busy_timeout first, separately from journal_mode=WAL.
+        // When the Claude Code hook rewrites a command it first spawns `rtk rewrite`,
+        // which starts a background telemetry thread that opens the DB.  If that
+        // process exits before the thread finishes, the WAL shared-memory file
+        // (.db-shm) can be briefly inconsistent, causing `PRAGMA journal_mode=WAL`
+        // to return a transient error.  Because execute_batch() stops on the first
+        // error, bundling both pragmas meant busy_timeout silently stayed at 0,
+        // making every lock-contention attempt fail immediately instead of waiting.
+        // Running them separately guarantees busy_timeout is always applied.
+        let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
         // Non-fatal: NFS/read-only filesystems may not support WAL.
-        let _ = conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;",
-        );
+        let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
         conn.execute(
             "CREATE TABLE IF NOT EXISTS commands (
                 id INTEGER PRIMARY KEY,
@@ -1358,14 +1364,27 @@ impl TimedExecution {
         let input_tokens = estimate_tokens(input);
         let output_tokens = estimate_tokens(output);
 
-        if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(
-                original_cmd,
-                rtk_cmd,
-                input_tokens,
-                output_tokens,
-                elapsed_ms,
-            );
+        // Retry once on transient DB-open failures.  When a Claude Code hook
+        // rewrites a command it first invokes `rtk rewrite`, which spawns a
+        // background telemetry thread that briefly holds a DB connection.  If
+        // that process exits before the thread finishes, SQLite's WAL shared-
+        // memory file (.db-shm) may be inconsistent for a few milliseconds,
+        // causing Tracker::new() to fail.  A single short sleep + retry is
+        // sufficient to outlast that window without blocking the user.
+        for attempt in 0..2u8 {
+            if let Ok(tracker) = Tracker::new() {
+                let _ = tracker.record(
+                    original_cmd,
+                    rtk_cmd,
+                    input_tokens,
+                    output_tokens,
+                    elapsed_ms,
+                );
+                return;
+            }
+            if attempt == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }
 
@@ -1391,9 +1410,17 @@ impl TimedExecution {
     /// ```
     pub fn track_passthrough(&self, original_cmd: &str, rtk_cmd: &str) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
-        // input_tokens=0, output_tokens=0 won't dilute savings statistics
-        if let Ok(tracker) = Tracker::new() {
-            let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+        // input_tokens=0, output_tokens=0 won't dilute savings statistics.
+        // Same retry logic as track() to handle transient DB-open failures in
+        // hook execution contexts.
+        for attempt in 0..2u8 {
+            if let Ok(tracker) = Tracker::new() {
+                let _ = tracker.record(original_cmd, rtk_cmd, 0, 0, elapsed_ms);
+                return;
+            }
+            if attempt == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }
 }
@@ -1606,7 +1633,67 @@ mod tests {
         );
     }
 
-    // 12. record_parse_failure + get_parse_failure_summary roundtrip
+    // 12. busy_timeout pragma is applied even when journal_mode=WAL is already set.
+    // Regression: both pragmas were in one execute_batch() call. If journal_mode=WAL
+    // returned a transient error, busy_timeout was never set (stayed at 0), causing
+    // all lock-contention writes to fail immediately.
+    // Verify by opening two connections and writing from both — WAL + busy_timeout
+    // must allow this without returning a "database is locked" error.
+    #[test]
+    fn test_busy_timeout_set_independently_of_wal_mode() {
+        let pid = std::process::id();
+
+        // Open DB twice: second open simulates hook-spawned concurrent connection
+        let tracker1 = Tracker::new().expect("first open must succeed");
+        let tracker2 = Tracker::new().expect("second open must succeed even with first open");
+
+        // Both connections should be able to write (busy_timeout guarantees no
+        // immediate lock-fail; WAL mode serialises writers without blocking readers)
+        let cmd1 = format!("git status hook_{}_a", pid);
+        let cmd2 = format!("git status hook_{}_b", pid);
+        tracker1
+            .record("git status", &cmd1, 100, 20, 5)
+            .expect("write from first connection must succeed");
+        tracker2
+            .record("git status", &cmd2, 100, 20, 5)
+            .expect("write from second connection must succeed");
+
+        // Confirm both records are visible
+        let verify = Tracker::new().expect("verify tracker must open");
+        let recent = verify.get_recent(20).expect("get_recent must work");
+        assert!(recent.iter().any(|r| r.rtk_cmd == cmd1), "record A missing");
+        assert!(recent.iter().any(|r| r.rtk_cmd == cmd2), "record B missing");
+    }
+
+    // 13. TimedExecution::track succeeds even when a concurrent reader holds the DB.
+    // Regression: hook-rewritten commands previously failed to record because a
+    // background telemetry thread (from `rtk rewrite`) held the DB open at the
+    // moment the tracking write was attempted, and busy_timeout was 0.
+    #[test]
+    fn test_track_records_with_concurrent_reader() {
+        let pid = std::process::id();
+        let hook_cmd = format!("rtk git status hook_rewritten_{}", pid);
+
+        // Simulate concurrent reader (e.g., telemetry thread from `rtk rewrite`)
+        let reader = Tracker::new().expect("reader must open");
+
+        // Now track — must succeed despite the concurrent reader connection
+        let timer = TimedExecution::start();
+        timer.track("git status", &hook_cmd, "raw output", "filtered");
+
+        // Verify the record was actually written (not silently dropped)
+        let verify = Tracker::new().expect("verify tracker must open");
+        let recent = verify.get_recent(20).expect("get_recent must work");
+        assert!(
+            recent.iter().any(|r| r.rtk_cmd == hook_cmd),
+            "hook-rewritten tracking record must be present in DB (got {} records)",
+            recent.len()
+        );
+
+        drop(reader);
+    }
+
+    // 14. record_parse_failure + get_parse_failure_summary roundtrip
     #[test]
     fn test_parse_failure_roundtrip() {
         let tracker = Tracker::new().expect("Failed to create tracker");
@@ -1624,7 +1711,7 @@ mod tests {
         assert!(summary.recent.iter().any(|r| r.raw_command == test_cmd));
     }
 
-    // 13. recovery_rate calculation
+    // 15. recovery_rate calculation
     #[test]
     fn test_parse_failure_recovery_rate() {
         let tracker = Tracker::new().expect("Failed to create tracker");
