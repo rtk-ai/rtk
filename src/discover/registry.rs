@@ -2310,8 +2310,8 @@ mod tests {
     #[test]
     fn test_rewrite_npx() {
         assert_eq!(
-            rewrite_command(format!("npx svgo").as_str(), &[]),
-            Some(format!("rtk npx svgo")),
+            rewrite_command("npx svgo", &[]),
+            Some("rtk npx svgo".to_string()),
         );
     }
     // --- Compound operator edge cases ---
