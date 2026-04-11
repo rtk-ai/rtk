@@ -10,6 +10,7 @@ use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_passthrough,
     FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
 };
+use crate::Commands;
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
@@ -210,31 +211,39 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-#[derive(Debug, Clone)]
-pub enum VitestCommand {
-    Run,
-}
-
-pub fn run(cmd: VitestCommand, args: &[String], verbose: u8) -> Result<i32> {
-    match cmd {
-        VitestCommand::Run => run_vitest(args, verbose),
+impl Commands {
+    fn test_framework_name(&self) -> Result<&'static str, &Commands> {
+        match self {
+            Commands::Jest { .. } => Ok("jest"),
+            Commands::Vitest { .. } => Ok("vitest"),
+            unknown => Err(unknown),
+        }
     }
 }
 
-fn run_vitest(args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let mut cmd = package_manager_exec("vitest");
+    let framework = command
+        .test_framework_name()
+        .expect("Unknown test framework");
+
+    let mut cmd = package_manager_exec(framework);
     cmd.arg("run"); // Force non-watch mode
 
     // Add JSON reporter for structured output
     cmd.arg("--reporter=json");
 
     for arg in args {
+        if arg == "run" || arg.starts_with("--reporter") {
+            continue;
+        }
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run vitest")?;
+    let output = cmd
+        .output()
+        .context(format!("Failed to run {}", framework))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{}{}", stdout, stderr);
@@ -246,30 +255,37 @@ fn run_vitest(args: &[String], verbose: u8) -> Result<i32> {
     let filtered = match parse_result {
         ParseResult::Full(data) => {
             if verbose > 0 {
-                eprintln!("vitest run (Tier 1: Full JSON parse)");
+                eprintln!("{} run (Tier 1: Full JSON parse)", framework);
             }
             data.format(mode)
         }
         ParseResult::Degraded(data, warnings) => {
             if verbose > 0 {
-                emit_degradation_warning("vitest", &warnings.join(", "));
+                emit_degradation_warning(framework, &warnings.join(", "));
             }
             data.format(mode)
         }
         ParseResult::Passthrough(raw) => {
-            emit_passthrough_warning("vitest", "All parsing tiers failed");
+            emit_passthrough_warning(framework, "All parsing tiers failed");
             raw
         }
     };
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, "vitest");
-    if let Some(hint) = crate::core::tee::tee_and_hint(&combined, "vitest_run", exit_code) {
+    let exit_code = crate::core::utils::exit_code_from_output(&output, framework);
+    if let Some(hint) =
+        crate::core::tee::tee_and_hint(&combined, format!("{}_run", framework).as_str(), exit_code)
+    {
         println!("{}\n{}", filtered, hint);
     } else {
         println!("{}", filtered);
     }
 
-    timer.track("vitest run", "rtk vitest run", &combined, &filtered);
+    timer.track(
+        format!("{} run", framework).as_str(),
+        format!("rtk {} run", framework).as_str(),
+        &combined,
+        &filtered,
+    );
 
     if !output.status.success() {
         return Ok(exit_code);
