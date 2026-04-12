@@ -1,10 +1,14 @@
 //! Matches shell commands against known RTK rewrite rules to decide how to handle them.
 
+use crate::core::utils::composer_bin_dirs;
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
+use std::path::Path;
 
 use super::lexer::{tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+
+const PHP_TOOL_NAMES: [&str; 5] = ["phpunit", "phpstan", "ecs", "pest", "paratest"];
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -100,6 +104,7 @@ pub fn classify_command(cmd: &str) -> Classification {
     let cmd_normalized = strip_absolute_path(cmd_clean);
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
+    let cmd_normalized = normalize_php_tool_command(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -279,6 +284,70 @@ fn strip_absolute_path(cmd: &str) -> String {
     } else {
         cmd.to_string()
     }
+}
+
+fn normalize_php_tool_command(cmd: &str) -> String {
+    normalize_php_tool_command_with_dirs(cmd, &composer_bin_dirs())
+}
+
+fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBuf]) -> String {
+    let first_space = cmd.find(char::is_whitespace);
+    let first_word = match first_space {
+        Some(pos) => &cmd[..pos],
+        None => cmd,
+    };
+
+    let Some(tool) = normalize_php_tool_word(first_word, bin_dirs) else {
+        return cmd.to_string();
+    };
+
+    match first_space {
+        Some(pos) => format!("{}{}", tool, &cmd[pos..]),
+        None => tool.to_string(),
+    }
+}
+
+fn normalize_php_tool_word<'a>(word: &str, bin_dirs: &'a [std::path::PathBuf]) -> Option<&'a str> {
+    let normalized_word = normalize_php_tool_path(word);
+
+    for tool in PHP_TOOL_NAMES {
+        if normalized_word == tool {
+            return Some(tool);
+        }
+
+        if bin_dirs
+            .iter()
+            .any(|bin_dir| matches_php_tool_path(&normalized_word, bin_dir, tool))
+        {
+            return Some(tool);
+        }
+    }
+
+    None
+}
+
+fn matches_php_tool_path(word: &str, bin_dir: &Path, tool: &str) -> bool {
+    let normalized_dir = normalize_php_tool_path(&bin_dir.to_string_lossy());
+    let candidate = format!("{normalized_dir}/{tool}");
+    word == candidate || word.ends_with(&format!("/{candidate}"))
+}
+
+fn normalize_php_tool_path(path: &str) -> String {
+    let mut normalized = path.trim().replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+
+    if let Some((stem, ext)) = normalized.rsplit_once('.') {
+        if ["bat", "cmd", "exe", "ps1"]
+            .iter()
+            .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+        {
+            normalized = stem.to_string();
+        }
+    }
+
+    normalized
 }
 
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
@@ -510,7 +579,8 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
             // Check if the base command is excluded from rewriting (#243)
-            let base = cmd_part.split_whitespace().next().unwrap_or("");
+            let normalized_cmd = normalize_php_tool_command(cmd_part);
+            let base = normalized_cmd.split_whitespace().next().unwrap_or("");
             if excluded.iter().any(|e| e == base) {
                 return None;
             }
@@ -526,7 +596,7 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     let stripped_cow = ENV_PREFIX.replace(cmd_part, "");
     let env_prefix_len = cmd_part.len() - stripped_cow.len();
     let env_prefix = &cmd_part[..env_prefix_len];
-    let cmd_clean = stripped_cow.trim();
+    let cmd_clean = normalize_php_tool_command(stripped_cow.trim());
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
     // #508: warn on stderr so agents learn to stop overusing it
@@ -552,7 +622,7 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
 
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
-        if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
+        if let Some(rest) = strip_word_prefix(&cmd_clean, prefix) {
             let rewritten = if rest.is_empty() {
                 format!("{}{}{}", env_prefix, rule.rtk_cmd, redirect_suffix)
             } else {
@@ -1834,6 +1904,140 @@ mod tests {
         assert_eq!(
             rewrite_command("uv pip list", &[]),
             Some("rtk pip list".into())
+        );
+    }
+
+    // --- PHP tooling ---
+
+    #[test]
+    fn test_classify_php_artisan() {
+        assert!(matches!(
+            classify_command("php artisan about"),
+            Classification::Supported {
+                rtk_equivalent: "rtk php",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_phpunit() {
+        assert!(matches!(
+            classify_command("vendor/bin/phpunit tests/Unit"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpunit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_normalize_php_tool_command_with_custom_bin_dir() {
+        let normalized = normalize_php_tool_command_with_dirs(
+            "tools/bin/phpunit tests/Unit",
+            &[std::path::PathBuf::from("tools/bin")],
+        );
+        assert_eq!(normalized, "phpunit tests/Unit");
+    }
+
+    #[test]
+    fn test_normalize_php_tool_command_with_wrapper_suffix() {
+        let normalized = normalize_php_tool_command_with_dirs(
+            ".\\vendor\\bin\\phpunit.bat tests/Unit",
+            &[std::path::PathBuf::from("vendor/bin")],
+        );
+        assert_eq!(normalized, "phpunit tests/Unit");
+    }
+
+    #[test]
+    fn test_classify_phpstan() {
+        assert!(matches!(
+            classify_command("phpstan analyse src"),
+            Classification::Supported {
+                rtk_equivalent: "rtk phpstan",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_ecs() {
+        assert!(matches!(
+            classify_command("vendor/bin/ecs check src"),
+            Classification::Supported {
+                rtk_equivalent: "rtk ecs",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_pest() {
+        assert!(matches!(
+            classify_command("vendor/bin/pest --parallel"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pest",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_paratest() {
+        assert!(matches!(
+            classify_command("paratest --processes=4"),
+            Classification::Supported {
+                rtk_equivalent: "rtk paratest",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_php_artisan() {
+        assert_eq!(
+            rewrite_command("php artisan about", &[]),
+            Some("rtk php artisan about".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpunit() {
+        assert_eq!(
+            rewrite_command("vendor/bin/phpunit tests/Unit", &[]),
+            Some("rtk phpunit tests/Unit".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_phpstan() {
+        assert_eq!(
+            rewrite_command("phpstan analyse src", &[]),
+            Some("rtk phpstan analyse src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_ecs() {
+        assert_eq!(
+            rewrite_command("vendor/bin/ecs check src", &[]),
+            Some("rtk ecs check src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pest() {
+        assert_eq!(
+            rewrite_command("vendor/bin/pest --parallel", &[]),
+            Some("rtk pest --parallel".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_paratest() {
+        assert_eq!(
+            rewrite_command("paratest --processes=4", &[]),
+            Some("rtk paratest --processes=4".into())
         );
     }
 
