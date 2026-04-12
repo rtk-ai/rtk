@@ -310,7 +310,7 @@ After install, **restart Claude Code**.
 
 ## Supported AI Tools
 
-RTK supports 12 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports a growing set of AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -323,10 +323,13 @@ RTK supports 12 AI coding tools. Each integration transparently rewrites shell c
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
+| **Hermes** | Manual install from `hermes/` | Python plugin (`pre_tool_call`) — initial support |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
+
+Hermes support is currently initial/manual: copy the plugin files from `hermes/` into `$HERMES_HOME/plugins/rtk-rewrite/` and restart Hermes. `rtk init` does not install Hermes yet.
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents).
 

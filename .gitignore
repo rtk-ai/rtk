@@ -28,6 +28,10 @@ Thumbs.db
 # Test artifacts
 *.cast.bak
 
+# Python
+__pycache__/
+*.pyc
+
 # Benchmark results
 scripts/benchmark/
 benchmark-report.md
