@@ -112,6 +112,7 @@ fn run_forget() -> Result<()> {
     let salt_path = super::telemetry::salt_file_path();
     let marker_path = super::telemetry::telemetry_marker_path();
 
+    // Compute device hash before deleting the salt
     let device_hash = if salt_path.exists() {
         Some(super::telemetry::generate_device_hash())
     } else {
@@ -127,6 +128,19 @@ fn run_forget() -> Result<()> {
         let _ = std::fs::remove_file(&marker_path);
     }
 
+    // Purge local tracking database (GDPR Art. 17 — right to erasure applies to local data too)
+    let db_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(super::constants::RTK_DATA_DIR)
+        .join(super::constants::HISTORY_DB);
+    if db_path.exists() {
+        match std::fs::remove_file(&db_path) {
+            Ok(()) => println!("Local tracking database deleted: {}", db_path.display()),
+            Err(e) => eprintln!("rtk: could not delete {}: {}", db_path.display(), e),
+        }
+    }
+
+    // Send server-side erasure request
     if let Some(hash) = device_hash {
         match send_erasure_request(&hash) {
             Ok(()) => {
@@ -135,7 +149,7 @@ fn run_forget() -> Result<()> {
             Err(e) => {
                 eprintln!("rtk: could not reach server: {}", e);
                 eprintln!("  To complete erasure, email contact@rtk-ai.app");
-                eprintln!("  with your device hash: {}...{}", &hash[..8], &hash[56..]);
+                eprintln!("  with your device hash: {}", hash);
             }
         }
     }
@@ -156,9 +170,13 @@ fn send_erasure_request(device_hash: &str) -> Result<(), Box<dyn std::error::Err
         "action": "erasure",
     });
 
-    ureq::post(&url)
-        .set("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(5))
+    let mut req = ureq::post(&url).set("Content-Type", "application/json");
+
+    if let Some(token) = option_env!("RTK_TELEMETRY_TOKEN") {
+        req = req.set("X-RTK-Token", token);
+    }
+
+    req.timeout(std::time::Duration::from_secs(5))
         .send_string(&payload.to_string())?;
 
     Ok(())

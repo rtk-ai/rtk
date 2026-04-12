@@ -114,7 +114,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 - Secrets, API keys, or environment variable values
 - Repository names or URLs
 - Personally identifiable information
-- IP addresses (not logged server-side)
+- IP addresses (not stored in telemetry pings; stored temporarily in erasure audit log for accountability, anonymized after 6 months)
 
 ## Consent
 
@@ -134,8 +134,9 @@ export RTK_TELEMETRY_DISABLED=1
 
 ## Retention Policy
 
-- **Server-side**: telemetry records are retained for a maximum of **12 months**, then automatically purged.
-- **Client-side**: the local SQLite database (`~/.local/share/rtk/tracking.db`) retains data for **90 days** by default (configurable via `tracking.history_days` in `config.toml`).
+- **Server-side**: telemetry records are retained for a maximum of **12 months**, then automatically purged (periodic task every 24 hours).
+- **Server-side (erasure log)**: IP addresses in the erasure audit log are **anonymized after 6 months** (GDPR — IP is personal data).
+- **Client-side**: the local SQLite database (`~/.local/share/rtk/tracking.db`) retains data for **90 days** by default (configurable via `tracking.history_days` in `config.toml`). Deleted entirely by `rtk telemetry forget`.
 
 ## Your Rights (GDPR)
 
@@ -150,8 +151,8 @@ Under the EU General Data Protection Regulation, you have the right to:
 
 ## Erasure Procedure
 
-1. Run `rtk telemetry forget` — this disables telemetry, deletes your device salt and ping marker, and sends an erasure request to the server.
-2. If the server is unreachable, the CLI prints fallback instructions with your device hash and the contact email.
+1. Run `rtk telemetry forget` — this disables telemetry, deletes your device salt, ping marker, and local tracking database (`history.db`), then sends an erasure request to the server.
+2. If the server is unreachable, the CLI prints your full device hash and fallback instructions to email contact@rtk-ai.app for manual erasure.
 3. You can also email contact@rtk-ai.app directly to request manual erasure.
 
 ## Data Handling
@@ -165,9 +166,9 @@ Under the EU General Data Protection Regulation, you have the right to:
 ### Server-side Requirements
 
 The telemetry server must implement:
-- `POST /erasure` endpoint accepting `{"device_hash": "...", "action": "erasure"}`
-- Automatic purge of records older than 12 months
-- Audit log for erasure requests (GDPR Art. 17(2) accountability)
+- `POST /erasure` endpoint accepting `{"device_hash": "...", "action": "erasure"}`, authenticated via `X-RTK-Token`
+- Automatic periodic purge of telemetry records older than 12 months
+- Audit log for erasure requests (GDPR Art. 17(2) accountability) with IP anonymization after 6 months
 
 ## For contributors
 

@@ -454,21 +454,13 @@ fn prompt_telemetry_consent() -> Result<()> {
     let config = crate::core::config::Config::load().unwrap_or_default();
     match config.telemetry.consent_given {
         Some(true) => return Ok(()),
-        Some(false) => {
-            let should_reask = config
-                .telemetry
-                .consent_date
-                .as_deref()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|date| {
-                    (chrono::Utc::now() - date.with_timezone(&chrono::Utc)).num_days() >= 14
-                })
-                .unwrap_or(false);
-            if !should_reask {
-                return Ok(());
-            }
-        }
+        Some(false) => return Ok(()),
         None => {}
+    }
+
+    if !io::stdin().is_terminal() {
+        save_telemetry_consent(false)?;
+        return Ok(());
     }
 
     eprintln!();
@@ -483,12 +475,6 @@ fn prompt_telemetry_consent() -> Result<()> {
     eprintln!("  Details: https://github.com/rtk-ai/rtk/blob/main/docs/TELEMETRY.md");
     eprintln!();
     eprint!("Enable anonymous telemetry? [y/N] ");
-
-    if !io::stdin().is_terminal() {
-        eprintln!("(non-interactive mode, defaulting to N)");
-        save_telemetry_consent(false)?;
-        return Ok(());
-    }
 
     let stdin = io::stdin();
     let mut line = String::new();
