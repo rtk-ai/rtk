@@ -115,6 +115,8 @@ git status  # Automatically rewritten to rtk git status
 
 The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
 
+This also applies to literal `direnv exec ...` commands: RTK rewrites only `direnv exec` to `rtk direnv ...`, while leaving `direnv allow`, `direnv status`, and other subcommands untouched.
+
 **Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
 ## How It Works
@@ -165,6 +167,14 @@ rtk gh pr list                  # Compact PR listing
 rtk gh pr view 42               # PR details + checks
 rtk gh issue list               # Compact issue listing
 rtk gh run list                 # Workflow run status
+```
+
+### Environment & direnv
+```bash
+rtk env -f AWS                  # Filtered env vars
+rtk direnv exec . env           # Redact KEY=*** under direnv exec
+rtk direnv exec . gh auth token # Redact token output to ***
+rtk direnv exec . pnpm install  # Passthrough when no direnv guard filter matches
 ```
 
 ### Test Runners

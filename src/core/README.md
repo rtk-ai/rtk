@@ -31,6 +31,8 @@ Three-tier filter lookup (first match wins):
 2. `~/.config/rtk/filters.toml` (user-global)
 3. Built-in filters concatenated by `build.rs` at compile time
 
+Most TOML filters are consumed by the fallback path, but selected Rust commands can opt into the same registry directly when they need shared precedence plus custom execution behavior. `rtk direnv` uses this to apply TOML rules to both `stdout` and `stderr` for matched `direnv exec` commands.
+
 ## Tracking Database Schema
 
 ```sql

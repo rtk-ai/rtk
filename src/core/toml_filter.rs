@@ -253,8 +253,9 @@ impl TomlFilterRegistry {
 }
 
 /// Commands already handled by dedicated Rust modules (routed by Clap before TOML).
-/// A TOML filter whose match_command matches one of these will never activate —
-/// Clap routes the command before `run_fallback()` is reached.
+/// Most TOML filters matching one of these will never activate through
+/// `run_fallback()`. Commands that opt into shared TOML lookup from their Rust
+/// module are skipped by the shadow warning below.
 const RUST_HANDLED_COMMANDS: &[&str] = &[
     "ls",
     "tree",
@@ -270,6 +271,7 @@ const RUST_HANDLED_COMMANDS: &[&str] = &[
     "json",
     "deps",
     "env",
+    "direnv",
     "find",
     "diff",
     "log",
@@ -316,9 +318,13 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
     let match_regex = Regex::new(&def.match_command)
         .map_err(|e| format!("invalid match_command regex: {}", e))?;
 
-    // Shadow warning: if match_command matches a Rust-handled command, this filter
-    // will never activate (Clap routes before run_fallback). Warn the author.
+    // Shadow warning: if match_command matches a Rust-handled command that does
+    // not opt into shared TOML lookup, this filter will never activate
+    // (Clap routes before run_fallback). Warn the author.
     for cmd in RUST_HANDLED_COMMANDS {
+        if *cmd == "direnv" {
+            continue;
+        }
         if match_regex.is_match(cmd) {
             eprintln!(
                 "[rtk] warning: filter '{}' match_command matches '{}' which is already \
@@ -1563,6 +1569,10 @@ match_command = "^make\\b"
             "brew-install",
             "composer-install",
             "df",
+            "direnv-01-env-dump",
+            "direnv-02-shell-env-dump",
+            "direnv-03-gh-auth-token",
+            "direnv-04-node-auth-token",
             "dotnet-build",
             "du",
             "fail2ban-client",
@@ -1613,11 +1623,56 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            58,
-            "Expected exactly 58 built-in filters, got {}. \
+            62,
+            "Expected exactly 62 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
+    }
+
+    #[test]
+    fn test_builtin_direnv_filters_match_expected_commands() {
+        let filters = make_filters(BUILTIN_TOML);
+
+        assert_eq!(
+            find_filter_in("direnv exec . env", &filters).map(|f| f.name.as_str()),
+            Some("direnv-01-env-dump")
+        );
+        assert_eq!(
+            find_filter_in("direnv exec . printenv", &filters).map(|f| f.name.as_str()),
+            Some("direnv-01-env-dump")
+        );
+        assert_eq!(
+            find_filter_in("direnv exec . bash -lc 'printenv'", &filters).map(|f| f.name.as_str()),
+            Some("direnv-02-shell-env-dump")
+        );
+        assert_eq!(
+            find_filter_in("direnv exec . gh auth token", &filters).map(|f| f.name.as_str()),
+            Some("direnv-03-gh-auth-token")
+        );
+        assert_eq!(
+            find_filter_in("direnv exec . sh -lc 'gh auth token'", &filters)
+                .map(|f| f.name.as_str()),
+            Some("direnv-03-gh-auth-token")
+        );
+        assert_eq!(
+            find_filter_in(
+                "direnv exec . pnpm config get //registry.npmjs.org/:_authToken",
+                &filters
+            )
+            .map(|f| f.name.as_str()),
+            Some("direnv-04-node-auth-token")
+        );
+    }
+
+    #[test]
+    fn test_builtin_direnv_filters_skip_safe_commands() {
+        let filters = make_filters(BUILTIN_TOML);
+
+        assert!(find_filter_in("direnv exec . pnpm install", &filters).is_none());
+        assert!(find_filter_in("direnv exec . gh auth status", &filters).is_none());
+        assert!(find_filter_in("direnv exec . bash -lc 'envsubst < file'", &filters).is_none());
+        assert!(find_filter_in("direnv allow .", &filters).is_none());
     }
 
     /// Verify that every built-in filter has at least one inline test.
@@ -1669,13 +1724,16 @@ input = "output line 1\n\noutput line 2"
 expected = "output line 1\noutput line 2"
 "#;
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
+        let builtin_count = make_filters(BUILTIN_TOML).len();
         let filters = make_filters(&combined);
 
-        // All 58 existing filters still present + 1 new = 59
+        // All existing filters still present + 1 new filter.
         assert_eq!(
             filters.len(),
-            59,
-            "Expected 59 filters after concat (58 built-in + 1 new)"
+            builtin_count + 1,
+            "Expected {} filters after concat ({} built-in + 1 new)",
+            builtin_count + 1,
+            builtin_count
         );
 
         // New filter is discoverable

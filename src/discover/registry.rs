@@ -724,6 +724,19 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_direnv_exec() {
+        assert_eq!(
+            classify_command("direnv exec . env"),
+            Classification::Supported {
+                rtk_equivalent: "rtk direnv",
+                category: "Env",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
     fn test_classify_cargo_check() {
         assert_eq!(
             classify_command("cargo check"),
@@ -1552,6 +1565,27 @@ mod tests {
             rewrite_command("gh release list", &[]),
             Some("rtk gh release list".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_direnv_exec() {
+        assert_eq!(
+            rewrite_command("direnv exec . env", &[]),
+            Some("rtk direnv exec . env".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_direnv_exec_pipe_first_only() {
+        assert_eq!(
+            rewrite_command("direnv exec . env | rg '^GITHUB_TOKEN='", &[]),
+            Some("rtk direnv exec . env | rg '^GITHUB_TOKEN='".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_direnv_allow_skipped() {
+        assert_eq!(rewrite_command("direnv allow .", &[]), None);
     }
 
     #[test]
