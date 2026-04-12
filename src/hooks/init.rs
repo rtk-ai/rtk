@@ -459,7 +459,6 @@ fn prompt_telemetry_consent() -> Result<()> {
     }
 
     if !io::stdin().is_terminal() {
-        save_telemetry_consent(false)?;
         return Ok(());
     }
 
