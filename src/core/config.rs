@@ -128,14 +128,6 @@ pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
 }
 
-pub fn telemetry_enabled() -> Option<bool> {
-    Config::load().ok().map(|c| c.telemetry.enabled)
-}
-
-pub fn telemetry_consent() -> Option<bool> {
-    Config::load().ok().and_then(|c| c.telemetry.consent_given)
-}
-
 impl Config {
     pub fn load() -> Result<Self> {
         let path = get_config_path()?;

@@ -158,11 +158,11 @@ fn run_forget() -> Result<()> {
     Ok(())
 }
 
-fn send_erasure_request(device_hash: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn send_erasure_request(device_hash: &str) -> Result<()> {
     let url = option_env!("RTK_TELEMETRY_URL");
     let url = match url {
         Some(u) => format!("{}/erasure", u),
-        None => return Err("no telemetry endpoint configured".into()),
+        None => anyhow::bail!("no telemetry endpoint configured"),
     };
 
     let payload = serde_json::json!({
