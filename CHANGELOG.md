@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **pytest:** fix `rtk pytest -q` incorrectly reporting "No tests collected" when tests ran ([#565](https://github.com/rtk-ai/rtk/issues/565)) — quiet mode summary line (no `===` wrapper) was not captured by the parser, causing `parse_summary_line("")` to return `(0, 0, 0)` and trigger the wrong message. Also fix false "No tests collected" when only skipped tests exist.
 * **diff:** correct truncation overflow count in condense_unified_diff ([#833](https://github.com/rtk-ai/rtk/pull/833)) ([5399f83](https://github.com/rtk-ai/rtk/commit/5399f83))
 * **git:** replace vague truncation markers with exact counts in log and grep output ([#833](https://github.com/rtk-ai/rtk/pull/833)) ([185fb97](https://github.com/rtk-ai/rtk/commit/185fb97))
 
