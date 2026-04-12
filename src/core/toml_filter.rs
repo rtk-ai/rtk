@@ -248,6 +248,12 @@ impl TomlFilterRegistry {
                 Err(e) => eprintln!("[rtk] warning: filter '{}' in {}: {}", name, source, e),
             }
         }
+
+        // Sort filters by length of their match_regex descending
+        // This ensures that more specific patterns (like '^gcloud\s+compute\b')
+        // are tested before generic ones (like '^gcloud\b')
+        compiled.sort_by_key(|f| std::cmp::Reverse(f.match_regex.as_str().len()));
+
         Ok(compiled)
     }
 }
@@ -1560,13 +1566,35 @@ match_command = "^make\\b"
 
         let expected = [
             "ansible-playbook",
+            "bazel-build",
+            "bazel-query",
+            "bazel-test",
+            "bq",
             "brew-install",
+            "bun-build",
+            "bun-install",
+            "bun-test",
+            "conda-install",
+            "conda-list",
             "composer-install",
             "df",
             "dotnet-build",
             "du",
+            "eza",
             "fail2ban-client",
+            "flutter-analyze",
+            "flutter-build",
+            "flutter-pub",
+            "flutter-test",
             "gcloud",
+            "gcloud_compute",
+            "gcloud_container",
+            "gcloud_functions",
+            "gcloud_iam",
+            "gcloud_logging",
+            "gcloud_run",
+            "gcloud_sql",
+            "gsutil",
             "hadolint",
             "helm",
             "iptables",
@@ -1577,6 +1605,7 @@ match_command = "^make\\b"
             "mvn-build",
             "ping",
             "pio-run",
+            "pip-install",
             "poetry-install",
             "pre-commit",
             "ps",
@@ -1593,8 +1622,13 @@ match_command = "^make\\b"
             "tofu-plan",
             "tofu-validate",
             "trunk-build",
+            "uv-add",
+            "uv-init",
+            "uv-lock",
             "uv-sync",
             "yamllint",
+            "yarn-install",
+            "yarn-test",
         ];
 
         for name in &expected {
@@ -1613,8 +1647,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            58,
-            "Expected exactly 58 built-in filters, got {}. \
+            86,
+            "Expected exactly 86 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1671,11 +1705,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 58 existing filters still present + 1 new = 59
+        // All 86 existing filters still present + 1 new = 87
         assert_eq!(
             filters.len(),
-            59,
-            "Expected 59 filters after concat (58 built-in + 1 new)"
+            87,
+            "Expected 87 filters after concat (86 built-in + 1 new)"
         );
 
         // New filter is discoverable

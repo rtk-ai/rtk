@@ -1,0 +1,70 @@
+[filters.bun-install]
+description = "Strip bun install download noise"
+match_command = "^(bun|bunx)\\s+(install|add)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*\\+",
+  "^bun install v",
+  "^Resolving dependencies",
+  "^\\[\\d+\\.\\d+ms\\]",
+]
+match_output = [{ pattern = "Saved lockfile", message = "ok (installed)" }]
+truncate_lines_at = 120
+max_lines = 30
+
+[filters.bun-test]
+description = "Compact bun test output — strip passing, keep failures"
+match_command = "^(bun|bunx)\\s+test\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^\\s*✓", "^\\s*\\(pass\\)", "^bun test v"]
+truncate_lines_at = 120
+max_lines = 50
+
+[filters.bun-build]
+description = "Strip bun build progress noise"
+match_command = "^(bun|bunx)\\s+(build|run)\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^\\[\\d+\\.\\d+ms\\]"]
+truncate_lines_at = 120
+max_lines = 40
+
+[[tests.bun-install]]
+name = "strips resolve noise"
+input = """
+bun install v1.1.0
+Resolving dependencies
+  + lodash@4.17.21
+
+Saved lockfile
+
+ 3 packages installed [250ms]
+"""
+expected = " 3 packages installed [250ms]"
+
+[[tests.bun-test]]
+name = "strips passing tests"
+input = """
+bun test v1.1.0
+
+src/index.test.ts:
+  ✓ adds numbers
+  ✓ subtracts numbers
+  ✗ divides by zero
+    Expected: Infinity
+    Received: NaN
+
+ 2 pass, 1 fail
+"""
+expected = "src/index.test.ts:\n  ✗ divides by zero\n    Expected: Infinity\n    Received: NaN\n 2 pass, 1 fail"
+
+[[tests.bun-build]]
+name = "strips timing noise"
+input = """
+[12.50ms] build
+
+  dist/index.js  1.2 KB
+
+[42.00ms] done
+"""
+expected = "  dist/index.js  1.2 KB"

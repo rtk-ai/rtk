@@ -1,0 +1,29 @@
+[filters.gsutil]
+description = "Compact gsutil output"
+match_command = "^gsutil\\b"
+strip_ansi = true
+strip_lines_matching = [
+    "^\\s*$",
+    "^Copying ",
+    "^Removing ",
+    "^Building synchronization state",
+]
+truncate_lines_at = 120
+max_lines = 40
+
+[[tests.gsutil]]
+name = "strips blank lines and progress"
+input = """
+Building synchronization state...
+Copying gs://bucket/file1.txt...
+
+gs://bucket/file1.txt
+gs://bucket/file2.txt
+gs://bucket/dir/
+"""
+expected = "gs://bucket/file1.txt\ngs://bucket/file2.txt\ngs://bucket/dir/"
+
+[[tests.gsutil]]
+name = "single line passthrough"
+input = "CommandException: No URLs matched"
+expected = "CommandException: No URLs matched"

@@ -25,11 +25,14 @@ pub enum HookStatus {
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
     // Don't warn users who don't have Claude Code installed
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return HookStatus::Ok,
+    let Some(home) = dirs::home_dir() else {
+        return HookStatus::Ok;
     };
     if !home.join(CLAUDE_DIR).exists() {
+        return HookStatus::Ok;
+    }
+
+    if other_integration_installed(&home) {
         return HookStatus::Ok;
     }
 
@@ -72,7 +75,7 @@ fn check_and_warn() -> Option<()> {
         }
     }
 
-    eprintln!("{}", warning);
+    eprintln!("{warning}");
 
     // Touch marker after warning is printed
     let _ = std::fs::create_dir_all(marker.parent()?);
@@ -93,7 +96,6 @@ pub fn parse_hook_version(content: &str) -> u8 {
     0 // No version tag = version 0 (outdated)
 }
 
-#[cfg(test)]
 fn other_integration_installed(home: &std::path::Path) -> bool {
     let paths = [
         home.join(OPENCODE_PLUGIN_PATH),
@@ -165,6 +167,31 @@ mod tests {
     }
 
     #[test]
+    fn test_status_ok_if_claude_missing_hook_but_other_installed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        let cursor_hook = tmp
+            .path()
+            .join(".cursor")
+            .join("hooks")
+            .join("rtk-rewrite.sh");
+        std::fs::create_dir_all(cursor_hook.parent().unwrap()).unwrap();
+        std::fs::write(&cursor_hook, b"hook").unwrap();
+
+        // Temporarily override home dir for this test
+        std::env::set_var("HOME", tmp.path());
+
+        let s = status();
+        assert_eq!(
+            s,
+            HookStatus::Ok,
+            "Should not warn about Claude if other integration is installed"
+        );
+    }
+
+    #[test]
     fn test_other_integration_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         assert!(!other_integration_installed(tmp.path()));
@@ -225,9 +252,8 @@ mod tests {
 
     #[test]
     fn test_status_returns_valid_variant() {
-        let home = match dirs::home_dir() {
-            Some(h) => h,
-            None => return,
+        let Some(home) = dirs::home_dir() else {
+            return;
         };
         let s = status();
         let has_claude_hook = home
@@ -244,10 +270,16 @@ mod tests {
                 "Expected Ok or Outdated when Claude hook exists, got {:?}",
                 s
             ),
-            (false, true, _) => assert_eq!(
+            (false, true, true) => assert_eq!(
+                s,
+                HookStatus::Ok,
+                "Expected Ok when .claude/ exists but hook absent AND other integration exists, got {:?}",
+                s
+            ),
+            (false, true, false) => assert_eq!(
                 s,
                 HookStatus::Missing,
-                "Expected Missing when .claude/ exists but hook absent, got {:?}",
+                "Expected Missing when .claude/ exists but hook absent and NO other integration, got {:?}",
                 s
             ),
             (false, false, _) => assert_eq!(s, HookStatus::Ok),

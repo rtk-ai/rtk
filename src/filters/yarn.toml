@@ -1,0 +1,65 @@
+[filters.yarn-install]
+description = "Strip yarn install resolution and fetch noise"
+match_command = "^yarn\\s+(install|add)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\[1/\\d+\\] Resolving",
+  "^\\[2/\\d+\\] Fetching",
+  "^\\[3/\\d+\\] Linking",
+  "^\\[4/\\d+\\] Building",
+  "^info ",
+  "^warning ",
+  "^└─",
+  "^├─",
+  "^│",
+]
+match_output = [{ pattern = "Already up to date", message = "ok (up to date)" }]
+truncate_lines_at = 120
+max_lines = 30
+
+[filters.yarn-test]
+description = "Compact yarn test output — strip passing, keep failures"
+match_command = "^yarn\\s+test\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^\\s*✓", "^\\s*PASS ", "^\\$ "]
+truncate_lines_at = 120
+max_lines = 50
+
+[[tests.yarn-install]]
+name = "strips resolution and fetch phases"
+input = """
+[1/4] Resolving packages...
+[2/4] Fetching packages...
+[3/4] Linking dependencies...
+[4/4] Building fresh packages...
+info No lockfile found.
+success Saved lockfile.
+Done in 4.23s.
+"""
+expected = "success Saved lockfile.\nDone in 4.23s."
+
+[[tests.yarn-install]]
+name = "already up to date short-circuits"
+input = """
+[1/4] Resolving packages...
+Already up to date.
+Done in 0.12s.
+"""
+expected = "ok (up to date)"
+
+[[tests.yarn-test]]
+name = "strips passing tests"
+input = """
+$ jest
+ PASS  src/utils.test.ts
+  ✓ validates input (3ms)
+  ✓ formats output (1ms)
+ FAIL  src/api.test.ts
+  ✗ handles timeout
+    Expected: "timeout"
+    Received: undefined
+
+Tests: 1 failed, 2 passed, 3 total
+"""
+expected = " FAIL  src/api.test.ts\n  ✗ handles timeout\n    Expected: \"timeout\"\n    Received: undefined\nTests: 1 failed, 2 passed, 3 total"

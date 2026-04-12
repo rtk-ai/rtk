@@ -1294,11 +1294,22 @@ fn run_kilocode_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
 
 const ANTIGRAVITY_RULES: &str = include_str!("../../hooks/antigravity/rules.md");
 
-pub fn run_antigravity_mode(verbose: u8) -> Result<()> {
-    run_antigravity_mode_at(&std::env::current_dir()?, verbose)
+/// Entry point for `rtk init --agent antigravity`
+/// Installs project-scoped rules to .agents/rules/ (read by Antigravity's Cascade AI).
+/// For transparent command rewriting, use Claude Code hooks instead: `rtk init -g`
+pub fn run_antigravity_mode(global: bool, verbose: u8) -> Result<()> {
+    if global {
+        anyhow::bail!(
+            "Antigravity does not support hooks.json. Use project-scoped rules instead:\n  \
+             rtk init --agent antigravity\n\n\
+             For transparent command rewriting via Claude Code (installed in Antigravity):\n  \
+             rtk init -g"
+        );
+    }
+    run_antigravity_rules_at(&std::env::current_dir()?, verbose)
 }
 
-fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
+fn run_antigravity_rules_at(base_dir: &Path, verbose: u8) -> Result<()> {
     // Antigravity reads .agents/rules/ from the project root (workspace-scoped)
     let target_dir = base_dir.join(".agents/rules");
     let rules_path = target_dir.join("antigravity-rtk-rules.md");
@@ -2826,7 +2837,7 @@ More notes
     #[test]
     fn test_antigravity_mode_creates_rules_file() {
         let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), 0).unwrap();
+        run_antigravity_rules_at(temp.path(), 0).unwrap();
 
         let rules_path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
         assert!(rules_path.exists(), "Rules file should be created");
@@ -2837,13 +2848,13 @@ More notes
     #[test]
     fn test_antigravity_mode_is_idempotent() {
         let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), 0).unwrap();
+        run_antigravity_rules_at(temp.path(), 0).unwrap();
 
         let path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
         let first = fs::read_to_string(&path).unwrap();
 
         // Second run should not overwrite
-        run_antigravity_mode_at(temp.path(), 0).unwrap();
+        run_antigravity_rules_at(temp.path(), 0).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
     }
@@ -3329,5 +3340,16 @@ More notes
         assert!(CURSOR_REWRITE_HOOK.contains("\"permission\": \"allow\""));
         assert!(CURSOR_REWRITE_HOOK.contains("\"updated_input\""));
         assert!(!CURSOR_REWRITE_HOOK.contains("hookSpecificOutput"));
+    }
+
+    #[test]
+    fn test_antigravity_global_mode_bails() {
+        let result = run_antigravity_mode(true, 0);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("does not support hooks.json"),
+            "Should guide user to alternatives"
+        );
     }
 }

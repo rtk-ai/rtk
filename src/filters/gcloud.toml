@@ -2,13 +2,74 @@
 description = "Compact gcloud output"
 match_command = "^gcloud\\b"
 strip_ansi = true
-strip_lines_matching = ["^\\s*$"]
+strip_lines_matching = [
+    "^\\s*$",
+    "^WARNING:",
+    "^To take a quick anonymous survey",
+]
+truncate_lines_at = 120
+max_lines = 40
+
+[filters.gcloud_compute]
+description = "Compact gcloud compute output"
+match_command = "^gcloud\\s+compute\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^WARNING:", "^Listed \\d+ items"]
+truncate_lines_at = 120
+max_lines = 50
+
+[filters.gcloud_iam]
+description = "Compact gcloud IAM output"
+match_command = "^gcloud\\s+iam\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^WARNING:", "^Listed \\d+ items"]
+truncate_lines_at = 120
+max_lines = 40
+
+[filters.gcloud_run]
+description = "Compact gcloud run output"
+match_command = "^gcloud\\s+run\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^WARNING:", "^Deploying container to"]
 truncate_lines_at = 120
 max_lines = 30
 
+[filters.gcloud_functions]
+description = "Compact gcloud functions output"
+match_command = "^gcloud\\s+functions\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^WARNING:"]
+truncate_lines_at = 120
+max_lines = 30
+
+[filters.gcloud_container]
+description = "Compact gcloud container/GKE output"
+match_command = "^gcloud\\s+container\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^WARNING:", "^Fetching cluster endpoint"]
+truncate_lines_at = 120
+max_lines = 40
+
+[filters.gcloud_sql]
+description = "Compact gcloud sql output"
+match_command = "^gcloud\\s+sql\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^WARNING:"]
+truncate_lines_at = 120
+max_lines = 30
+
+[filters.gcloud_logging]
+description = "Compact gcloud logging output"
+match_command = "^gcloud\\s+logging\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^WARNING:"]
+truncate_lines_at = 120
+max_lines = 50
+
 [[tests.gcloud]]
-name = "strips blank lines, preserves output"
+name = "strips blank lines and warnings"
 input = """
+WARNING: This command is deprecated.
 Updated property [core/project].
 
 NAME        REGION        STATUS
@@ -20,3 +81,75 @@ expected = "Updated property [core/project].\nNAME        REGION        STATUS\n
 name = "single line passthrough"
 input = "Listed 0 items."
 expected = "Listed 0 items."
+
+[[tests.gcloud_compute]]
+name = "strips warnings and listed count"
+input = """
+WARNING: Some instances might be missing.
+Listed 3 items.
+
+NAME    ZONE          STATUS
+vm-1    us-central1-a RUNNING
+"""
+expected = "NAME    ZONE          STATUS\nvm-1    us-central1-a RUNNING"
+
+[[tests.gcloud_iam]]
+name = "strips warnings and listed count"
+input = """
+WARNING: Permissions may lag behind.
+Listed 2 items.
+ROLE                    TITLE
+roles/editor            Editor
+"""
+expected = "ROLE                    TITLE\nroles/editor            Editor"
+
+[[tests.gcloud_run]]
+name = "strips deploy progress and warnings"
+input = """
+WARNING: Deploying to regions other than us-central1.
+Deploying container to Cloud Run service [my-svc]
+SERVICE  REGION       URL
+my-svc   us-east1     https://my-svc-abc.a.run.app
+"""
+expected = "SERVICE  REGION       URL\nmy-svc   us-east1     https://my-svc-abc.a.run.app"
+
+[[tests.gcloud_functions]]
+name = "strips warnings"
+input = """
+WARNING: Functions are in beta.
+
+NAME      STATUS  TRIGGER
+my-func   ACTIVE  HTTP
+"""
+expected = "NAME      STATUS  TRIGGER\nmy-func   ACTIVE  HTTP"
+
+[[tests.gcloud_container]]
+name = "strips fetch and warnings"
+input = """
+WARNING: cluster version is deprecated.
+Fetching cluster endpoint and auth data.
+
+NAME         LOCATION       STATUS
+my-cluster   us-central1-c  RUNNING
+"""
+expected = "NAME         LOCATION       STATUS\nmy-cluster   us-central1-c  RUNNING"
+
+[[tests.gcloud_sql]]
+name = "strips warnings"
+input = """
+WARNING: SQL instance is stopped.
+
+NAME    DATABASE_VERSION  LOCATION      TIER
+my-db   POSTGRES_15       us-central1   db-f1-micro
+"""
+expected = "NAME    DATABASE_VERSION  LOCATION      TIER\nmy-db   POSTGRES_15       us-central1   db-f1-micro"
+
+[[tests.gcloud_logging]]
+name = "strips warnings"
+input = """
+WARNING: Streaming logs.
+
+timestamp: 2026-04-10T00:00:00Z severity: ERROR
+textPayload: Something bad happened
+"""
+expected = "timestamp: 2026-04-10T00:00:00Z severity: ERROR\ntextPayload: Something bad happened"

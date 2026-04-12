@@ -1,0 +1,66 @@
+[filters.conda-install]
+description = "Strip conda install/update download progress and solver noise"
+match_command = "^conda\\s+(install|update|create)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Downloading ",
+  "^Extracting ",
+  "^Solving environment:",
+  "^Collecting package metadata",
+  "^\\s+\\|.*\\|\\s+\\d+%",
+  "^Verifying transaction:",
+  "^Executing transaction:",
+  "^Preparing transaction:",
+]
+truncate_lines_at = 120
+max_lines = 30
+
+[filters.conda-list]
+description = "Compact conda list output"
+match_command = "^conda\\s+list\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^#",
+  "^\\s*$",
+]
+truncate_lines_at = 120
+max_lines = 40
+
+[[tests.conda-install]]
+name = "strips solver and download noise"
+input = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: done
+
+## Package Plan ##
+
+  environment location: /opt/conda/envs/myenv
+
+  added / updated specs:
+    - numpy
+
+The following packages will be downloaded:
+
+    package                    |            build
+    ---------------------------|-----------------
+    numpy-1.26.2               |  py312h6d4df81_0         7.5 MB
+
+Downloading and Extracting Packages:
+
+Preparing transaction: done
+Verifying transaction: done
+Executing transaction: done
+"""
+expected = "## Package Plan ##\n  environment location: /opt/conda/envs/myenv\n  added / updated specs:\n    - numpy\nThe following packages will be downloaded:\n    package                    |            build\n    ---------------------------|-----------------\n    numpy-1.26.2               |  py312h6d4df81_0         7.5 MB\nDownloading and Extracting Packages:"
+
+[[tests.conda-list]]
+name = "strips comment headers"
+input = """
+# packages in environment at /opt/conda/envs/myenv:
+#
+# Name                    Version                   Build  Channel
+numpy                     1.26.2          py312h6d4df81_0
+pandas                    2.1.4           py312h8f98415_0
+"""
+expected = "numpy                     1.26.2          py312h6d4df81_0\npandas                    2.1.4           py312h8f98415_0"

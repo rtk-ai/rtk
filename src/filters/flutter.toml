@@ -1,0 +1,102 @@
+[filters.flutter-build]
+description = "Strip flutter build progress and Gradle/Xcode noise"
+match_command = "^flutter\\s+(build|run)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Running Gradle task",
+  "^Downloading ",
+  "^\\s+Downloading ",
+  "^✓ Built ",
+  "^Launching lib/main.dart",
+  "^Waiting for ",
+  "^\\[\\s+\\]",
+  "^\\[\\+\\d+\\s+ms\\]",
+]
+truncate_lines_at = 120
+max_lines = 30
+
+[filters.flutter-analyze]
+description = "Compact dart analyze output — strip info, keep errors/warnings"
+match_command = "^(flutter|dart)\\s+analyze\\b"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$", "^Analyzing ", "^\\s*info\\s"]
+match_output = [{ pattern = "No issues found", message = "ok (no issues)" }]
+truncate_lines_at = 120
+max_lines = 40
+
+[filters.flutter-test]
+description = "Compact flutter/dart test output — strip passing, keep failures"
+match_command = "^(flutter|dart)\\s+test\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\d\\d:\\d\\d \\+\\d+:",
+  "^All tests passed",
+]
+match_output = [{ pattern = "All tests passed", message = "ok (all passed)" }]
+truncate_lines_at = 120
+max_lines = 50
+
+[filters.flutter-pub]
+description = "Strip flutter/dart pub get download noise"
+match_command = "^(flutter|dart)\\s+pub\\s+(get|upgrade|add)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Resolving dependencies",
+  "^\\s+Downloading ",
+  "^Got dependencies",
+]
+match_output = [
+  { pattern = "Got dependencies|No dependencies changed", message = "ok (up to date)" },
+]
+truncate_lines_at = 120
+max_lines = 20
+
+[[tests.flutter-build]]
+name = "strips gradle and download noise"
+input = """
+Running Gradle task 'assembleDebug'...
+Downloading https://services.gradle.org/distributions/gradle-8.0-all.zip
+
+✓ Built build/app/outputs/flutter-apk/app-debug.apk (48.2MB)
+"""
+expected = ""
+
+[[tests.flutter-analyze]]
+name = "no issues short-circuits"
+input = """
+Analyzing myapp...
+No issues found!
+"""
+expected = "ok (no issues)"
+
+[[tests.flutter-analyze]]
+name = "keeps errors and warnings"
+input = """
+Analyzing myapp...
+
+  error - lib/main.dart:10:3 - Undefined name 'foo' - undefined_identifier
+  warning - lib/utils.dart:5:1 - Unused import - unused_import
+  info - lib/theme.dart:1:1 - Prefer const constructors - prefer_const_constructors
+
+3 issues found (1 error, 1 warning, 1 info)
+"""
+expected = "  error - lib/main.dart:10:3 - Undefined name 'foo' - undefined_identifier\n  warning - lib/utils.dart:5:1 - Unused import - unused_import\n3 issues found (1 error, 1 warning, 1 info)"
+
+[[tests.flutter-test]]
+name = "all passed short-circuits"
+input = """
+00:05 +42: All tests passed!
+"""
+expected = "ok (all passed)"
+
+[[tests.flutter-pub]]
+name = "got dependencies short-circuits"
+input = """
+Resolving dependencies...
+  Downloading collection 1.18.0...
+Got dependencies!
+"""
+expected = "ok (up to date)"

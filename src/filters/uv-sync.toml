@@ -13,6 +13,50 @@ match_output = [
 ]
 max_lines = 20
 
+[filters.uv-init]
+description = "Compact uv init output — strip download progress"
+match_command = "^uv\\s+init\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s+Downloading ",
+  "^\\s+Using cached ",
+  "^\\s*━",
+  "^\\s*\\|.*\\d+\\.\\d+\\s+[MkG]B",
+]
+truncate_lines_at = 120
+max_lines = 20
+
+[filters.uv-add]
+description = "Compact uv add output — strip download/resolve noise"
+match_command = "^uv\\s+add\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s+Downloading ",
+  "^\\s+Using cached ",
+  "^\\s+Preparing ",
+  "^\\s*━",
+  "^\\s*\\|.*\\d+\\.\\d+\\s+[MkG]B",
+]
+truncate_lines_at = 120
+max_lines = 20
+
+[filters.uv-lock]
+description = "Compact uv lock output — strip resolve noise"
+match_command = "^uv\\s+lock\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s+Downloading ",
+  "^\\s+Using cached ",
+  "^\\s+Preparing ",
+]
+match_output = [
+  { pattern = "Resolved \\d+ package", message = "ok (locked)" },
+]
+max_lines = 20
+
 [[tests.uv-sync]]
 name = "audited packages short-circuits to ok"
 input = """
@@ -35,3 +79,32 @@ Installed 5 packages in 23ms
  + urllib3==2.1.0
 """
 expected = "Installed 5 packages in 23ms\n + certifi==2023.11.17\n + charset-normalizer==3.3.2\n + idna==3.6\n + requests==2.31.0\n + urllib3==2.1.0"
+
+[[tests.uv-init]]
+name = "strips download progress from init"
+input = """
+  Downloading cpython-3.12.0-macos-aarch64.tar.gz
+     ━━━━━━━━━━━━━━━━ 21.0/21.0 MB 260 kB/s eta 0:00:03
+     ━━━━━━━━━━━━━━━━ 21.0/21.0 MB 260 kB/s eta 0:00:03
+Initialized project `myproject`
+"""
+expected = "Initialized project `myproject`"
+
+[[tests.uv-add]]
+name = "strips download noise from add"
+input = """
+Resolved 12 packages in 450ms
+  Downloading flask-3.0.0-py3-none-any.whl (101 kB)
+  Preparing packages...
+Installed 7 packages in 89ms
+ + flask==3.0.0
+ + jinja2==3.1.2
+"""
+expected = "Resolved 12 packages in 450ms\nInstalled 7 packages in 89ms\n + flask==3.0.0\n + jinja2==3.1.2"
+
+[[tests.uv-lock]]
+name = "resolved short-circuits to ok"
+input = """
+Resolved 42 packages in 1.23s
+"""
+expected = "ok (locked)"
