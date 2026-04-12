@@ -29,6 +29,10 @@ rtk gain --quota -t pro   # quota analysis (pro/5x/20x tiers)
 # Export
 rtk gain --all --format json > savings.json
 rtk gain --all --format csv  > savings.csv
+
+# Reset local statistics (requires explicit confirmation)
+rtk gain --reset --confirm           # same as -y / --yes
+rtk gain --project --reset -y      # current repo only (commands table)
 ```
 
 ## Daily breakdown
@@ -127,9 +131,24 @@ sqlite3 ~/.local/share/rtk/history.db \
 # Backup
 cp ~/.local/share/rtk/history.db ~/backups/rtk-history-$(date +%Y%m%d).db
 
-# Reset
-rm ~/.local/share/rtk/history.db    # recreated on next command
+# Reset (built-in)
+rtk gain --reset --confirm          # deletes all command + parse-failure rows
+rtk gain --project --reset --confirm  # deletes command rows for cwd project only
+
+# Reset (manual — removes entire DB file; recreated on next RTK run)
+rm ~/.local/share/rtk/history.db
 ```
+
+### `rtk gain --reset`
+
+Deletes rows in the local SQLite database. **You must pass `--confirm`, `-y`, or `--yes` together with `--reset`** so the operation cannot run by accident.
+
+| Invocation | Effect |
+|------------|--------|
+| `rtk gain --reset --confirm` | Clears **all** `commands` and **all** `parse_failures`. |
+| `rtk gain --project --reset --confirm` | Clears **only** `commands` whose recorded `project_path` is this directory or a subdirectory. Parse failures are **not** removed (that log is not project-scoped). |
+
+After a reset, the next tracked command recreates aggregates from new data only.
 
 ## Analysis workflows
 

@@ -398,6 +398,31 @@ impl Tracker {
         Ok(())
     }
 
+    /// Delete all command history and parse-failure rows.
+    ///
+    /// Returns `(commands_deleted, parse_failures_deleted)` as reported by SQLite.
+    pub fn reset_all(&self) -> Result<(usize, usize)> {
+        let commands_deleted = self.conn.execute("DELETE FROM commands", [])?;
+        let failures_deleted = self.conn.execute("DELETE FROM parse_failures", [])?;
+        Ok((commands_deleted, failures_deleted))
+    }
+
+    /// Delete command rows for one project tree (exact `project_path` or subdirectory).
+    ///
+    /// Uses the same path matching rules as [`Tracker::get_summary_filtered`]. The
+    /// `parse_failures` table is not scoped by project and is left unchanged.
+    pub fn reset_project_commands(&self, project_root: &str) -> Result<usize> {
+        let (exact, glob) = project_filter_params(Some(project_root));
+        let (Some(exact), Some(glob)) = (exact, glob) else {
+            anyhow::bail!("internal: project filter params");
+        };
+        let n = self.conn.execute(
+            "DELETE FROM commands WHERE project_path = ?1 OR project_path GLOB ?2",
+            params![exact, glob],
+        )?;
+        Ok(n)
+    }
+
     /// Record a parse failure for analytics.
     pub fn record_parse_failure(
         &self,
@@ -1583,5 +1608,80 @@ mod tests {
         // We can't assert exact rate because other tests may have added records,
         // but we can verify recovery_rate is between 0 and 100
         assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
+    }
+
+    // 14. reset_all clears commands and parse_failures (isolated DB)
+    #[test]
+    fn test_reset_all_clears_commands_and_failures() {
+        use std::env;
+
+        let tmp = env::temp_dir().join(format!("rtk_reset_all_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        env::set_var("RTK_DB_PATH", &tmp);
+
+        let tracker = Tracker::new().expect("tracker");
+        let pid = std::process::id();
+        tracker
+            .record("oc", &format!("rtk_reset_cmd_{}", pid), 10, 5, 1)
+            .unwrap();
+        tracker
+            .record_parse_failure(&format!("raw_{}", pid), "err", true)
+            .unwrap();
+
+        let (nc, nf) = tracker.reset_all().unwrap();
+        assert!(nc >= 1);
+        assert!(nf >= 1);
+        assert_eq!(tracker.get_summary().unwrap().total_commands, 0);
+        assert_eq!(tracker.get_parse_failure_summary().unwrap().total, 0);
+
+        env::remove_var("RTK_DB_PATH");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // 15. reset_project_commands keeps other projects' rows
+    #[test]
+    fn test_reset_project_commands_scoped() {
+        use std::env;
+
+        let tmp = env::temp_dir().join(format!("rtk_reset_proj_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        env::set_var("RTK_DB_PATH", &tmp);
+
+        let base = tempfile::tempdir().expect("tempdir");
+        let proj_a = base.path().join("repo_a");
+        let proj_b = base.path().join("repo_b");
+        std::fs::create_dir_all(&proj_a).unwrap();
+        std::fs::create_dir_all(&proj_b).unwrap();
+        let canon_a = proj_a.canonicalize().unwrap();
+        let canon_b = proj_b.canonicalize().unwrap();
+
+        let old_cwd = env::current_dir().unwrap();
+        let tracker = Tracker::new().expect("tracker");
+        env::set_current_dir(&proj_a).unwrap();
+        tracker
+            .record("a1", "rtk_a", 10, 5, 1)
+            .expect("record in a");
+        env::set_current_dir(&proj_b).unwrap();
+        tracker
+            .record("b1", "rtk_b", 10, 5, 1)
+            .expect("record in b");
+
+        let n = tracker
+            .reset_project_commands(&canon_a.to_string_lossy())
+            .unwrap();
+        assert_eq!(n, 1);
+
+        let s_a = tracker
+            .get_summary_filtered(Some(&canon_a.to_string_lossy()))
+            .unwrap();
+        assert_eq!(s_a.total_commands, 0);
+        let s_b = tracker
+            .get_summary_filtered(Some(&canon_b.to_string_lossy()))
+            .unwrap();
+        assert_eq!(s_b.total_commands, 1);
+
+        env::set_current_dir(old_cwd).unwrap();
+        env::remove_var("RTK_DB_PATH");
+        let _ = std::fs::remove_file(&tmp);
     }
 }

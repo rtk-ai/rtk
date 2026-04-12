@@ -412,6 +412,12 @@ enum Commands {
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
+        /// Delete tracking rows from the local database (requires --confirm / -y)
+        #[arg(long)]
+        reset: bool,
+        /// Confirm `--reset` (safety guard; same as `-y` / `--yes`)
+        #[arg(long, short = 'y', visible_alias = "yes", requires = "reset")]
+        confirm: bool,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -1746,6 +1752,8 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             failures,
+            reset,
+            confirm,
         } => {
             analytics::gain::run(
                 project, // added: pass project flag
@@ -1759,6 +1767,8 @@ fn run_cli() -> Result<i32> {
                 all,
                 &format,
                 failures,
+                reset,
+                confirm,
                 cli.verbose,
             )?;
             0
@@ -2473,6 +2483,34 @@ mod tests {
                 _ => panic!("Expected Gain command"),
             }
         }
+    }
+
+    #[test]
+    fn test_gain_reset_confirm_parses() {
+        for args in [
+            vec!["rtk", "gain", "--reset", "--confirm"],
+            vec!["rtk", "gain", "--reset", "-y"],
+            vec!["rtk", "gain", "--reset", "--yes"],
+        ] {
+            let label = format!("{args:?}");
+            let result = Cli::try_parse_from(args);
+            assert!(result.is_ok(), "args {label} should parse");
+            if let Ok(cli) = result {
+                match cli.command {
+                    Commands::Gain { reset, confirm, .. } => {
+                        assert!(reset);
+                        assert!(confirm);
+                    }
+                    _ => panic!("Expected Gain command"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_confirm_without_reset_rejected() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--confirm"]);
+        assert!(result.is_err());
     }
 
     #[test]
