@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub gradle: GradleConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -128,6 +130,35 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct GradleConfig {
+    /// Package prefixes treated as "user code" in stack traces (kept, not dropped).
+    #[serde(default)]
+    pub user_packages: Vec<String>,
+    /// Additional regex patterns for lines to drop (applied after built-in global filters).
+    #[serde(default)]
+    pub extra_drop_patterns: Vec<String>,
+    /// Additional package prefixes to treat as framework noise in stack traces.
+    /// Built-in: java.*, kotlin.*, sun.*, javax.*, jdk.*, jakarta.*, *.internal.*
+    #[serde(default = "default_drop_frame_packages")]
+    pub drop_frame_packages: Vec<String>,
+}
+
+pub fn default_drop_frame_packages() -> Vec<String> {
+    vec![
+        "org.gradle".to_string(),
+        "org.junit.platform".to_string(),
+        "org.junit.jupiter.engine".to_string(),
+        "org.springframework".to_string(),
+        "com.google.inject".to_string(),
+        "io.grpc".to_string(),
+        "org.mockito".to_string(),
+        "io.mockk".to_string(),
+        "org.eclipse.jetty".to_string(),
+        "org.assertj.core.internal".to_string(),
+    ]
 }
 
 /// Check if telemetry is enabled in config. Returns None if config can't be loaded.
