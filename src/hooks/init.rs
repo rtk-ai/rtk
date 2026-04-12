@@ -297,8 +297,7 @@ pub fn run(
 }
 
 /// Prepare hook directory and return paths (hook_dir, hook_path)
-fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
-    let claude_dir = resolve_claude_dir()?;
+fn prepare_hook_paths(claude_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let hook_dir = claude_dir.join("hooks");
     fs::create_dir_all(&hook_dir)
         .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
@@ -437,8 +436,8 @@ fn prompt_user_consent(settings_path: &Path) -> Result<bool> {
 }
 
 /// Print manual instructions for settings.json patching
-fn print_manual_instructions(hook_path: &Path, include_opencode: bool) {
-    println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
+fn print_manual_instructions(hook_path: &Path, settings_path: &Path, include_opencode: bool) {
+    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
     println!("  {{");
     println!("    \"hooks\": {{ \"PreToolUse\": [{{");
     println!("      \"matcher\": \"Bash\",");
@@ -701,11 +700,11 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
 /// Handles reading, checking, prompting, merging, backing up, and atomic writing
 fn patch_settings_json(
     hook_path: &Path,
+    claude_dir: &Path,
     mode: PatchMode,
     verbose: u8,
     include_opencode: bool,
 ) -> Result<PatchResult> {
-    let claude_dir = resolve_claude_dir()?;
     let settings_path = claude_dir.join(SETTINGS_JSON);
     let hook_command = hook_path
         .to_str()
@@ -737,12 +736,12 @@ fn patch_settings_json(
     // Handle mode
     match mode {
         PatchMode::Skip => {
-            print_manual_instructions(hook_path, include_opencode);
+            print_manual_instructions(hook_path, &settings_path, include_opencode);
             return Ok(PatchResult::Skipped);
         }
         PatchMode::Ask => {
             if !prompt_user_consent(&settings_path)? {
-                print_manual_instructions(hook_path, include_opencode);
+                print_manual_instructions(hook_path, &settings_path, include_opencode);
                 return Ok(PatchResult::Declined);
             }
         }
@@ -907,7 +906,7 @@ fn run_default_mode(
     let claude_md_path = claude_dir.join(CLAUDE_MD);
 
     // 1. Prepare hook directory and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
+    let (_hook_dir, hook_path) = prepare_hook_paths(&claude_dir)?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
     // 2. Write RTK.md
@@ -944,7 +943,13 @@ fn run_default_mode(
     }
 
     // 5. Patch settings.json
-    let patch_result = patch_settings_json(&hook_path, patch_mode, verbose, install_opencode)?;
+    let patch_result = patch_settings_json(
+        &hook_path,
+        &claude_dir,
+        patch_mode,
+        verbose,
+        install_opencode,
+    )?;
 
     // Report result
     match patch_result {
@@ -1039,14 +1044,16 @@ fn run_hook_only_mode(
     verbose: u8,
     install_opencode: bool,
 ) -> Result<()> {
-    if !global {
-        eprintln!("[warn] Warning: --hook-only only makes sense with --global");
-        eprintln!("    For local projects, use default mode or --claude-md");
-        return Ok(());
-    }
+    let claude_dir = if global {
+        resolve_claude_dir()?
+    } else {
+        std::env::current_dir()?.join(".claude")
+    };
+
+    let scope = if global { "global" } else { "project-scoped" };
 
     // Prepare and install hook
-    let (_hook_dir, hook_path) = prepare_hook_paths()?;
+    let (_hook_dir, hook_path) = prepare_hook_paths(&claude_dir)?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
 
     let opencode_plugin_path = if install_opencode {
@@ -1062,7 +1069,7 @@ fn run_hook_only_mode(
     } else {
         "already up to date"
     };
-    println!("\nRTK hook {} (hook-only mode).\n", hook_status);
+    println!("\nRTK hook {} (hook-only mode, {}).\n", hook_status, scope);
     println!("  Hook: {}", hook_path.display());
     if let Some(path) = &opencode_plugin_path {
         println!("  OpenCode: {}", path.display());
@@ -1072,7 +1079,13 @@ fn run_hook_only_mode(
     );
 
     // Patch settings.json
-    let patch_result = patch_settings_json(&hook_path, patch_mode, verbose, install_opencode)?;
+    let patch_result = patch_settings_json(
+        &hook_path,
+        &claude_dir,
+        patch_mode,
+        verbose,
+        install_opencode,
+    )?;
 
     // Report result
     match patch_result {
