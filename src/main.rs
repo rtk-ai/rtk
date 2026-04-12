@@ -18,6 +18,7 @@ use cmds::js::{
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
+use cmds::swift::swift_cmd;
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read, summary,
     tree, wc_cmd,
@@ -637,6 +638,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Swift package manager with compact output
+    Swift {
+        #[command(subcommand)]
+        command: SwiftCommands,
+    },
+
     /// Pip package manager with compact output (auto-detects uv)
     Pip {
         /// Pip arguments (e.g., list, outdated, install)
@@ -1008,6 +1015,22 @@ enum DotnetCommands {
     /// Passthrough: runs any unsupported dotnet subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum SwiftCommands {
+    /// Build with compact output
+    Build {
+        /// Additional swift build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run tests with compact output
+    Test {
+        /// Additional swift test arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1970,6 +1993,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Rspec { args } => rspec_cmd::run(&args, cli.verbose)?,
 
+        Commands::Swift { command } => match command {
+            SwiftCommands::Build { args } => swift_cmd::run_build(&args, cli.verbose)?,
+            SwiftCommands::Test { args } => swift_cmd::run_test(&args, cli.verbose)?,
+        },
+
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
         Commands::Go { command } => match command {
@@ -2262,6 +2290,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
+            | Commands::Swift { .. }
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }

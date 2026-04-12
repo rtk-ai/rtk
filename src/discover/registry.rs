@@ -1599,6 +1599,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_swift_build() {
+        assert_eq!(
+            rewrite_command("swift build -c release", &[]),
+            Some("rtk swift build -c release".into())
+        );
+    }
+
     // --- #336: docker compose supported subcommands rewritten, unsupported skipped ---
 
     #[test]
