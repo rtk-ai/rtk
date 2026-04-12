@@ -53,7 +53,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^npm\s+(run|exec)",
+        pattern: r"^npm\s+(run|exec|install|ci|list|ls|outdated|audit|test|i)\b",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",

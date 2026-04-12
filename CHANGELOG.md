@@ -5,6 +5,12 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+* **rules:** expand npm rewrite pattern to include install, ci, list, outdated, audit, test ([#1148](https://github.com/rtk-ai/rtk/issues/1148))
+
 ## [0.34.3](https://github.com/rtk-ai/rtk/compare/v0.34.2...v0.34.3) (2026-04-02)
 
 
