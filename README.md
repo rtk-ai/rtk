@@ -234,6 +234,7 @@ rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
 rtk curl <url>                  # Auto-detect JSON + schema
 rtk wget <url>                  # Download, strip progress bars
+rtk bq query / show / ls        # BigQuery token-optimized outputs
 rtk summary <long command>      # Heuristic summary
 rtk proxy <command>             # Raw passthrough + tracking
 ```

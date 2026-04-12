@@ -1,0 +1,58 @@
+[filters.bq-show]
+description = "Compact bq show — strip noise, convert table to CSV, truncate schema output"
+match_command = "^bq\\s+show\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Updates are available",
+  "^please run:",
+  "^\\s*\\$ gcloud components",
+  "^-+-+-*-"
+]
+match_output = [
+  { pattern = "Not found:", message = "bq: table or dataset not found" },
+  { pattern = "Access Denied:", message = "bq: access denied" },
+]
+replace = [
+  { pattern = "^\\s*", replacement = "" },           # strip leading whitespace
+  { pattern = "\\s\\s+", replacement = ", " },        # 2+ spaces → CSV separator
+  { pattern = ",\\s*$", replacement = "" },           # strip trailing comma from alignment padding
+  { pattern = "^(\\|-)", replacement = ", $1" }       # prefix schema continuation rows with ", "
+]
+max_lines = 100
+truncate_lines_at = 200
+on_empty = "bq: no output"
+
+[[tests.bq-show]]
+name = "strips gcloud noise and converts to csv"
+input = """
+
+Updates are available for some Google Cloud CLI components.  To install them,
+please run:
+  $ gcloud components update
+
+  Last modified        Schema        Total Rows   Total Bytes
+ ----------------- -------------- -------------- -------------
+  01 Jan 12:00:00   col1:STRING    1000           50000
+"""
+expected = """Last modified, Schema, Total Rows, Total Bytes
+01 Jan 12:00:00, col1:STRING, 1000, 50000"""
+
+[[tests.bq-show]]
+name = "handles partitioned and clustered tables"
+input = """
+  Last modified         Schema         Type     Total Rows   Total Bytes    Expiration   Time Partitioning   Clustered Fields   Labels  
+ ----------------- ------------------- -------- ------------ ------------- ------------- ------------------- ------------------ -------- 
+  22 Mar 10:20:17   |- id: integer      TABLE    1000000      500000000                   DAY (event_date)    event_name, uid           
+                    |- event_name: str                                                                                                  
+                    |- event_date: date                                                                                                 
+"""
+expected = """Last modified, Schema, Type, Total Rows, Total Bytes, Expiration, Time Partitioning, Clustered Fields, Labels
+22 Mar 10:20:17, |- id: integer, TABLE, 1000000, 500000000, DAY (event_date), event_name, uid
+, |- event_name: str
+, |- event_date: date"""
+
+[[tests.bq-show]]
+name = "empty input shows no-output message"
+input = ""
+expected = "bq: no output"

@@ -1,0 +1,63 @@
+[filters.bq-ls]
+description = "Compact bq ls — strip gcloud noise and separator lines, convert space-aligned table list to CSV"
+match_command = "^bq\\s+ls\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Updates are available",
+  "^please run:",
+  "^\\s*\\$ gcloud components",
+  "^-+\\s*$",
+  "^\\s*-+\\s*-"
+]
+match_output = [
+  { pattern = "Not found:", message = "bq: dataset or project not found" },
+  { pattern = "Access Denied:", message = "bq: access denied" },
+]
+replace = [
+  { pattern = "^\\s{15,}", replacement = "  |- " }, # 15+ spaces -> continuation line
+  { pattern = "^\\s*", replacement = "" },      # strip leading whitespace
+  { pattern = "\\s\\s+", replacement = ", " },  # 2+ spaces → CSV separator
+  { pattern = ",\\s*$", replacement = "" },      # strip trailing comma from alignment padding
+  { pattern = "^\\|- tableId", replacement = "tableId" } # clean up prefixed header if any
+]
+max_lines = 200
+truncate_lines_at = 150
+on_empty = "bq ls: no datasets or tables found"
+
+[[tests.bq-ls]]
+name = "lists datasets and strips gcloud noise"
+input = """
+
+Updates are available for some Google Cloud CLI components.  To install them,
+please run:
+  $ gcloud components update
+
+   datasetId
+ --------------------
+  my_dataset
+  another_dataset
+  third_dataset
+"""
+expected = """datasetId
+my_dataset
+another_dataset
+third_dataset"""
+
+[[tests.bq-ls]]
+name = "lists tables with types and partitioning"
+input = """  tableId          Type     Labels   Time Partitioning
+ ----------------  -------  ------   -----------------
+  events           TABLE             DAY(event_date)
+  users            TABLE
+  sessions_view    VIEW
+"""
+expected = """tableId, Type, Labels, Time Partitioning
+events, TABLE, DAY(event_date)
+users, TABLE
+sessions_view, VIEW"""
+
+[[tests.bq-ls]]
+name = "empty input shows not-found message"
+input = ""
+expected = "bq ls: no datasets or tables found"

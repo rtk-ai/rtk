@@ -656,6 +656,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    RtkRule {
+        pattern: r"^bq\s+(query|show|ls|head|extract|load|mk|rm|cp)\b",
+        rtk_cmd: "rtk bq",
+        rewrite_prefixes: &["bq"],
+        category: "Infra",
+        savings_pct: 65.0,
+        subcmd_savings: &[("query", 70.0), ("show", 60.0)],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[
