@@ -24,6 +24,7 @@ colored = "2"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
+toon-rust = "0.1.3"
 chrono = "0.4"
 tempfile = "3"
 sha2 = "0.10"

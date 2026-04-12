@@ -89,6 +89,11 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
 /// Parse a JSON string and return compact representation with values preserved.
 /// Long strings are truncated, arrays are summarized.
 pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<String> {
+    // Try TOON first (lossless, better compression than compact_json)
+    if let Some(toon) = crate::core::toon_convert::json_to_toon(json_str) {
+        return Ok(toon);
+    }
+
     let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
     Ok(compact_json(&value, 0, max_depth))
 }
