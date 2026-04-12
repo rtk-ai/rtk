@@ -1330,6 +1330,7 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
     Ok(())
 }
 
+/// Codex mode: slim RTK.md + @RTK.md reference in AGENTS.md
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;

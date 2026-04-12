@@ -1,0 +1,94 @@
+[INFO] Scanning for projects...
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Build Order:
+[INFO]
+[INFO] E-DEAL Parent                                                      [pom]
+[INFO] edeal-common                                                       [jar]
+[INFO] edeal-webapp                                                       [war]
+[INFO]
+[INFO] ----------------< com.edeal.frontline:edeal-parent >----------------
+[INFO] Building E-DEAL Parent 2027-000-SNAPSHOT                           [1/3]
+[INFO]   from pom.xml
+[INFO] --------------------------------[ pom ]---------------------------------
+[INFO]
+[INFO] ----------------< com.edeal.frontline:edeal-common >----------------
+[INFO] Building edeal-common 2027-000-SNAPSHOT                            [2/3]
+[INFO]   from edeal-common/pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ edeal-common ---
+[INFO] Copying 12 resources from src/main/resources to target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ edeal-common ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:testResources (default-testResources) @ edeal-common ---
+[INFO] Copying 3 resources from src/test/resources to target/test-classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) @ edeal-common ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO]
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ edeal-common ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO]
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.edeal.frontline.util.DateUtilsTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.234 s -- in com.edeal.frontline.util.DateUtilsTest
+[INFO] Running com.edeal.frontline.util.StringUtilsTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.123 s -- in com.edeal.frontline.util.StringUtilsTest
+[INFO]
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
+[INFO]
+[INFO]
+[INFO] ----------------< com.edeal.frontline:edeal-webapp >----------------
+[INFO] Building edeal-webapp 2027-000-SNAPSHOT                            [3/3]
+[INFO]   from edeal-webapp/pom.xml
+[INFO] --------------------------------[ war ]---------------------------------
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ edeal-webapp ---
+[INFO] Copying 45 resources from src/main/resources to target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ edeal-webapp ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:testResources (default-testResources) @ edeal-webapp ---
+[INFO] Copying 5 resources from src/test/resources to target/test-classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) @ edeal-webapp ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO]
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ edeal-webapp ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO]
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.edeal.frontline.UserServiceTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.234 s -- in com.edeal.frontline.UserServiceTest
+[INFO] Running com.edeal.frontline.api.RestControllerTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.345 s -- in com.edeal.frontline.api.RestControllerTest
+[INFO] Running com.edeal.frontline.repository.UserRepositoryTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.567 s -- in com.edeal.frontline.repository.UserRepositoryTest
+[INFO] Running com.edeal.frontline.service.EmailServiceTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.345 s -- in com.edeal.frontline.service.EmailServiceTest
+[INFO]
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 14, Failures: 0, Errors: 0, Skipped: 0
+[INFO]
+[INFO] ------------------------------------------------------------------------
+[INFO] Reactor Summary for E-DEAL Parent 2027-000-SNAPSHOT:
+[INFO]
+[INFO] E-DEAL Parent ...................................... SUCCESS [  0.234 s]
+[INFO] edeal-common ....................................... SUCCESS [  3.456 s]
+[INFO] edeal-webapp ....................................... SUCCESS [ 15.678 s]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  22.345 s
+[INFO] Finished at: 2026-03-21T10:30:00+01:00
+[INFO] ------------------------------------------------------------------------

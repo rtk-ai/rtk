@@ -22,8 +22,14 @@ pub enum HookStatus {
 }
 
 /// Return the current hook status without printing anything.
-/// Returns `Ok` if no Claude Code is detected (not applicable).
+/// Returns `Ok` if no Claude Code is detected (not applicable)
+/// or if running on Windows (hooks not supported there).
 pub fn status() -> HookStatus {
+    // Hooks are Unix-only — don't warn on Windows
+    if cfg!(target_os = "windows") {
+        return HookStatus::Ok;
+    }
+
     // Don't warn users who don't have Claude Code installed
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -225,6 +231,13 @@ mod tests {
 
     #[test]
     fn test_status_returns_valid_variant() {
+        // On Windows, hooks aren't supported — status() always returns Ok
+        if cfg!(target_os = "windows") {
+            assert_eq!(status(), HookStatus::Ok);
+            return;
+        }
+
+        // Skip on machines without Claude Code or without hook
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => return,

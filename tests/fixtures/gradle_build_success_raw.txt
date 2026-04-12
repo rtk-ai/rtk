@@ -1,0 +1,38 @@
+Downloading https://services.gradle.org/distributions/gradle-9.1.0-bin.zip
+............10%.............20%.............30%.............40%.............50%............60%.............70%.............80%.............90%.............100%
+
+Welcome to Gradle 9.1.0!
+
+Here are the highlights of this release:
+ - Full Java 25 support
+ - Native task graph visualization
+ - Enhanced console output
+
+For more details see https://docs.gradle.org/9.1.0/release-notes.html
+
+Starting a Gradle Daemon (subsequent builds will be faster)
+
+> Configure project :
+> Configure project :edeal-common
+> Configure project :edeal-webapp
+
+> Task :edeal-common:compileJava UP-TO-DATE
+> Task :edeal-common:processResources UP-TO-DATE
+> Task :edeal-common:classes UP-TO-DATE
+> Task :edeal-common:jar UP-TO-DATE
+> Task :edeal-webapp:compileJava
+Note: Some input files use or override a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+> Task :edeal-webapp:processResources UP-TO-DATE
+> Task :edeal-webapp:classes
+> Task :edeal-webapp:war
+> Task :edeal-webapp:assemble
+> Task :edeal-common:compileTestJava NO-SOURCE
+> Task :edeal-webapp:compileTestJava UP-TO-DATE
+> Task :edeal-webapp:processTestResources NO-SOURCE
+> Task :edeal-webapp:testClasses UP-TO-DATE
+> Task :edeal-webapp:test UP-TO-DATE
+> Task :edeal-webapp:check UP-TO-DATE
+
+BUILD SUCCESSFUL in 28s
+14 actionable tasks: 3 executed, 11 up-to-date

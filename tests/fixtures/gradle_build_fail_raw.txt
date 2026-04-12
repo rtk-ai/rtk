@@ -1,0 +1,42 @@
+Starting a Gradle Daemon (subsequent builds will be faster)
+
+> Configure project :
+> Configure project :edeal-common
+
+> Task :edeal-common:compileJava UP-TO-DATE
+> Task :edeal-common:processResources UP-TO-DATE
+> Task :edeal-common:classes UP-TO-DATE
+> Task :edeal-common:jar UP-TO-DATE
+> Task :edeal-webapp:compileJava FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':edeal-webapp:compileJava'.
+> Compilation failed; see the compiler error output for details.
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to generate a Build Scan (Powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 12s
+5 actionable tasks: 1 executed, 4 up-to-date
+
+> Task :edeal-webapp:compileJava
+/home/dev/e-deal/edeal-webapp/src/main/java/com/edeal/frontline/UserService.java:42: error: cannot find symbol
+        return userRepository.findByEmail(email);
+                             ^
+  symbol:   method findByEmail(String)
+  location: variable userRepository of type UserRepository
+/home/dev/e-deal/edeal-webapp/src/main/java/com/edeal/frontline/UserService.java:58: error: method login in class AuthManager cannot be applied to given types;
+        authManager.login(user, password, rememberMe);
+                   ^
+  required: User, String
+  found:    User, String, boolean
+  reason: actual and formal argument lists differ in length
+/home/dev/e-deal/edeal-webapp/src/main/java/com/edeal/frontline/api/RestController.java:23: error: package javax.ws.rs does not exist
+import javax.ws.rs.GET;
+                  ^
+3 errors

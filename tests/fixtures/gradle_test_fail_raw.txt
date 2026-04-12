@@ -1,0 +1,73 @@
+Starting a Gradle Daemon (subsequent builds will be faster)
+
+> Configure project :
+> Configure project :edeal-common
+> Configure project :edeal-webapp
+
+> Task :edeal-common:compileJava UP-TO-DATE
+> Task :edeal-common:processResources UP-TO-DATE
+> Task :edeal-common:classes UP-TO-DATE
+> Task :edeal-common:jar UP-TO-DATE
+> Task :edeal-webapp:compileJava UP-TO-DATE
+> Task :edeal-webapp:processResources UP-TO-DATE
+> Task :edeal-webapp:classes UP-TO-DATE
+> Task :edeal-webapp:compileTestJava UP-TO-DATE
+> Task :edeal-webapp:processTestResources NO-SOURCE
+> Task :edeal-webapp:testClasses UP-TO-DATE
+> Task :edeal-webapp:test
+
+com.edeal.frontline.UserServiceTest > testGetUserByEmail PASSED
+com.edeal.frontline.UserServiceTest > testCreateUser PASSED
+com.edeal.frontline.UserServiceTest > testDeleteUser PASSED
+com.edeal.frontline.UserServiceTest > testUpdateUserProfile FAILED
+
+    com.edeal.frontline.UserServiceTest > testUpdateUserProfile FAILED
+        java.lang.AssertionError: Expected user name to be "John Updated" but was "John"
+            at org.junit.Assert.assertEquals(Assert.java:117)
+            at com.edeal.frontline.UserServiceTest.testUpdateUserProfile(UserServiceTest.java:89)
+            at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+            at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77)
+            at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+
+com.edeal.frontline.api.RestControllerTest > testGetEndpoint PASSED
+com.edeal.frontline.api.RestControllerTest > testPostEndpoint PASSED
+com.edeal.frontline.api.RestControllerTest > testAuthRequired FAILED
+
+    com.edeal.frontline.api.RestControllerTest > testAuthRequired FAILED
+        java.lang.AssertionError: Expected status code 401 but was 200
+            at org.junit.Assert.assertEquals(Assert.java:117)
+            at com.edeal.frontline.api.RestControllerTest.testAuthRequired(RestControllerTest.java:67)
+            at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+
+com.edeal.frontline.api.RestControllerTest > testPagination PASSED
+com.edeal.frontline.repository.UserRepositoryTest > testFindById PASSED
+com.edeal.frontline.repository.UserRepositoryTest > testFindByEmail PASSED
+com.edeal.frontline.repository.UserRepositoryTest > testSaveAndFlush PASSED
+com.edeal.frontline.service.EmailServiceTest > testSendEmail PASSED
+com.edeal.frontline.service.EmailServiceTest > testSendBulkEmail PASSED
+com.edeal.frontline.service.EmailServiceTest > testTemplateRendering PASSED
+com.edeal.frontline.util.DateUtilsTest > testFormatDate PASSED
+com.edeal.frontline.util.DateUtilsTest > testParseDate PASSED
+com.edeal.frontline.util.DateUtilsTest > testTimezoneConversion PASSED
+com.edeal.frontline.util.StringUtilsTest > testTruncate PASSED
+com.edeal.frontline.util.StringUtilsTest > testSanitizeHtml PASSED
+com.edeal.frontline.util.StringUtilsTest > testNormalize PASSED
+
+20 tests completed, 2 failed
+
+> Task :edeal-webapp:test FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':edeal-webapp:test'.
+> There were failing tests. See the report at: file:///home/dev/e-deal/edeal-webapp/build/reports/tests/test/index.html
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to generate a Build Scan (Powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 42s
+14 actionable tasks: 1 executed, 13 up-to-date
