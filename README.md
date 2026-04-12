@@ -244,10 +244,10 @@ rtk gain --history              # Recent command history
 rtk gain --daily                # Day-by-day breakdown
 rtk gain --all --format json    # JSON export for dashboards
 
-rtk discover                    # Find missed savings opportunities
+rtk discover                    # Find missed savings opportunities from session history
 rtk discover --all --since 7    # All projects, last 7 days
 
-rtk session                     # Show RTK adoption across recent sessions
+rtk session                     # Show RTK adoption across recent Claude/OpenCode sessions
 ```
 
 ## Global Flags

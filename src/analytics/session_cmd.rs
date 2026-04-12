@@ -1,11 +1,16 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
 use crate::core::utils::format_tokens;
-use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
+use crate::discover::provider::{
+    ClaudeProvider, ExtractedCommand, OpenCodeProvider, SessionProvider,
+};
 use crate::discover::registry::{classify_command, split_command_chain, Classification};
-use anyhow::{Context, Result};
+use anyhow::Result;
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const OPENCODE_SESSION_PREFIX: &str = "opencode-session:";
 
 /// A summarized session for display.
 struct SessionSummary {
@@ -56,15 +61,108 @@ fn progress_bar(pct: f64, width: usize) -> String {
     format!("{}{}", "@".repeat(filled), ".".repeat(empty))
 }
 
+fn opencode_session_id(path: &Path) -> Option<String> {
+    path.to_string_lossy()
+        .strip_prefix(OPENCODE_SESSION_PREFIX)
+        .map(str::to_string)
+}
+
+fn load_opencode_session_times() -> HashMap<String, i64> {
+    let db_path = match dirs::home_dir() {
+        Some(h) => h.join(".local/share/opencode/opencode.db"),
+        None => return HashMap::new(),
+    };
+
+    let conn = match rusqlite::Connection::open(db_path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut stmt = match conn.prepare("SELECT id, time_updated FROM session") {
+        Ok(s) => s,
+        Err(_) => return HashMap::new(),
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let ts: i64 = row.get(1)?;
+        Ok((
+            id,
+            if ts > 1_000_000_000_000 {
+                ts / 1000
+            } else {
+                ts
+            },
+        ))
+    }) {
+        Ok(r) => r,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut out = HashMap::new();
+    for row in rows.flatten() {
+        out.insert(row.0, row.1);
+    }
+    out
+}
+
+fn session_updated_unix(path: &Path, opencode_times: &HashMap<String, i64>) -> i64 {
+    if let Some(id) = opencode_session_id(path) {
+        return *opencode_times.get(&id).unwrap_or(&0);
+    }
+
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn format_relative_date(unix_ts: i64) -> String {
+    if unix_ts <= 0 {
+        return "?".to_string();
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let delta = (now - unix_ts).max(0) as u64;
+    let days = delta / 86400;
+    if days == 0 {
+        "Today".to_string()
+    } else if days == 1 {
+        "Yesterday".to_string()
+    } else {
+        format!("{}d ago", days)
+    }
+}
+
 pub fn run(_verbose: u8) -> Result<()> {
     let provider = ClaudeProvider;
-    let sessions = provider
-        .discover_sessions(None, Some(30))
-        .context("Failed to discover Claude Code sessions")?;
+    let opencode_provider = OpenCodeProvider::default();
+
+    let mut sessions = Vec::new();
+    let mut available_sources = 0usize;
+
+    if let Ok(mut claude_sessions) = provider.discover_sessions(None, Some(30)) {
+        available_sources += 1;
+        sessions.append(&mut claude_sessions);
+    }
+
+    if let Ok(mut opencode_sessions) = opencode_provider.discover_sessions(None, Some(30)) {
+        available_sources += 1;
+        sessions.append(&mut opencode_sessions);
+    }
+
+    if available_sources == 0 {
+        anyhow::bail!("Failed to discover Claude Code/OpenCode sessions");
+    }
 
     if sessions.is_empty() {
-        println!("No Claude Code sessions found in the last 30 days.");
-        println!("Make sure Claude Code has been used at least once.");
+        println!("No Claude Code/OpenCode sessions found in the last 30 days.");
+        println!("Make sure Claude Code or OpenCode has been used at least once.");
         return Ok(());
     }
 
@@ -77,15 +175,13 @@ pub fn run(_verbose: u8) -> Result<()> {
         })
         .collect();
 
-    // Sort by mtime desc
+    let opencode_times = load_opencode_session_times();
+
+    // Sort by updated time desc (filesystem for Claude, DB for OpenCode)
     session_files.sort_by(|a, b| {
-        let ma = fs::metadata(a)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let mb = fs::metadata(b)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        mb.cmp(&ma)
+        let ta = session_updated_unix(a, &opencode_times);
+        let tb = session_updated_unix(b, &opencode_times);
+        tb.cmp(&ta)
     });
 
     // Take top 10
@@ -96,7 +192,10 @@ pub fn run(_verbose: u8) -> Result<()> {
     for path in &session_files {
         let cmds = match provider.extract_commands(path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => match opencode_provider.extract_commands(path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            },
         };
 
         if cmds.is_empty() {
@@ -106,32 +205,23 @@ pub fn run(_verbose: u8) -> Result<()> {
         let (total_cmds, rtk_cmds, output_tokens) = count_rtk_commands(&cmds);
 
         // Extract session ID from filename
-        let id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        let short_id = if id.len() > 8 { &id[..8] } else { id };
+        let id = opencode_session_id(path).unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
+        let short_id = if id.len() > 8 {
+            id[..8].to_string()
+        } else {
+            id
+        };
 
-        // Extract date from mtime
-        let date = fs::metadata(path)
-            .and_then(|m| m.modified())
-            .map(|t| {
-                let elapsed = std::time::SystemTime::now()
-                    .duration_since(t)
-                    .unwrap_or_default();
-                let days = elapsed.as_secs() / 86400;
-                if days == 0 {
-                    "Today".to_string()
-                } else if days == 1 {
-                    "Yesterday".to_string()
-                } else {
-                    format!("{}d ago", days)
-                }
-            })
-            .unwrap_or_else(|_| "?".to_string());
+        let updated_unix = session_updated_unix(path, &opencode_times);
+        let date = format_relative_date(updated_unix);
 
         summaries.push(SessionSummary {
-            id: short_id.to_string(),
+            id: short_id,
             date,
             total_cmds,
             rtk_cmds,

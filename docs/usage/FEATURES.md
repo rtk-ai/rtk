@@ -1112,7 +1112,7 @@ Top commands:
 
 ### `rtk discover` -- Opportunites manquees
 
-**Objectif :** Analyse l'historique Claude Code pour trouver les commandes qui auraient pu etre optimisees par rtk.
+**Objectif :** Analyse l'historique Claude Code/OpenCode pour trouver les commandes qui auraient pu etre optimisees par rtk.
 
 ```bash
 rtk discover                          # Projet courant, 30 derniers jours
@@ -1136,7 +1136,7 @@ rtk discover --format json            # Export JSON
 
 ### `rtk learn` -- Apprendre des erreurs
 
-**Objectif :** Analyse l'historique d'erreurs CLI de Claude Code pour detecter les corrections recurrentes.
+**Objectif :** Analyse l'historique d'erreurs CLI de Claude Code/OpenCode pour detecter les corrections recurrentes.
 
 ```bash
 rtk learn                             # Projet courant

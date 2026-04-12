@@ -41,9 +41,9 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 
 ## How History Analysis Works
 
-`rtk discover` reads Claude Code JSONL session files. Each file contains `tool_use`/`tool_result` pairs for every command the LLM ran. The module:
+`rtk discover` reads Claude Code JSONL sessions and OpenCode SQLite sessions. The module:
 
-1. Extracts commands from the JSONL (via `SessionProvider` trait — currently only Claude Code)
+1. Extracts commands via `SessionProvider` implementations (Claude Code + OpenCode)
 2. Splits compound commands using the same lexer-based tokenization
 3. Classifies each command against the same rules used for live rewriting
 4. Aggregates results: which commands could have been rewritten, estimated token savings, adoption rate

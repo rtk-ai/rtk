@@ -9,7 +9,7 @@ pub mod rules;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, OpenCodeProvider, SessionProvider};
 use registry::{
     category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
     strip_disabled_prefix, Classification,
@@ -42,6 +42,7 @@ pub fn run(
     verbose: u8,
 ) -> Result<()> {
     let provider = ClaudeProvider;
+    let opencode_provider = OpenCodeProvider::default();
 
     // Determine project filter
     let project_filter = if all {
@@ -51,12 +52,47 @@ pub fn run(
     } else {
         // Default: current working directory
         let cwd = std::env::current_dir()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        Some(cwd.to_string_lossy().to_string())
     };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    let mut sessions = Vec::new();
+    let mut available_sources = 0usize;
+
+    match provider.discover_sessions(project_filter.as_deref(), Some(since_days)) {
+        Ok(mut claude_sessions) => {
+            available_sources += 1;
+            if verbose > 0 {
+                eprintln!("Found {} Claude Code sessions", claude_sessions.len());
+            }
+            sessions.append(&mut claude_sessions);
+        }
+        Err(e) => {
+            if verbose > 0 {
+                eprintln!("Warning: Claude Code sessions unavailable: {}", e);
+            }
+        }
+    }
+
+    match opencode_provider.discover_sessions(project_filter.as_deref(), Some(since_days)) {
+        Ok(mut opencode_sessions) => {
+            available_sources += 1;
+            if verbose > 0 {
+                eprintln!("Found {} OpenCode sessions", opencode_sessions.len());
+            }
+            sessions.append(&mut opencode_sessions);
+        }
+        Err(e) => {
+            if verbose > 0 {
+                eprintln!("Warning: OpenCode sessions unavailable: {}", e);
+            }
+        }
+    }
+
+    if available_sources == 0 {
+        anyhow::bail!(
+            "No session sources available. Use Claude Code or OpenCode at least once, then rerun discover."
+        );
+    }
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
@@ -76,13 +112,16 @@ pub fn run(
     for session_path in &sessions {
         let extracted = match provider.extract_commands(session_path) {
             Ok(cmds) => cmds,
-            Err(e) => {
-                if verbose > 0 {
-                    eprintln!("Warning: skipping {}: {}", session_path.display(), e);
+            Err(_) => match opencode_provider.extract_commands(session_path) {
+                Ok(cmds) => cmds,
+                Err(e) => {
+                    if verbose > 0 {
+                        eprintln!("Warning: skipping {}: {}", session_path.display(), e);
+                    }
+                    parse_errors += 1;
+                    continue;
                 }
-                parse_errors += 1;
-                continue;
-            }
+            },
         };
 
         for ext_cmd in &extracted {

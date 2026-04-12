@@ -1,4 +1,4 @@
-//! Reads Claude Code session logs from disk and streams their command history.
+//! Reads agent session logs and streams their command history.
 
 use crate::hooks::constants::CLAUDE_DIR;
 use anyhow::{Context, Result};
@@ -8,6 +8,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
+
+const OPENCODE_DB_RELATIVE_PATH: &str = ".local/share/opencode/opencode.db";
+const OPENCODE_SESSION_PREFIX: &str = "opencode-session:";
 
 /// A command extracted from a session file.
 #[derive(Debug)]
@@ -62,6 +65,59 @@ impl ClaudeProvider {
     }
 }
 
+#[derive(Default)]
+pub struct OpenCodeProvider {
+    db_path: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct OpenCodePartRow {
+    key: String,
+    time_updated: i64,
+    command: String,
+    output: Option<String>,
+    error_output: Option<String>,
+    status: Option<String>,
+}
+
+impl OpenCodeProvider {
+    fn db_path(&self) -> Result<PathBuf> {
+        if let Some(path) = &self.db_path {
+            return Ok(path.clone());
+        }
+
+        let home = dirs::home_dir().context("could not determine home directory")?;
+        let path = home.join(OPENCODE_DB_RELATIVE_PATH);
+
+        if !path.exists() {
+            anyhow::bail!(
+                "OpenCode database not found: {}\nMake sure OpenCode has been used at least once.",
+                path.display()
+            );
+        }
+
+        Ok(path)
+    }
+
+    fn session_path_from_id(id: &str) -> PathBuf {
+        PathBuf::from(format!("{}{}", OPENCODE_SESSION_PREFIX, id))
+    }
+
+    fn session_id_from_path(path: &Path) -> Option<String> {
+        let raw = path.to_string_lossy();
+        raw.strip_prefix(OPENCODE_SESSION_PREFIX)
+            .map(str::to_string)
+    }
+
+    fn to_unix_seconds(ts: i64) -> i64 {
+        if ts > 1_000_000_000_000 {
+            ts / 1000
+        } else {
+            ts
+        }
+    }
+}
+
 impl SessionProvider for ClaudeProvider {
     fn discover_sessions(
         &self,
@@ -90,7 +146,8 @@ impl SessionProvider for ClaudeProvider {
             // Apply project filter: substring match on directory name
             if let Some(filter) = project_filter {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !dir_name.contains(filter) {
+                let encoded_filter = ClaudeProvider::encode_project_path(filter);
+                if !dir_name.contains(filter) && !dir_name.contains(&encoded_filter) {
                     continue;
                 }
             }
@@ -242,10 +299,138 @@ impl SessionProvider for ClaudeProvider {
     }
 }
 
+impl SessionProvider for OpenCodeProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let db_path = self.db_path()?;
+        let conn = rusqlite::Connection::open(&db_path)
+            .with_context(|| format!("failed to open {}", db_path.display()))?;
+
+        let cutoff_unix = since_days.map(|days| {
+            let cutoff = SystemTime::now()
+                .checked_sub(Duration::from_secs(days * 86400))
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            cutoff
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        });
+
+        let mut stmt = conn.prepare("SELECT id, directory, time_updated FROM session")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let directory: String = row.get(1)?;
+            let time_updated: i64 = row.get(2)?;
+            Ok((id, directory, time_updated))
+        })?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (id, directory, time_updated) = row?;
+
+            if let Some(filter) = project_filter {
+                if !directory.contains(filter) {
+                    continue;
+                }
+            }
+
+            if let Some(cutoff) = cutoff_unix {
+                if OpenCodeProvider::to_unix_seconds(time_updated) < cutoff {
+                    continue;
+                }
+            }
+
+            sessions.push(OpenCodeProvider::session_path_from_id(&id));
+        }
+
+        Ok(sessions)
+    }
+
+    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+        let session_id = OpenCodeProvider::session_id_from_path(path)
+            .with_context(|| format!("invalid OpenCode session path: {}", path.display()))?;
+
+        let db_path = self.db_path()?;
+        let conn = rusqlite::Connection::open(&db_path)
+            .with_context(|| format!("failed to open {}", db_path.display()))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id,
+                    time_updated,
+                    json_extract(data, '$.callID') AS call_id,
+                    json_extract(data, '$.state.input.command') AS command,
+                    json_extract(data, '$.state.output') AS output,
+                    json_extract(data, '$.state.error') AS error_output,
+                    json_extract(data, '$.state.status') AS status
+             FROM part
+             WHERE session_id = ?1
+               AND json_extract(data, '$.type') = 'tool'
+               AND lower(json_extract(data, '$.tool')) IN ('bash', 'shell')
+             ORDER BY time_updated ASC",
+        )?;
+
+        let rows = stmt.query_map([session_id.as_str()], |row| {
+            let id: String = row.get(0)?;
+            let time_updated: i64 = row.get(1)?;
+            let call_id: Option<String> = row.get(2)?;
+            let command: Option<String> = row.get(3)?;
+            let output: Option<String> = row.get(4)?;
+            let error_output: Option<String> = row.get(5)?;
+            let status: Option<String> = row.get(6)?;
+            Ok(OpenCodePartRow {
+                key: call_id.unwrap_or(id),
+                time_updated,
+                command: command.unwrap_or_default(),
+                output,
+                error_output,
+                status,
+            })
+        })?;
+
+        // Keep the latest state per callID (running -> completed/error)
+        let mut by_call: HashMap<String, OpenCodePartRow> = HashMap::new();
+        for row in rows {
+            let parsed = row?;
+            by_call.insert(parsed.key.clone(), parsed);
+        }
+
+        let mut latest_rows: Vec<OpenCodePartRow> = by_call.into_values().collect();
+        latest_rows.sort_by_key(|r| r.time_updated);
+
+        let mut commands = Vec::new();
+        for (sequence_index, row) in latest_rows.into_iter().enumerate() {
+            if row.command.trim().is_empty() {
+                continue;
+            }
+
+            let output = row.output.or(row.error_output);
+            let output_len = output.as_ref().map(|content| content.len());
+            let output_content = output.map(|content| content.chars().take(1000).collect());
+            let is_error = row.status.as_deref() == Some("error");
+
+            commands.push(ExtractedCommand {
+                command: row.command,
+                output_len,
+                session_id: session_id.clone(),
+                output_content,
+                is_error,
+                sequence_index,
+            });
+        }
+
+        Ok(commands)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::{params, Connection};
     use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -392,5 +577,164 @@ mod tests {
         assert_eq!(cmds[0].command, "first");
         assert_eq!(cmds[1].command, "second");
         assert_eq!(cmds[2].command, "third");
+    }
+
+    fn setup_opencode_db() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("opencode.db");
+        let conn = Connection::open(&db_path).unwrap();
+
+        conn.execute(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL,
+                time_updated INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        (temp, db_path)
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    #[test]
+    fn test_opencode_discover_sessions_filters_project_and_since() {
+        let (_temp, db_path) = setup_opencode_db();
+        let conn = Connection::open(&db_path).unwrap();
+        let now = now_ms();
+        let old = now - (40 * 86_400 * 1000);
+
+        conn.execute(
+            "INSERT INTO session (id, directory, time_updated) VALUES (?1, ?2, ?3)",
+            params!["ses_new_match", "/home/user/code/rtk", now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, time_updated) VALUES (?1, ?2, ?3)",
+            params!["ses_new_other", "/home/user/code/other", now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, directory, time_updated) VALUES (?1, ?2, ?3)",
+            params!["ses_old_match", "/home/user/code/rtk", old],
+        )
+        .unwrap();
+
+        let provider = OpenCodeProvider {
+            db_path: Some(db_path),
+        };
+        let sessions = provider.discover_sessions(Some("rtk"), Some(30)).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].to_string_lossy(),
+            "opencode-session:ses_new_match"
+        );
+    }
+
+    #[test]
+    fn test_opencode_extract_commands_reads_bash_tools() {
+        let (_temp, db_path) = setup_opencode_db();
+        let conn = Connection::open(&db_path).unwrap();
+
+        conn.execute(
+            "INSERT INTO session (id, directory, time_updated) VALUES (?1, ?2, ?3)",
+            params!["ses_1", "/home/user/code/rtk", now_ms()],
+        )
+        .unwrap();
+
+        let bash_data = r#"{"type":"tool","tool":"bash","callID":"call_1","state":{"status":"completed","input":{"command":"git status"},"output":"clean"}}"#;
+        conn.execute(
+            "INSERT INTO part (id, session_id, time_updated, data) VALUES (?1, ?2, ?3, ?4)",
+            params!["prt_1", "ses_1", now_ms(), bash_data],
+        )
+        .unwrap();
+
+        let read_data = r#"{"type":"tool","tool":"read","callID":"call_2","state":{"status":"completed","input":{"filePath":"/tmp/x"},"output":"abc"}}"#;
+        conn.execute(
+            "INSERT INTO part (id, session_id, time_updated, data) VALUES (?1, ?2, ?3, ?4)",
+            params!["prt_2", "ses_1", now_ms() + 1, read_data],
+        )
+        .unwrap();
+
+        let provider = OpenCodeProvider {
+            db_path: Some(db_path),
+        };
+        let cmds = provider
+            .extract_commands(Path::new("opencode-session:ses_1"))
+            .unwrap();
+
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git status");
+        assert_eq!(cmds[0].output_len, Some("clean".len()));
+        assert!(!cmds[0].is_error);
+    }
+
+    #[test]
+    fn test_opencode_extract_commands_uses_latest_call_state() {
+        let (_temp, db_path) = setup_opencode_db();
+        let conn = Connection::open(&db_path).unwrap();
+        let t = now_ms();
+
+        conn.execute(
+            "INSERT INTO session (id, directory, time_updated) VALUES (?1, ?2, ?3)",
+            params!["ses_2", "/home/user/code/rtk", t],
+        )
+        .unwrap();
+
+        let running = r#"{"type":"tool","tool":"bash","callID":"call_same","state":{"status":"running","input":{"command":"cargo test"}}}"#;
+        let completed = r#"{"type":"tool","tool":"bash","callID":"call_same","state":{"status":"completed","input":{"command":"cargo test"},"output":"ok"}}"#;
+        let errored = r#"{"type":"tool","tool":"bash","callID":"call_err","state":{"status":"error","input":{"command":"git bad"},"error":"failed"}}"#;
+
+        conn.execute(
+            "INSERT INTO part (id, session_id, time_updated, data) VALUES (?1, ?2, ?3, ?4)",
+            params!["prt_r", "ses_2", t, running],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (id, session_id, time_updated, data) VALUES (?1, ?2, ?3, ?4)",
+            params!["prt_c", "ses_2", t + 1, completed],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part (id, session_id, time_updated, data) VALUES (?1, ?2, ?3, ?4)",
+            params!["prt_e", "ses_2", t + 2, errored],
+        )
+        .unwrap();
+
+        let provider = OpenCodeProvider {
+            db_path: Some(db_path),
+        };
+        let cmds = provider
+            .extract_commands(Path::new("opencode-session:ses_2"))
+            .unwrap();
+
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].command, "cargo test");
+        assert_eq!(cmds[0].output_len, Some(2));
+        assert!(!cmds[0].is_error);
+
+        assert_eq!(cmds[1].command, "git bad");
+        assert_eq!(cmds[1].output_len, Some("failed".len()));
+        assert_eq!(cmds[1].output_content.as_deref(), Some("failed"));
+        assert!(cmds[1].is_error);
     }
 }
