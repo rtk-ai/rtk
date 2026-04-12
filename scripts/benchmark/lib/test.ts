@@ -137,7 +137,8 @@ export async function testRewrite(
   input: string,
   expected: string
 ): Promise<TestResult> {
-  const { stdout } = await vmExec(`${RTK_BIN} rewrite '${input}'`);
+  const escaped = input.replace(/'/g, "'\\''");
+  const { stdout } = await vmExec(`${RTK_BIN} rewrite '${escaped}'`);
   const actual = stdout.trim();
 
   let status: TestStatus;

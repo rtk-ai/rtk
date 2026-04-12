@@ -41,20 +41,29 @@ export async function vmStart(): Promise<void> {
   await $`multipass start ${VM_NAME}`;
 }
 
-/** Execute a command in the VM, returns stdout */
-export async function vmExec(cmd: string): Promise<{
+/** Execute a command in the VM, returns stdout (60s timeout per test by default) */
+export async function vmExec(
+  cmd: string,
+  timeoutMs = 60_000
+): Promise<{
   stdout: string;
   stderr: string;
   exitCode: number;
 }> {
-  const result = await $`multipass exec ${VM_NAME} -- bash -c ${cmd}`
+  const exec = $`multipass exec ${VM_NAME} -- bash -c ${cmd}`
     .quiet()
-    .nothrow();
-  return {
-    stdout: result.stdout.toString(),
-    stderr: result.stderr.toString(),
-    exitCode: result.exitCode,
-  };
+    .nothrow()
+    .then((r) => ({
+      stdout: r.stdout.toString(),
+      stderr: r.stderr.toString(),
+      exitCode: r.exitCode,
+    }));
+
+  const timeout = new Promise<{ stdout: string; stderr: string; exitCode: number }>((_, reject) =>
+    setTimeout(() => reject(new Error(`vmExec timed out after ${timeoutMs}ms: ${cmd}`)), timeoutMs)
+  );
+
+  return Promise.race([exec, timeout]);
 }
 
 /** Transfer a file to the VM */

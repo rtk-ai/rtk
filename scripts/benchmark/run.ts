@@ -26,6 +26,9 @@ if (args.includes("--phase") && phaseOnly === null) {
   console.error("Error: --phase requires a number (e.g. --phase 3)");
   process.exit(1);
 }
+const reportPath = args.includes("--report")
+  ? args[args.indexOf("--report") + 1]
+  : `${new URL("../../", import.meta.url).pathname.replace(/\/$/, "")}/benchmark-report.txt`;
 
 const PROJECT_ROOT = new URL("../../", import.meta.url).pathname.replace(/\/$/, "");
 const RTK = RTK_BIN;
@@ -84,16 +87,10 @@ if (shouldRun(2)) {
     "export PATH=$HOME/.cargo/bin:$PATH && cd /home/ubuntu/rtk && cargo clippy --all-targets -- -D warnings 2>&1"
   );
 
-  const testResult = await vmExec(
+  await testCmd(
+    "quality:cargo test",
     "export PATH=$HOME/.cargo/bin:$PATH && cd /home/ubuntu/rtk && cargo test --all 2>&1"
   );
-  const testLine = testResult.stdout.split("\n").find((l) => l.startsWith("test result"));
-  if (testLine?.includes("0 failed")) {
-    const count = testLine.match(/(\d+) passed/)?.[1] ?? "?";
-    await testCmd("quality:cargo test", `echo '${count} tests passed'`);
-  } else {
-    await testCmd("quality:cargo test", "exit 1", 0);
-  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -411,7 +408,7 @@ if (shouldRun(11) && !quick) {
 
 const report = await saveReport(
   { ...buildInfo, branch, commit },
-  "/tmp/rtk-test-report.txt"
+  reportPath
 );
 
 console.log("\n" + report);
