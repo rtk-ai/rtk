@@ -409,7 +409,7 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Privacy & Telemetry
 
-RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers. For the full list of fields, data handling, and contributor guidelines, see **[docs/TELEMETRY.md](docs/TELEMETRY.md)**.
+RTK can collect **anonymous, aggregate usage metrics** once per day. Telemetry is **disabled by default** and requires **explicit opt-in consent** (GDPR Art. 6, 7) during `rtk init` or via `rtk telemetry enable`. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers. For the full list of fields, data handling, and contributor guidelines, see **[docs/TELEMETRY.md](docs/TELEMETRY.md)**.
 
 **What is collected and why:**
 
@@ -430,14 +430,17 @@ All data is **aggregate counts or anonymized command names** (first 3 words, no 
 
 **What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, personal data, or repository contents.
 
-**Opt-out** (any of these):
+**Manage telemetry:**
 ```bash
-# Environment variable
-export RTK_TELEMETRY_DISABLED=1
+rtk telemetry status     # Check current consent state
+rtk telemetry enable     # Give consent (interactive prompt)
+rtk telemetry disable    # Withdraw consent — stops all collection immediately
+rtk telemetry forget     # Withdraw consent + delete all local data + request server-side erasure
+```
 
-# Or in config file (~/.config/rtk/config.toml)
-[telemetry]
-enabled = false
+**Override via environment:**
+```bash
+export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
 ```
 
 ## Star History

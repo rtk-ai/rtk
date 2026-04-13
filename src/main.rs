@@ -543,6 +543,12 @@ enum Commands {
     /// Show RTK adoption across Claude Code sessions
     Session {},
 
+    /// Manage telemetry consent and data (RGPD/GDPR)
+    Telemetry {
+        #[command(subcommand)]
+        command: core::telemetry_cmd::TelemetrySubcommand,
+    },
+
     /// Learn CLI corrections from Claude Code error history
     Learn {
         /// Filter by project path (substring match)
@@ -1892,6 +1898,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Session {} => {
             analytics::session_cmd::run(cli.verbose)?;
+            0
+        }
+
+        Commands::Telemetry { command } => {
+            core::telemetry_cmd::run(&command)?;
             0
         }
 
