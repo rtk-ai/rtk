@@ -1,6 +1,7 @@
 ---
 model: sonnet
 description: RTK Code Review — Review locale pre-PR avec auto-fix
+argument-hint: "[--fix] [file-pattern]"
 ---
 
 # RTK Code Review

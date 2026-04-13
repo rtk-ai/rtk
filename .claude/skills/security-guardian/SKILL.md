@@ -1,5 +1,6 @@
 ---
 description: CLI security expert for RTK - command injection, shell escaping, hook security
+allowed-tools: Read Grep Glob Bash
 ---
 
 # Security Guardian
