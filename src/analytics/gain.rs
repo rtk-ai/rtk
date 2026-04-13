@@ -1,6 +1,8 @@
 //! Shows users how many tokens RTK has saved them over time.
 
-use crate::core::display_helpers::{format_duration, print_period_table};
+use crate::core::display_helpers::{
+    format_duration, print_period_table, start_output_capture, take_output_capture,
+};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
@@ -12,6 +14,13 @@ use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+// Shadow `println!` to route through the capture system.
+// When capture is active (watch mode) → buffer; when inactive → regular stdout.
+macro_rules! println {
+    () => { crate::core::display_helpers::captured_println(format_args!("")) };
+    ($($arg:tt)*) => { crate::core::display_helpers::captured_println(format_args!($($arg)*)) };
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -49,12 +58,14 @@ pub fn run(
     )
 }
 
-/// RAII guard that hides the terminal cursor on creation and restores it on drop (including panic).
+/// RAII guard that switches to the alternate screen buffer, hides the cursor,
+/// and restores everything on drop (including panic).
 struct CursorGuard;
 
 impl CursorGuard {
     fn new() -> Self {
-        print!("\x1b[?25l");
+        // Alternate screen buffer + hide cursor + disable line wrapping
+        print!("\x1b[?1049h\x1b[?25l\x1b[?7l");
         let _ = std::io::stdout().flush();
         Self
     }
@@ -62,9 +73,17 @@ impl CursorGuard {
 
 impl Drop for CursorGuard {
     fn drop(&mut self) {
-        let _ = write!(std::io::stdout(), "\x1b[?25h");
+        // Re-enable line wrapping + show cursor + leave alternate screen buffer
+        let _ = write!(std::io::stdout(), "\x1b[?7h\x1b[?25h\x1b[?1049l");
         let _ = std::io::stdout().flush();
     }
+}
+
+/// Returns (width, height) of the terminal, with sensible defaults.
+fn terminal_dimensions() -> (usize, usize) {
+    terminal_size::terminal_size()
+        .map(|(w, h)| (w.0 as usize, h.0 as usize))
+        .unwrap_or((80, 24))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -119,14 +138,21 @@ fn run_watch_loop(
     let _cursor_guard = CursorGuard::new();
 
     while running.load(Ordering::SeqCst) {
-        print!("\x1b[H");
-        let _ = std::io::stdout().flush();
+        let (term_w, term_h) = terminal_dimensions();
+
+        // Capture all println! output to a buffer (via the shadow macro).
+        start_output_capture();
 
         let now = Local::now().format("%Y-%m-%d %H:%M:%S");
         println!("Every {}s: {:<40} {}", interval, flags, now);
         println!();
 
-        // Ignore display errors in watch mode (DB might be temporarily locked)
+        // Reserve lines for: watch header(2) + title(1) + sep(1) + blank(1) +
+        // KPIs(6) + blank(1) + section header(1) + table header(3) + table footer(2)
+        // = ~18 lines of overhead before command rows
+        let overhead = 18;
+        let max_cmd_rows = term_h.saturating_sub(overhead).max(3);
+
         let _ = run_display(
             &tracker,
             project_scope.as_deref(),
@@ -139,9 +165,16 @@ fn run_watch_loop(
             monthly,
             all,
             failures,
+            Some(max_cmd_rows),
+            Some(term_w),
         );
 
-        print!("\x1b[J");
+        // Flush the entire frame in a single write: home + content + clear-to-end.
+        // The terminal processes this atomically — no visible blank frame.
+        // \x1b[K (clear to end of line) is already embedded in each line by captured_println.
+        if let Some(content) = take_output_capture() {
+            print!("\x1b[H{}\x1b[J", content);
+        }
         let _ = std::io::stdout().flush();
 
         for _ in 0..(interval * 10) {
@@ -213,6 +246,8 @@ fn run_once(
         monthly,
         all,
         failures,
+        None,
+        None,
     )
 }
 
@@ -230,6 +265,8 @@ fn run_display(
     monthly: bool,
     all: bool,
     failures: bool,
+    max_cmd_rows: Option<usize>,
+    term_width: Option<usize>,
 ) -> Result<()> {
     if failures {
         return show_failures(tracker);
@@ -253,8 +290,9 @@ fn run_display(
         } else {
             "RTK Token Savings (Global Scope)"
         };
+        let sep_width = term_width.unwrap_or(80).min(60);
         println!("{}", styled(title, true));
-        println!("{}", "═".repeat(60));
+        println!("{}", "═".repeat(sep_width));
         // added: show project path when scoped
         if let Some(scope) = project_scope {
             println!("Scope: {}", shorten_path(scope));
@@ -314,9 +352,7 @@ fn run_display(
             // added: styled section header
             println!("{}", styled("By Command", true));
 
-            // added: dynamic column widths for clean alignment
-            let cmd_width = 24usize;
-            let impact_width = 10usize;
+            // Dynamic column widths for clean alignment
             let count_width = summary
                 .by_command
                 .iter()
@@ -338,6 +374,14 @@ fn run_display(
                 .max()
                 .unwrap_or(6)
                 .max(6);
+
+            // Adapt cmd_width and impact_width to fit terminal width
+            // Fixed overhead: "#"(3) + 6×gap(12) + count + saved + "%"(6) + time
+            let fixed_cols = 3 + 12 + count_width + saved_width + 6 + time_width;
+            let available = term_width.unwrap_or(120).saturating_sub(fixed_cols);
+            // Split available space: ~70% command, ~30% impact bar
+            let cmd_width = (available * 7 / 10).clamp(10, 30);
+            let impact_width = available.saturating_sub(cmd_width).clamp(4, 14);
 
             let table_width = 3
                 + 2
@@ -369,9 +413,15 @@ fn run_display(
                 .max()
                 .unwrap_or(1);
 
-            for (idx, (cmd, count, saved, pct, avg_time)) in summary.by_command.iter().enumerate() {
+            let display_rows = max_cmd_rows.unwrap_or(summary.by_command.len());
+            let total_cmds = summary.by_command.len();
+            let visible = display_rows.min(total_cmds);
+
+            for (idx, (cmd, count, saved, pct, avg_time)) in
+                summary.by_command.iter().take(visible).enumerate()
+            {
                 let row_idx = format!("{:>2}.", idx + 1);
-                let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width)); // added: colored command
+                let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width));
                 let count_cell = format!("{:>count_width$}", count, count_width = count_width);
                 let saved_cell = format!(
                     "{:>saved_width$}",
@@ -379,16 +429,22 @@ fn run_display(
                     saved_width = saved_width
                 );
                 let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
-                let pct_cell = colorize_pct_cell(*pct, &pct_plain); // added: color-coded percentage
+                let pct_cell = colorize_pct_cell(*pct, &pct_plain);
                 let time_cell = format!(
                     "{:>time_width$}",
                     format_duration(*avg_time),
                     time_width = time_width
                 );
-                let impact = mini_bar(*saved, max_saved, impact_width); // added: impact bar
+                let impact = mini_bar(*saved, max_saved, impact_width);
                 println!(
                     "{}  {}  {}  {}  {}  {}  {}",
                     row_idx, cmd_cell, count_cell, saved_cell, pct_cell, time_cell, impact
+                );
+            }
+            if visible < total_cmds {
+                println!(
+                    "     ... +{} more (enlarge terminal to see all)",
+                    total_cmds - visible
                 );
             }
             println!("{}", "─".repeat(table_width));

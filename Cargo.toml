@@ -35,6 +35,7 @@ quick-xml = "0.37"
 which = "8"
 automod = "1"
 ctrlc = "3"
+terminal_size = "0.4"
 
 [build-dependencies]
 toml = "0.8"
