@@ -262,10 +262,20 @@ fn glob_matches(cmd: &str, pattern: &str) -> bool {
                 return false;
             }
         } else {
-            // Middle segment: find next occurrence
-            match cmd[search_from..].find(*part) {
-                Some(pos) => search_from += pos + part.len(),
-                None => return false,
+            // Middle segment: find next occurrence.
+            // Also accept end-of-string when the segment ends with whitespace — this
+            // handles commands that terminate at the middle token without trailing args,
+            // e.g. "git -C * diff:*" should match bare "git -C /path diff" (#1105).
+            let remaining = &cmd[search_from..];
+            if let Some(pos) = remaining.find(*part) {
+                search_from += pos + part.len();
+            } else {
+                let trimmed = part.trim_end();
+                if !trimmed.is_empty() && remaining.ends_with(trimmed) {
+                    search_from += remaining.len();
+                } else {
+                    return false;
+                }
             }
         }
     }
@@ -445,6 +455,26 @@ mod tests {
     #[test]
     fn test_middle_wildcard_no_match() {
         assert!(!command_matches_pattern("git push develop", "git * main"));
+    }
+
+    // Bug 3: middle wildcard at end-of-command (no trailing args) — #1105
+    #[test]
+    fn test_middle_wildcard_at_end_of_command() {
+        // "git -C * diff:*" should match bare "git -C /path diff" (no trailing flags)
+        assert!(command_matches_pattern(
+            "git -C /path diff",
+            "git -C * diff:*"
+        ));
+        // Must still match when there ARE trailing args
+        assert!(command_matches_pattern(
+            "git -C /path diff --stat",
+            "git -C * diff:*"
+        ));
+        // Must NOT match a different subcommand
+        assert!(!command_matches_pattern(
+            "git -C /path status",
+            "git -C * diff:*"
+        ));
     }
 
     // Bug 3: multiple wildcards
