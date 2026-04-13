@@ -1093,26 +1093,44 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
     if let Some(filter) = toml_match {
         // TOML match: capture stdout for filtering
-        let result = core::utils::resolved_command(&args[0])
-            .args(&args[1..])
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::piped()) // capture
-            .stderr(std::process::Stdio::inherit()) // stderr always direct
-            .output();
+        let result = if filter.filter_stderr {
+            // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
+            core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()) // captured for merging
+                .output()
+        } else {
+            core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::piped()) // capture
+                .stderr(std::process::Stdio::inherit()) // stderr always direct
+                .output()
+        };
 
         match result {
             Ok(output) => {
                 let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
                 let stdout_raw = String::from_utf8_lossy(&output.stdout);
+                let stderr_raw = String::from_utf8_lossy(&output.stderr);
 
+                // Merge stderr into the text to filter when filter_stderr is enabled;
+                // otherwise emit stderr directly so it is always visible.
+                let combined_raw = if filter.filter_stderr {
+                    format!("{}{}", stdout_raw, stderr_raw)
+                } else {
+                    stdout_raw.to_string()
+                };
                 // Tee raw output BEFORE filtering on failure — lets LLM re-read if needed
                 let tee_hint = if !output.status.success() {
-                    core::tee::tee_and_hint(&stdout_raw, &raw_command, exit_code)
+                    core::tee::tee_and_hint(&combined_raw, &raw_command, exit_code)
                 } else {
                     None
                 };
 
-                let filtered = core::toml_filter::apply_filter(filter, &stdout_raw);
+                let filtered = core::toml_filter::apply_filter(filter, &combined_raw);
                 println!("{}", filtered);
                 if let Some(hint) = tee_hint {
                     println!("{}", hint);
@@ -1121,7 +1139,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 timer.track(
                     &raw_command,
                     &format!("rtk:toml {}", raw_command),
-                    &stdout_raw,
+                    &combined_raw,
                     &filtered,
                 );
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
