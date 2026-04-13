@@ -12,6 +12,8 @@ pub fn run(
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
     line_numbers: bool,
+    offset: Option<usize>,
+    limit: Option<usize>,
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -61,6 +63,23 @@ pub fn run(
             "Lines: {} -> {} ({:.1}% reduction)",
             original_lines, filtered_lines, reduction
         );
+    }
+
+    // Apply line range (--offset/--limit) before other windowing
+    if offset.is_some() || limit.is_some() {
+        let lines: Vec<&str> = filtered.lines().collect();
+        let start = offset.unwrap_or(1).saturating_sub(1); // 1-based to 0-based
+        let end = limit
+            .map(|l| (start + l).min(lines.len()))
+            .unwrap_or(lines.len());
+        if start < lines.len() {
+            filtered = lines[start..end].join("\n");
+            if !filtered.is_empty() {
+                filtered.push('\n');
+            }
+        } else {
+            filtered = String::new();
+        }
     }
 
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
@@ -194,7 +213,7 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        run(file.path(), FilterLevel::Minimal, None, None, false, None, None, 0)?;
         Ok(())
     }
 
@@ -203,6 +222,25 @@ fn main() {{
         // Test that run_stdin has correct signature and compiles
         // We don't actually run it because it would hang waiting for stdin
         // Compile-time verification that the function exists with correct signature
+    }
+
+    #[test]
+    fn test_read_with_offset_and_limit() -> Result<()> {
+        let mut file = NamedTempFile::with_suffix(".txt")?;
+        writeln!(file, "line1\nline2\nline3\nline4\nline5")?;
+
+        // offset=2, limit=2 → lines 2-3
+        run(
+            file.path(),
+            FilterLevel::None,
+            None,
+            None,
+            false,
+            Some(2),
+            Some(2),
+            0,
+        )?;
+        Ok(())
     }
 
     #[test]
