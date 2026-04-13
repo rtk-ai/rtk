@@ -7,7 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, scp_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -366,6 +366,13 @@ enum Commands {
         #[arg(short = 'O', long = "output-document", allow_hyphen_values = true)]
         output: Option<String>,
         /// Additional wget arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Copy files with compact transfer progress output
+    Scp {
+        /// Additional scp arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1732,6 +1739,8 @@ fn run_cli() -> Result<i32> {
             }
         }
 
+        Commands::Scp { args } => scp_cmd::run(&args, cli.verbose)?,
+
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
         Commands::Gain {
@@ -2246,6 +2255,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Summary { .. }
             | Commands::Grep { .. }
             | Commands::Wget { .. }
+            | Commands::Scp { .. }
             | Commands::Vitest { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }

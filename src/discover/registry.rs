@@ -1555,6 +1555,27 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_scp() {
+        assert_eq!(
+            classify_command("scp -i ~/.ssh/id_ed25519 file deploy@host:/tmp/file"),
+            Classification::Supported {
+                rtk_equivalent: "rtk scp",
+                category: "Network",
+                estimated_savings_pct: 65.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_scp() {
+        assert_eq!(
+            rewrite_command("scp file deploy@host:/tmp/file", &[]),
+            Some("rtk scp file deploy@host:/tmp/file".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_cargo_install() {
         assert_eq!(
             rewrite_command("cargo install rtk", &[]),

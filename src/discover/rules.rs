@@ -231,6 +231,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^scp\b",
+        rtk_cmd: "rtk scp",
+        rewrite_prefixes: &["scp"],
+        category: "Network",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",
         rtk_cmd: "rtk mypy",
         rewrite_prefixes: &["python3 -m mypy", "python -m mypy", "mypy"],
