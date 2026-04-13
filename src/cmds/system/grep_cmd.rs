@@ -7,6 +7,35 @@ use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::process::Stdio;
+
+fn parse_match_line(line: &str, default_path: &str) -> Option<(String, usize, String)> {
+    let parts: Vec<&str> = line.splitn(3, ':').collect();
+
+    match parts.as_slice() {
+        [line_num, content] => Some((
+            default_path.to_string(),
+            line_num.parse().unwrap_or(0),
+            (*content).to_string(),
+        )),
+        [first, second, third] => {
+            if let Ok(line_num) = first.parse::<usize>() {
+                Some((
+                    default_path.to_string(),
+                    line_num,
+                    format!("{}:{}", second, third),
+                ))
+            } else {
+                Some((
+                    (*first).to_string(),
+                    second.parse().unwrap_or(0),
+                    (*third).to_string(),
+                ))
+            }
+        }
+        _ => None,
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -33,7 +62,9 @@ pub fn run(
     // Without this, rg returns 0 matches for files in .gitignore, causing
     // false negatives that make AI agents draw wrong conclusions.
     // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
-    rg_cmd.args(["-n", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
+    rg_cmd
+        .args(["-H", "-n", "--no-heading", "--no-ignore-vcs", &rg_pattern, path])
+        .stdin(Stdio::null());
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -50,7 +81,9 @@ pub fn run(
     let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
-            grep_cmd.args(["-rn", pattern, path]);
+            grep_cmd
+                .args(["-H", "-r", "-n", pattern, path])
+                .stdin(Stdio::null());
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
@@ -89,19 +122,11 @@ pub fn run(
 
     let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for line in result.stdout.lines() {
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-
-        let (file, line_num, content) = if parts.len() == 3 {
-            let ln = parts[1].parse().unwrap_or(0);
-            (parts[0].to_string(), ln, parts[2])
-        } else if parts.len() == 2 {
-            let ln = parts[0].parse().unwrap_or(0);
-            (path.to_string(), ln, parts[1])
-        } else {
+        let Some((file, line_num, content)) = parse_match_line(line, path) else {
             continue;
         };
 
-        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
+        let cleaned = clean_line(&content, max_line_len, context_re.as_ref(), pattern);
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
@@ -231,6 +256,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_match_line_with_file_path() {
+        let parsed = parse_match_line("src/main.rs:42:fn main() {", "src/main.rs").unwrap();
+        assert_eq!(parsed.0, "src/main.rs");
+        assert_eq!(parsed.1, 42);
+        assert_eq!(parsed.2, "fn main() {");
+    }
+
+    #[test]
+    fn test_parse_match_line_single_file_without_path() {
+        let parsed = parse_match_line("271:class PluginManager:", "hermes_cli/plugins.py").unwrap();
+        assert_eq!(parsed.0, "hermes_cli/plugins.py");
+        assert_eq!(parsed.1, 271);
+        assert_eq!(parsed.2, "class PluginManager:");
+    }
+
+    #[test]
     fn test_extra_args_accepted() {
         // Test that the function signature accepts extra_args
         // This is a compile-time test - if it compiles, the signature is correct
@@ -299,15 +340,15 @@ mod tests {
     // The -n/--line-numbers clap flag in main.rs is a no-op accepted for compat.
     #[test]
     fn test_rg_always_has_line_numbers() {
-        // grep_cmd::run() always passes "-n" to rg (line 24).
-        // This test documents that -n is built-in, so the clap flag is safe to ignore.
+        // grep_cmd::run() always passes "-H -n" to rg (line 33).
+        // This test documents that -H and -n are accepted, so single-file matches keep filenames.
         let mut cmd = resolved_command("rg");
-        cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
-        // If rg is available, it should accept -n without error (exit 1 = no match, not error)
+        cmd.args(["-H", "-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
+        // If rg is available, it should accept -H/-n without error (exit 1 = no match, not error)
         if let Ok(output) = cmd.output() {
             assert!(
                 output.status.code() == Some(1) || output.status.success(),
-                "rg -n should be accepted"
+                "rg -H -n should be accepted"
             );
         }
         // If rg is not installed, skip gracefully (test still passes)

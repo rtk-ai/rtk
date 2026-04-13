@@ -12,6 +12,32 @@ enum ParseState {
     Summary,
 }
 
+fn is_summary_line(line: &str) -> bool {
+    let normalized = line.trim().trim_matches('=').trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if normalized.starts_with("no tests ran") {
+        return true;
+    }
+
+    let Some(first_token) = normalized.split_whitespace().next() else {
+        return false;
+    };
+    if first_token.parse::<usize>().is_err() {
+        return false;
+    }
+
+    normalized.contains(" passed")
+        || normalized.contains(" failed")
+        || normalized.contains(" skipped")
+        || normalized.contains(" xfailed")
+        || normalized.contains(" xpassed")
+        || normalized.contains(" error")
+        || normalized.contains(" errors")
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("pytest") {
         resolved_command("pytest")
@@ -73,23 +99,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 current_failure.clear();
             }
             continue;
-        } else if trimmed.starts_with("===")
-            && (trimmed.contains("passed")
-                || trimmed.contains("failed")
-                || trimmed.contains("skipped"))
-        {
-            summary_line = trimmed.to_string();
-            continue;
-        // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
-        } else if summary_line.is_empty()
-            && !trimmed.starts_with("===")
-            && !trimmed.starts_with("FAILED")
-            && !trimmed.starts_with("ERROR")
-            && (trimmed.contains(" passed")
-                || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
-            && trimmed.contains(" in ")
-        {
+        } else if is_summary_line(trimmed) {
             summary_line = trimmed.to_string();
             continue;
         }
@@ -142,6 +152,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
 }
 
 fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[String]) -> String {
+    if summary.to_lowercase().contains("no tests ran") {
+        return "Pytest: No tests collected".to_string();
+    }
+
     // Parse summary line
     let (passed, failed, skipped) = parse_summary_line(summary);
 
@@ -272,6 +286,15 @@ tests/test_foo.py .....                                            [100%]
     }
 
     #[test]
+    fn test_filter_pytest_quiet_all_pass() {
+        let output = r#".........................                                                [100%]
+25 passed in 3.92s"#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 25 passed");
+    }
+
+    #[test]
     fn test_filter_pytest_with_failures() {
         let output = r#"=== test session starts ===
 collected 5 items
@@ -333,6 +356,44 @@ collected 0 items
 
         let result = filter_pytest_output(output);
         assert!(result.contains("No tests collected"));
+    }
+
+    #[test]
+    fn test_filter_pytest_quiet_no_tests() {
+        let output = r#"no tests ran in 0.00s"#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: No tests collected");
+    }
+
+    #[test]
+    fn test_filter_pytest_quiet_failures() {
+        let output = r#"..F..                                                                    [100%]
+
+=================================== FAILURES ===================================
+_______________________________ test_something ________________________________
+
+    def test_something():
+>       assert False
+E       assert False
+
+tests/test_foo.py:10: AssertionError
+
+=========================== short test summary info ============================
+FAILED tests/test_foo.py::test_something - assert False
+4 passed, 1 failed in 0.50s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(result.contains("4 passed, 1 failed"));
+        assert!(result.contains("test_something"));
+    }
+
+    #[test]
+    fn test_is_summary_line_detects_quiet_summary() {
+        assert!(is_summary_line("25 passed in 3.92s"));
+        assert!(is_summary_line("4 passed, 1 failed in 0.50s"));
+        assert!(is_summary_line("no tests ran in 0.00s"));
+        assert!(!is_summary_line("E       AssertionError: expected 5"));
     }
 
     #[test]
