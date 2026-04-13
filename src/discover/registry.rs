@@ -1192,19 +1192,32 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_npx_tsc() {
-        assert_eq!(
-            rewrite_command("npx tsc --noEmit", &[]),
-            Some("rtk tsc --noEmit".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pnpm_tsc() {
-        assert_eq!(
-            rewrite_command("pnpm tsc --noEmit", &[]),
-            Some("rtk tsc --noEmit".into())
-        );
+    fn test_rewrite_tsc() {
+        let commands = vec![
+            "npm exec tsc",
+            "npm rum tsc",
+            "npm run tsc",
+            "npm run-script tsc",
+            "npm urn tsc",
+            "npm x tsc",
+            "pnpm dlx tsc",
+            "pnpm exec tsc",
+            "pnpm run tsc",
+            "pnpm run-script tsc",
+            "npm tsc",
+            "npx tsc",
+            "pnpm tsc",
+            "pnpx tsc",
+            "tsc",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(&format!("{command} --noEmit"), &[]),
+                Some("rtk tsc --noEmit".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
@@ -1244,19 +1257,61 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_npx_playwright() {
-        assert_eq!(
-            rewrite_command("npx playwright test", &[]),
-            Some("rtk playwright test".into())
-        );
+    fn test_rewrite_playwright() {
+        let commands = vec![
+            "npm exec playwright",
+            "npm rum playwright",
+            "npm run playwright",
+            "npm run-script playwright",
+            "npm urn playwright",
+            "npm x playwright",
+            "pnpm dlx playwright",
+            "pnpm exec playwright",
+            "pnpm run playwright",
+            "pnpm run-script playwright",
+            "npm playwright",
+            "npx playwright",
+            "pnpm playwright",
+            "pnpx playwright",
+            "playwright",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(&format!("{command} test"), &[]),
+                Some("rtk playwright test".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_rewrite_next_build() {
-        assert_eq!(
-            rewrite_command("next build --turbo", &[]),
-            Some("rtk next --turbo".into())
-        );
+        let commands = vec![
+            "npm exec next build",
+            "npm rum next build",
+            "npm run next build",
+            "npm run-script next build",
+            "npm urn next build",
+            "npm x next build",
+            "pnpm dlx next build",
+            "pnpm exec next build",
+            "pnpm run next build",
+            "pnpm run-script next build",
+            "npm next build",
+            "npx next build",
+            "pnpm next build",
+            "pnpx next build",
+            "next build",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(&format!("{command} --turbo"), &[]),
+                Some("rtk next --turbo".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
@@ -2205,67 +2260,427 @@ mod tests {
     // --- JS/TS tooling ---
 
     #[test]
+    fn test_classify_lint() {
+        let commands = vec![
+            "npm exec biome",
+            "npm exec eslint",
+            "npm rum biome",
+            "npm rum eslint",
+            "npm rum lint",
+            "npm run biome",
+            "npm run eslint",
+            "npm run lint",
+            "npm run-script biome",
+            "npm run-script eslint",
+            "npm run-script lint",
+            "npm urn biome",
+            "npm urn eslint",
+            "npm urn lint",
+            "npm x biome",
+            "npm x eslint",
+            "pnpm dlx biome",
+            "pnpm dlx eslint",
+            "pnpm exec biome",
+            "pnpm exec eslint",
+            "pnpm run biome",
+            "pnpm run eslint",
+            "pnpm run lint",
+            "pnpm run-script biome",
+            "pnpm run-script eslint",
+            "pnpm run-script lint",
+            "npm biome",
+            "npm eslint",
+            "npm lint",
+            "npx biome",
+            "npx eslint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm eslint",
+            "pnpm lint",
+            "pnpx biome",
+            "pnpx eslint",
+            "pnpx lint",
+            "biome",
+            "eslint",
+            "lint",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk lint",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint() {
+        let commands = vec![
+            "npm exec biome",
+            "npm exec eslint",
+            "npm rum biome",
+            "npm rum eslint",
+            "npm rum lint",
+            "npm run biome",
+            "npm run eslint",
+            "npm run lint",
+            "npm run-script biome",
+            "npm run-script eslint",
+            "npm run-script lint",
+            "npm urn biome",
+            "npm urn eslint",
+            "npm urn lint",
+            "npm x biome",
+            "npm x eslint",
+            "pnpm dlx biome",
+            "pnpm dlx eslint",
+            "pnpm exec biome",
+            "pnpm exec eslint",
+            "pnpm run biome",
+            "pnpm run eslint",
+            "pnpm run lint",
+            "pnpm run-script biome",
+            "pnpm run-script eslint",
+            "pnpm run-script lint",
+            "npm biome",
+            "npm eslint",
+            "npm lint",
+            "npx biome",
+            "npx eslint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm eslint",
+            "pnpm lint",
+            "pnpx biome",
+            "pnpx eslint",
+            "pnpx lint",
+            "biome",
+            "eslint",
+            "lint",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(command, &[]),
+                Some("rtk lint".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_jest() {
+        let commands = vec![
+            "jest run",
+            "jest",
+            "npm exec jest run",
+            "npm exec jest",
+            "npm jest run",
+            "npm jest",
+            "npm rum jest run",
+            "npm rum jest",
+            "npm run jest run",
+            "npm run jest",
+            "npm run-script jest run",
+            "npm run-script jest",
+            "npm urn jest run",
+            "npm urn jest",
+            "npm x jest run",
+            "npm x jest",
+            "npx jest run",
+            "npx jest",
+            "pnpm dlx jest run",
+            "pnpm dlx jest",
+            "pnpm exec jest run",
+            "pnpm exec jest",
+            "pnpm jest run",
+            "pnpm jest",
+            "pnpm run jest run",
+            "pnpm run jest",
+            "pnpm run-script jest run",
+            "pnpm run-script jest",
+            "pnpx jest run",
+            "pnpx jest",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk jest",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_jest() {
+        let commands = vec![
+            "jest run",
+            "jest",
+            "npm exec jest run",
+            "npm exec jest",
+            "npm jest run",
+            "npm jest",
+            "npm rum jest run",
+            "npm rum jest",
+            "npm run jest run",
+            "npm run jest",
+            "npm run-script jest run",
+            "npm run-script jest",
+            "npm urn jest run",
+            "npm urn jest",
+            "npm x jest run",
+            "npm x jest",
+            "npx jest run",
+            "npx jest",
+            "pnpm dlx jest run",
+            "pnpm dlx jest",
+            "pnpm exec jest run",
+            "pnpm exec jest",
+            "pnpm jest run",
+            "pnpm jest",
+            "pnpm run jest run",
+            "pnpm run jest",
+            "pnpm run-script jest run",
+            "pnpm run-script jest",
+            "pnpx jest run",
+            "pnpx jest",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(command, &[]),
+                Some("rtk jest".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_vitest() {
-        assert!(matches!(
-            classify_command("vitest run"),
-            Classification::Supported {
-                rtk_equivalent: "rtk vitest",
-                ..
-            }
-        ));
+        let commands = vec![
+            "npm exec vitest run",
+            "npm exec vitest",
+            "npm rum vitest run",
+            "npm rum vitest",
+            "npm run vitest run",
+            "npm run vitest",
+            "npm run-script vitest run",
+            "npm run-script vitest",
+            "npm urn vitest run",
+            "npm urn vitest",
+            "npm vitest run",
+            "npm vitest",
+            "npm x vitest run",
+            "npm x vitest",
+            "npx vitest run",
+            "npx vitest",
+            "pnpm dlx vitest run",
+            "pnpm dlx vitest",
+            "pnpm exec vitest run",
+            "pnpm exec vitest",
+            "pnpm run vitest run",
+            "pnpm run vitest",
+            "pnpm run-script vitest run",
+            "pnpm run-script vitest",
+            "pnpm vitest run",
+            "pnpm vitest",
+            "pnpx vitest run",
+            "pnpx vitest",
+            "vitest run",
+            "vitest",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk vitest",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_rewrite_vitest() {
-        assert_eq!(
-            rewrite_command("vitest run", &[]),
-            Some("rtk vitest run".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pnpm_vitest() {
-        assert_eq!(
-            rewrite_command("pnpm vitest run", &[]),
-            Some("rtk vitest run".into())
-        );
+        let commands = vec![
+            "npm exec vitest run",
+            "npm exec vitest",
+            "npm rum vitest run",
+            "npm rum vitest",
+            "npm run vitest run",
+            "npm run vitest",
+            "npm run-script vitest run",
+            "npm run-script vitest",
+            "npm urn vitest run",
+            "npm urn vitest",
+            "npm vitest run",
+            "npm vitest",
+            "npm x vitest run",
+            "npm x vitest",
+            "npx vitest run",
+            "npx vitest",
+            "pnpm dlx vitest run",
+            "pnpm dlx vitest",
+            "pnpm exec vitest run",
+            "pnpm exec vitest",
+            "pnpm run vitest run",
+            "pnpm run vitest",
+            "pnpm run-script vitest run",
+            "pnpm run-script vitest",
+            "pnpm vitest run",
+            "pnpm vitest",
+            "pnpx vitest run",
+            "pnpx vitest",
+            "vitest run",
+            "vitest",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(command, &[]),
+                Some("rtk vitest".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_classify_prisma() {
-        assert!(matches!(
-            classify_command("npx prisma migrate dev"),
-            Classification::Supported {
-                rtk_equivalent: "rtk prisma",
-                ..
-            }
-        ));
+        let commands = vec![
+            "npm exec prisma",
+            "npm rum prisma",
+            "npm run prisma",
+            "npm run-script prisma",
+            "npm urn prisma",
+            "npm x prisma",
+            "pnpm dlx prisma",
+            "pnpm exec prisma",
+            "pnpm run prisma",
+            "pnpm run-script prisma",
+            "npm prisma",
+            "npx prisma",
+            "pnpm prisma",
+            "pnpx prisma",
+            "prisma",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(format!("{command} migrate dev").as_str()),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk prisma",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_rewrite_prisma() {
-        assert_eq!(
-            rewrite_command("npx prisma migrate dev", &[]),
-            Some("rtk prisma migrate dev".into())
-        );
+        let commands = vec![
+            "npm exec prisma",
+            "npm rum prisma",
+            "npm run prisma",
+            "npm run-script prisma",
+            "npm urn prisma",
+            "npm x prisma",
+            "pnpm dlx prisma",
+            "pnpm exec prisma",
+            "pnpm run prisma",
+            "pnpm run-script prisma",
+            "npm prisma",
+            "npx prisma",
+            "pnpm prisma",
+            "pnpx prisma",
+            "prisma",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(format!("{command} migrate dev").as_str(), &[]),
+                Some("rtk prisma migrate dev".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_rewrite_prettier() {
-        assert_eq!(
-            rewrite_command("npx prettier --check src/", &[]),
-            Some("rtk prettier --check src/".into())
-        );
+        let commands = vec![
+            "npm exec prettier",
+            "npm rum prettier",
+            "npm run prettier",
+            "npm run-script prettier",
+            "npm urn prettier",
+            "npm x prettier",
+            "pnpm dlx prettier",
+            "pnpm exec prettier",
+            "pnpm run prettier",
+            "pnpm run-script prettier",
+            "npm prettier",
+            "npx prettier",
+            "pnpm prettier",
+            "pnpx prettier",
+            "prettier",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(format!("{command} --check src/").as_str(), &[]),
+                Some("rtk prettier --check src/".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
-    fn test_rewrite_pnpm_list() {
-        assert_eq!(
-            rewrite_command("pnpm list", &[]),
-            Some("rtk pnpm list".into())
-        );
+    fn test_rewrite_pnpm_command() {
+        let commands = vec![
+            "exec",
+            "i",
+            "install",
+            "list",
+            "ls",
+            "outdated",
+            "run",
+            "run-script",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(format!("pnpm {command}").as_str(), &[]),
+                Some(format!("rtk pnpm {command}")),
+                "Failed for command: pnpm {}",
+                command
+            );
+        }
     }
 
+    #[test]
+    fn test_rewrite_npx() {
+        assert_eq!(
+            rewrite_command("npx svgo", &[]),
+            Some("rtk npx svgo".to_string()),
+        );
+    }
     // --- Compound operator edge cases ---
 
     #[test]

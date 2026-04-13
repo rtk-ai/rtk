@@ -367,7 +367,7 @@ if [ -f "package.json" ]; then
   fi
 
   if command -v vitest &> /dev/null || [ -f "node_modules/.bin/vitest" ]; then
-    bench "vitest run" "vitest run --reporter=json 2>&1 || true" "$RTK vitest run"
+    bench "vitest" "vitest run --reporter=json 2>&1 || true" "$RTK vitest"
   fi
 
   if command -v pnpm &> /dev/null; then

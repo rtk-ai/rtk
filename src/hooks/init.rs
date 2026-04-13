@@ -109,11 +109,16 @@ rtk prettier --check    # Files needing format only (70%)
 rtk next build          # Next.js build with route metrics (87%)
 ```
 
-### Test (90-99% savings)
+### Test (60-99% savings)
 ```bash
 rtk cargo test          # Cargo test failures only (90%)
-rtk vitest run          # Vitest failures only (99.5%)
+rtk go test             # Go test failures only (90%)
+rtk jest                # Jest failures only (99.5%)
+rtk vitest              # Vitest failures only (99.5%)
 rtk playwright test     # Playwright failures only (94%)
+rtk pytest              # Python test failures only (90%)
+rtk rake test           # Ruby test failures only (90%)
+rtk rspec               # RSpec test failures only (60%)
 rtk test <cmd>          # Generic test wrapper - failures only
 ```
 

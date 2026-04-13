@@ -135,11 +135,12 @@ rtk git push                    # -> "ok main"
 
 ### Tests
 ```bash
-rtk test cargo test             # Echecs uniquement (-90%)
-rtk vitest run                  # Vitest compact
+rtk jest                        # Jest compact
+rtk vitest                      # Vitest compact
 rtk pytest                      # Tests Python (-90%)
 rtk go test                     # Tests Go (-90%)
 rtk cargo test                  # Tests Cargo (-90%)
+rtk test <cmd>                  # Echecs uniquement (-90%)
 ```
 
 ### Build & Lint

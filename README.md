@@ -171,15 +171,16 @@ rtk gh run list                 # Workflow run status
 
 ### Test Runners
 ```bash
-rtk test cargo test             # Show failures only (-90%)
-rtk err npm run build           # Errors/warnings only
-rtk vitest run                  # Vitest compact (failures only)
+rtk jest                        # Jest compact (failures only)
+rtk vitest                      # Vitest compact (failures only)
 rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
+rtk err <cmd>                   # Filter errors only from any command
+rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
 ```
 
 ### Build & Lint

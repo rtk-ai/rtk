@@ -576,12 +576,13 @@ Filtre la sortie de `cargo nextest` pour n'afficher que les echecs.
 
 ---
 
-### `rtk vitest run` -- Tests Vitest
+### `rtk jest` / `rtk vitest` -- Tests Jest/Vitest
 
 **Economies :** ~99.5%
 
 ```bash
-rtk vitest run [args...]
+rtk jest [args...]
+rtk vitest [args...]
 ```
 
 ---
@@ -1258,7 +1259,8 @@ rtk verify
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |
-| `vitest/jest` | `rtk vitest run` |
+| `jest` | `rtk jest` |
+| `vitest` | `rtk vitest` |
 | `tsc` | `rtk tsc` |
 | `eslint/biome` | `rtk lint` |
 | `prettier` | `rtk prettier` |
