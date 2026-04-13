@@ -12,9 +12,9 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
         rtk_cmd: "rtk git",
-        rewrite_prefixes: &["git"],
+        rewrite_prefixes: &["git", "yadm"],
         category: "Git",
         savings_pct: 70.0,
         subcmd_savings: &[
@@ -276,9 +276,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^golangci-lint(\s|$)",
-        rtk_cmd: "rtk golangci-lint",
-        rewrite_prefixes: &["golangci-lint", "golangci"],
+        pattern: r"^(?:golangci-lint|golangci)\s+(run)(?:\s|$)",
+        rtk_cmd: "rtk golangci-lint run",
+        rewrite_prefixes: &["golangci-lint run", "golangci run"],
         category: "Go",
         savings_pct: 85.0,
         subcmd_savings: &[],
@@ -653,6 +653,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["wc"],
         category: "Files",
         savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^liquibase(?:\s|$)",
+        rtk_cmd: "rtk liquibase",
+        rewrite_prefixes: &["liquibase"],
+        category: "Infra",
+        savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

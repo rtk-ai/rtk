@@ -38,6 +38,8 @@ struct PackageResult {
     build_failed: bool,
     build_errors: Vec<String>,
     failed_tests: Vec<(String, Vec<String>)>, // (test_name, output_lines)
+    package_failed: bool,                     // package-level failure (timeout, signal, etc.)
+    package_fail_output: Vec<String>,         // output lines collected before the package fail
 }
 
 pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
@@ -350,6 +352,10 @@ fn filter_go_test_json(output: &str) -> String {
                             pkg_result.build_errors = errors;
                         }
                     }
+                } else {
+                    // Package-level failure without a specific test or build error
+                    // (timeout, signal kill, panic before test execution, etc.)
+                    pkg_result.package_failed = true;
                 }
             }
             "skip" => {
@@ -358,13 +364,21 @@ fn filter_go_test_json(output: &str) -> String {
                 }
             }
             "output" => {
-                // Collect output for current test
-                if let (Some(test), Some(output_text)) = (&event.test, &event.output) {
-                    let key = (package.clone(), test.clone());
-                    current_test_output
-                        .entry(key)
-                        .or_default()
-                        .push(output_text.trim_end().to_string());
+                if let Some(output_text) = &event.output {
+                    if let Some(test) = &event.test {
+                        // Collect output for current test
+                        let key = (package.clone(), test.clone());
+                        current_test_output
+                            .entry(key)
+                            .or_default()
+                            .push(output_text.trim_end().to_string());
+                    } else {
+                        // Package-level output (timeout messages, signal info, etc.)
+                        let trimmed = output_text.trim();
+                        if !trimmed.is_empty() {
+                            pkg_result.package_fail_output.push(trimmed.to_string());
+                        }
+                    }
                 }
             }
             _ => {} // run, pause, cont, etc.
@@ -377,8 +391,15 @@ fn filter_go_test_json(output: &str) -> String {
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
     let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
+    // Only count package-level fails for packages with no individual test or build failures.
+    // go test -json emits a trailing package-level {"action":"fail"} after any test failure
+    // too, but that event is just a cascade — the individual test failures are already counted.
+    let total_pkg_fail: usize = packages
+        .values()
+        .filter(|p| p.package_failed && p.fail == 0 && !p.build_failed)
+        .count();
 
-    let has_failures = total_fail > 0 || total_build_fail > 0;
+    let has_failures = total_fail > 0 || total_build_fail > 0 || total_pkg_fail > 0;
 
     if !has_failures && total_pass == 0 {
         return "Go test: No tests found".to_string();
@@ -395,7 +416,7 @@ fn filter_go_test_json(output: &str) -> String {
     result.push_str(&format!(
         "Go test: {} passed, {} failed",
         total_pass,
-        total_fail + total_build_fail
+        total_fail + total_build_fail + total_pkg_fail
     ));
     if total_skip > 0 {
         result.push_str(&format!(", {} skipped", total_skip));
@@ -403,7 +424,25 @@ fn filter_go_test_json(output: &str) -> String {
     result.push_str(&format!(" in {} packages\n", total_packages));
     result.push_str("═══════════════════════════════════════\n");
 
-    // Show build failures first
+    // Show package-level failures first (timeouts, signals, panics).
+    // Skip packages that already have individual test-level failures — those are displayed
+    // in the per-package section below and the package-level event is just a cascade.
+    for (package, pkg_result) in packages.iter() {
+        if !pkg_result.package_failed || pkg_result.fail > 0 || pkg_result.build_failed {
+            continue;
+        }
+
+        result.push_str(&format!("\n{} [FAIL]\n", compact_package_name(package)));
+
+        for line in &pkg_result.package_fail_output {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                result.push_str(&format!("  {}\n", truncate(trimmed, 120)));
+            }
+        }
+    }
+
+    // Show build failures
     for (package, pkg_result) in packages.iter() {
         if !pkg_result.build_failed {
             continue;
@@ -693,6 +732,119 @@ mod tests {
         let result = filter_go_test_json(output);
         assert!(result.contains("foo_test.go:42:"));
         assert!(result.contains("values differ after normalization"));
+    }
+
+    #[test]
+    fn test_filter_go_test_timeout_package_fail() {
+        // When go test times out, the JSON stream has a package-level "fail"
+        // with no Test field and no FailedBuild field. This should be reported
+        // as a failure, not "No tests found".
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"start","Package":"example.com/foo"}
+{"Time":"2024-01-01T10:01:03Z","Action":"output","Package":"example.com/foo","Output":"*** Test killed with quit: ran too long (1m3s).\n"}
+{"Time":"2024-01-01T10:01:03Z","Action":"output","Package":"example.com/foo","Output":"FAIL\texample.com/foo\t63.001s\n"}
+{"Time":"2024-01-01T10:01:03Z","Action":"fail","Package":"example.com/foo","Elapsed":63.003}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.contains("1 failed"),
+            "Expected '1 failed' in output, got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Should not say 'No tests found' on timeout, got: {}",
+            result
+        );
+        assert!(
+            result.contains("FAIL"),
+            "Expected failure output in summary, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_no_double_count_on_test_failure() {
+        // go test -json always emits a package-level {"action":"fail"} after each
+        // test-level failure. The package-level event is a cascade, not an additional
+        // failure. The summary header must show "1 failed", not "2 failed".
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"run","Package":"example.com/foo","Test":"TestFail"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"=== RUN   TestFail\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"    Error: expected 5, got 3\n"}
+{"Time":"2024-01-01T10:00:03Z","Action":"fail","Package":"example.com/foo","Test":"TestFail","Elapsed":0.5}
+{"Time":"2024-01-01T10:00:03Z","Action":"fail","Package":"example.com/foo","Elapsed":0.5}"#;
+
+        let result = filter_go_test_json(output);
+        // The summary header must say "1 failed", not "2 failed" (no double-counting).
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "Expected header 'Go test: 0 passed, 1 failed', got: {}",
+            result
+        );
+        assert!(result.contains("TestFail"));
+        assert!(result.contains("expected 5, got 3"));
+        // The package must NOT appear twice (once as "[FAIL]" and once with test details).
+        assert_eq!(
+            result.matches("foo").count(),
+            1,
+            "Package name should appear exactly once, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_timeout_with_signal_quit_output() {
+        // Exact reproduction of the scenario from issue #958: the signal: quit line
+        // appears as a separate JSON output event.
+        let output = r#"{"Action":"start","Package":"example.com/pkg"}
+{"Action":"output","Package":"example.com/pkg","Output":"*** Test killed with quit: ran too long (1m30s).\n"}
+{"Action":"output","Package":"example.com/pkg","Output":"signal: quit\n"}
+{"Action":"output","Package":"example.com/pkg","Output":"FAIL\texample.com/pkg\t90.000s\n"}
+{"Action":"fail","Package":"example.com/pkg","Elapsed":90.001}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "Expected 'Go test: 0 passed, 1 failed', got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Must not say 'No tests found' on timeout, got: {}",
+            result
+        );
+        assert!(
+            result.contains("Test killed with quit"),
+            "Should show the timeout message, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_timeout_with_passing_tests_before_kill() {
+        // Some tests pass before the package times out.
+        // Summary should show both pass and fail counts.
+        let output = r#"{"Action":"run","Package":"example.com/foo","Test":"TestFast"}
+{"Action":"pass","Package":"example.com/foo","Test":"TestFast","Elapsed":0.001}
+{"Action":"run","Package":"example.com/foo","Test":"TestHang"}
+{"Action":"output","Package":"example.com/foo","Output":"*** Test killed with quit: ran too long (30s).\n"}
+{"Action":"fail","Package":"example.com/foo","Elapsed":30.001}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.starts_with("Go test: 1 passed, 1 failed"),
+            "Expected 'Go test: 1 passed, 1 failed', got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Must not say 'No tests found', got: {}",
+            result
+        );
+        assert!(
+            result.contains("Test killed with quit"),
+            "Should show timeout message, got: {}",
+            result
+        );
     }
 
     #[test]

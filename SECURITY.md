@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in RTK, please report it to the maintainers privately:
 
-- **Email**: security@rtk-ai.dev (or create a private security advisory on GitHub)
+- **Email**: security@rtk-ai.app (or create a private security advisory on GitHub)
 - **Response time**: We aim to acknowledge reports within 48 hours
 - **Disclosure**: We follow responsible disclosure practices (90-day embargo)
 
@@ -208,7 +208,7 @@ Critical vulnerabilities (remote code execution, data exfiltration) may be fast-
 
 ## Contact
 
-- **Security issues**: security@rtk-ai.dev
+- **Security issues**: security@rtk-ai.app
 - **General questions**: https://github.com/rtk-ai/rtk/discussions
 - **Maintainers**: @FlorianBruniaux (active fork maintainer)
 

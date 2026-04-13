@@ -15,17 +15,18 @@ use crate::parser::{
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]
 struct PnpmListOutput {
+    name: String,
     #[serde(flatten)]
-    packages: HashMap<String, PnpmPackage>,
+    package: PackageJsonListItem,
 }
 
 #[derive(Debug, Deserialize)]
-struct PnpmPackage {
+struct PackageJsonListItem {
     version: Option<String>,
     #[serde(rename = "dependencies", default)]
-    dependencies: HashMap<String, PnpmPackage>,
+    dependencies: HashMap<String, PackageJsonListItem>,
     #[serde(rename = "devDependencies", default)]
-    dev_dependencies: HashMap<String, PnpmPackage>,
+    dev_dependencies: HashMap<String, PackageJsonListItem>,
 }
 
 /// pnpm outdated JSON output structure
@@ -52,13 +53,19 @@ impl OutputParser for PnpmListParser {
 
     fn parse(input: &str) -> ParseResult<DependencyState> {
         // Tier 1: Try JSON parsing
-        match serde_json::from_str::<PnpmListOutput>(input) {
+        match serde_json::from_str::<Vec<PnpmListOutput>>(input) {
             Ok(json) => {
                 let mut dependencies = Vec::new();
                 let mut total_count = 0;
 
-                for (name, pkg) in &json.packages {
-                    collect_dependencies(name, pkg, false, &mut dependencies, &mut total_count);
+                for pkg in &json {
+                    collect_dependencies(
+                        pkg.name.as_str(),
+                        &pkg.package,
+                        false,
+                        &mut dependencies,
+                        &mut total_count,
+                    );
                 }
 
                 let result = DependencyState {
@@ -88,7 +95,7 @@ impl OutputParser for PnpmListParser {
 /// Recursively collect dependencies from pnpm package tree
 fn collect_dependencies(
     name: &str,
-    pkg: &PnpmPackage,
+    pkg: &PackageJsonListItem,
     is_dev: bool,
     deps: &mut Vec<Dependency>,
     count: &mut usize,
@@ -502,8 +509,9 @@ mod tests {
 
     #[test]
     fn test_pnpm_list_parser_json() {
-        let json = r#"{
-            "my-project": {
+        let json = r#"[
+            {
+                "name": "my-project",
                 "version": "1.0.0",
                 "dependencies": {
                     "express": {
@@ -511,7 +519,7 @@ mod tests {
                     }
                 }
             }
-        }"#;
+        ]"#;
 
         let result = PnpmListParser::parse(json);
         assert_eq!(result.tier(), 1);

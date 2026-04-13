@@ -1,7 +1,7 @@
 ---
 name: rust-rtk
 description: Expert Rust developer for RTK - CLI proxy patterns, filter design, performance optimization
-model: claude-sonnet-4-5-20250929
+model: sonnet
 tools: Read, Write, Edit, MultiEdit, Bash, Grep, Glob
 ---
 

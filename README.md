@@ -17,8 +17,8 @@
 <p align="center">
   <a href="https://www.rtk-ai.app">Website</a> &bull;
   <a href="#installation">Install</a> &bull;
-  <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> &bull;
-  <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
+  <a href="https://www.rtk-ai.app/guide/troubleshooting">Troubleshooting</a> &bull;
+  <a href="ARCHITECTURE.md">Architecture</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -87,6 +87,8 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) where the full hook system works natively. See [Windows setup](#windows) below for details.
+
 ### Verify Installation
 
 ```bash
@@ -106,6 +108,8 @@ rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
 rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
+rtk init --agent kilocode       # Kilo Code
+rtk init --agent antigravity    # Google Antigravity
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -306,159 +310,77 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
+## Windows
+
+RTK works on Windows with some limitations. The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell, so on native Windows RTK falls back to **CLAUDE.md injection mode** — your AI assistant receives RTK instructions but commands are not rewritten automatically.
+
+### Recommended: WSL (full support)
+
+For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux). Inside WSL, RTK works exactly like Linux — full hook support, auto-rewrite, everything:
+
+```bash
+# Inside WSL
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+```
+
+### Native Windows (limited support)
+
+On native Windows (cmd.exe / PowerShell), RTK filters work but the hook does not auto-rewrite commands:
+
+```powershell
+# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
+# 2. Add rtk.exe to your PATH
+# 3. Initialize (falls back to CLAUDE.md injection)
+rtk init -g
+# 4. Use rtk explicitly
+rtk cargo test
+rtk git status
+```
+
+**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+
+| Feature | WSL | Native Windows |
+|---------|-----|----------------|
+| Filters (cargo, git, etc.) | Full | Full |
+| Auto-rewrite hook | Yes | No (CLAUDE.md fallback) |
+| `rtk init -g` | Hook mode | CLAUDE.md mode |
+| `rtk gain` / analytics | Full | Full |
+
 ## Supported AI Tools
 
-RTK supports 10 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports 12 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
 
 | Tool | Install | Method |
 |------|---------|--------|
 | **Claude Code** | `rtk init -g` | PreToolUse hook (bash) |
-| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook (`rtk hook copilot`) — transparent rewrite |
+| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
-| **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook (`rtk hook gemini`) |
+| **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
-| **Mistral Vibe** | Planned (#800) | Blocked on upstream BeforeToolCallback |
+| **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
+| **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
+| **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 
-### Claude Code (default)
-
-```bash
-rtk init -g                 # Install hook + RTK.md
-rtk init -g --auto-patch    # Non-interactive (CI/CD)
-rtk init --show             # Verify installation
-rtk init -g --uninstall     # Remove
-```
-
-### GitHub Copilot (VS Code + CLI)
-
-```bash
-rtk init -g --copilot         # Install hook + instructions
-```
-
-Creates `.github/hooks/rtk-rewrite.json` (PreToolUse hook) and `.github/copilot-instructions.md` (prompt-level awareness).
-
-The hook (`rtk hook copilot`) auto-detects the format:
-- **VS Code Copilot Chat**: transparent rewrite via `updatedInput` (same as Claude Code)
-- **Copilot CLI**: deny-with-suggestion (CLI does not support `updatedInput` yet — see [copilot-cli#2013](https://github.com/github/copilot-cli/issues/2013))
-
-### Cursor
-
-```bash
-rtk init -g --agent cursor
-```
-
-Creates `~/.cursor/hooks/rtk-rewrite.sh` + patches `~/.cursor/hooks.json` with preToolUse matcher. Works with both Cursor editor and `cursor-agent` CLI.
-
-### Gemini CLI
-
-```bash
-rtk init -g --gemini
-rtk init -g --gemini --uninstall
-```
-
-Creates `~/.gemini/hooks/rtk-hook-gemini.sh` + patches `~/.gemini/settings.json` with BeforeTool hook.
-
-### Codex (OpenAI)
-
-```bash
-rtk init -g --codex
-```
-
-Creates `~/.codex/RTK.md` + `~/.codex/AGENTS.md` with `@RTK.md` reference. Codex reads these as global instructions.
-
-### Windsurf
-
-```bash
-rtk init --agent windsurf
-```
-
-Creates `.windsurfrules` in the current project. Cascade reads rules and prefixes commands with `rtk`.
-
-### Cline / Roo Code
-
-```bash
-rtk init --agent cline
-```
-
-Creates `.clinerules` in the current project. Cline reads rules and prefixes commands with `rtk`.
-
-### OpenCode
-
-```bash
-rtk init -g --opencode
-```
-
-Creates `~/.config/opencode/plugins/rtk.ts`. Uses `tool.execute.before` hook.
-
-### OpenClaw
-
-```bash
-openclaw plugins install ./openclaw
-```
-
-Plugin in `openclaw/` directory. Uses `before_tool_call` hook, delegates to `rtk rewrite`.
-
-### Mistral Vibe (planned)
-
-Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531), [PR #533](https://github.com/mistralai/mistral-vibe/pull/533)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
-
-### Commands Rewritten
-
-| Raw Command | Rewritten To |
-|-------------|-------------|
-| `git status/diff/log/add/commit/push/pull` | `rtk git ...` |
-| `gh pr/issue/run` | `rtk gh ...` |
-| `cargo test/build/clippy` | `rtk cargo ...` |
-| `cat/head/tail <file>` | `rtk read <file>` |
-| `rg/grep <pattern>` | `rtk grep <pattern>` |
-| `ls` | `rtk ls` |
-| `vitest/jest` | `rtk vitest run` |
-| `tsc` | `rtk tsc` |
-| `eslint/biome` | `rtk lint` |
-| `prettier` | `rtk prettier` |
-| `playwright` | `rtk playwright` |
-| `prisma` | `rtk prisma` |
-| `ruff check/format` | `rtk ruff ...` |
-| `pytest` | `rtk pytest` |
-| `pip list/install` | `rtk pip ...` |
-| `go test/build/vet` | `rtk go ...` |
-| `golangci-lint` | `rtk golangci-lint` |
-| `rake test` / `rails test` | `rtk rake test` |
-| `rspec` / `bundle exec rspec` | `rtk rspec` |
-| `rubocop` / `bundle exec rubocop` | `rtk rubocop` |
-| `bundle install/update` | `rtk bundle ...` |
-| `aws sts/ec2/lambda/...` | `rtk aws ...` |
-| `docker ps/images/logs` | `rtk docker ...` |
-| `kubectl get/logs` | `rtk kubectl ...` |
-| `curl` | `rtk curl` |
-| `pnpm list/outdated` | `rtk pnpm ...` |
-
-Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
+For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents).
 
 ## Configuration
-
-### Config File
 
 `~/.config/rtk/config.toml` (macOS: `~/Library/Application Support/rtk/config.toml`):
 
 ```toml
-[tracking]
-database_path = "/path/to/custom.db"  # default: ~/.local/share/rtk/history.db
-
 [hooks]
 exclude_commands = ["curl", "playwright"]  # skip rewrite for these
 
 [tee]
 enabled = true          # save raw output on failure (default: true)
 mode = "failures"       # "failures", "always", or "never"
-max_files = 20          # rotation limit
 ```
-
-### Tee: Full Output Recovery
 
 When a command fails, RTK saves the full unfiltered output so the LLM can read it without re-executing:
 
@@ -466,6 +388,8 @@ When a command fails, RTK saves the full unfiltered output so the LLM can read i
 FAILED: 2/15 tests
 [full output: ~/.local/share/rtk/tee/1707753600_cargo_test.log]
 ```
+
+For the full config reference (all sections, env vars, per-project filters), see the [Configuration guide](https://www.rtk-ai.app/guide/getting-started/configuration).
 
 ### Uninstall
 
@@ -477,33 +401,67 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Documentation
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Fix common issues
-- **[INSTALL.md](INSTALL.md)** - Detailed installation guide
-- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Technical architecture
-- **[SECURITY.md](SECURITY.md)** - Security policy and PR review process
-- **[AUDIT_GUIDE.md](docs/AUDIT_GUIDE.md)** - Token savings analytics guide
+- **[rtk-ai.app/guide](https://www.rtk-ai.app/guide)** — full user guide (installation, supported agents, what gets optimized, analytics, configuration, troubleshooting)
+- **[INSTALL.md](INSTALL.md)** — detailed installation reference
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design and technical decisions
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — contribution guide
+- **[SECURITY.md](SECURITY.md)** — security policy
 
 ## Privacy & Telemetry
 
-RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This helps prioritize development. See opt-out options below.
+RTK can collect **anonymous, aggregate usage metrics** once per day. Telemetry is **disabled by default** and requires **explicit opt-in consent** (GDPR Art. 6, 7) during `rtk init` or via `rtk telemetry enable`. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers. For the full list of fields, data handling, and contributor guidelines, see **[docs/TELEMETRY.md](docs/TELEMETRY.md)**.
 
-**What is collected:**
-- Device hash (salted SHA-256 — per-user random salt stored locally, not reversible)
-- RTK version, OS, architecture
-- Command count (last 24h) and top command names (e.g. "git", "cargo" — no arguments, no file paths)
-- Token savings percentage
+**What is collected and why:**
 
-**What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, or any personally identifiable information.
+| Category | Data | Why |
+|----------|------|-----|
+| Identity | Salted device hash (SHA-256, not reversible) | Count unique installations without tracking individuals |
+| Environment | RTK version, OS, architecture, install method | Know which platforms to support and test |
+| Usage volume | Command count (24h), total commands, tokens saved (24h/30d/total) | Measure adoption and value delivered |
+| Quality | Top 5 passthrough commands (0% savings), parse failure count, commands with <30% savings | Identify missing filters and weak ones to improve |
+| Ecosystem | Command category distribution (e.g. git 45%, cargo 20%, js 15%) | Prioritize filter development for popular ecosystems |
+| Retention | Days since first use, active days in last 30 | Understand engagement and detect churn |
+| Adoption | AI agent hook type (claude/gemini/codex), custom TOML filter count | Track integration coverage and DSL adoption |
+| Configuration | Whether config.toml exists, number of excluded commands, project count | Understand user maturity and customization patterns |
+| Features | Usage counts for meta-commands (gain, discover, proxy, verify) | Know which RTK features are valued vs unused |
+| Economics | Estimated USD savings (based on API token pricing) | Quantify the value RTK provides to users |
 
-**Opt-out** (any of these):
+All data is **aggregate counts or anonymized command names** (first 3 words, no arguments). Top commands report only tool names (e.g. "git", "cargo"), never full command lines.
+
+**What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, personal data, or repository contents.
+
+**Manage telemetry:**
 ```bash
-# Environment variable
-export RTK_TELEMETRY_DISABLED=1
-
-# Or in config file (~/.config/rtk/config.toml)
-[telemetry]
-enabled = false
+rtk telemetry status     # Check current consent state
+rtk telemetry enable     # Give consent (interactive prompt)
+rtk telemetry disable    # Withdraw consent — stops all collection immediately
+rtk telemetry forget     # Withdraw consent + delete all local data + request server-side erasure
 ```
+
+**Override via environment:**
+```bash
+export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
+```
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=rtk-ai%2Frtk&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=rtk-ai/rtk&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=rtk-ai/rtk&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=rtk-ai/rtk&type=date&legend=top-left" />
+ </picture>
+</a>
+
+## StarMapper
+
+<a href="https://starmapper.bruniaux.com/rtk-ai/rtk">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://starmapper.bruniaux.com/api/map-image/rtk-ai/rtk?theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://starmapper.bruniaux.com/api/map-image/rtk-ai/rtk?theme=light" />
+    <img alt="StarMapper" src="https://starmapper.bruniaux.com/api/map-image/rtk-ai/rtk" />
+  </picture>
+</a>
 
 ## Contributing
 

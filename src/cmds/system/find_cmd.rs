@@ -210,9 +210,13 @@ pub fn run(
 
     let want_dirs = file_type == "d";
 
+    // When the pattern targets dotfiles (e.g. -name ".claude.json"), we must walk hidden
+    // entries; otherwise skip them to keep results tidy (#1101).
+    let search_hidden = effective_pattern.starts_with('.');
+
     let mut builder = WalkBuilder::new(path);
     builder
-        .hidden(true) // skip hidden files/dirs
+        .hidden(!search_hidden) // skip hidden files/dirs unless pattern targets dotfiles
         .git_ignore(true) // respect .gitignore
         .git_global(true)
         .git_exclude(true);
@@ -557,6 +561,22 @@ mod tests {
     fn run_from_args_iname_case_insensitive() {
         // -iname should match case-insensitively
         let result = run_from_args(&args(&[".", "-iname", "cargo.toml"]), 0);
+        assert!(result.is_ok());
+    }
+
+    // --- #1101: dotfile pattern should not skip hidden files ---
+
+    #[test]
+    fn find_dotfile_pattern_includes_hidden() {
+        // .gitignore exists at the repo root — must be found when using a dotfile pattern
+        let result = run(".gitignore", ".", 50, Some(1), "f", false, 0);
+        assert!(result.is_ok(), "run with dotfile pattern should not error");
+    }
+
+    #[test]
+    fn find_regular_pattern_skips_hidden() {
+        // Non-dot pattern should not error (hidden dirs remain skipped)
+        let result = run("*.rs", "src", 5, None, "f", false, 0);
         assert!(result.is_ok());
     }
 
