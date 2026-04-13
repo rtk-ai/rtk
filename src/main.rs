@@ -46,12 +46,103 @@ pub enum AgentTarget {
     Antigravity,
 }
 
+const HELP_TEMPLATE: &str = "\
+{name} {version}
+{about-with-newline}
+{usage-heading} {usage}
+
+RTK:
+  cc-economics   Spending vs savings analysis
+  config         Show/create configuration
+  discover       Find missed savings opportunities
+  gain           Token savings summary and history
+  hook           Hook processors for AI tools
+  hook-audit     Hook rewrite audit metrics
+  init           Initialize rtk for your AI agent
+  learn          Learn from CLI error history
+  proxy          Execute without filtering (track only)
+  rewrite        Rewrite command to RTK equivalent
+  session        RTK adoption across sessions
+  telemetry      Manage telemetry consent (GDPR)
+  trust          Trust project TOML filters
+  untrust        Revoke TOML filter trust
+  verify         Verify hook + TOML filters
+
+─────────────────────────────────────────────────────────
+
+Analysis:
+  deps           Summarize project dependencies
+  env            Environment variables (masked)
+  err            Run command, show errors only
+  json           JSON compact or schema-only
+  log            Filter and deduplicate logs
+  smart          2-line technical summary
+  summary        Run command, show summary
+
+Build & Lint:
+  cargo          Cargo (Rust)
+  dotnet         .NET (build/test/restore/format)
+  format         Universal format checker
+  go             Go commands
+  golangci-lint  golangci-lint grouped output
+  lint           ESLint grouped violations
+  mypy           Mypy type checker grouped
+  prettier       Prettier format checker
+  rubocop        RuboCop linter (Ruby)
+  ruff           Ruff linter/formatter (Python)
+  tsc            TypeScript compiler errors grouped
+
+Cloud & Infrastructure:
+  aws            AWS CLI (force JSON, compress)
+  curl           Curl with auto-JSON detection
+  docker         Docker compact output
+  kubectl        Kubectl compact output
+  psql           PostgreSQL (strip borders)
+  wget           Download, strip progress bars
+
+Files & Search:
+  diff           Ultra-condensed diff
+  find           Find files with compact output
+  grep           Compact grep, grouped by file
+  ls             List directory contents
+  read           Read file with filtering
+  tree           Directory tree
+  wc             Compact word/line/byte count
+
+Frameworks:
+  next           Next.js build compact
+  prisma         Prisma CLI (no ASCII art)
+
+Git & GitHub:
+  gh             GitHub CLI (pr, issue, run)
+  git            Git with compact output
+  gt             Graphite stacked PR commands
+
+Package Managers:
+  npm            npm with filtered output
+  npx            npx with intelligent routing
+  pip            pip/uv compact output
+  pnpm           pnpm ultra-compact output
+
+Test:
+  playwright     Playwright E2E, failures only
+  pytest         Pytest compact output
+  rake           Rake/Rails Minitest compact
+  rspec          RSpec (Rails/Ruby) compact
+  test           Generic test runner, failures only
+  vitest         Vitest compact output
+
+Options:
+{options}";
+
 #[derive(Parser)]
 #[command(
     name = "rtk",
     version,
     about = "Rust Token Killer - Minimize LLM token consumption",
-    long_about = "A high-performance CLI proxy designed to filter and summarize system outputs before they reach your LLM context."
+    long_about = "A high-performance CLI proxy designed to filter and summarize system outputs before they reach your LLM context.",
+    help_template = HELP_TEMPLATE,
+    next_display_order = None,
 )]
 struct Cli {
     #[command(subcommand)]
@@ -72,242 +163,111 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List directory contents with token-optimized output (proxy to native ls)
-    Ls {
-        /// Arguments passed to ls (supports all native ls flags like -l, -a, -h, -R)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Directory tree with token-optimized output (proxy to native tree)
-    Tree {
-        /// Arguments passed to tree (supports all native tree flags like -L, -d, -a)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Read file with intelligent filtering
-    Read {
-        /// Files to read (supports multiple, like cat)
-        #[arg(required = true, num_args = 1..)]
-        files: Vec<PathBuf>,
-        /// Filter: none (default, full content), minimal, aggressive
-        #[arg(short, long, default_value = "none")]
-        level: core::filter::FilterLevel,
-        /// Max lines
-        #[arg(short, long, conflicts_with = "tail_lines")]
-        max_lines: Option<usize>,
-        /// Keep only last N lines
-        #[arg(long, conflicts_with = "max_lines")]
-        tail_lines: Option<usize>,
-        /// Show line numbers
-        #[arg(short = 'n', long)]
-        line_numbers: bool,
-    },
-
-    /// Generate 2-line technical summary (heuristic-based)
-    Smart {
-        /// File to analyze
-        file: PathBuf,
-        /// Model: heuristic
-        #[arg(short, long, default_value = "heuristic")]
-        model: String,
-        /// Force model download
-        #[arg(long)]
-        force_download: bool,
-    },
-
-    /// Git commands with compact output
-    Git {
-        /// Change to directory before executing (like git -C <path>, can be repeated)
-        #[arg(short = 'C', action = clap::ArgAction::Append)]
-        directory: Vec<String>,
-
-        /// Git configuration override (like git -c key=value, can be repeated)
-        #[arg(short = 'c', action = clap::ArgAction::Append)]
-        config_override: Vec<String>,
-
-        /// Set the path to the .git directory
-        #[arg(long = "git-dir")]
-        git_dir: Option<String>,
-
-        /// Set the path to the working tree
-        #[arg(long = "work-tree")]
-        work_tree: Option<String>,
-
-        /// Disable pager (like git --no-pager)
-        #[arg(long = "no-pager")]
-        no_pager: bool,
-
-        /// Skip optional locks (like git --no-optional-locks)
-        #[arg(long = "no-optional-locks")]
-        no_optional_locks: bool,
-
-        /// Treat repository as bare (like git --bare)
-        #[arg(long)]
-        bare: bool,
-
-        /// Treat pathspecs literally (like git --literal-pathspecs)
-        #[arg(long = "literal-pathspecs")]
-        literal_pathspecs: bool,
-
-        #[command(subcommand)]
-        command: GitCommands,
-    },
-
-    /// GitHub CLI (gh) commands with token-optimized output
-    Gh {
-        /// Subcommand: pr, issue, run, repo
-        subcommand: String,
-        /// Additional arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// AWS CLI with compact output (force JSON, compress)
-    Aws {
-        /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
-        subcommand: String,
-        /// Additional arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// PostgreSQL client with compact output (strip borders, compress tables)
-    #[command(disable_help_flag = true)]
-    Psql {
-        /// psql arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// pnpm commands with ultra-compact output
-    Pnpm {
-        /// pnpm filter arguments (can be repeated: --filter @app1 --filter @app2)
-        #[arg(long, short = 'F')]
-        filter: Vec<String>,
-
-        #[command(subcommand)]
-        command: PnpmCommands,
-    },
-
-    /// Run command and show only errors/warnings
-    Err {
-        /// Command to run
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-
-    /// Run tests and show only failures
-    Test {
-        /// Test command (e.g. cargo test)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-
-    /// Show JSON (compact values by default, or keys-only with --keys-only)
-    Json {
-        /// JSON file
-        file: PathBuf,
-        /// Max depth
-        #[arg(short, long, default_value = "5")]
-        depth: usize,
-        /// Show keys only (strip all values, show structure)
-        #[arg(long)]
-        keys_only: bool,
-    },
-
-    /// Summarize project dependencies
-    Deps {
-        /// Project path
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-
-    /// Show environment variables (filtered, sensitive masked)
-    Env {
-        /// Filter by name (e.g. PATH, AWS)
+    // ── RTK ──────────────────────────────────────────────────────────────────
+    /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
+    #[command(next_display_order = None)]
+    CcEconomics {
+        /// Show detailed daily breakdown
         #[arg(short, long)]
-        filter: Option<String>,
-        /// Show all (include sensitive)
-        #[arg(long)]
-        show_all: bool,
-    },
-
-    /// Find files with compact tree output (accepts native find flags like -name, -type)
-    Find {
-        /// All find arguments (supports both RTK and native find syntax)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Ultra-condensed diff (only changed lines)
-    Diff {
-        /// First file or - for stdin (unified diff)
-        file1: PathBuf,
-        /// Second file (optional if stdin)
-        file2: Option<PathBuf>,
-    },
-
-    /// Filter and deduplicate log output
-    Log {
-        /// Log file (omit for stdin)
-        file: Option<PathBuf>,
-    },
-
-    /// .NET commands with compact output (build/test/restore/format)
-    Dotnet {
-        #[command(subcommand)]
-        command: DotnetCommands,
-    },
-
-    /// Docker commands with compact output
-    Docker {
-        #[command(subcommand)]
-        command: DockerCommands,
-    },
-
-    /// Kubectl commands with compact output
-    Kubectl {
-        #[command(subcommand)]
-        command: KubectlCommands,
-    },
-
-    /// Run command and show heuristic summary
-    Summary {
-        /// Command to run and summarize
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-
-    /// Compact grep - strips whitespace, truncates, groups by file
-    Grep {
-        /// Pattern to search
-        pattern: String,
-        /// Path to search in
-        #[arg(default_value = ".")]
-        path: String,
-        /// Max line length
-        #[arg(short = 'l', long, default_value = "80")]
-        max_len: usize,
-        /// Max results to show
-        #[arg(short, long, default_value = "200")]
-        max: usize,
-        /// Show only match context (not full line)
+        daily: bool,
+        /// Show weekly breakdown
         #[arg(short, long)]
-        context_only: bool,
-        /// Filter by file type (e.g., ts, py, rust)
-        #[arg(short = 't', long)]
-        file_type: Option<String>,
-        /// Show line numbers (always on, accepted for grep/rg compatibility)
-        #[arg(short = 'n', long)]
-        line_numbers: bool,
-        /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        extra_args: Vec<String>,
+        weekly: bool,
+        /// Show monthly breakdown
+        #[arg(short, long)]
+        monthly: bool,
+        /// Show all time breakdowns (daily + weekly + monthly)
+        #[arg(short, long)]
+        all: bool,
+        /// Output format: text, json, csv
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Show or create configuration file
+    #[command(next_display_order = None)]
+    Config {
+        /// Create default config file
+        #[arg(long)]
+        create: bool,
+    },
+
+    /// Discover missed RTK savings from Claude Code history
+    #[command(next_display_order = None)]
+    Discover {
+        /// Filter by project path (substring match)
+        #[arg(short, long)]
+        project: Option<String>,
+        /// Max commands per section
+        #[arg(short, long, default_value = "15")]
+        limit: usize,
+        /// Scan all projects (default: current project only)
+        #[arg(short, long)]
+        all: bool,
+        /// Limit to sessions from last N days
+        #[arg(short, long, default_value = "30")]
+        since: u64,
+        /// Output format: text, json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Show token savings summary and history
+    #[command(next_display_order = None)]
+    Gain {
+        /// Filter statistics to current project (current working directory)
+        #[arg(short, long)]
+        project: bool,
+        /// Show ASCII graph of daily savings
+        #[arg(short, long)]
+        graph: bool,
+        /// Show recent command history
+        #[arg(short = 'H', long)]
+        history: bool,
+        /// Show monthly quota savings estimate
+        #[arg(short, long)]
+        quota: bool,
+        /// Subscription tier for quota calculation: pro, 5x, 20x
+        #[arg(short, long, default_value = "20x", requires = "quota")]
+        tier: String,
+        /// Show detailed daily breakdown (all days)
+        #[arg(short, long)]
+        daily: bool,
+        /// Show weekly breakdown
+        #[arg(short, long)]
+        weekly: bool,
+        /// Show monthly breakdown
+        #[arg(short, long)]
+        monthly: bool,
+        /// Show all time breakdowns (daily + weekly + monthly)
+        #[arg(short, long)]
+        all: bool,
+        /// Output format: text, json, csv
+        #[arg(short, long, default_value = "text")]
+        format: String,
+        /// Show parse failure log (commands that fell back to raw execution)
+        #[arg(short = 'F', long)]
+        failures: bool,
+    },
+
+    /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, etc.)
+    #[command(next_display_order = None)]
+    Hook {
+        #[command(subcommand)]
+        command: HookCommands,
+    },
+
+    /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
+    #[command(name = "hook-audit")]
+    #[command(next_display_order = None)]
+    HookAudit {
+        /// Show entries from last N days (0 = all time)
+        #[arg(short, long, default_value = "7")]
+        since: u64,
     },
 
     /// Initialize rtk instructions for assistant CLI usage
+    #[command(next_display_order = None)]
     Init {
         /// Add to global assistant config directory instead of local project file
         #[arg(short, long)]
@@ -358,198 +318,8 @@ enum Commands {
         copilot: bool,
     },
 
-    /// Download with compact output (strips progress bars)
-    Wget {
-        /// URL to download
-        url: String,
-        /// Output file (-O - for stdout)
-        #[arg(short = 'O', long = "output-document", allow_hyphen_values = true)]
-        output: Option<String>,
-        /// Additional wget arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Word/line/byte count with compact output (strips paths and padding)
-    Wc {
-        /// Arguments passed to wc (files, flags like -l, -w, -c)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Show token savings summary and history
-    Gain {
-        /// Filter statistics to current project (current working directory) // added
-        #[arg(short, long)]
-        project: bool,
-        /// Show ASCII graph of daily savings
-        #[arg(short, long)]
-        graph: bool,
-        /// Show recent command history
-        #[arg(short = 'H', long)]
-        history: bool,
-        /// Show monthly quota savings estimate
-        #[arg(short, long)]
-        quota: bool,
-        /// Subscription tier for quota calculation: pro, 5x, 20x
-        #[arg(short, long, default_value = "20x", requires = "quota")]
-        tier: String,
-        /// Show detailed daily breakdown (all days)
-        #[arg(short, long)]
-        daily: bool,
-        /// Show weekly breakdown
-        #[arg(short, long)]
-        weekly: bool,
-        /// Show monthly breakdown
-        #[arg(short, long)]
-        monthly: bool,
-        /// Show all time breakdowns (daily + weekly + monthly)
-        #[arg(short, long)]
-        all: bool,
-        /// Output format: text, json, csv
-        #[arg(short, long, default_value = "text")]
-        format: String,
-        /// Show parse failure log (commands that fell back to raw execution)
-        #[arg(short = 'F', long)]
-        failures: bool,
-    },
-
-    /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
-    CcEconomics {
-        /// Show detailed daily breakdown
-        #[arg(short, long)]
-        daily: bool,
-        /// Show weekly breakdown
-        #[arg(short, long)]
-        weekly: bool,
-        /// Show monthly breakdown
-        #[arg(short, long)]
-        monthly: bool,
-        /// Show all time breakdowns (daily + weekly + monthly)
-        #[arg(short, long)]
-        all: bool,
-        /// Output format: text, json, csv
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
-
-    /// Show or create configuration file
-    Config {
-        /// Create default config file
-        #[arg(long)]
-        create: bool,
-    },
-
-    /// Vitest commands with compact output
-    Vitest {
-        #[command(subcommand)]
-        command: VitestCommands,
-    },
-
-    /// Prisma commands with compact output (no ASCII art)
-    Prisma {
-        #[command(subcommand)]
-        command: PrismaCommands,
-    },
-
-    /// TypeScript compiler with grouped error output
-    Tsc {
-        /// TypeScript compiler arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Next.js build with compact output
-    Next {
-        /// Next.js build arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// ESLint with grouped rule violations
-    Lint {
-        /// Linter arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Prettier format checker with compact output
-    Prettier {
-        /// Prettier arguments (e.g., --check, --write)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Universal format checker (prettier, black, ruff format)
-    Format {
-        /// Formatter arguments (auto-detects formatter from project files)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Playwright E2E tests with compact output
-    Playwright {
-        /// Playwright arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Cargo commands with compact output
-    Cargo {
-        #[command(subcommand)]
-        command: CargoCommands,
-    },
-
-    /// npm run with filtered output (strip boilerplate)
-    Npm {
-        /// npm run arguments (script name + options)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
-    Npx {
-        /// npx arguments (command + options)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Curl with auto-JSON detection and schema output
-    Curl {
-        /// Curl arguments (URL + options)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Discover missed RTK savings from Claude Code history
-    Discover {
-        /// Filter by project path (substring match)
-        #[arg(short, long)]
-        project: Option<String>,
-        /// Max commands per section
-        #[arg(short, long, default_value = "15")]
-        limit: usize,
-        /// Scan all projects (default: current project only)
-        #[arg(short, long)]
-        all: bool,
-        /// Limit to sessions from last N days
-        #[arg(short, long, default_value = "30")]
-        since: u64,
-        /// Output format: text, json
-        #[arg(short, long, default_value = "text")]
-        format: String,
-    },
-
-    /// Show RTK adoption across Claude Code sessions
-    Session {},
-
-    /// Manage telemetry consent and data (RGPD/GDPR)
-    Telemetry {
-        #[command(subcommand)]
-        command: core::telemetry_cmd::TelemetrySubcommand,
-    },
-
     /// Learn CLI corrections from Claude Code error history
+    #[command(next_display_order = None)]
     Learn {
         /// Filter by project path (substring match)
         #[arg(short, long)]
@@ -575,107 +345,11 @@ enum Commands {
     },
 
     /// Execute command without filtering but track usage
+    #[command(next_display_order = None)]
     Proxy {
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
-    },
-
-    /// Trust project-local TOML filters in current directory
-    Trust {
-        /// List all trusted projects
-        #[arg(long)]
-        list: bool,
-    },
-
-    /// Revoke trust for project-local TOML filters
-    Untrust,
-
-    /// Verify hook integrity and run TOML filter inline tests
-    Verify {
-        /// Run tests only for this filter name
-        #[arg(long)]
-        filter: Option<String>,
-        /// Fail if any filter has no inline tests (CI mode)
-        #[arg(long)]
-        require_all: bool,
-    },
-
-    /// Ruff linter/formatter with compact output
-    Ruff {
-        /// Ruff arguments (e.g., check, format --check)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Pytest test runner with compact output
-    Pytest {
-        /// Pytest arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Mypy type checker with grouped error output
-    Mypy {
-        /// Mypy arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Rake/Rails test with compact Minitest output (Ruby)
-    Rake {
-        /// Rake arguments (e.g., test, test TEST=path/to/test.rb)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// RuboCop linter with compact output (Ruby)
-    Rubocop {
-        /// RuboCop arguments (e.g., --auto-correct, -A)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// RSpec test runner with compact output (Rails/Ruby)
-    Rspec {
-        /// RSpec arguments (e.g., spec/models, --tag focus)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Pip package manager with compact output (auto-detects uv)
-    Pip {
-        /// Pip arguments (e.g., list, outdated, install)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Go commands with compact output
-    Go {
-        #[command(subcommand)]
-        command: GoCommands,
-    },
-
-    /// Graphite (gt) stacked PR commands with compact output
-    Gt {
-        #[command(subcommand)]
-        command: GtCommands,
-    },
-
-    /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
-    #[command(name = "golangci-lint")]
-    GolangciLint {
-        /// Additional golangci-lint arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
-    #[command(name = "hook-audit")]
-    HookAudit {
-        /// Show entries from last N days (0 = all time)
-        #[arg(short, long, default_value = "7")]
-        since: u64,
     },
 
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
@@ -685,6 +359,7 @@ enum Commands {
     ///
     /// Used by Claude Code, Gemini CLI, and other LLM hooks:
     ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
+    #[command(next_display_order = None)]
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
@@ -692,84 +367,581 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Hook processors for LLM CLI tools (Gemini CLI, Copilot, etc.)
-    Hook {
+    /// Show RTK adoption across Claude Code sessions
+    #[command(next_display_order = None)]
+    Session {},
+
+    /// Manage telemetry consent and data (RGPD/GDPR)
+    Telemetry {
         #[command(subcommand)]
-        command: HookCommands,
+        command: core::telemetry_cmd::TelemetrySubcommand,
+    },
+
+    /// Trust project-local TOML filters in current directory
+    #[command(next_display_order = None)]
+    Trust {
+        /// List all trusted projects
+        #[arg(long)]
+        list: bool,
+    },
+
+    /// Revoke trust for project-local TOML filters
+    #[command(next_display_order = None)]
+    Untrust,
+
+    /// Verify hook integrity and run TOML filter inline tests
+    #[command(next_display_order = None)]
+    Verify {
+        /// Run tests only for this filter name
+        #[arg(long)]
+        filter: Option<String>,
+        /// Fail if any filter has no inline tests (CI mode)
+        #[arg(long)]
+        require_all: bool,
+    },
+
+    // ── Analysis ─────────────────────────────────────────────────────────────
+    /// Summarize project dependencies
+    #[command(next_display_order = None)]
+    Deps {
+        /// Project path
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
+    /// Show environment variables (filtered, sensitive masked)
+    #[command(next_display_order = None)]
+    Env {
+        /// Filter by name (e.g. PATH, AWS)
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// Show all (include sensitive)
+        #[arg(long)]
+        show_all: bool,
+    },
+
+    /// Run command and show only errors/warnings
+    #[command(next_display_order = None)]
+    Err {
+        /// Command to run
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Show JSON (compact values by default, or keys-only with --keys-only)
+    #[command(next_display_order = None)]
+    Json {
+        /// JSON file
+        file: PathBuf,
+        /// Max depth
+        #[arg(short, long, default_value = "5")]
+        depth: usize,
+        /// Show keys only (strip all values, show structure)
+        #[arg(long)]
+        keys_only: bool,
+    },
+
+    /// Filter and deduplicate log output
+    #[command(next_display_order = None)]
+    Log {
+        /// Log file (omit for stdin)
+        file: Option<PathBuf>,
+    },
+
+    /// Generate 2-line technical summary (heuristic-based)
+    #[command(next_display_order = None)]
+    Smart {
+        /// File to analyze
+        file: PathBuf,
+        /// Model: heuristic
+        #[arg(short, long, default_value = "heuristic")]
+        model: String,
+        /// Force model download
+        #[arg(long)]
+        force_download: bool,
+    },
+
+    /// Run command and show heuristic summary
+    #[command(next_display_order = None)]
+    Summary {
+        /// Command to run and summarize
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    // ── Build & Lint ──────────────────────────────────────────────────────────
+    /// Cargo commands with compact output
+    #[command(next_display_order = None)]
+    Cargo {
+        #[command(subcommand)]
+        command: CargoCommands,
+    },
+
+    /// .NET commands with compact output (build/test/restore/format)
+    #[command(next_display_order = None)]
+    Dotnet {
+        #[command(subcommand)]
+        command: DotnetCommands,
+    },
+
+    /// Universal format checker (prettier, black, ruff format)
+    #[command(next_display_order = None)]
+    Format {
+        /// Formatter arguments (auto-detects formatter from project files)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Go commands with compact output
+    #[command(next_display_order = None)]
+    Go {
+        #[command(subcommand)]
+        command: GoCommands,
+    },
+
+    /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
+    #[command(name = "golangci-lint")]
+    #[command(next_display_order = None)]
+    GolangciLint {
+        /// Additional golangci-lint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// ESLint with grouped rule violations
+    #[command(next_display_order = None)]
+    Lint {
+        /// Linter arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Mypy type checker with grouped error output
+    #[command(next_display_order = None)]
+    Mypy {
+        /// Mypy arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Prettier format checker with compact output
+    #[command(next_display_order = None)]
+    Prettier {
+        /// Prettier arguments (e.g., --check, --write)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// RuboCop linter with compact output (Ruby)
+    #[command(next_display_order = None)]
+    Rubocop {
+        /// RuboCop arguments (e.g., --auto-correct, -A)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Ruff linter/formatter with compact output
+    #[command(next_display_order = None)]
+    Ruff {
+        /// Ruff arguments (e.g., check, format --check)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// TypeScript compiler with grouped error output
+    #[command(next_display_order = None)]
+    Tsc {
+        /// TypeScript compiler arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    // ── Cloud & Infrastructure ────────────────────────────────────────────────
+    /// AWS CLI with compact output (force JSON, compress)
+    #[command(next_display_order = None)]
+    Aws {
+        /// AWS service subcommand (e.g., sts, s3, ec2, ecs, rds, cloudformation)
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Curl with auto-JSON detection and schema output
+    #[command(next_display_order = None)]
+    Curl {
+        /// Curl arguments (URL + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Docker commands with compact output
+    #[command(next_display_order = None)]
+    Docker {
+        #[command(subcommand)]
+        command: DockerCommands,
+    },
+
+    /// Kubectl commands with compact output
+    #[command(next_display_order = None)]
+    Kubectl {
+        #[command(subcommand)]
+        command: KubectlCommands,
+    },
+
+    /// PostgreSQL client with compact output (strip borders, compress tables)
+    #[command(disable_help_flag = true, next_display_order = None)]
+    Psql {
+        /// psql arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Download with compact output (strips progress bars)
+    #[command(next_display_order = None)]
+    Wget {
+        /// URL to download
+        url: String,
+        /// Output file (-O - for stdout)
+        #[arg(short = 'O', long = "output-document", allow_hyphen_values = true)]
+        output: Option<String>,
+        /// Additional wget arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    // ── Files & Search ────────────────────────────────────────────────────────
+    /// Ultra-condensed diff (only changed lines)
+    #[command(next_display_order = None)]
+    Diff {
+        /// First file or - for stdin (unified diff)
+        file1: PathBuf,
+        /// Second file (optional if stdin)
+        file2: Option<PathBuf>,
+    },
+
+    /// Find files with compact tree output (accepts native find flags like -name, -type)
+    #[command(next_display_order = None)]
+    Find {
+        /// All find arguments (supports both RTK and native find syntax)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Compact grep - strips whitespace, truncates, groups by file
+    #[command(next_display_order = None)]
+    Grep {
+        /// Pattern to search
+        pattern: String,
+        /// Path to search in
+        #[arg(default_value = ".")]
+        path: String,
+        /// Max line length
+        #[arg(short = 'l', long, default_value = "80")]
+        max_len: usize,
+        /// Max results to show
+        #[arg(short, long, default_value = "200")]
+        max: usize,
+        /// Show only match context (not full line)
+        #[arg(short, long)]
+        context_only: bool,
+        /// Filter by file type (e.g., ts, py, rust)
+        #[arg(short = 't', long)]
+        file_type: Option<String>,
+        /// Show line numbers (always on, accepted for grep/rg compatibility)
+        #[arg(short = 'n', long)]
+        line_numbers: bool,
+        /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        extra_args: Vec<String>,
+    },
+
+    /// List directory contents with token-optimized output (proxy to native ls)
+    #[command(next_display_order = None)]
+    Ls {
+        /// Arguments passed to ls (supports all native ls flags like -l, -a, -h, -R)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Read file with intelligent filtering
+    #[command(next_display_order = None)]
+    Read {
+        /// Files to read (supports multiple, like cat)
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<PathBuf>,
+        /// Filter: none (default, full content), minimal, aggressive
+        #[arg(short, long, default_value = "none")]
+        level: core::filter::FilterLevel,
+        /// Max lines
+        #[arg(short, long, conflicts_with = "tail_lines")]
+        max_lines: Option<usize>,
+        /// Keep only last N lines
+        #[arg(long, conflicts_with = "max_lines")]
+        tail_lines: Option<usize>,
+        /// Show line numbers
+        #[arg(short = 'n', long)]
+        line_numbers: bool,
+    },
+
+    /// Directory tree with token-optimized output (proxy to native tree)
+    #[command(next_display_order = None)]
+    Tree {
+        /// Arguments passed to tree (supports all native tree flags like -L, -d, -a)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Word/line/byte count with compact output (strips paths and padding)
+    #[command(next_display_order = None)]
+    Wc {
+        /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    // ── Frameworks ────────────────────────────────────────────────────────────
+    /// Next.js build with compact output
+    #[command(next_display_order = None)]
+    Next {
+        /// Next.js build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Prisma commands with compact output (no ASCII art)
+    #[command(next_display_order = None)]
+    Prisma {
+        #[command(subcommand)]
+        command: PrismaCommands,
+    },
+
+    // ── Git & GitHub ──────────────────────────────────────────────────────────
+    /// GitHub CLI (gh) commands with token-optimized output
+    #[command(next_display_order = None)]
+    Gh {
+        /// Subcommand: pr, issue, run, repo
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Git commands with compact output
+    #[command(next_display_order = None)]
+    Git {
+        /// Change to directory before executing (like git -C <path>, can be repeated)
+        #[arg(short = 'C', action = clap::ArgAction::Append)]
+        directory: Vec<String>,
+
+        /// Git configuration override (like git -c key=value, can be repeated)
+        #[arg(short = 'c', action = clap::ArgAction::Append)]
+        config_override: Vec<String>,
+
+        /// Set the path to the .git directory
+        #[arg(long = "git-dir")]
+        git_dir: Option<String>,
+
+        /// Set the path to the working tree
+        #[arg(long = "work-tree")]
+        work_tree: Option<String>,
+
+        /// Disable pager (like git --no-pager)
+        #[arg(long = "no-pager")]
+        no_pager: bool,
+
+        /// Skip optional locks (like git --no-optional-locks)
+        #[arg(long = "no-optional-locks")]
+        no_optional_locks: bool,
+
+        /// Treat repository as bare (like git --bare)
+        #[arg(long)]
+        bare: bool,
+
+        /// Treat pathspecs literally (like git --literal-pathspecs)
+        #[arg(long = "literal-pathspecs")]
+        literal_pathspecs: bool,
+
+        #[command(subcommand)]
+        command: GitCommands,
+    },
+
+    /// Graphite (gt) stacked PR commands with compact output
+    #[command(next_display_order = None)]
+    Gt {
+        #[command(subcommand)]
+        command: GtCommands,
+    },
+
+    // ── Package Managers ──────────────────────────────────────────────────────
+    /// npm run with filtered output (strip boilerplate)
+    #[command(next_display_order = None)]
+    Npm {
+        /// npm run arguments (script name + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// npx with intelligent routing (tsc, eslint, prisma -> specialized filters)
+    #[command(next_display_order = None)]
+    Npx {
+        /// npx arguments (command + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Pip package manager with compact output (auto-detects uv)
+    #[command(next_display_order = None)]
+    Pip {
+        /// Pip arguments (e.g., list, outdated, install)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// pnpm commands with ultra-compact output
+    #[command(next_display_order = None)]
+    Pnpm {
+        /// pnpm filter arguments (can be repeated: --filter @app1 --filter @app2)
+        #[arg(long, short = 'F')]
+        filter: Vec<String>,
+
+        #[command(subcommand)]
+        command: PnpmCommands,
+    },
+
+    // ── Test ──────────────────────────────────────────────────────────────────
+    /// Playwright E2E tests with compact output
+    #[command(next_display_order = None)]
+    Playwright {
+        /// Playwright arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Pytest test runner with compact output
+    #[command(next_display_order = None)]
+    Pytest {
+        /// Pytest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Rake/Rails test with compact Minitest output (Ruby)
+    #[command(next_display_order = None)]
+    Rake {
+        /// Rake arguments (e.g., test, test TEST=path/to/test.rb)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// RSpec test runner with compact output (Rails/Ruby)
+    #[command(next_display_order = None)]
+    Rspec {
+        /// RSpec arguments (e.g., spec/models, --tag focus)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Run tests and show only failures
+    #[command(next_display_order = None)]
+    Test {
+        /// Test command (e.g. cargo test)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+
+    /// Vitest commands with compact output
+    #[command(next_display_order = None)]
+    Vitest {
+        #[command(subcommand)]
+        command: VitestCommands,
     },
 }
 
 #[derive(Subcommand)]
 enum HookCommands {
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
+    #[command(next_display_order = None)]
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
+    #[command(next_display_order = None)]
     Copilot,
 }
 
 #[derive(Subcommand)]
 enum GitCommands {
     /// Condensed diff output
+    #[command(next_display_order = None)]
     Diff {
         /// Git arguments (supports all git diff flags like --stat, --cached, etc)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// One-line commit history
+    #[command(next_display_order = None)]
     Log {
         /// Git arguments (supports all git log flags like --oneline, --graph, --all)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compact status (supports all git status flags)
+    #[command(next_display_order = None)]
     Status {
         /// Git arguments (supports all git status flags like --porcelain, --short, -s)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compact show (commit summary + stat + compacted diff)
+    #[command(next_display_order = None)]
     Show {
         /// Git arguments (supports all git show flags)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Add files → "ok"
+    #[command(next_display_order = None)]
     Add {
         /// Files and flags to add (supports all git add flags like -A, -p, --all, etc)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Commit → "ok \<hash\>"
+    #[command(next_display_order = None)]
     Commit {
         /// Git commit arguments (supports -a, -m, --amend, --allow-empty, etc)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Push → "ok \<branch\>"
+    #[command(next_display_order = None)]
     Push {
         /// Git push arguments (supports -u, remote, branch, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Pull → "ok \<stats\>"
+    #[command(next_display_order = None)]
     Pull {
         /// Git pull arguments (supports --rebase, remote, branch, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compact branch listing (current/local/remote)
+    #[command(next_display_order = None)]
     Branch {
         /// Git branch arguments (supports -d, -D, -m, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Fetch → "ok fetched (N new refs)"
+    #[command(next_display_order = None)]
     Fetch {
         /// Git fetch arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Stash management (list, show, pop, apply, drop)
+    #[command(next_display_order = None)]
     Stash {
         /// Subcommand: list, show, pop, apply, drop, push
         subcommand: Option<String>,
@@ -778,6 +950,7 @@ enum GitCommands {
         args: Vec<String>,
     },
     /// Compact worktree listing
+    #[command(next_display_order = None)]
     Worktree {
         /// Git worktree arguments (add, remove, prune, or empty for list)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -791,6 +964,7 @@ enum GitCommands {
 #[derive(Subcommand)]
 enum PnpmCommands {
     /// List installed packages (ultra-dense)
+    #[command(next_display_order = None)]
     List {
         /// Depth level (default: 0)
         #[arg(short, long, default_value = "0")]
@@ -800,12 +974,14 @@ enum PnpmCommands {
         args: Vec<String>,
     },
     /// Show outdated packages (condensed: "pkg: old → new")
+    #[command(next_display_order = None)]
     Outdated {
         /// Additional pnpm arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Install packages (filter progress bars)
+    #[command(next_display_order = None)]
     Install {
         /// Packages to install
         packages: Vec<String>,
@@ -813,7 +989,9 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
     /// Typecheck (delegates to tsc filter)
+    #[command(next_display_order = None)]
     Typecheck {
         /// Additional typecheck arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -827,12 +1005,16 @@ enum PnpmCommands {
 #[derive(Subcommand)]
 enum DockerCommands {
     /// List running containers
+    #[command(next_display_order = None)]
     Ps,
     /// List images
+    #[command(next_display_order = None)]
     Images,
     /// Show container logs (deduplicated)
+    #[command(next_display_order = None)]
     Logs { container: String },
     /// Docker Compose commands with compact output
+    #[command(next_display_order = None)]
     Compose {
         #[command(subcommand)]
         command: ComposeCommands,
@@ -845,13 +1027,16 @@ enum DockerCommands {
 #[derive(Subcommand)]
 enum ComposeCommands {
     /// List compose services (compact)
+    #[command(next_display_order = None)]
     Ps,
     /// Show compose logs (deduplicated)
+    #[command(next_display_order = None)]
     Logs {
         /// Optional service name
         service: Option<String>,
     },
     /// Build compose services (summary)
+    #[command(next_display_order = None)]
     Build {
         /// Optional service name
         service: Option<String>,
@@ -864,6 +1049,7 @@ enum ComposeCommands {
 #[derive(Subcommand)]
 enum KubectlCommands {
     /// List pods
+    #[command(next_display_order = None)]
     Pods {
         #[arg(short, long)]
         namespace: Option<String>,
@@ -872,6 +1058,7 @@ enum KubectlCommands {
         all: bool,
     },
     /// List services
+    #[command(next_display_order = None)]
     Services {
         #[arg(short, long)]
         namespace: Option<String>,
@@ -880,6 +1067,7 @@ enum KubectlCommands {
         all: bool,
     },
     /// Show pod logs (deduplicated)
+    #[command(next_display_order = None)]
     Logs {
         pod: String,
         #[arg(short, long)]
@@ -893,6 +1081,7 @@ enum KubectlCommands {
 #[derive(Subcommand)]
 enum VitestCommands {
     /// Run tests with filtered output (90% token reduction)
+    #[command(next_display_order = None)]
     Run {
         /// Additional vitest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -903,17 +1092,20 @@ enum VitestCommands {
 #[derive(Subcommand)]
 enum PrismaCommands {
     /// Generate Prisma Client (strip ASCII art)
+    #[command(next_display_order = None)]
     Generate {
         /// Additional prisma arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Manage migrations
+    #[command(next_display_order = None)]
     Migrate {
         #[command(subcommand)]
         command: PrismaMigrateCommands,
     },
     /// Push schema to database
+    #[command(next_display_order = None)]
     DbPush {
         /// Additional prisma arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -924,6 +1116,7 @@ enum PrismaCommands {
 #[derive(Subcommand)]
 enum PrismaMigrateCommands {
     /// Create and apply migration
+    #[command(next_display_order = None)]
     Dev {
         /// Migration name
         #[arg(short, long)]
@@ -933,12 +1126,14 @@ enum PrismaMigrateCommands {
         args: Vec<String>,
     },
     /// Check migration status
+    #[command(next_display_order = None)]
     Status {
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Deploy migrations to production
+    #[command(next_display_order = None)]
     Deploy {
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -949,36 +1144,42 @@ enum PrismaMigrateCommands {
 #[derive(Subcommand)]
 enum CargoCommands {
     /// Build with compact output (strip Compiling lines, keep errors)
+    #[command(next_display_order = None)]
     Build {
         /// Additional cargo build arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Test with failures-only output
+    #[command(next_display_order = None)]
     Test {
         /// Additional cargo test arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Clippy with warnings grouped by lint rule
+    #[command(next_display_order = None)]
     Clippy {
         /// Additional cargo clippy arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Check with compact output (strip Checking lines, keep errors)
+    #[command(next_display_order = None)]
     Check {
         /// Additional cargo check arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Install with compact output (strip dep compilation, keep installed/errors)
+    #[command(next_display_order = None)]
     Install {
         /// Additional cargo install arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Nextest with failures-only output
+    #[command(next_display_order = None)]
     Nextest {
         /// Additional cargo nextest arguments (e.g., run, list, --lib)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -992,21 +1193,25 @@ enum CargoCommands {
 #[derive(Subcommand)]
 enum DotnetCommands {
     /// Build with compact output
+    #[command(next_display_order = None)]
     Build {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Test with compact output
+    #[command(next_display_order = None)]
     Test {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Restore with compact output
+    #[command(next_display_order = None)]
     Restore {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Format with compact output
+    #[command(next_display_order = None)]
     Format {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1019,18 +1224,21 @@ enum DotnetCommands {
 #[derive(Subcommand)]
 enum GoCommands {
     /// Run tests with compact output (90% token reduction via JSON streaming)
+    #[command(next_display_order = None)]
     Test {
         /// Additional go test arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Build with compact output (errors only)
+    #[command(next_display_order = None)]
     Build {
         /// Additional go build arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Vet with compact output
+    #[command(next_display_order = None)]
     Vet {
         /// Additional go vet arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -1053,6 +1261,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "hook-audit",
     "cc-economics",
     "verify",
+    "telemetry",
     "trust",
     "untrust",
     "session",
@@ -1189,31 +1398,37 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 #[derive(Subcommand)]
 enum GtCommands {
     /// Compact stack log output
+    #[command(next_display_order = None)]
     Log {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compact submit output
+    #[command(next_display_order = None)]
     Submit {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compact sync output
+    #[command(next_display_order = None)]
     Sync {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compact restack output
+    #[command(next_display_order = None)]
     Restack {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Compact create output
+    #[command(next_display_order = None)]
     Create {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
     /// Branch info and management
+    #[command(next_display_order = None)]
     Branch {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1759,7 +1974,7 @@ fn run_cli() -> Result<i32> {
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
         Commands::Gain {
-            project, // added
+            project,
             graph,
             history,
             quota,
@@ -1772,7 +1987,7 @@ fn run_cli() -> Result<i32> {
             failures,
         } => {
             analytics::gain::run(
-                project, // added: pass project flag
+                project,
                 graph,
                 history,
                 quota,
@@ -2301,7 +2516,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn test_git_commit_single_message() {
@@ -2786,5 +3001,19 @@ mod tests {
             cli.ultra_compact,
             "--ultra-compact long form must still enable ultra-compact mode"
         );
+    }
+
+    fn help_template_covers_all_commands() {
+        let cmd = Cli::command();
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name();
+            if name == "help" {
+                continue;
+            }
+            assert!(
+                HELP_TEMPLATE.contains(&format!("  {name}")),
+                "Command '{name}' is missing from HELP_TEMPLATE — add it to the correct section",
+            );
+        }
     }
 }
