@@ -59,6 +59,44 @@ pub fn run(
     }
 }
 
+/// Returns true if `arg` looks like a file-system path rather than a git revision.
+///
+/// Used by `normalize_diff_args` to decide where to inject `--`.
+fn looks_like_path(arg: &str) -> bool {
+    // Path separators are the strongest signal
+    arg.contains('/') || arg.contains('\\') || arg.starts_with('.') || arg.starts_with('~')
+}
+
+/// Re-insert `--` before the first path-like argument when clap has consumed it.
+///
+/// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
+/// first positional argument (before any other positional).  This means:
+///   `rtk git diff -- file` → args = ["file"]   (clap ate `--`)
+///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
+///
+/// Without the `--` separator git may treat an unambiguous path as a revision and
+/// emit "fatal: ambiguous argument".  We re-insert `--` before the first
+/// path-like argument when `--` is absent so git always gets the correct intent.
+fn normalize_diff_args(args: &[String]) -> Vec<String> {
+    // Already has `--` — nothing to do
+    if args.iter().any(|a| a == "--") {
+        return args.to_vec();
+    }
+    // Find the first non-flag arg that looks like a path
+    let path_start = args
+        .iter()
+        .position(|arg| !arg.starts_with('-') && looks_like_path(arg));
+    match path_start {
+        Some(idx) => {
+            let mut out = args[..idx].to_vec();
+            out.push("--".to_string());
+            out.extend_from_slice(&args[idx..]);
+            out
+        }
+        None => args.to_vec(),
+    }
+}
+
 fn run_diff(
     args: &[String],
     max_lines: Option<usize>,
@@ -66,6 +104,9 @@ fn run_diff(
     global_args: &[String],
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+
+    // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
+    let args = &normalize_diff_args(args);
 
     // Check if user wants stat output
     let wants_stat = args
@@ -1793,6 +1834,79 @@ mod tests {
             !result.contains("more changes truncated"),
             "5 files × 20 lines should not exceed max_lines=500"
         );
+    }
+
+    // ----- normalize_diff_args (issue #1215) -----
+
+    /// Baseline: `--` already present → no-op, args unchanged.
+    #[test]
+    fn test_normalize_diff_args_noop_when_separator_present() {
+        let args = vec![
+            "HEAD".to_string(),
+            "--".to_string(),
+            "src/main.rs".to_string(),
+        ];
+        assert_eq!(normalize_diff_args(&args), args);
+    }
+
+    /// Core regression: clap ate `--` before a path with `/`.
+    /// `normalize_diff_args` must re-insert it.
+    #[test]
+    fn test_normalize_diff_args_reinserts_separator_before_path_with_slash() {
+        let args = vec!["apps/client/frontend/src/MyComponent.tsx".to_string()];
+        let normalized = normalize_diff_args(&args);
+        assert_eq!(
+            normalized,
+            vec!["--".to_string(), "apps/client/frontend/src/MyComponent.tsx".to_string()],
+            "-- must be injected before the path argument"
+        );
+    }
+
+    /// Ref before path: args like ["HEAD", "src/foo.rs"] get `--` inserted before the path.
+    #[test]
+    fn test_normalize_diff_args_reinserts_separator_after_ref() {
+        let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
+        let normalized = normalize_diff_args(&args);
+        assert_eq!(
+            normalized,
+            vec!["HEAD".to_string(), "--".to_string(), "src/foo.rs".to_string()]
+        );
+    }
+
+    /// Flags before path: `["--cached", "src/foo.rs"]` → `["--cached", "--", "src/foo.rs"]`.
+    #[test]
+    fn test_normalize_diff_args_reinserts_separator_after_flag() {
+        let args = vec!["--cached".to_string(), "src/foo.rs".to_string()];
+        let normalized = normalize_diff_args(&args);
+        assert_eq!(
+            normalized,
+            vec!["--cached".to_string(), "--".to_string(), "src/foo.rs".to_string()]
+        );
+    }
+
+    /// Pure flags (no paths) → no injection.
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_pure_flags() {
+        let args = vec!["--stat".to_string(), "--cached".to_string()];
+        assert_eq!(normalize_diff_args(&args), args);
+    }
+
+    /// Dotfile / relative-path detection (starts with `.`).
+    #[test]
+    fn test_normalize_diff_args_dotfile_is_path() {
+        let args = vec![".gitignore".to_string()];
+        let normalized = normalize_diff_args(&args);
+        assert_eq!(
+            normalized,
+            vec!["--".to_string(), ".gitignore".to_string()]
+        );
+    }
+
+    /// A bare word that isn't path-like (e.g. a branch name) → no injection.
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_bare_ref() {
+        let args = vec!["HEAD".to_string()];
+        assert_eq!(normalize_diff_args(&args), args);
     }
 
     #[test]
