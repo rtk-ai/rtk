@@ -177,6 +177,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^vercel\b",
+        rtk_cmd: "rtk vercel",
+        rewrite_prefixes: &["vercel"],
+        category: "Infra",
+        savings_pct: 68.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
         rtk_cmd: "rtk docker",
         rewrite_prefixes: &["docker"],

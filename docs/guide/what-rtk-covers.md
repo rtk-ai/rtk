@@ -59,6 +59,7 @@ Once RTK is installed with a hook, these commands are automatically intercepted 
 | `next build` | 80% | Route summary + errors only |
 | `prisma migrate` | 75% | Migration status only |
 | `playwright test` | 90% | Failures + trace links only |
+| `vercel` | 68% | Deploy logs and project listings compressed |
 
 ## Python
 

@@ -878,6 +878,19 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_vercel_deploy() {
+        assert_eq!(
+            classify_command("vercel --yes --prod"),
+            Classification::Supported {
+                rtk_equivalent: "rtk vercel",
+                category: "Infra",
+                estimated_savings_pct: 68.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
     fn test_classify_python_m_mypy() {
         assert_eq!(
             classify_command("python3 -m mypy --strict"),
@@ -1575,6 +1588,14 @@ mod tests {
         assert_eq!(
             rewrite_command("docker run --rm ubuntu bash", &[]),
             Some("rtk docker run --rm ubuntu bash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_vercel_project_ls() {
+        assert_eq!(
+            rewrite_command("vercel project ls", &[]),
+            Some("rtk vercel project ls".into())
         );
     }
 
