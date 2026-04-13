@@ -1,43 +1,40 @@
 //! Runs a command and produces a heuristic summary of its output.
 
 use crate::core::tracking;
-use crate::core::utils::truncate;
+use crate::core::utils::{resolved_command, truncate};
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Run a command and provide a heuristic summary
-pub fn run(command: &str, verbose: u8) -> Result<i32> {
+pub fn run(parts: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let command_label = parts.join(" ");
 
     if verbose > 0 {
-        eprintln!("Running and summarizing: {}", command);
+        eprintln!("Running and summarizing: {}", command_label);
     }
 
-    let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute command")?;
+    let (cmd, args) = parts
+        .split_first()
+        .context("summary: no command provided")?;
+
+    let output = resolved_command(cmd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to execute command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, command);
+    let exit_code = crate::core::utils::exit_code_from_output(&output, &command_label);
 
-    let summary = summarize_output(&raw, command, output.status.success());
+    let summary = summarize_output(&raw, &command_label, output.status.success());
     println!("{}", summary);
-    timer.track(command, "rtk summary", &raw, &summary);
+    timer.track(&command_label, "rtk summary", &raw, &summary);
     Ok(exit_code)
 }
 

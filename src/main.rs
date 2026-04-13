@@ -1522,15 +1522,9 @@ fn run_cli() -> Result<i32> {
             }
         }
 
-        Commands::Err { command } => {
-            let cmd = command.join(" ");
-            runner::run_err(&cmd, cli.verbose)?
-        }
+        Commands::Err { command } => runner::run_err(&command, cli.verbose)?,
 
-        Commands::Test { command } => {
-            let cmd = command.join(" ");
-            runner::run_test(&cmd, cli.verbose)?
-        }
+        Commands::Test { command } => runner::run_test(&command, cli.verbose)?,
 
         Commands::Json {
             file,
@@ -1643,10 +1637,7 @@ fn run_cli() -> Result<i32> {
             KubectlCommands::Other(args) => container::run_kubectl_passthrough(&args, cli.verbose)?,
         },
 
-        Commands::Summary { command } => {
-            let cmd = command.join(" ");
-            summary::run(&cmd, cli.verbose)?
-        }
+        Commands::Summary { command } => summary::run(&command, cli.verbose)?,
 
         Commands::Grep {
             pattern,

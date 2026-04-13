@@ -1,32 +1,30 @@
 //! Runs arbitrary commands and captures only stderr or test failures.
 
+use crate::core::utils::resolved_command;
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Run a command and filter output to show only errors/warnings
-pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_err(parts: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let command_label = parts.join(" ");
 
     if verbose > 0 {
-        eprintln!("Running: {}", command);
+        eprintln!("Running: {}", command_label);
     }
 
-    let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute command")?;
+    let (cmd, args) = parts
+        .split_first()
+        .context("run_err: no command provided")?;
+
+    let output = resolved_command(cmd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to execute command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -57,45 +55,42 @@ pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
     } else {
         println!("{}", rtk);
     }
-    timer.track(command, "rtk run-err", &raw, &rtk);
+    timer.track(&command_label, "rtk run-err", &raw, &rtk);
     Ok(exit_code)
 }
 
 /// Run tests and show only failures
-pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
+pub fn run_test(parts: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
+    let command_label = parts.join(" ");
 
     if verbose > 0 {
-        eprintln!("Running tests: {}", command);
+        eprintln!("Running tests: {}", command_label);
     }
 
-    let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute test command")?;
+    let (cmd, args) = parts
+        .split_first()
+        .context("run_test: no command provided")?;
+
+    let output = resolved_command(cmd)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("Failed to execute test command")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let raw = format!("{}\n{}", stdout, stderr);
 
     let exit_code = crate::core::utils::exit_code_from_output(&output, "test");
-    let summary = extract_test_summary(&raw, command);
+    let summary = extract_test_summary(&raw, &command_label);
     if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "test", exit_code) {
         println!("{}\n{}", summary, hint);
     } else {
         println!("{}", summary);
     }
-    timer.track(command, "rtk run-test", &raw, &summary);
+    timer.track(&command_label, "rtk run-test", &raw, &summary);
     Ok(exit_code)
 }
 
