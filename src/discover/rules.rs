@@ -12,7 +12,7 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree|checkout|merge|rebase)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
@@ -23,7 +23,11 @@ pub const RULES: &[RtkRule] = &[
             ("add", 59.0),
             ("commit", 59.0),
         ],
-        subcmd_status: &[],
+        subcmd_status: &[
+            ("checkout", RtkStatus::Passthrough),
+            ("merge", RtkStatus::Passthrough),
+            ("rebase", RtkStatus::Passthrough),
+        ],
     },
     RtkRule {
         pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
@@ -35,22 +39,29 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
+        pattern: r"^cargo\s+(build|test|clippy|check|fmt|install|run|publish)",
         rtk_cmd: "rtk cargo",
         rewrite_prefixes: &["cargo"],
         category: "Cargo",
         savings_pct: 80.0,
         subcmd_savings: &[("test", 90.0), ("check", 80.0)],
-        subcmd_status: &[("fmt", RtkStatus::Passthrough)],
+        subcmd_status: &[
+            ("fmt", RtkStatus::Passthrough),
+            ("run", RtkStatus::Passthrough),
+            ("publish", RtkStatus::Passthrough),
+        ],
     },
     RtkRule {
-        pattern: r"^pnpm\s+(list|ls|outdated|install)",
+        pattern: r"^pnpm\s+(list|ls|outdated|install|build|exec)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
         savings_pct: 80.0,
         subcmd_savings: &[],
-        subcmd_status: &[],
+        subcmd_status: &[
+            ("build", RtkStatus::Passthrough),
+            ("exec", RtkStatus::Passthrough),
+        ],
     },
     RtkRule {
         pattern: r"^npm\s+(run|exec)",

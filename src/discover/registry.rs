@@ -173,10 +173,17 @@ pub fn classify_command(cmd: &str) -> Classification {
             (rule.savings_pct, super::report::RtkStatus::Existing)
         };
 
+        // Passthrough commands have 0% savings (no filtering)
+        let final_savings = if status == super::report::RtkStatus::Passthrough {
+            0.0
+        } else {
+            savings
+        };
+
         Classification::Supported {
             rtk_equivalent: rule.rtk_cmd,
             category: rule.category,
-            estimated_savings_pct: savings,
+            estimated_savings_pct: final_savings,
             status,
         }
     } else {
@@ -919,7 +926,98 @@ mod tests {
             Classification::Supported {
                 rtk_equivalent: "rtk cargo",
                 category: "Cargo",
-                estimated_savings_pct: 80.0,
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_run_passthrough() {
+        assert_eq!(
+            classify_command("cargo run"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_publish_passthrough() {
+        assert_eq!(
+            classify_command("cargo publish"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_checkout_passthrough() {
+        assert_eq!(
+            classify_command("git checkout main"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_merge_passthrough() {
+        assert_eq!(
+            classify_command("git merge feature-branch"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_rebase_passthrough() {
+        assert_eq!(
+            classify_command("git rebase origin/main"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_pnpm_build_passthrough() {
+        assert_eq!(
+            classify_command("pnpm build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                category: "PackageManager",
+                estimated_savings_pct: 0.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_pnpm_exec_passthrough() {
+        assert_eq!(
+            classify_command("pnpm exec playwright test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pnpm",
+                category: "PackageManager",
+                estimated_savings_pct: 0.0,
                 status: RtkStatus::Passthrough,
             }
         );
@@ -940,9 +1038,9 @@ mod tests {
 
     #[test]
     fn test_registry_covers_all_cargo_subcommands() {
-        // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt)
+        // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt, Run, Publish)
         // except Other has a matching pattern in the registry
-        for subcmd in ["build", "test", "clippy", "check", "fmt"] {
+        for subcmd in ["build", "test", "clippy", "check", "fmt", "run", "publish"] {
             let cmd = format!("cargo {subcmd}");
             match classify_command(&cmd) {
                 Classification::Supported { .. } => {}
@@ -956,7 +1054,7 @@ mod tests {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
             "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "stash", "worktree", "checkout", "merge", "rebase",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {
@@ -1118,6 +1216,30 @@ mod tests {
         assert_eq!(
             rewrite_command("cargo test", &[]),
             Some("rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cargo_publish() {
+        assert_eq!(
+            rewrite_command("cargo publish", &[]),
+            Some("rtk cargo publish".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_rebase() {
+        assert_eq!(
+            rewrite_command("git rebase origin/main", &[]),
+            Some("rtk git rebase origin/main".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_exec() {
+        assert_eq!(
+            rewrite_command("pnpm exec playwright test", &[]),
+            Some("rtk pnpm exec playwright test".into())
         );
     }
 
