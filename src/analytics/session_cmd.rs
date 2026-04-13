@@ -1,11 +1,12 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
 use crate::core::utils::format_tokens;
-use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
+use crate::discover::provider::{
+    discover_provider_sessions, extract_commands_for_session, supported_providers_display,
+    DiscoveredSession, ExtractedCommand, ProviderId,
+};
 use crate::discover::registry::{classify_command, split_command_chain, Classification};
-use anyhow::{Context, Result};
-use std::fs;
-use std::path::PathBuf;
+use anyhow::Result;
 
 /// A summarized session for display.
 struct SessionSummary {
@@ -56,46 +57,74 @@ fn progress_bar(pct: f64, width: usize) -> String {
     format!("{}{}", "@".repeat(filled), ".".repeat(empty))
 }
 
-pub fn run(_verbose: u8) -> Result<()> {
-    let provider = ClaudeProvider;
-    let sessions = provider
-        .discover_sessions(None, Some(30))
-        .context("Failed to discover Claude Code sessions")?;
+fn session_updated_unix(session: &DiscoveredSession) -> i64 {
+    session.updated_unix
+}
 
-    if sessions.is_empty() {
-        println!("No Claude Code sessions found in the last 30 days.");
-        println!("Make sure Claude Code has been used at least once.");
+fn format_relative_date(unix_ts: i64) -> String {
+    if unix_ts <= 0 {
+        return "?".to_string();
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let delta = (now - unix_ts).max(0) as u64;
+    let days = delta / 86400;
+    if days == 0 {
+        "Today".to_string()
+    } else if days == 1 {
+        "Yesterday".to_string()
+    } else {
+        format!("{}d ago", days)
+    }
+}
+
+pub fn run(_verbose: u8) -> Result<()> {
+    let discovery = discover_provider_sessions(None, Some(30));
+
+    if discovery.available_sources == 0 {
+        anyhow::bail!(
+            "Failed to discover sessions from {}",
+            supported_providers_display()
+        );
+    }
+
+    if discovery.sessions.is_empty() {
+        println!("No sessions found in the last 30 days.");
+        println!(
+            "Make sure {} has been used at least once.",
+            supported_providers_display()
+        );
         return Ok(());
     }
 
-    // Group JSONL files by parent session (ignore subagent files)
-    let mut session_files: Vec<PathBuf> = sessions
+    // Group JSONL files by parent session (ignore Claude subagent files)
+    let mut sessions: Vec<DiscoveredSession> = discovery
+        .sessions
         .into_iter()
-        .filter(|p| {
-            // Skip subagent files — only top-level session JSONL
-            !p.to_string_lossy().contains("subagents")
+        .filter(|session| {
+            !(session.provider == ProviderId::ClaudeCode
+                && session.path.to_string_lossy().contains("subagents"))
         })
         .collect();
 
-    // Sort by mtime desc
-    session_files.sort_by(|a, b| {
-        let ma = fs::metadata(a)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let mb = fs::metadata(b)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        mb.cmp(&ma)
+    // Sort by updated time desc for every provider.
+    sessions.sort_by(|a, b| {
+        let ta = session_updated_unix(a);
+        let tb = session_updated_unix(b);
+        tb.cmp(&ta)
     });
 
     // Take top 10
-    session_files.truncate(10);
+    sessions.truncate(10);
 
     let mut summaries: Vec<SessionSummary> = Vec::new();
 
-    for path in &session_files {
-        let cmds = match provider.extract_commands(path) {
-            Ok(c) => c,
+    for session in &sessions {
+        let cmds = match extract_commands_for_session(session) {
+            Ok(commands) => commands,
             Err(_) => continue,
         };
 
@@ -105,33 +134,18 @@ pub fn run(_verbose: u8) -> Result<()> {
 
         let (total_cmds, rtk_cmds, output_tokens) = count_rtk_commands(&cmds);
 
-        // Extract session ID from filename
-        let id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        let short_id = if id.len() > 8 { &id[..8] } else { id };
+        let id = session.session_id.clone();
+        let short_id = if id.len() > 8 {
+            id[..8].to_string()
+        } else {
+            id
+        };
 
-        // Extract date from mtime
-        let date = fs::metadata(path)
-            .and_then(|m| m.modified())
-            .map(|t| {
-                let elapsed = std::time::SystemTime::now()
-                    .duration_since(t)
-                    .unwrap_or_default();
-                let days = elapsed.as_secs() / 86400;
-                if days == 0 {
-                    "Today".to_string()
-                } else if days == 1 {
-                    "Yesterday".to_string()
-                } else {
-                    format!("{}d ago", days)
-                }
-            })
-            .unwrap_or_else(|_| "?".to_string());
+        let updated_unix = session_updated_unix(session);
+        let date = format_relative_date(updated_unix);
 
         summaries.push(SessionSummary {
-            id: short_id.to_string(),
+            id: short_id,
             date,
             total_cmds,
             rtk_cmds,
@@ -191,7 +205,7 @@ pub fn run(_verbose: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discover::provider::ExtractedCommand;
+    use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
     use std::io::Write;
     use tempfile::NamedTempFile;
 

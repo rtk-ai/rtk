@@ -521,7 +521,7 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Discover missed RTK savings from Claude Code history
+    /// Discover missed RTK savings from Claude Code/OpenCode/Codex CLI/Copilot CLI history
     Discover {
         /// Filter by project path (substring match)
         #[arg(short, long)]
@@ -540,10 +540,10 @@ enum Commands {
         format: String,
     },
 
-    /// Show RTK adoption across Claude Code sessions
+    /// Show RTK adoption across Claude Code/OpenCode/Codex CLI/Copilot CLI sessions
     Session {},
 
-    /// Learn CLI corrections from Claude Code error history
+    /// Learn CLI corrections from Claude Code/OpenCode/Codex CLI/Copilot CLI error history
     Learn {
         /// Filter by project path (substring match)
         #[arg(short, long)]

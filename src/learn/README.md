@@ -4,7 +4,7 @@
 
 ## Purpose
 
-Analyzes Claude Code session history to detect recurring CLI mistakes — commands that fail then get corrected by the agent. Powers the `rtk learn` command, which identifies error patterns (unknown flags, wrong paths, missing args) and can auto-generate `.claude/rules/cli-corrections.md` to prevent them.
+Analyzes Claude Code, OpenCode, Codex CLI, and Copilot CLI session history to detect recurring CLI mistakes — commands that fail then get corrected by the agent. Powers the `rtk learn` command, which identifies error patterns (unknown flags, wrong paths, missing args) and can auto-generate `.claude/rules/cli-corrections.md` to prevent them.
 
 ## Key Types
 
@@ -14,12 +14,12 @@ Analyzes Claude Code session history to detect recurring CLI mistakes — comman
 
 ## Dependencies
 
-- **Uses**: `discover::provider::ClaudeProvider` (session file discovery and command extraction), `lazy_static`/`regex` (error pattern matching), `serde_json` (JSON output)
+- **Uses**: `discover::provider` provider dispatch (session discovery and command extraction), `lazy_static`/`regex` (error pattern matching), `serde_json` (JSON output)
 - **Used by**: `src/main.rs` (routes `rtk learn` command)
 
 ## Detection Algorithm
 
-1. Extract all commands from JSONL sessions via `ClaudeProvider`
+1. Extract all commands from available session providers (Claude Code JSONL + OpenCode SQLite + Codex CLI JSONL + Copilot CLI JSONL)
 2. Scan chronologically for fail-then-succeed pairs (same base command, first has error output, second succeeds)
 3. Classify the error type using regex patterns on the error output
 4. Assign confidence scores based on similarity and error clarity

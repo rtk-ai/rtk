@@ -9,7 +9,9 @@ pub mod rules;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{
+    discover_provider_sessions, extract_commands_for_session, supported_providers_display,
+};
 use registry::{
     category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
     strip_disabled_prefix, Classification,
@@ -41,8 +43,6 @@ pub fn run(
     format: &str,
     verbose: u8,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
-
     // Determine project filter
     let project_filter = if all {
         None
@@ -51,17 +51,36 @@ pub fn run(
     } else {
         // Default: current working directory
         let cwd = std::env::current_dir()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        Some(cwd.to_string_lossy().to_string())
     };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    let discovery = discover_provider_sessions(project_filter.as_deref(), Some(since_days));
 
     if verbose > 0 {
-        eprintln!("Scanning {} session files...", sessions.len());
-        for s in &sessions {
-            eprintln!("  {}", s.display());
+        for (provider, error) in &discovery.unavailable_sources {
+            eprintln!(
+                "Warning: {} sessions unavailable: {}",
+                provider.display_name(),
+                error
+            );
+        }
+    }
+
+    if discovery.available_sources == 0 {
+        anyhow::bail!(
+            "No session sources available. Use {} at least once, then rerun discover.",
+            supported_providers_display(),
+        );
+    }
+
+    if verbose > 0 {
+        eprintln!("Scanning {} session files...", discovery.sessions.len());
+        for session in &discovery.sessions {
+            eprintln!(
+                "  [{}] {}",
+                session.provider.display_name(),
+                session.path.display()
+            );
         }
     }
 
@@ -73,12 +92,12 @@ pub fn run(
     let mut supported_map: HashMap<&'static str, SupportedBucket> = HashMap::new();
     let mut unsupported_map: HashMap<String, UnsupportedBucket> = HashMap::new();
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
+    for session in &discovery.sessions {
+        let extracted = match extract_commands_for_session(session) {
             Ok(cmds) => cmds,
             Err(e) => {
                 if verbose > 0 {
-                    eprintln!("Warning: skipping {}: {}", session_path.display(), e);
+                    eprintln!("Warning: skipping {}: {}", session.path.display(), e);
                 }
                 parse_errors += 1;
                 continue;
@@ -235,7 +254,7 @@ pub fn run(
     };
 
     let report = DiscoverReport {
-        sessions_scanned: sessions.len(),
+        sessions_scanned: discovery.sessions.len(),
         total_commands,
         already_rtk,
         since_days,

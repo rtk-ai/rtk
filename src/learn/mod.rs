@@ -3,7 +3,9 @@
 pub mod detector;
 pub mod report;
 
-use crate::discover::provider::{ClaudeProvider, SessionProvider};
+use crate::discover::provider::{
+    discover_provider_sessions, extract_commands_for_session, supported_providers_display,
+};
 use anyhow::Result;
 use detector::{deduplicate_corrections, find_corrections, CommandExecution};
 use report::{format_console_report, write_rules_file};
@@ -17,8 +19,6 @@ pub fn run(
     min_confidence: f64,
     min_occurrences: usize,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
-
     // Determine project filter (same logic as discover)
     let project_filter = if all {
         None
@@ -27,24 +27,28 @@ pub fn run(
     } else {
         // Default: current working directory
         let cwd = std::env::current_dir()?;
-        let cwd_str = cwd.to_string_lossy().to_string();
-        let encoded = ClaudeProvider::encode_project_path(&cwd_str);
-        Some(encoded)
+        Some(cwd.to_string_lossy().to_string())
     };
 
-    // Discover sessions
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since))?;
+    let discovery = discover_provider_sessions(project_filter.as_deref(), Some(since));
 
-    if sessions.is_empty() {
-        println!("No Claude Code sessions found in the last {} days.", since);
+    if discovery.available_sources == 0 {
+        anyhow::bail!(
+            "No session sources available. Use {} at least once, then rerun learn.",
+            supported_providers_display(),
+        );
+    }
+
+    if discovery.sessions.is_empty() {
+        println!("No sessions found in the last {} days.", since);
         return Ok(());
     }
 
     // Extract commands from all sessions
     let mut all_commands: Vec<CommandExecution> = Vec::new();
 
-    for session_path in &sessions {
-        let extracted = match provider.extract_commands(session_path) {
+    for session in &discovery.sessions {
+        let extracted = match extract_commands_for_session(session) {
             Ok(cmds) => cmds,
             Err(_) => continue, // Skip malformed sessions
         };
@@ -70,7 +74,7 @@ pub fn run(
     if corrections.is_empty() {
         println!(
             "No CLI corrections detected in {} sessions.",
-            sessions.len()
+            discovery.sessions.len()
         );
         return Ok(());
     }
@@ -92,7 +96,7 @@ pub fn run(
         "json" => {
             // JSON output
             let json = serde_json::json!({
-                "sessions_scanned": sessions.len(),
+                "sessions_scanned": discovery.sessions.len(),
                 "total_corrections": filtered.len(),
                 "rules": rules.iter().map(|r| serde_json::json!({
                     "wrong": r.wrong_pattern,
@@ -106,7 +110,8 @@ pub fn run(
         }
         _ => {
             // Text output
-            let report = format_console_report(&rules, filtered.len(), sessions.len(), since);
+            let report =
+                format_console_report(&rules, filtered.len(), discovery.sessions.len(), since);
             print!("{}", report);
 
             if write_rules && !rules.is_empty() {

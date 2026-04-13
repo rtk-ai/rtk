@@ -192,7 +192,7 @@ rtk wget <url>          # Compact download output (65%)
 ```bash
 rtk gain                # View token savings statistics
 rtk gain --history      # View command history with savings
-rtk discover            # Analyze Claude Code sessions for missed RTK usage
+rtk discover            # Analyze Claude Code/OpenCode/Codex CLI/Copilot CLI sessions for missed RTK usage
 rtk proxy <cmd>         # Run command without filtering (for debugging)
 rtk init                # Add RTK instructions to CLAUDE.md
 rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
@@ -448,7 +448,9 @@ fn print_manual_instructions(hook_path: &Path, include_opencode: bool) {
     println!("    }}]}}");
     println!("  }}");
     if include_opencode {
-        println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
+        println!(
+            "\n  Then restart Claude Code, OpenCode, Codex CLI, and Copilot CLI. Test with: git status\n"
+        );
     } else {
         println!("\n  Then restart Claude Code. Test with: git status\n");
     }
@@ -643,7 +645,9 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         for item in removed {
             println!("  - {}", item);
         }
-        println!("\nRestart Claude Code, OpenCode, and Cursor (if used) to apply changes.");
+        println!(
+            "\nRestart Claude Code, OpenCode, Codex CLI, Copilot CLI, and Cursor (if used) to apply changes."
+        );
     }
 
     Ok(())
@@ -777,7 +781,9 @@ fn patch_settings_json(
         );
     }
     if include_opencode {
-        println!("  Restart Claude Code and OpenCode. Test with: git status");
+        println!(
+            "  Restart Claude Code, OpenCode, Codex CLI, and Copilot CLI. Test with: git status"
+        );
     } else {
         println!("  Restart Claude Code. Test with: git status");
     }
@@ -954,7 +960,9 @@ fn run_default_mode(
         PatchResult::AlreadyPresent => {
             println!("\n  settings.json: hook already present");
             if install_opencode {
-                println!("  Restart Claude Code and OpenCode. Test with: git status");
+                println!(
+                    "  Restart Claude Code, OpenCode, Codex CLI, and Copilot CLI. Test with: git status"
+                );
             } else {
                 println!("  Restart Claude Code. Test with: git status");
             }
@@ -1082,7 +1090,9 @@ fn run_hook_only_mode(
         PatchResult::AlreadyPresent => {
             println!("\n  settings.json: hook already present");
             if install_opencode {
-                println!("  Restart Claude Code and OpenCode. Test with: git status");
+                println!(
+                    "  Restart Claude Code, OpenCode, Codex CLI, and Copilot CLI. Test with: git status"
+                );
             } else {
                 println!("  Restart Claude Code. Test with: git status");
             }
