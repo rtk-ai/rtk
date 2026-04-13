@@ -142,6 +142,16 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 
 Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
 
+## Windows support
+
+The shell hook (`rtk-rewrite.sh`) requires a Unix shell. On native Windows:
+
+- `rtk init -g` automatically falls back to **CLAUDE.md injection mode** (prompt-level instructions)
+- Filters work normally (`rtk cargo test`, `rtk git status`)
+- Auto-rewrite does not work — the AI assistant is instructed to use RTK but commands are not intercepted
+
+For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). Inside WSL, all agents with shell hook integration (Claude Code, Cursor, Gemini) work identically to Linux.
+
 ## Graceful degradation
 
 Hooks never block command execution. If RTK is missing, the hook exits cleanly and the raw command runs unchanged:

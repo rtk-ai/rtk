@@ -87,6 +87,8 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) where the full hook system works natively. See [Windows setup](#windows) below for details.
+
 ### Verify Installation
 
 ```bash
@@ -307,6 +309,43 @@ rtk init --show             # Verify installation
 ```
 
 After install, **restart Claude Code**.
+
+## Windows
+
+RTK works on Windows with some limitations. The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell, so on native Windows RTK falls back to **CLAUDE.md injection mode** — your AI assistant receives RTK instructions but commands are not rewritten automatically.
+
+### Recommended: WSL (full support)
+
+For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux). Inside WSL, RTK works exactly like Linux — full hook support, auto-rewrite, everything:
+
+```bash
+# Inside WSL
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+```
+
+### Native Windows (limited support)
+
+On native Windows (cmd.exe / PowerShell), RTK filters work but the hook does not auto-rewrite commands:
+
+```powershell
+# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
+# 2. Add rtk.exe to your PATH
+# 3. Initialize (falls back to CLAUDE.md injection)
+rtk init -g
+# 4. Use rtk explicitly
+rtk cargo test
+rtk git status
+```
+
+**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+
+| Feature | WSL | Native Windows |
+|---------|-----|----------------|
+| Filters (cargo, git, etc.) | Full | Full |
+| Auto-rewrite hook | Yes | No (CLAUDE.md fallback) |
+| `rtk init -g` | Hook mode | CLAUDE.md mode |
+| `rtk gain` / analytics | Full | Full |
 
 ## Supported AI Tools
 
