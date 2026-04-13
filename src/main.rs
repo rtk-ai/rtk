@@ -40,6 +40,10 @@ pub enum AgentTarget {
     Windsurf,
     /// Cline / Roo Code (VS Code)
     Cline,
+    /// Kilo Code
+    Kilocode,
+    /// Google Antigravity
+    Antigravity,
 }
 
 #[derive(Parser)]
@@ -58,7 +62,7 @@ struct Cli {
     verbose: u8,
 
     /// Ultra-compact mode: ASCII icons, inline format (Level 2 optimizations)
-    #[arg(short = 'u', long, global = true)]
+    #[arg(long, global = true)]
     ultra_compact: bool,
 
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
@@ -66,7 +70,7 @@ struct Cli {
     skip_env: bool,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// List directory contents with token-optimized output (proxy to native ls)
     Ls {
@@ -179,6 +183,10 @@ enum Commands {
 
     /// pnpm commands with ultra-compact output
     Pnpm {
+        /// pnpm filter arguments (can be repeated: --filter @app1 --filter @app2)
+        #[arg(long, short = 'F')]
+        filter: Vec<String>,
+
         #[command(subcommand)]
         command: PnpmCommands,
     },
@@ -197,16 +205,16 @@ enum Commands {
         command: Vec<String>,
     },
 
-    /// Show JSON (compact values, or schema-only with --schema)
+    /// Show JSON (compact values by default, or keys-only with --keys-only)
     Json {
         /// JSON file
         file: PathBuf,
         /// Max depth
         #[arg(short, long, default_value = "5")]
         depth: usize,
-        /// Show structure only (strip all values)
+        /// Show keys only (strip all values, show structure)
         #[arg(long)]
-        schema: bool,
+        keys_only: bool,
     },
 
     /// Summarize project dependencies
@@ -432,10 +440,18 @@ enum Commands {
         create: bool,
     },
 
+    /// Jest commands with compact output
+    Jest {
+        /// Additional jest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Vitest commands with compact output
     Vitest {
-        #[command(subcommand)]
-        command: VitestCommands,
+        /// Additional vitest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Prisma commands with compact output (no ASCII art)
@@ -534,6 +550,12 @@ enum Commands {
 
     /// Show RTK adoption across Claude Code sessions
     Session {},
+
+    /// Manage telemetry consent and data (RGPD/GDPR)
+    Telemetry {
+        #[command(subcommand)]
+        command: core::telemetry_cmd::TelemetrySubcommand,
+    },
 
     /// Learn CLI corrections from Claude Code error history
     Learn {
@@ -669,10 +691,10 @@ enum Commands {
         command: GtCommands,
     },
 
-    /// golangci-lint with compact output
+    /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
     #[command(name = "golangci-lint")]
     GolangciLint {
-        /// golangci-lint arguments
+        /// Additional golangci-lint arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -706,7 +728,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum HookCommands {
     /// Process Claude Code PreToolUse hook (reads JSON from stdin)
     Claude,
@@ -727,7 +749,7 @@ enum HookCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum GitCommands {
     /// Condensed diff output
     Diff {
@@ -808,7 +830,7 @@ enum GitCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum PnpmCommands {
     /// List installed packages (ultra-dense)
     List {
@@ -833,12 +855,6 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Build (generic passthrough, no framework-specific filter)
-    Build {
-        /// Additional build arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// Typecheck (delegates to tsc filter)
     Typecheck {
         /// Additional typecheck arguments
@@ -850,7 +866,7 @@ enum PnpmCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum DockerCommands {
     /// List running containers
     Ps,
@@ -868,7 +884,7 @@ enum DockerCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum ComposeCommands {
     /// List compose services (compact)
     Ps,
@@ -887,7 +903,7 @@ enum ComposeCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum KubectlCommands {
     /// List pods
     Pods {
@@ -916,17 +932,7 @@ enum KubectlCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
-enum VitestCommands {
-    /// Run tests with filtered output (90% token reduction)
-    Run {
-        /// Additional vitest arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-}
-
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum PrismaCommands {
     /// Generate Prisma Client (strip ASCII art)
     Generate {
@@ -947,7 +953,7 @@ enum PrismaCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum PrismaMigrateCommands {
     /// Create and apply migration
     Dev {
@@ -972,7 +978,7 @@ enum PrismaMigrateCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum CargoCommands {
     /// Build with compact output (strip Compiling lines, keep errors)
     Build {
@@ -1015,7 +1021,7 @@ enum CargoCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum DotnetCommands {
     /// Build with compact output
     Build {
@@ -1042,7 +1048,7 @@ enum DotnetCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum GoCommands {
     /// Run tests with compact output (90% token reduction via JSON streaming)
     Test {
@@ -1126,26 +1132,44 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
     if let Some(filter) = toml_match {
         // TOML match: capture stdout for filtering
-        let result = core::utils::resolved_command(&args[0])
-            .args(&args[1..])
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::piped()) // capture
-            .stderr(std::process::Stdio::inherit()) // stderr always direct
-            .output();
+        let result = if filter.filter_stderr {
+            // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
+            core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()) // captured for merging
+                .output()
+        } else {
+            core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::piped()) // capture
+                .stderr(std::process::Stdio::inherit()) // stderr always direct
+                .output()
+        };
 
         match result {
             Ok(output) => {
                 let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
                 let stdout_raw = String::from_utf8_lossy(&output.stdout);
+                let stderr_raw = String::from_utf8_lossy(&output.stderr);
 
+                // Merge stderr into the text to filter when filter_stderr is enabled;
+                // otherwise emit stderr directly so it is always visible.
+                let combined_raw = if filter.filter_stderr {
+                    format!("{}{}", stdout_raw, stderr_raw)
+                } else {
+                    stdout_raw.to_string()
+                };
                 // Tee raw output BEFORE filtering on failure — lets LLM re-read if needed
                 let tee_hint = if !output.status.success() {
-                    core::tee::tee_and_hint(&stdout_raw, &raw_command, exit_code)
+                    core::tee::tee_and_hint(&combined_raw, &raw_command, exit_code)
                 } else {
                     None
                 };
 
-                let filtered = core::toml_filter::apply_filter(filter, &stdout_raw);
+                let filtered = core::toml_filter::apply_filter(filter, &combined_raw);
                 println!("{}", filtered);
                 if let Some(hint) = tee_hint {
                     println!("{}", hint);
@@ -1154,7 +1178,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 timer.track(
                     &raw_command,
                     &format!("rtk:toml {}", raw_command),
-                    &stdout_raw,
+                    &combined_raw,
                     &filtered,
                 );
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
@@ -1195,7 +1219,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     }
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum GtCommands {
     /// Compact stack log output
     Log {
@@ -1236,6 +1260,47 @@ enum GtCommands {
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
 fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
+}
+
+/// Merge pnpm global filters args with other ones for standard String-based commands
+fn merge_pnpm_args(filters: &[String], args: &[String]) -> Vec<String> {
+    filters
+        .iter()
+        .map(|filter| format!("--filter={}", filter))
+        .chain(args.iter().cloned())
+        .collect()
+}
+
+/// Merge pnpm global filters args with other ones, using OsString for passthrough compatibility
+fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
+    filters
+        .iter()
+        .map(|filter| OsString::from(format!("--filter={}", filter)))
+        .chain(args.iter().cloned())
+        .collect()
+}
+
+/// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
+fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
+    // Check if this is a Build or Typecheck command with filters
+    match command {
+        PnpmCommands::Typecheck { .. } => {
+            // FIXME: if filters are present, we should find out which workspaces are selected before running rtk dedicated commands
+            if !filters.is_empty() {
+                let cmd_name = match command {
+                    PnpmCommands::Typecheck { .. } => "tsc",
+                    _ => unreachable!(),
+                };
+                let msg = format!(
+                    "[rtk] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
+                    cmd_name
+                );
+                return Some(msg);
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn main() {
@@ -1461,27 +1526,34 @@ fn run_cli() -> Result<i32> {
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
 
-        Commands::Pnpm { command } => match command {
-            PnpmCommands::List { depth, args } => {
-                pnpm_cmd::run(pnpm_cmd::PnpmCommand::List { depth }, &args, cli.verbose)?
+        Commands::Pnpm { filter, command } => {
+            // Warns user if filters are used with unsupported subcommands like typecheck
+            if let Some(warning) = validate_pnpm_filters(&filter, &command) {
+                eprintln!("{}", warning);
             }
-            PnpmCommands::Outdated { args } => {
-                pnpm_cmd::run(pnpm_cmd::PnpmCommand::Outdated, &args, cli.verbose)?
+
+            match command {
+                PnpmCommands::List { depth, args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::List { depth },
+                    &merge_pnpm_args(&filter, &args),
+                    cli.verbose,
+                )?,
+                PnpmCommands::Outdated { args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Outdated,
+                    &merge_pnpm_args(&filter, &args),
+                    cli.verbose,
+                )?,
+                PnpmCommands::Install { packages, args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Install { packages },
+                    &merge_pnpm_args(&filter, &args),
+                    cli.verbose,
+                )?,
+                PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
+                PnpmCommands::Other(args) => {
+                    pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
+                }
             }
-            PnpmCommands::Install { packages, args } => pnpm_cmd::run(
-                pnpm_cmd::PnpmCommand::Install { packages },
-                &args,
-                cli.verbose,
-            )?,
-            PnpmCommands::Build { args } => {
-                let mut build_args: Vec<String> = vec!["build".into()];
-                build_args.extend(args);
-                let os_args: Vec<OsString> = build_args.into_iter().map(OsString::from).collect();
-                pnpm_cmd::run_passthrough(&os_args, cli.verbose)?
-            }
-            PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
-            PnpmCommands::Other(args) => pnpm_cmd::run_passthrough(&args, cli.verbose)?,
-        },
+        }
 
         Commands::Err { command } => {
             let cmd = command.join(" ");
@@ -1496,12 +1568,12 @@ fn run_cli() -> Result<i32> {
         Commands::Json {
             file,
             depth,
-            schema,
+            keys_only,
         } => {
             if file == Path::new("-") {
-                json_cmd::run_stdin(depth, schema, cli.verbose)?;
+                json_cmd::run_stdin(depth, keys_only, cli.verbose)?;
             } else {
-                json_cmd::run(&file, depth, schema, cli.verbose)?;
+                json_cmd::run(&file, depth, keys_only, cli.verbose)?;
             }
             0
         }
@@ -1659,6 +1731,18 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
             } else if copilot {
                 hooks::init::run_copilot(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Kilocode) {
+                if global {
+                    anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
+                }
+                hooks::init::run_kilocode_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Antigravity) {
+                if global {
+                    anyhow::bail!(
+                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
+                    );
+                }
+                hooks::init::run_antigravity_mode(cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -1758,11 +1842,9 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Vitest { command } => match command {
-            VitestCommands::Run { args } => {
-                vitest_cmd::run(vitest_cmd::VitestCommand::Run, &args, cli.verbose)?
-            }
-        },
+        Commands::Jest { ref args } | Commands::Vitest { ref args } => {
+            vitest_cmd::run_test(&cli.command, args, cli.verbose)?
+        }
 
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {
@@ -1847,6 +1929,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Session {} => {
             analytics::session_cmd::run(cli.verbose)?;
+            0
+        }
+
+        Commands::Telemetry { command } => {
+            core::telemetry_cmd::run(&command)?;
             0
         }
 
@@ -2043,6 +2130,7 @@ fn run_cli() -> Result<i32> {
         Commands::Proxy { args } => {
             use std::io::{Read, Write};
             use std::process::Stdio;
+            use std::sync::atomic::{AtomicU32, Ordering};
             use std::thread;
 
             if args.is_empty() {
@@ -2082,7 +2170,6 @@ fn run_cli() -> Result<i32> {
             // processes. Drop-based ChildGuard doesn't run on signals with
             // panic=abort, so we register a signal handler that kills the child
             // PID stored in this atomic.
-            use std::sync::atomic::{AtomicU32, Ordering};
             static PROXY_CHILD_PID: AtomicU32 = AtomicU32::new(0);
 
             #[cfg(unix)]
@@ -2093,6 +2180,7 @@ fn run_cli() -> Result<i32> {
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                         libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
                     }
+                    // Re-raise with default handler so parent sees correct exit status
                     libc::signal(sig, libc::SIG_DFL);
                     libc::raise(sig);
                 }
@@ -2690,5 +2778,167 @@ mod tests {
                 _ => panic!("expected Rewrite command"),
             }
         }
+    }
+
+    #[test]
+    fn test_merge_filters_with_no_args() {
+        let filters = vec![];
+        let args = vec!["--depth=0".to_string(), "--no-verbose".to_string()];
+        let expected_args = vec!["--depth=0", "--no-verbose"];
+        assert_eq!(merge_pnpm_args(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_merge_filters_with_args() {
+        let filters = vec!["@app1".to_string(), "@app2".to_string()];
+        let args = vec![
+            "--filter=@app3".to_string(),
+            "--depth=0".to_string(),
+            "--no-verbose".to_string(),
+        ];
+        let expected_args = vec![
+            "--filter=@app1",
+            "--filter=@app2",
+            "--filter=@app3",
+            "--depth=0",
+            "--no-verbose",
+        ];
+        assert_eq!(merge_pnpm_args(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_merge_filters_with_no_args_os() {
+        let filters = vec![];
+        let args = vec![OsString::from("--depth=0")];
+        let expected_args = vec![OsString::from("--depth=0")];
+        assert_eq!(merge_pnpm_args_os(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_merge_filters_with_args_os() {
+        let filters = vec!["@app1".to_string()];
+        let args = vec![OsString::from("--depth=0")];
+        let expected_args = vec![
+            OsString::from("--filter=@app1"),
+            OsString::from("--depth=0"),
+        ];
+        assert_eq!(merge_pnpm_args_os(&filters, &args), expected_args);
+    }
+
+    #[test]
+    fn test_pnpm_subcommand_with_filter() {
+        let cli = Cli::try_parse_from([
+            "rtk", "pnpm", "--filter", "@app1", "--filter", "@app2", "list", "--filter", "@app3",
+            "--filter", "@app4", "--prod",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Pnpm {
+                filter,
+                command: PnpmCommands::List { depth, args },
+            } => {
+                assert_eq!(depth, 0);
+                assert_eq!(filter, vec!["@app1", "@app2"]);
+                assert_eq!(
+                    args,
+                    vec!["--filter", "@app3", "--filter", "@app4", "--prod"]
+                );
+            }
+            _ => panic!("Expected Pnpm List command"),
+        }
+    }
+
+    #[test]
+    fn test_git_push_u_flag_passes_through() {
+        let cli = Cli::try_parse_from(["rtk", "git", "push", "-u", "origin", "my-branch"]).unwrap();
+        assert!(
+            !cli.ultra_compact,
+            "-u on git push must NOT be consumed as --ultra-compact"
+        );
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Push { args },
+                ..
+            } => {
+                assert!(
+                    args.contains(&"-u".to_string()),
+                    "-u must be forwarded to git push, got: {:?}",
+                    args
+                );
+            }
+            _ => panic!("Expected Git Push command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_subcommand_with_short_filter() {
+        // -F is the short form of --filter in pnpm
+        let cli =
+            Cli::try_parse_from(["rtk", "pnpm", "-F", "@app1", "-F", "@app2", "list"]).unwrap();
+        match cli.command {
+            Commands::Pnpm { filter, .. } => {
+                assert_eq!(filter, vec!["@app1", "@app2"]);
+            }
+            _ => panic!("Expected Pnpm command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_typecheck_without_filters() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "pnpm",
+            "typecheck",
+            "--filter",
+            "@app3",
+            "--filter",
+            "@app4",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Pnpm { filter, command } => {
+                let warning = validate_pnpm_filters(&filter, &command);
+
+                assert!(filter.is_empty());
+                assert!(warning.is_none())
+            }
+            _ => panic!("Expected Pnpm Build command"),
+        }
+    }
+
+    #[test]
+    fn test_pnpm_typecheck_with_filters() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "pnpm",
+            "--filter",
+            "@app1",
+            "--filter",
+            "@app2",
+            "typecheck",
+            "--filter",
+            "@app3",
+            "--filter",
+            "@app4",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Pnpm { filter, command } => {
+                let warning = validate_pnpm_filters(&filter, &command).unwrap();
+
+                assert_eq!(filter, vec!["@app1", "@app2"]);
+                assert_eq!(warning, "[rtk] warning: --filter is not yet supported for pnpm tsc, filters preceding the subcommand will be ignored")
+            }
+            _ => panic!("Expected Pnpm Build command"),
+        }
+    }
+
+    #[test]
+    fn test_ultra_compact_long_form_still_works() {
+        let cli = Cli::try_parse_from(["rtk", "--ultra-compact", "git", "status"]).unwrap();
+        assert!(
+            cli.ultra_compact,
+            "--ultra-compact long form must still enable ultra-compact mode"
+        );
     }
 }

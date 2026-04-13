@@ -122,10 +122,11 @@ rtk git push                    # -> "ok main"
 
 ### 测试
 ```bash
-rtk test cargo test             # 仅显示失败（-90%）
-rtk vitest run                  # Vitest 紧凑输出
+rtk jest                        # Jest 紧凑输出
+rtk vitest                      # Vitest 紧凑输出
 rtk pytest                      # Python 测试（-90%）
 rtk go test                     # Go 测试（-90%）
+rtk test <cmd>                  # 仅显示失败（-90%）
 ```
 
 ### 构建 & 检查

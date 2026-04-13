@@ -121,11 +121,17 @@ fn write_tee_file(
     let filename = format!("{}_{}.log", epoch, slug);
     let filepath = tee_dir.join(filename);
 
-    // Truncate at max_file_size
+    // Truncate at max_file_size (find a safe UTF-8 char boundary)
     let content = if raw.len() > max_file_size {
+        let boundary = raw
+            .char_indices()
+            .take_while(|(i, _)| *i < max_file_size)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
         format!(
             "{}\n\n--- truncated at {} bytes ---",
-            &raw[..max_file_size],
+            &raw[..boundary],
             max_file_size
         )
     } else {
@@ -354,6 +360,47 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("--- truncated at 1000 bytes ---"));
         assert!(content.len() < 2000);
+    }
+
+    #[test]
+    fn test_write_tee_file_truncation_utf8_boundary() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        // Create a string where the truncation point falls inside a multi-byte char.
+        // Japanese chars are 3 bytes each in UTF-8.
+        // 332 chars * 3 bytes = 996 bytes, then one more = 999 bytes.
+        // With max_file_size=998, the cut falls mid-character.
+        let japanese = "\u{6F22}".repeat(333); // 999 bytes of 3-byte chars
+        assert_eq!(japanese.len(), 999);
+
+        // Truncate at 998 — falls in the middle of the 333rd character
+        let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
+        assert!(result.is_some());
+
+        let path = result.unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("--- truncated at 998 bytes ---"));
+        // Should contain 332 full characters (996 bytes), not panic
+        assert!(content.starts_with(&"\u{6F22}".repeat(332)));
+    }
+
+    #[test]
+    fn test_write_tee_file_truncation_emoji() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        // Emoji are 4 bytes each in UTF-8
+        let emojis = "\u{1F600}".repeat(100); // 400 bytes
+        assert_eq!(emojis.len(), 400);
+
+        // Truncate at 201 — falls mid-emoji (4-byte boundary is at 200, 204)
+        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 201, 20);
+        assert!(result.is_some());
+
+        let path = result.unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("--- truncated at 201 bytes ---"));
+        // The emoji portion should be exactly 200 bytes (50 emojis),
+        // rounded down from 201 to the nearest char boundary
+        let target = "\u{1F600}".repeat(50);
+        assert!(content.starts_with(&target));
     }
 
     #[test]
