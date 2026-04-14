@@ -589,11 +589,14 @@ enum Commands {
         args: Vec<OsString>,
     },
 
-    /// Trust project-local TOML filters in current directory
+    /// Trust project-local or global TOML filters
     Trust {
         /// List all trusted projects
         #[arg(long)]
         list: bool,
+        /// Accept current global filters (~/.config/rtk/filters.toml)
+        #[arg(long)]
+        global: bool,
     },
 
     /// Revoke trust for project-local TOML filters
@@ -2208,8 +2211,8 @@ fn run_cli() -> Result<i32> {
             core::utils::exit_code_from_status(&status, &cmd_name)
         }
 
-        Commands::Trust { list } => {
-            hooks::trust::run_trust(list)?;
+        Commands::Trust { list, global } => {
+            hooks::trust::run_trust(list, global)?;
             0
         }
 

@@ -215,13 +215,26 @@ impl TomlFilterRegistry {
             }
         }
 
-        // Priority 2: user-global ~/.config/rtk/filters.toml
+        // Priority 2: user-global ~/.config/rtk/filters.toml (integrity-checked)
         if let Some(config_dir) = dirs::config_dir() {
             let global_path = config_dir.join(RTK_DATA_DIR).join(FILTERS_TOML);
             if let Ok(content) = std::fs::read_to_string(&global_path) {
-                match Self::parse_and_compile(&content, "user-global") {
-                    Ok(f) => filters.extend(f),
-                    Err(e) => eprintln!("[rtk] warning: {}: {}", global_path.display(), e),
+                // SA-2025-RTK-002: detect unauthorized changes to global filters.
+                // A supply-chain attack (e.g. npm postinstall) could write to
+                // ~/.config/rtk/filters.toml to suppress security scanner output.
+                let integrity = crate::hooks::trust::check_global_integrity(&global_path);
+                if let crate::hooks::trust::GlobalFilterStatus::Changed { .. } = integrity {
+                    eprintln!(
+                        "[rtk] WARNING: {} changed unexpectedly.",
+                        global_path.display()
+                    );
+                    eprintln!("[rtk] Review the file and run `rtk trust --global` to accept.");
+                    eprintln!("[rtk] Global filters NOT applied until re-accepted.");
+                } else {
+                    match Self::parse_and_compile(&content, "user-global") {
+                        Ok(f) => filters.extend(f),
+                        Err(e) => eprintln!("[rtk] warning: {}: {}", global_path.display(), e),
+                    }
                 }
             }
         }

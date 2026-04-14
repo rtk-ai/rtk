@@ -140,6 +140,48 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
     }
 }
 
+/// Check integrity of user-global filters (~/.config/rtk/filters.toml).
+///
+/// Unlike project-local filters, global filters are NOT blocked on first load
+/// (they live in the user's home dir, not in an untrusted repo). Instead:
+/// - First load: hash is recorded silently (baseline)
+/// - Subsequent loads: if hash changed, warn but still load
+///
+/// This detects supply-chain attacks (e.g. npm postinstall scripts writing
+/// to ~/.config/) without blocking legitimate user edits.
+pub fn check_global_integrity(filter_path: &Path) -> GlobalFilterStatus {
+    let key = match canonical_key(filter_path) {
+        Ok(k) => k,
+        Err(_) => return GlobalFilterStatus::Ok, // can't resolve path, skip check
+    };
+    let store = read_store().unwrap_or_default();
+    let actual_hash = match integrity::compute_hash(filter_path) {
+        Ok(h) => h,
+        Err(_) => return GlobalFilterStatus::Ok, // can't hash, skip check
+    };
+
+    match store.trusted.get(&key) {
+        None => {
+            // First load — record baseline hash silently
+            let _ = trust_filter_with_hash(filter_path, &actual_hash);
+            GlobalFilterStatus::Ok
+        }
+        Some(entry) if entry.sha256 == actual_hash => GlobalFilterStatus::Ok,
+        Some(entry) => GlobalFilterStatus::Changed {
+            expected: entry.sha256.clone(),
+            actual: actual_hash,
+        },
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum GlobalFilterStatus {
+    /// Hash matches or first load (baseline recorded)
+    Ok,
+    /// Content changed since last seen
+    Changed { expected: String, actual: String },
+}
+
 /// Store a pre-computed SHA-256 hash as trusted (avoids TOCTOU re-read).
 pub fn trust_filter_with_hash(filter_path: &Path, hash: &str) -> Result<()> {
     let key = canonical_key(filter_path)?;
@@ -177,8 +219,11 @@ pub fn list_trusted() -> Result<HashMap<String, TrustEntry>> {
 // CLI commands
 // ---------------------------------------------------------------------------
 
-/// Run `rtk trust` — review and trust project-local filters.
-pub fn run_trust(list: bool) -> Result<()> {
+/// Run `rtk trust` — review and trust project-local or global filters.
+pub fn run_trust(list: bool, global: bool) -> Result<()> {
+    if global {
+        return run_trust_global();
+    }
     if list {
         let trusted = list_trusted()?;
         if trusted.is_empty() {
@@ -228,6 +273,46 @@ pub fn run_trust(list: bool) -> Result<()> {
         hash.get(..16).unwrap_or(&hash)
     );
     println!("Project-local filters will now be applied.");
+
+    Ok(())
+}
+
+/// Run `rtk trust --global` — accept current global filters.
+fn run_trust_global() -> Result<()> {
+    let config_dir = dirs::config_dir().context("Cannot determine config directory")?;
+    let global_path = config_dir
+        .join(crate::core::constants::RTK_DATA_DIR)
+        .join("filters.toml");
+
+    if !global_path.exists() {
+        anyhow::bail!("No global filters found at {}", global_path.display());
+    }
+
+    let content_bytes = std::fs::read(&global_path)
+        .with_context(|| format!("Failed to read {}", global_path.display()))?;
+    let content = String::from_utf8_lossy(&content_bytes);
+
+    println!("=== {} ===", global_path.display());
+    println!("{}", content);
+    println!("{}", "=".repeat(40));
+    println!();
+
+    print_risk_summary(&content);
+
+    let hash = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&content_bytes);
+        format!("{:x}", h.finalize())
+    };
+
+    trust_filter_with_hash(&global_path, &hash)?;
+    println!();
+    println!(
+        "Accepted global filters (sha256:{})",
+        hash.get(..16).unwrap_or(&hash)
+    );
+    println!("Global filters will now be applied.");
 
     Ok(())
 }
@@ -500,5 +585,161 @@ mod tests {
         assert!(key.contains("filters.toml"));
         // Should be an absolute path
         assert!(key.starts_with('/') || key.contains(':'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Global filter integrity tests
+    // -----------------------------------------------------------------------
+
+    /// Simulate check_global_integrity using an isolated store file
+    fn check_global_with_store(filter_path: &Path, store_file: &Path) -> GlobalFilterStatus {
+        let key = match canonical_key(filter_path) {
+            Ok(k) => k,
+            Err(_) => return GlobalFilterStatus::Ok,
+        };
+        let store: TrustStore = if store_file.exists() {
+            let content = std::fs::read_to_string(store_file).unwrap_or_default();
+            serde_json::from_str(&content).unwrap_or_default()
+        } else {
+            TrustStore::default()
+        };
+        let actual_hash = match integrity::compute_hash(filter_path) {
+            Ok(h) => h,
+            Err(_) => return GlobalFilterStatus::Ok,
+        };
+
+        match store.trusted.get(&key) {
+            None => {
+                // Record baseline
+                let mut s = store;
+                s.version = 1;
+                s.trusted.insert(
+                    key,
+                    TrustEntry {
+                        sha256: actual_hash,
+                        trusted_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                if let Some(parent) = store_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let content = serde_json::to_string_pretty(&s).unwrap();
+                let _ = std::fs::write(store_file, content);
+                GlobalFilterStatus::Ok
+            }
+            Some(entry) if entry.sha256 == actual_hash => GlobalFilterStatus::Ok,
+            Some(entry) => GlobalFilterStatus::Changed {
+                expected: entry.sha256.clone(),
+                actual: actual_hash,
+            },
+        }
+    }
+
+    /// Accept change using isolated store
+    fn accept_global_with_store(filter_path: &Path, store_file: &Path) {
+        let key = canonical_key(filter_path).unwrap();
+        let hash = integrity::compute_hash(filter_path).unwrap();
+        let mut store: TrustStore = if store_file.exists() {
+            let content = std::fs::read_to_string(store_file).unwrap_or_default();
+            serde_json::from_str(&content).unwrap_or_default()
+        } else {
+            TrustStore::default()
+        };
+        store.version = 1;
+        store.trusted.insert(
+            key,
+            TrustEntry {
+                sha256: hash,
+                trusted_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
+        let content = serde_json::to_string_pretty(&store).unwrap();
+        std::fs::write(store_file, content).unwrap();
+    }
+
+    #[test]
+    fn test_global_first_load_records_baseline() {
+        let temp = TempDir::new().unwrap();
+        let filter = temp.path().join("filters.toml");
+        let store = temp.path().join("store.json");
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
+
+        let status = check_global_with_store(&filter, &store);
+        assert_eq!(status, GlobalFilterStatus::Ok);
+        // Store file should now exist with the hash
+        assert!(store.exists());
+    }
+
+    #[test]
+    fn test_global_unchanged_is_ok() {
+        let temp = TempDir::new().unwrap();
+        let filter = temp.path().join("filters.toml");
+        let store = temp.path().join("store.json");
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
+
+        let _ = check_global_with_store(&filter, &store);
+        let status = check_global_with_store(&filter, &store);
+        assert_eq!(status, GlobalFilterStatus::Ok);
+    }
+
+    #[test]
+    fn test_global_changed_is_detected() {
+        let temp = TempDir::new().unwrap();
+        let filter = temp.path().join("filters.toml");
+        let store = temp.path().join("store.json");
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
+
+        let _ = check_global_with_store(&filter, &store);
+
+        // Modify file (simulates supply-chain attack)
+        std::fs::write(
+            &filter,
+            "[filters.evil]\nmatch_command = \".*\"\nmatch_output = \"password\"",
+        )
+        .unwrap();
+
+        let status = check_global_with_store(&filter, &store);
+        match status {
+            GlobalFilterStatus::Changed { expected, actual } => {
+                assert_ne!(expected, actual);
+                assert_eq!(expected.len(), 64);
+                assert_eq!(actual.len(), 64);
+            }
+            other => panic!("Expected Changed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_global_accept_resets_baseline() {
+        let temp = TempDir::new().unwrap();
+        let filter = temp.path().join("filters.toml");
+        let store = temp.path().join("store.json");
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
+
+        let _ = check_global_with_store(&filter, &store);
+
+        // Modify
+        std::fs::write(&filter, "[filters.updated]\nmatch_command = \"ls\"").unwrap();
+
+        // Detect change
+        let status = check_global_with_store(&filter, &store);
+        assert!(matches!(status, GlobalFilterStatus::Changed { .. }));
+
+        // Accept
+        accept_global_with_store(&filter, &store);
+
+        // Should be Ok now
+        let status = check_global_with_store(&filter, &store);
+        assert_eq!(status, GlobalFilterStatus::Ok);
+    }
+
+    #[test]
+    fn test_global_nonexistent_file_is_ok() {
+        let temp = TempDir::new().unwrap();
+        let filter = temp.path().join("nonexistent.toml");
+        let store = temp.path().join("store.json");
+
+        let status = check_global_with_store(&filter, &store);
+        assert_eq!(status, GlobalFilterStatus::Ok);
     }
 }
