@@ -1978,7 +1978,7 @@ fn run_cli() -> Result<i32> {
                 "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
                 _ => {
                     // Generic passthrough with npm boilerplate filter
-                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?
+                    npm_cmd::run_npx(&args, cli.verbose, cli.skip_env)?
                 }
             }
         }

@@ -4,6 +4,32 @@ use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 
+/// Generic npx passthrough: runs `npx <args>` directly without injecting "run".
+/// Used for unknown npx packages like `vue-tsc`, `taze`, etc.
+pub fn run_npx(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+    let mut cmd = resolved_command("npx");
+
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if skip_env {
+        cmd.env("SKIP_ENV_VALIDATION", "1");
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: npx {}", args.join(" "));
+    }
+
+    runner::run_filtered(
+        cmd,
+        "npx",
+        &args.join(" "),
+        filter_npm_output,
+        runner::RunOptions::default(),
+    )
+}
+
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
 const NPM_SUBCOMMANDS: &[&str] = &[
@@ -220,4 +246,26 @@ npm notice
         let result = filter_npm_output(output);
         assert_eq!(result, "ok");
     }
+
+    // Regression: https://github.com/rtk-ai/rtk/issues/1269
+    #[test]
+    fn test_npx_vue_tsc_output_passes_through() {
+        let output = r#"src/components/Foo.vue:10:5 - error TS2322: Type 'string' is not assignable to type 'number'.
+
+10     const count: number = "hello"
+       ~~~~~
+
+src/components/Bar.vue:5:3 - error TS2339: Property 'foo' does not exist on type '{}'.
+
+5   this.foo
+    ~~~~
+
+Found 2 errors in 2 files.
+"#;
+        let result = filter_npm_output(output);
+        assert!(result.contains("error TS2322"), "type error must be preserved");
+        assert!(result.contains("error TS2339"), "type error must be preserved");
+        assert!(result.contains("Found 2 errors"), "error summary must be preserved");
+    }
+
 }
