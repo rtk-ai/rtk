@@ -7,7 +7,7 @@ mod report;
 pub mod rules;
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
@@ -15,6 +15,8 @@ use registry::{
     strip_disabled_prefix, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
+
+use crate::core::tracking::Tracker;
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -31,6 +33,31 @@ struct SupportedBucket {
 struct UnsupportedBucket {
     count: usize,
     example: String,
+}
+
+/// Query the RTK tracking database for original commands executed within the
+/// given time window.  Returns a set of normalized (trimmed, lowercased) command
+/// strings so we can quickly check whether a command extracted from a session log
+/// was *already* routed through RTK by the PreToolUse hook.
+fn hook_handled_commands(since_days: u64) -> HashSet<String> {
+    let tracker = match Tracker::new() {
+        Ok(t) => t,
+        Err(_) => return HashSet::new(),
+    };
+
+    let since = chrono::Utc::now()
+        - chrono::Duration::try_days(since_days as i64).unwrap_or(chrono::Duration::days(30));
+
+    // Fetch all tracked commands within the window.
+    // `original_cmd` is what the LLM produced (e.g. "git status"), which is also
+    // what discover extracts from the session JSONL.
+    match tracker.get_original_cmds_since(since) {
+        Ok(cmds) => cmds
+            .into_iter()
+            .map(|c| c.trim().to_lowercase())
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
 }
 
 pub fn run(
@@ -57,6 +84,10 @@ pub fn run(
     };
 
     let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+
+    // Load commands that the PreToolUse hook already routed through RTK.
+    let handled = hook_handled_commands(since_days);
+    let mut hook_handled_count: usize = 0;
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
@@ -114,6 +145,14 @@ pub fn run(
                         estimated_savings_pct,
                         status,
                     } => {
+                        // If the PreToolUse hook already routed this command
+                        // through RTK, count it as handled rather than missed.
+                        if handled.contains(&part.trim().to_lowercase()) {
+                            already_rtk += 1;
+                            hook_handled_count += 1;
+                            continue;
+                        }
+
                         let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
                             SupportedBucket {
                                 rtk_equivalent,
@@ -238,6 +277,7 @@ pub fn run(
         sessions_scanned: sessions.len(),
         total_commands,
         already_rtk,
+        hook_handled: hook_handled_count,
         since_days,
         supported,
         unsupported,

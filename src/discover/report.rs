@@ -50,6 +50,10 @@ pub struct DiscoverReport {
     pub sessions_scanned: usize,
     pub total_commands: usize,
     pub already_rtk: usize,
+    /// Commands that the PreToolUse hook already routed through RTK.
+    /// These are a subset of `already_rtk` — broken out so the report
+    /// can explain why discover previously over-reported missed savings.
+    pub hook_handled: usize,
     pub since_days: u64,
     pub supported: Vec<SupportedEntry>,
     pub unsupported: Vec<UnsupportedEntry>,
@@ -83,7 +87,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         report.sessions_scanned, report.since_days, report.total_commands
     ));
     out.push_str(&format!(
-        "Already using RTK: {} commands ({}%)\n",
+        "Already using RTK: {} commands ({}%)",
         report.already_rtk,
         if report.total_commands > 0 {
             report.already_rtk * 100 / report.total_commands
@@ -91,6 +95,13 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             0
         }
     ));
+    if report.hook_handled > 0 {
+        out.push_str(&format!(
+            " ({} via PreToolUse hook)",
+            report.hook_handled
+        ));
+    }
+    out.push('\n');
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
         out.push_str("\nNo missed savings found. RTK usage looks good!\n");

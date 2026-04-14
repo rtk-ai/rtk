@@ -908,6 +908,23 @@ impl Tracker {
         Ok(count)
     }
 
+    /// Get distinct original commands executed since a given timestamp.
+    ///
+    /// Used by `rtk discover` to cross-reference session log commands against
+    /// the tracking database, so commands already handled by the PreToolUse hook
+    /// are not reported as "missed savings."
+    pub fn get_original_cmds_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<String>> {
+        let ts = since.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT original_cmd FROM commands WHERE timestamp >= ?1",
+        )?;
+        let rows = stmt.query_map(params![ts], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// Get top N commands by frequency (for telemetry).
     pub fn top_commands(&self, limit: usize) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
@@ -1583,5 +1600,28 @@ mod tests {
         // We can't assert exact rate because other tests may have added records,
         // but we can verify recovery_rate is between 0 and 100
         assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
+    }
+
+    // 14. get_original_cmds_since returns recorded commands
+    #[test]
+    fn test_get_original_cmds_since() {
+        let tracker = Tracker::new().expect("Failed to create tracker");
+        let unique = format!("test_discover_xref_{}", std::process::id());
+
+        tracker
+            .record(&unique, &format!("rtk {}", unique), 100, 50, 10)
+            .expect("Failed to record");
+
+        let since = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let cmds = tracker
+            .get_original_cmds_since(since)
+            .expect("Failed to query");
+
+        assert!(
+            cmds.iter().any(|c| c == &unique),
+            "Expected to find '{}' in {:?}",
+            unique,
+            cmds
+        );
     }
 }
