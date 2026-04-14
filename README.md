@@ -142,6 +142,9 @@ Four strategies applied per command type:
 ### Files
 ```bash
 rtk ls .                        # Token-optimized directory tree
+rtk eza .                       # eza listing (flat/long/tree) token-optimized
+rtk eza -l .                    # Compact long format: name + size only
+rtk eza -T .                    # Tree view, noise dirs excluded
 rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk smart file.rs               # 2-line heuristic code summary
@@ -368,7 +371,121 @@ RTK supports 12 AI coding tools. Each integration transparently rewrites shell c
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 
-For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents).
+### Claude Code (default)
+
+```bash
+rtk init -g                 # Install hook + RTK.md
+rtk init -g --auto-patch    # Non-interactive (CI/CD)
+rtk init --show             # Verify installation
+rtk init -g --uninstall     # Remove
+```
+
+### GitHub Copilot (VS Code + CLI)
+
+```bash
+rtk init -g --copilot         # Install hook + instructions
+```
+
+Creates `.github/hooks/rtk-rewrite.json` (PreToolUse hook) and `.github/copilot-instructions.md` (prompt-level awareness).
+
+The hook (`rtk hook copilot`) auto-detects the format:
+- **VS Code Copilot Chat**: transparent rewrite via `updatedInput` (same as Claude Code)
+- **Copilot CLI**: deny-with-suggestion (CLI does not support `updatedInput` yet — see [copilot-cli#2013](https://github.com/github/copilot-cli/issues/2013))
+
+### Cursor
+
+```bash
+rtk init -g --agent cursor
+```
+
+Creates `~/.cursor/hooks/rtk-rewrite.sh` + patches `~/.cursor/hooks.json` with preToolUse matcher. Works with both Cursor editor and `cursor-agent` CLI.
+
+### Gemini CLI
+
+```bash
+rtk init -g --gemini
+rtk init -g --gemini --uninstall
+```
+
+Creates `~/.gemini/hooks/rtk-hook-gemini.sh` + patches `~/.gemini/settings.json` with BeforeTool hook.
+
+### Codex (OpenAI)
+
+```bash
+rtk init -g --codex
+```
+
+Creates `~/.codex/RTK.md` + `~/.codex/AGENTS.md` with `@RTK.md` reference. Codex reads these as global instructions.
+
+### Windsurf
+
+```bash
+rtk init --agent windsurf
+```
+
+Creates `.windsurfrules` in the current project. Cascade reads rules and prefixes commands with `rtk`.
+
+### Cline / Roo Code
+
+```bash
+rtk init --agent cline
+```
+
+Creates `.clinerules` in the current project. Cline reads rules and prefixes commands with `rtk`.
+
+### OpenCode
+
+```bash
+rtk init -g --opencode
+```
+
+Creates `~/.config/opencode/plugins/rtk.ts`. Uses `tool.execute.before` hook.
+
+### OpenClaw
+
+```bash
+openclaw plugins install ./openclaw
+```
+
+Plugin in `openclaw/` directory. Uses `before_tool_call` hook, delegates to `rtk rewrite`.
+
+### Mistral Vibe (planned)
+
+Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531), [PR #533](https://github.com/mistralai/mistral-vibe/pull/533)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
+
+### Commands Rewritten
+
+| Raw Command | Rewritten To |
+|-------------|-------------|
+| `git status/diff/log/add/commit/push/pull` | `rtk git ...` |
+| `gh pr/issue/run` | `rtk gh ...` |
+| `cargo test/build/clippy` | `rtk cargo ...` |
+| `cat/head/tail <file>` | `rtk read <file>` |
+| `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `ls` | `rtk ls` |
+| `eza` | `rtk eza` |
+| `vitest/jest` | `rtk vitest run` |
+| `tsc` | `rtk tsc` |
+| `eslint/biome` | `rtk lint` |
+| `prettier` | `rtk prettier` |
+| `playwright` | `rtk playwright` |
+| `prisma` | `rtk prisma` |
+| `ruff check/format` | `rtk ruff ...` |
+| `pytest` | `rtk pytest` |
+| `pip list/install` | `rtk pip ...` |
+| `go test/build/vet` | `rtk go ...` |
+| `golangci-lint` | `rtk golangci-lint` |
+| `rake test` / `rails test` | `rtk rake test` |
+| `rspec` / `bundle exec rspec` | `rtk rspec` |
+| `rubocop` / `bundle exec rubocop` | `rtk rubocop` |
+| `bundle install/update` | `rtk bundle ...` |
+| `aws sts/ec2/lambda/...` | `rtk aws ...` |
+| `docker ps/images/logs` | `rtk docker ...` |
+| `kubectl get/logs` | `rtk kubectl ...` |
+| `curl` | `rtk curl` |
+| `pnpm list/outdated` | `rtk pnpm ...` |
+
+Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
 
 ## Configuration
 

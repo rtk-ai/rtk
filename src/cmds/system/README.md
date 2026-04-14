@@ -8,6 +8,7 @@
 - `grep_cmd.rs` reads `core/config` for `limits.grep_max_results` and `limits.grep_max_per_file`
 - `local_llm.rs` (`rtk smart`) uses `core/filter` for heuristic file summarization
 - `format_cmd.rs` is a cross-ecosystem dispatcher: auto-detects and routes to `prettier_cmd` or `ruff_cmd` (black is handled inline, not as a separate module)
+- `eza_cmd.rs` (`rtk eza`) handles flat, long (`-l`), and tree (`-T`) modes: strips icons, noise dirs, permissions, timestamps; truncates flat lists >30 entries
 
 ## Cross-command
 
