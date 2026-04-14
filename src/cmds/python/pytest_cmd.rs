@@ -88,7 +88,8 @@ fn filter_pytest_output(output: &str) -> String {
             && !trimmed.starts_with("ERROR")
             && (trimmed.contains(" passed")
                 || trimmed.contains(" failed")
-                || trimmed.contains(" skipped"))
+                || trimmed.contains(" skipped")
+                || trimmed.contains(" xfailed"))
             && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
@@ -144,13 +145,20 @@ fn filter_pytest_output(output: &str) -> String {
 
 fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[String]) -> String {
     // Parse summary line
-    let (passed, failed, skipped) = parse_summary_line(summary);
+    let (passed, failed, skipped, xfailed) = parse_summary_line(summary);
 
     if failed == 0 && passed > 0 {
-        return format!("Pytest: {} passed", passed);
+        let mut result = format!("Pytest: {} passed", passed);
+        if skipped > 0 {
+            result.push_str(&format!(", {} skipped", skipped));
+        }
+        if xfailed > 0 {
+            result.push_str(&format!(", {} xfailed", xfailed));
+        }
+        return result;
     }
 
-    if passed == 0 && failed == 0 && skipped == 0 {
+    if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 {
         return "Pytest: No tests collected".to_string();
     }
 
@@ -158,6 +166,9 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
     result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
     if skipped > 0 {
         result.push_str(&format!(", {} skipped", skipped));
+    }
+    if xfailed > 0 {
+        result.push_str(&format!(", {} xfailed", xfailed));
     }
     result.push('\n');
     result.push_str("═══════════════════════════════════════\n");
@@ -221,10 +232,11 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
     result.trim().to_string()
 }
 
-fn parse_summary_line(summary: &str) -> (usize, usize, usize) {
+fn parse_summary_line(summary: &str) -> (usize, usize, usize, usize) {
     let mut passed = 0;
     let mut failed = 0;
     let mut skipped = 0;
+    let mut xfailed = 0;
 
     // Parse lines like "=== 4 passed, 1 failed in 0.50s ==="
     let parts: Vec<&str> = summary.split(',').collect();
@@ -233,7 +245,11 @@ fn parse_summary_line(summary: &str) -> (usize, usize, usize) {
         let words: Vec<&str> = part.split_whitespace().collect();
         for (i, word) in words.iter().enumerate() {
             if i > 0 {
-                if word.contains("passed") {
+                if word.contains("xfailed") {
+                    if let Ok(n) = words[i - 1].parse::<usize>() {
+                        xfailed = n;
+                    }
+                } else if word.contains("passed") {
                     if let Ok(n) = words[i - 1].parse::<usize>() {
                         passed = n;
                     }
@@ -250,7 +266,7 @@ fn parse_summary_line(summary: &str) -> (usize, usize, usize) {
         }
     }
 
-    (passed, failed, skipped)
+    (passed, failed, skipped, xfailed)
 }
 
 #[cfg(test)]
@@ -338,14 +354,21 @@ collected 0 items
 
     #[test]
     fn test_parse_summary_line() {
-        assert_eq!(parse_summary_line("=== 5 passed in 0.50s ==="), (5, 0, 0));
+        assert_eq!(
+            parse_summary_line("=== 5 passed in 0.50s ==="),
+            (5, 0, 0, 0)
+        );
         assert_eq!(
             parse_summary_line("=== 4 passed, 1 failed in 0.50s ==="),
-            (4, 1, 0)
+            (4, 1, 0, 0)
         );
         assert_eq!(
             parse_summary_line("=== 3 passed, 1 failed, 2 skipped in 1.0s ==="),
-            (3, 1, 2)
+            (3, 1, 2, 0)
+        );
+        assert_eq!(
+            parse_summary_line("=== 2 passed, 3 xfailed in 1.0s ==="),
+            (2, 0, 0, 3)
         );
     }
 
@@ -393,6 +416,31 @@ collected 3 items
         assert!(
             !result.contains("No tests collected"),
             "Should not say 'No tests collected' when tests were skipped. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_only_xfailed() {
+        let output = r#"=== test session starts ===
+collected 2 items
+
+=== 2 xfailed in 0.10s ==="#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Should recognize xfailed-only pytest output. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("2 failed"),
+            "Should not report xfailed tests as real failures. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("2 xfailed"),
+            "Should report xfailed tests in the summary. Got: {}",
             result
         );
     }
