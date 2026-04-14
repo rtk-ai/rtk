@@ -73,7 +73,7 @@ fn filter_tree_output(raw: &str) -> String {
 
     for line in lines {
         // Skip the final summary line (e.g., "5 directories, 23 files")
-        if line.contains("director") && line.contains("file") {
+        if line.contains("directory") && line.contains("file") {
             continue;
         }
 
