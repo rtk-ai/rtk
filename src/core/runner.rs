@@ -65,6 +65,13 @@ where
 {
     let timer = tracking::TimedExecution::start();
 
+    // Force C locale so that filtered subcommands (ls, git, find, …) emit
+    // English output that matches the existing regexes.  Without this, non-
+    // English locales cause parse failures (e.g. `rtk ls` returns "(empty)").
+    // Intentionally NOT applied to `run_passthrough`, which shows raw output
+    // to the user and should respect their real locale.
+    cmd.env("LC_ALL", "C");
+
     let output = cmd
         .output()
         .with_context(|| format!("Failed to run {}", tool_name))?;
