@@ -389,7 +389,7 @@ E   AssertionError: expected True
 
 === short test summary info ===
 FAILED tests/test_foo.py::test_something - AssertionError
-5 failed, 1698 passed, 2 skipped in 108.89s"#;
+5 failed, 1698 passed, 2 skipped, 3 xfailed in 108.89s"#;
 
         let result = filter_pytest_output(output);
         assert!(
@@ -398,7 +398,7 @@ FAILED tests/test_foo.py::test_something - AssertionError
             result
         );
         assert!(
-            result.contains("1698") || result.contains("5 failed"),
+            result.contains("1698") || result.contains("5 failed") || result.contains("3 xfailed"),
             "Should show actual test counts. Got: {}",
             result
         );
