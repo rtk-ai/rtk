@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
+const CLAUDE_MD: &str = "CLAUDE.md";
+const RTK_INSTRUCTIONS_MARKER: &str = "<!-- rtk-instructions";
 
 /// Hook status for diagnostics and `rtk gain`.
 #[derive(Debug, PartialEq, Clone)]
@@ -34,6 +36,13 @@ pub fn status() -> HookStatus {
     }
 
     let Some(hook_path) = hook_installed_path() else {
+        // On Windows, hook-mode is not supported (`rtk init` falls back to
+        // `--claude-md` mode and writes the RTK block into ~/.claude/CLAUDE.md).
+        // When that block is present, the user already has the only valid
+        // integration on this platform, so don't nag them to install a hook.
+        if cfg!(windows) && claude_md_mode_installed(&home) {
+            return HookStatus::Ok;
+        }
         return HookStatus::Missing;
     };
     let Ok(content) = std::fs::read_to_string(&hook_path) else {
@@ -119,6 +128,13 @@ fn hook_installed_path() -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn claude_md_mode_installed(home: &std::path::Path) -> bool {
+    let path = home.join(CLAUDE_DIR).join(CLAUDE_MD);
+    std::fs::read_to_string(path)
+        .map(|s| s.contains(RTK_INSTRUCTIONS_MARKER))
+        .unwrap_or(false)
 }
 
 fn warn_marker_path() -> Option<PathBuf> {
@@ -224,6 +240,34 @@ mod tests {
     }
 
     #[test]
+    fn test_claude_md_mode_with_rtk_block_detected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(CLAUDE_DIR);
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join(CLAUDE_MD),
+            "# CLAUDE.md\n<!-- rtk-instructions v2 -->\nstuff\n<!-- /rtk-instructions -->\n",
+        )
+        .unwrap();
+        assert!(claude_md_mode_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_claude_md_mode_without_rtk_block_not_detected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path().join(CLAUDE_DIR);
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join(CLAUDE_MD), "# CLAUDE.md\nno rtk here\n").unwrap();
+        assert!(!claude_md_mode_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_claude_md_mode_no_file_not_detected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(!claude_md_mode_installed(tmp.path()));
+    }
+
+    #[test]
     fn test_status_returns_valid_variant() {
         let home = match dirs::home_dir() {
             Some(h) => h,
@@ -236,15 +280,21 @@ mod tests {
             .join("rtk-rewrite.sh")
             .exists();
         let has_claude_dir = home.join(".claude").exists();
-        let has_other = other_integration_installed(&home);
+        let has_windows_claude_md = cfg!(windows) && claude_md_mode_installed(&home);
 
-        match (has_claude_hook, has_claude_dir, has_other) {
+        match (has_claude_hook, has_claude_dir, has_windows_claude_md) {
             (true, _, _) => assert!(
                 s == HookStatus::Ok || s == HookStatus::Outdated,
                 "Expected Ok or Outdated when Claude hook exists, got {:?}",
                 s
             ),
-            (false, true, _) => assert_eq!(
+            (false, true, true) => assert_eq!(
+                s,
+                HookStatus::Ok,
+                "Expected Ok on Windows when --claude-md mode is installed, got {:?}",
+                s
+            ),
+            (false, true, false) => assert_eq!(
                 s,
                 HookStatus::Missing,
                 "Expected Missing when .claude/ exists but hook absent, got {:?}",
