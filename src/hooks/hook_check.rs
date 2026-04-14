@@ -1,11 +1,13 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
 use super::constants::{
-    CLAUDE_DIR, CODEX_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HOOKS_SUBDIR,
-    OPENCODE_PLUGIN_PATH, REWRITE_HOOK_FILE,
+    CLAUDE_DIR, HOOKS_SUBDIR, NATIVE_HOOK_COMMAND, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
 };
+#[cfg(test)]
+use super::constants::{CODEX_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, OPENCODE_PLUGIN_PATH};
 use crate::core::constants::RTK_DATA_DIR;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
@@ -29,21 +31,61 @@ pub fn status() -> HookStatus {
         Some(h) => h,
         None => return HookStatus::Ok,
     };
-    if !home.join(CLAUDE_DIR).exists() {
+    let claude_dir = home.join(CLAUDE_DIR);
+    if !claude_dir.exists() {
         return HookStatus::Ok;
     }
 
-    let Some(hook_path) = hook_installed_path() else {
-        return HookStatus::Missing;
-    };
-    let Ok(content) = std::fs::read_to_string(&hook_path) else {
-        return HookStatus::Outdated; // exists but unreadable — treat as needs-update
-    };
-    if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
-        HookStatus::Ok
-    } else {
-        HookStatus::Outdated
+    // Bash hook file (~/.claude/hooks/rtk-rewrite.sh): versioned, may be outdated.
+    if let Some(hook_path) = hook_installed_path() {
+        let Ok(content) = std::fs::read_to_string(&hook_path) else {
+            return HookStatus::Outdated; // exists but unreadable — treat as needs-update
+        };
+        return if parse_hook_version(&content) >= CURRENT_HOOK_VERSION {
+            HookStatus::Ok
+        } else {
+            HookStatus::Outdated
+        };
     }
+
+    // Native hook (command in settings.json): no file on disk, no version.
+    // Either the entry is there or it isn't.
+    if native_hook_installed(&claude_dir) {
+        return HookStatus::Ok;
+    }
+
+    HookStatus::Missing
+}
+
+/// Check whether the native hook command is registered for PreToolUse
+/// in `<claude_dir>/settings.json`. Used as a fallback when no bash hook
+/// file is present on disk (Windows, or users who opted into `--native-hook`).
+pub(crate) fn native_hook_installed(claude_dir: &Path) -> bool {
+    let settings_path = claude_dir.join(SETTINGS_JSON);
+    let Ok(content) = std::fs::read_to_string(&settings_path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd == NATIVE_HOOK_COMMAND)
+}
+
+/// Public helper: is the native hook configured for the current user?
+/// Returns false if home dir is unavailable or settings.json is missing/invalid.
+pub fn native_hook_configured() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    native_hook_installed(&home.join(CLAUDE_DIR))
 }
 
 /// Check if the installed hook is missing or outdated, warn once per day.
@@ -230,27 +272,90 @@ mod tests {
             None => return,
         };
         let s = status();
-        let has_claude_hook = home
-            .join(".claude")
-            .join("hooks")
-            .join("rtk-rewrite.sh")
-            .exists();
-        let has_claude_dir = home.join(".claude").exists();
+        let claude_dir = home.join(".claude");
+        let has_claude_hook = claude_dir.join("hooks").join("rtk-rewrite.sh").exists();
+        let has_claude_dir = claude_dir.exists();
+        let has_native = has_claude_dir && native_hook_installed(&claude_dir);
         let has_other = other_integration_installed(&home);
 
-        match (has_claude_hook, has_claude_dir, has_other) {
-            (true, _, _) => assert!(
+        match (has_claude_hook, has_native, has_claude_dir, has_other) {
+            (true, _, _, _) => assert!(
                 s == HookStatus::Ok || s == HookStatus::Outdated,
-                "Expected Ok or Outdated when Claude hook exists, got {:?}",
+                "Expected Ok or Outdated when bash hook exists, got {:?}",
                 s
             ),
-            (false, true, _) => assert_eq!(
+            (false, true, _, _) => assert_eq!(
+                s,
+                HookStatus::Ok,
+                "Expected Ok when native hook is configured, got {:?}",
+                s
+            ),
+            (false, false, true, _) => assert_eq!(
                 s,
                 HookStatus::Missing,
-                "Expected Missing when .claude/ exists but hook absent, got {:?}",
+                "Expected Missing when .claude/ exists but no hook (bash or native), got {:?}",
                 s
             ),
-            (false, false, _) => assert_eq!(s, HookStatus::Ok),
+            (false, false, false, _) => assert_eq!(s, HookStatus::Ok),
         }
+    }
+
+    #[test]
+    fn test_native_hook_installed_detects_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let claude_dir = tmp.path();
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": NATIVE_HOOK_COMMAND}]
+                }]
+            }
+        });
+        std::fs::write(
+            claude_dir.join(SETTINGS_JSON),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        assert!(native_hook_installed(claude_dir));
+    }
+
+    #[test]
+    fn test_native_hook_installed_missing_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(!native_hook_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_native_hook_installed_unrelated_hook() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": "/some/other/tool.sh"}]
+                }]
+            }
+        });
+        std::fs::write(
+            tmp.path().join(SETTINGS_JSON),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        assert!(!native_hook_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_native_hook_installed_invalid_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(SETTINGS_JSON), "{ not valid json").unwrap();
+        assert!(!native_hook_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_native_hook_installed_empty_hooks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(SETTINGS_JSON), "{}").unwrap();
+        assert!(!native_hook_installed(tmp.path()));
     }
 }

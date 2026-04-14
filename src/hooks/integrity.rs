@@ -12,7 +12,8 @@
 //!
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
-use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, NATIVE_HOOK_COMMAND, REWRITE_HOOK_FILE};
+use super::hook_check;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -226,8 +227,17 @@ pub fn run_verify(verbose: u8) -> Result<()> {
             println!("      Run `rtk init -g` to establish baseline.");
         }
         IntegrityStatus::NotInstalled => {
-            println!("SKIP  RTK hook not installed");
-            println!("      Run `rtk init -g` to install.");
+            // No bash hook on disk — check for the native hook in settings.json.
+            // The native hook is a command string, not a file, so there is no
+            // filesystem baseline to verify against.
+            if hook_check::native_hook_configured() {
+                println!("PASS  native hook configured");
+                println!("      Command: {}", NATIVE_HOOK_COMMAND);
+                println!("      (command lives in settings.json; no file hash to verify)");
+            } else {
+                println!("SKIP  RTK hook not installed");
+                println!("      Run `rtk init -g` to install.");
+            }
         }
         IntegrityStatus::OrphanedHash => {
             eprintln!("WARN  hash file exists but hook is missing");
