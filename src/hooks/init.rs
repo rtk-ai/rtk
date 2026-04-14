@@ -303,6 +303,42 @@ pub fn run(
     Ok(())
 }
 
+/// Check whether `jq` is available on PATH and warn if not.
+///
+/// The shell-based hook (`rtk-rewrite.sh`) requires `jq` to parse the JSON
+/// payload from Claude Code.  When `jq` is missing the hook exits silently
+/// (exit 0, no output) which means **every** command falls through without
+/// RTK rewriting — resulting in zero token savings with no visible error.
+///
+/// This is a soft check: it prints a prominent warning but does **not** fail
+/// the init, so the rest of the setup can still complete.
+fn check_jq_available() {
+    use std::process::Command;
+
+    let jq_found = Command::new("jq")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !jq_found {
+        eprintln!();
+        eprintln!("  [WARNING] jq is not installed.");
+        eprintln!("  The RTK hook requires jq to rewrite commands.");
+        eprintln!("  Without it the hook will silently do nothing — zero token savings.");
+        eprintln!();
+        eprintln!("  Install jq:");
+        eprintln!("    macOS:  brew install jq");
+        eprintln!("    Ubuntu: sudo apt-get install -y jq");
+        eprintln!("    Fedora: sudo dnf install -y jq");
+        eprintln!("    Arch:   sudo pacman -S jq");
+        eprintln!("    Other:  https://jqlang.github.io/jq/download/");
+        eprintln!();
+    }
+}
+
 /// Prepare hook directory and return paths (hook_dir, hook_path)
 fn prepare_hook_paths() -> Result<(PathBuf, PathBuf)> {
     let claude_dir = resolve_claude_dir()?;
@@ -975,6 +1011,12 @@ fn run_default_mode(
     // 1. Prepare hook directory and install hook
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
+
+    // 1b. Warn if jq is not installed — the hook script requires it to parse JSON.
+    // Without jq the hook exits silently, causing zero token savings.
+    // This check will become unnecessary once the hook is replaced by a native
+    // Rust subcommand (see https://github.com/rtk-ai/rtk/pull/785).
+    check_jq_available();
 
     // 2. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, verbose)?;
@@ -1824,6 +1866,9 @@ fn install_cursor_hooks(verbose: u8) -> Result<()> {
         })?;
     }
 
+    // 1b. Warn if jq is missing (same issue as Claude Code hook)
+    check_jq_available();
+
     // 2. Create or patch hooks.json
     let hooks_json_path = cursor_dir.join(HOOKS_JSON);
     let patched = patch_cursor_hooks_json(&hooks_json_path, verbose)?;
@@ -2639,6 +2684,13 @@ mod tests {
             RTK_INSTRUCTIONS.contains("<!-- rtk-instructions"),
             "RTK_INSTRUCTIONS must have version marker for idempotency"
         );
+    }
+
+    #[test]
+    fn test_check_jq_available_does_not_panic() {
+        // check_jq_available is a soft check — it must never panic or fail,
+        // regardless of whether jq is installed. It only prints a warning.
+        check_jq_available();
     }
 
     #[test]
