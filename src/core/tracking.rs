@@ -1153,6 +1153,11 @@ fn categorize_command(rtk_cmd: &str) -> String {
     .to_string()
 }
 
+/// Returns the resolved path to the tracking database file.
+pub fn db_path() -> Result<PathBuf> {
+    get_db_path()
+}
+
 fn get_db_path() -> Result<PathBuf> {
     // Priority 1: Environment variable RTK_DB_PATH
     if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {

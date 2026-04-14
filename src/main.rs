@@ -412,6 +412,9 @@ enum Commands {
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
+        /// Live-refresh mode (milliseconds between polls, default 500)
+        #[arg(short = 'W', long, value_name = "MS")]
+        watch: Option<Option<u64>>,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -1768,7 +1771,9 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             failures,
+            watch,
         } => {
+            let watch_interval = watch.map(|opt| opt.unwrap_or(500));
             analytics::gain::run(
                 project, // added: pass project flag
                 graph,
@@ -1781,6 +1786,7 @@ fn run_cli() -> Result<i32> {
                 all,
                 &format,
                 failures,
+                watch_interval,
                 cli.verbose,
             )?;
             0
@@ -2495,6 +2501,42 @@ mod tests {
         if let Ok(cli) = result {
             match cli.command {
                 Commands::Gain { failures, .. } => assert!(failures),
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_watch_no_value_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--watch"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { watch, .. } => assert_eq!(watch, Some(None)),
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_watch_with_value_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "--watch", "5"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { watch, .. } => assert_eq!(watch, Some(Some(5))),
+                _ => panic!("Expected Gain command"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_gain_watch_short_flag_parses() {
+        let result = Cli::try_parse_from(["rtk", "gain", "-W", "2"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Gain { watch, .. } => assert_eq!(watch, Some(Some(2))),
                 _ => panic!("Expected Gain command"),
             }
         }
