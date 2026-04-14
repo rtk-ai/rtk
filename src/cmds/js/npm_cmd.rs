@@ -113,7 +113,7 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
         cmd,
         "npm",
         &args.join(" "),
-        |raw| filter_npm_output(raw),
+        filter_npm_output,
         runner::RunOptions::default(),
     )
 }

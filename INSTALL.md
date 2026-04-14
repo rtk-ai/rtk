@@ -231,11 +231,11 @@ rtk ls .
 # Test with git
 rtk git status
 
-# Test with pnpm (fork only)
+# Test with pnpm
 rtk pnpm list
 
-# Test with Vitest (feat/vitest-support branch only)
-rtk vitest run
+# Test with Vitest
+rtk vitest
 ```
 
 ## Uninstalling
@@ -303,8 +303,15 @@ rtk pnpm install pkg  # Silent installation
 
 ### Tests
 ```bash
-rtk test cargo test   # Failures only (-90%)
-rtk vitest run        # Filtered Vitest output (-99.6%)
+rtk cargo test      # Filtered Cargo test output (-90%)
+rtk go test         # Filtered Go tests (NDJSON, -90%)
+rtk jest            # Filtered Jest output (-99.6%)
+rtk vitest          # Filtered Vitest output (-99.6%)
+rtk playwright test # Filtered Playwright output (-94%)
+rtk pytest          # Filtered Python tests (-90%)
+rtk rake test       # Filtered Ruby tests (-90%)
+rtk rspec           # Filtered RSpec tests (-60%)
+rtk test <cmd>      # Generic test wrapper - failures only (-90%)
 ```
 
 ### Statistics
@@ -319,7 +326,7 @@ rtk gain --history    # With command history
 ### Production T3 Stack Project
 | Operation | Standard | RTK | Reduction |
 |-----------|----------|-----|-----------|
-| `vitest run` | 102,199 chars | 377 chars | **-99.6%** |
+| `vitest` | 102,199 chars | 377 chars | **-99.6%** |
 | `git status` | 529 chars | 217 chars | **-59%** |
 | `pnpm list` | ~8,000 tokens | ~2,400 | **-70%** |
 | `pnpm outdated` | ~12,000 tokens | ~1,200-2,400 | **-80-90%** |

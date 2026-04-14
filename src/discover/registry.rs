@@ -70,6 +70,21 @@ lazy_static! {
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(.+)$").unwrap();
 }
 
+const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
+    "-c",
+    "--color",
+    "--config",
+    "--cpu-profile-path",
+    "--mem-profile-path",
+    "--trace-path",
+];
+
+#[derive(Debug, Clone, Copy)]
+struct GolangciRunParts<'a> {
+    global_segment: &'a str,
+    run_segment: &'a str,
+}
+
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
     let trimmed = cmd.trim();
@@ -100,6 +115,9 @@ pub fn classify_command(cmd: &str) -> Classification {
     let cmd_normalized = strip_absolute_path(cmd_clean);
     // Strip git global options: git -C /tmp status → git status (#163)
     let cmd_normalized = strip_git_global_opts(&cmd_normalized);
+    // Strip golangci-lint global options before `run` so classify/rewrite stays
+    // aligned with the runtime wrapper behavior.
+    let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -256,6 +274,105 @@ fn strip_git_global_opts(cmd: &str) -> String {
     let after_git = &cmd[4..]; // skip "git "
     let stripped = GIT_GLOBAL_OPT.replace(after_git, "");
     format!("git {}", stripped.trim())
+}
+
+/// Strip golangci-lint global options before the `run` subcommand.
+/// `golangci-lint --color never run ./...` → `golangci-lint run ./...`
+/// Returns the original string unchanged if this is not a supported compact `run` invocation.
+fn strip_golangci_global_opts(cmd: &str) -> String {
+    match parse_golangci_run_parts(cmd) {
+        Some(parts) => format!("golangci-lint {}", parts.run_segment),
+        None => cmd.to_string(),
+    }
+}
+
+/// Parse supported golangci-lint invocations with optional global flags before `run`.
+fn parse_golangci_run_parts(cmd: &str) -> Option<GolangciRunParts<'_>> {
+    let tokens = split_token_spans(cmd);
+    let first = tokens.first()?;
+    if first.0 != "golangci-lint" && first.0 != "golangci" {
+        return None;
+    }
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i].0;
+
+        if token == "--" {
+            return None;
+        }
+
+        if !token.starts_with('-') {
+            if token == "run" {
+                let global_segment = if i > 1 {
+                    cmd[tokens[1].1..tokens[i].1].trim()
+                } else {
+                    ""
+                };
+                let run_segment = cmd[tokens[i].1..].trim();
+                return Some(GolangciRunParts {
+                    global_segment,
+                    run_segment,
+                });
+            }
+            return None;
+        }
+
+        if let Some(flag) = split_golangci_flag_name(token) {
+            if golangci_flag_takes_separate_value(token, flag) {
+                i += 1;
+            }
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+fn split_golangci_flag_name(arg: &str) -> Option<&str> {
+    if arg.starts_with("--") {
+        return Some(arg.split_once('=').map(|(flag, _)| flag).unwrap_or(arg));
+    }
+
+    if arg.starts_with('-') {
+        return Some(arg);
+    }
+
+    None
+}
+
+fn golangci_flag_takes_separate_value(arg: &str, flag: &str) -> bool {
+    if !GOLANGCI_GLOBAL_OPT_WITH_VALUE.contains(&flag) {
+        return false;
+    }
+
+    if arg.starts_with("--") && arg.contains('=') {
+        return false;
+    }
+
+    true
+}
+
+fn split_token_spans(cmd: &str) -> Vec<(&str, usize, usize)> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+
+    for (idx, ch) in cmd.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(token_start) = start.take() {
+                tokens.push((&cmd[token_start..idx], token_start, idx));
+            }
+        } else if start.is_none() {
+            start = Some(idx);
+        }
+    }
+
+    if let Some(token_start) = start {
+        tokens.push((&cmd[token_start..], token_start, cmd.len()));
+    }
+
+    tokens
 }
 
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
@@ -499,8 +616,8 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
     // semantics than rtk read or no equivalent at all. Only `-n` (line numbers)
     // maps correctly to `rtk read -n`. Skip rewrite for any other flag.
-    if cmd_part.starts_with("cat ") {
-        let args = cmd_part["cat ".len()..].trim_start();
+    if let Some(cmd_args) = cmd_part.strip_prefix("cat ") {
+        let args = cmd_args.trim_start();
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
             return None;
         }
@@ -536,6 +653,18 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
              Remove RTK_DISABLED=1 to restore token savings."
         );
         return None;
+    }
+
+    if let Some(parts) = parse_golangci_run_parts(cmd_clean) {
+        let rewritten = if parts.global_segment.is_empty() {
+            format!("{}rtk golangci-lint {}", env_prefix, parts.run_segment)
+        } else {
+            format!(
+                "{}rtk golangci-lint {} {}",
+                env_prefix, parts.global_segment, parts.run_segment
+            )
+        };
+        return Some(rewritten);
     }
 
     // #196: gh with --json/--jq/--template produces structured output that
@@ -595,6 +724,40 @@ mod tests {
                 estimated_savings_pct: 70.0,
                 status: RtkStatus::Existing,
             }
+        );
+    }
+
+    #[test]
+    fn test_classify_yadm_status() {
+        assert_eq!(
+            classify_command("yadm status"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_yadm_diff() {
+        assert_eq!(
+            classify_command("yadm diff"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_yadm_status() {
+        assert_eq!(
+            rewrite_command("yadm status", &[]),
+            Some("rtk git status".to_string())
         );
     }
 
@@ -1029,19 +1192,32 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_npx_tsc() {
-        assert_eq!(
-            rewrite_command("npx tsc --noEmit", &[]),
-            Some("rtk tsc --noEmit".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pnpm_tsc() {
-        assert_eq!(
-            rewrite_command("pnpm tsc --noEmit", &[]),
-            Some("rtk tsc --noEmit".into())
-        );
+    fn test_rewrite_tsc() {
+        let commands = vec![
+            "npm exec tsc",
+            "npm rum tsc",
+            "npm run tsc",
+            "npm run-script tsc",
+            "npm urn tsc",
+            "npm x tsc",
+            "pnpm dlx tsc",
+            "pnpm exec tsc",
+            "pnpm run tsc",
+            "pnpm run-script tsc",
+            "npm tsc",
+            "npx tsc",
+            "pnpm tsc",
+            "pnpx tsc",
+            "tsc",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(&format!("{command} --noEmit"), &[]),
+                Some("rtk tsc --noEmit".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
@@ -1081,19 +1257,61 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_npx_playwright() {
-        assert_eq!(
-            rewrite_command("npx playwright test", &[]),
-            Some("rtk playwright test".into())
-        );
+    fn test_rewrite_playwright() {
+        let commands = vec![
+            "npm exec playwright",
+            "npm rum playwright",
+            "npm run playwright",
+            "npm run-script playwright",
+            "npm urn playwright",
+            "npm x playwright",
+            "pnpm dlx playwright",
+            "pnpm exec playwright",
+            "pnpm run playwright",
+            "pnpm run-script playwright",
+            "npm playwright",
+            "npx playwright",
+            "pnpm playwright",
+            "pnpx playwright",
+            "playwright",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(&format!("{command} test"), &[]),
+                Some("rtk playwright test".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_rewrite_next_build() {
-        assert_eq!(
-            rewrite_command("next build --turbo", &[]),
-            Some("rtk next --turbo".into())
-        );
+        let commands = vec![
+            "npm exec next build",
+            "npm rum next build",
+            "npm run next build",
+            "npm run-script next build",
+            "npm urn next build",
+            "npm x next build",
+            "pnpm dlx next build",
+            "pnpm exec next build",
+            "pnpm run next build",
+            "pnpm run-script next build",
+            "npm next build",
+            "npx next build",
+            "pnpm next build",
+            "pnpx next build",
+            "next build",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(&format!("{command} --turbo"), &[]),
+                Some("rtk next --turbo".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
@@ -1877,7 +2095,73 @@ mod tests {
         assert!(matches!(
             classify_command("golangci-lint run"),
             Classification::Supported {
-                rtk_equivalent: "rtk golangci-lint",
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint -v run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_value_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint --color never run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_inline_value_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint --color=never run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_with_inline_config_flag_before_run() {
+        assert!(matches!(
+            classify_command("golangci-lint --config=foo.yml run ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_bare_is_not_compact_wrapper() {
+        assert!(!matches!(
+            classify_command("golangci-lint"),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_golangci_lint_other_subcommand_is_not_compact_wrapper() {
+        assert!(!matches!(
+            classify_command("golangci-lint version"),
+            Classification::Supported {
+                rtk_equivalent: "rtk golangci-lint run",
                 ..
             }
         ));
@@ -1915,70 +2199,488 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_golangci_lint_with_flag_before_run() {
+        assert_eq!(
+            rewrite_command("golangci-lint -v run ./...", &[]),
+            Some("rtk golangci-lint -v run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_with_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command("golangci-lint --color never run ./...", &[]),
+            Some("rtk golangci-lint --color never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_with_inline_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command("golangci-lint --color=never run ./...", &[]),
+            Some("rtk golangci-lint --color=never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_golangci_lint_with_inline_config_flag_before_run() {
+        assert_eq!(
+            rewrite_command("golangci-lint --config=foo.yml run ./...", &[]),
+            Some("rtk golangci-lint --config=foo.yml run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefixed_golangci_lint_with_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command("FOO=1 golangci-lint --color never run ./...", &[]),
+            Some("FOO=1 rtk golangci-lint --color never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefixed_golangci_lint_with_inline_value_flag_before_run() {
+        assert_eq!(
+            rewrite_command("FOO=1 golangci-lint --color=never run ./...", &[]),
+            Some("FOO=1 rtk golangci-lint --color=never run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bare_golangci_lint_skips_compact_wrapper() {
+        assert_eq!(rewrite_command("golangci-lint", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_other_golangci_lint_subcommand_skips_compact_wrapper() {
+        assert_eq!(rewrite_command("golangci-lint version", &[]), None);
+    }
+
     // --- JS/TS tooling ---
 
     #[test]
+    fn test_classify_lint() {
+        let commands = vec![
+            "npm exec biome",
+            "npm exec eslint",
+            "npm rum biome",
+            "npm rum eslint",
+            "npm rum lint",
+            "npm run biome",
+            "npm run eslint",
+            "npm run lint",
+            "npm run-script biome",
+            "npm run-script eslint",
+            "npm run-script lint",
+            "npm urn biome",
+            "npm urn eslint",
+            "npm urn lint",
+            "npm x biome",
+            "npm x eslint",
+            "pnpm dlx biome",
+            "pnpm dlx eslint",
+            "pnpm exec biome",
+            "pnpm exec eslint",
+            "pnpm run biome",
+            "pnpm run eslint",
+            "pnpm run lint",
+            "pnpm run-script biome",
+            "pnpm run-script eslint",
+            "pnpm run-script lint",
+            "npm biome",
+            "npm eslint",
+            "npm lint",
+            "npx biome",
+            "npx eslint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm eslint",
+            "pnpm lint",
+            "pnpx biome",
+            "pnpx eslint",
+            "pnpx lint",
+            "biome",
+            "eslint",
+            "lint",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk lint",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_lint() {
+        let commands = vec![
+            "npm exec biome",
+            "npm exec eslint",
+            "npm rum biome",
+            "npm rum eslint",
+            "npm rum lint",
+            "npm run biome",
+            "npm run eslint",
+            "npm run lint",
+            "npm run-script biome",
+            "npm run-script eslint",
+            "npm run-script lint",
+            "npm urn biome",
+            "npm urn eslint",
+            "npm urn lint",
+            "npm x biome",
+            "npm x eslint",
+            "pnpm dlx biome",
+            "pnpm dlx eslint",
+            "pnpm exec biome",
+            "pnpm exec eslint",
+            "pnpm run biome",
+            "pnpm run eslint",
+            "pnpm run lint",
+            "pnpm run-script biome",
+            "pnpm run-script eslint",
+            "pnpm run-script lint",
+            "npm biome",
+            "npm eslint",
+            "npm lint",
+            "npx biome",
+            "npx eslint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm eslint",
+            "pnpm lint",
+            "pnpx biome",
+            "pnpx eslint",
+            "pnpx lint",
+            "biome",
+            "eslint",
+            "lint",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(command, &[]),
+                Some("rtk lint".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_jest() {
+        let commands = vec![
+            "jest run",
+            "jest",
+            "npm exec jest run",
+            "npm exec jest",
+            "npm jest run",
+            "npm jest",
+            "npm rum jest run",
+            "npm rum jest",
+            "npm run jest run",
+            "npm run jest",
+            "npm run-script jest run",
+            "npm run-script jest",
+            "npm urn jest run",
+            "npm urn jest",
+            "npm x jest run",
+            "npm x jest",
+            "npx jest run",
+            "npx jest",
+            "pnpm dlx jest run",
+            "pnpm dlx jest",
+            "pnpm exec jest run",
+            "pnpm exec jest",
+            "pnpm jest run",
+            "pnpm jest",
+            "pnpm run jest run",
+            "pnpm run jest",
+            "pnpm run-script jest run",
+            "pnpm run-script jest",
+            "pnpx jest run",
+            "pnpx jest",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk jest",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_jest() {
+        let commands = vec![
+            "jest run",
+            "jest",
+            "npm exec jest run",
+            "npm exec jest",
+            "npm jest run",
+            "npm jest",
+            "npm rum jest run",
+            "npm rum jest",
+            "npm run jest run",
+            "npm run jest",
+            "npm run-script jest run",
+            "npm run-script jest",
+            "npm urn jest run",
+            "npm urn jest",
+            "npm x jest run",
+            "npm x jest",
+            "npx jest run",
+            "npx jest",
+            "pnpm dlx jest run",
+            "pnpm dlx jest",
+            "pnpm exec jest run",
+            "pnpm exec jest",
+            "pnpm jest run",
+            "pnpm jest",
+            "pnpm run jest run",
+            "pnpm run jest",
+            "pnpm run-script jest run",
+            "pnpm run-script jest",
+            "pnpx jest run",
+            "pnpx jest",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(command, &[]),
+                Some("rtk jest".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_vitest() {
-        assert!(matches!(
-            classify_command("vitest run"),
-            Classification::Supported {
-                rtk_equivalent: "rtk vitest",
-                ..
-            }
-        ));
+        let commands = vec![
+            "npm exec vitest run",
+            "npm exec vitest",
+            "npm rum vitest run",
+            "npm rum vitest",
+            "npm run vitest run",
+            "npm run vitest",
+            "npm run-script vitest run",
+            "npm run-script vitest",
+            "npm urn vitest run",
+            "npm urn vitest",
+            "npm vitest run",
+            "npm vitest",
+            "npm x vitest run",
+            "npm x vitest",
+            "npx vitest run",
+            "npx vitest",
+            "pnpm dlx vitest run",
+            "pnpm dlx vitest",
+            "pnpm exec vitest run",
+            "pnpm exec vitest",
+            "pnpm run vitest run",
+            "pnpm run vitest",
+            "pnpm run-script vitest run",
+            "pnpm run-script vitest",
+            "pnpm vitest run",
+            "pnpm vitest",
+            "pnpx vitest run",
+            "pnpx vitest",
+            "vitest run",
+            "vitest",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(command),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk vitest",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_rewrite_vitest() {
-        assert_eq!(
-            rewrite_command("vitest run", &[]),
-            Some("rtk vitest run".into())
-        );
-    }
-
-    #[test]
-    fn test_rewrite_pnpm_vitest() {
-        assert_eq!(
-            rewrite_command("pnpm vitest run", &[]),
-            Some("rtk vitest run".into())
-        );
+        let commands = vec![
+            "npm exec vitest run",
+            "npm exec vitest",
+            "npm rum vitest run",
+            "npm rum vitest",
+            "npm run vitest run",
+            "npm run vitest",
+            "npm run-script vitest run",
+            "npm run-script vitest",
+            "npm urn vitest run",
+            "npm urn vitest",
+            "npm vitest run",
+            "npm vitest",
+            "npm x vitest run",
+            "npm x vitest",
+            "npx vitest run",
+            "npx vitest",
+            "pnpm dlx vitest run",
+            "pnpm dlx vitest",
+            "pnpm exec vitest run",
+            "pnpm exec vitest",
+            "pnpm run vitest run",
+            "pnpm run vitest",
+            "pnpm run-script vitest run",
+            "pnpm run-script vitest",
+            "pnpm vitest run",
+            "pnpm vitest",
+            "pnpx vitest run",
+            "pnpx vitest",
+            "vitest run",
+            "vitest",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(command, &[]),
+                Some("rtk vitest".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_classify_prisma() {
-        assert!(matches!(
-            classify_command("npx prisma migrate dev"),
-            Classification::Supported {
-                rtk_equivalent: "rtk prisma",
-                ..
-            }
-        ));
+        let commands = vec![
+            "npm exec prisma",
+            "npm rum prisma",
+            "npm run prisma",
+            "npm run-script prisma",
+            "npm urn prisma",
+            "npm x prisma",
+            "pnpm dlx prisma",
+            "pnpm exec prisma",
+            "pnpm run prisma",
+            "pnpm run-script prisma",
+            "npm prisma",
+            "npx prisma",
+            "pnpm prisma",
+            "pnpx prisma",
+            "prisma",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    classify_command(format!("{command} migrate dev").as_str()),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk prisma",
+                        ..
+                    }
+                ),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_rewrite_prisma() {
-        assert_eq!(
-            rewrite_command("npx prisma migrate dev", &[]),
-            Some("rtk prisma migrate dev".into())
-        );
+        let commands = vec![
+            "npm exec prisma",
+            "npm rum prisma",
+            "npm run prisma",
+            "npm run-script prisma",
+            "npm urn prisma",
+            "npm x prisma",
+            "pnpm dlx prisma",
+            "pnpm exec prisma",
+            "pnpm run prisma",
+            "pnpm run-script prisma",
+            "npm prisma",
+            "npx prisma",
+            "pnpm prisma",
+            "pnpx prisma",
+            "prisma",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(format!("{command} migrate dev").as_str(), &[]),
+                Some("rtk prisma migrate dev".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
     fn test_rewrite_prettier() {
-        assert_eq!(
-            rewrite_command("npx prettier --check src/", &[]),
-            Some("rtk prettier --check src/".into())
-        );
+        let commands = vec![
+            "npm exec prettier",
+            "npm rum prettier",
+            "npm run prettier",
+            "npm run-script prettier",
+            "npm urn prettier",
+            "npm x prettier",
+            "pnpm dlx prettier",
+            "pnpm exec prettier",
+            "pnpm run prettier",
+            "pnpm run-script prettier",
+            "npm prettier",
+            "npx prettier",
+            "pnpm prettier",
+            "pnpx prettier",
+            "prettier",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(format!("{command} --check src/").as_str(), &[]),
+                Some("rtk prettier --check src/".into()),
+                "Failed for command: {}",
+                command
+            );
+        }
     }
 
     #[test]
-    fn test_rewrite_pnpm_list() {
-        assert_eq!(
-            rewrite_command("pnpm list", &[]),
-            Some("rtk pnpm list".into())
-        );
+    fn test_rewrite_pnpm_command() {
+        let commands = vec![
+            "exec",
+            "i",
+            "install",
+            "list",
+            "ls",
+            "outdated",
+            "run",
+            "run-script",
+        ];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(format!("pnpm {command}").as_str(), &[]),
+                Some(format!("rtk pnpm {command}")),
+                "Failed for command: pnpm {}",
+                command
+            );
+        }
     }
 
+    #[test]
+    fn test_rewrite_npx() {
+        assert_eq!(
+            rewrite_command("npx svgo", &[]),
+            Some("rtk npx svgo".to_string()),
+        );
+    }
     // --- Compound operator edge cases ---
 
     #[test]
@@ -2335,6 +3037,31 @@ mod tests {
         assert_eq!(strip_git_global_opts("git --no-pager log"), "git log");
         assert_eq!(strip_git_global_opts("git status"), "git status");
         assert_eq!(strip_git_global_opts("cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn test_strip_golangci_global_opts_helper() {
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint -v run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint --color never run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint --color=never run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint --config=foo.yml run ./..."),
+            "golangci-lint run ./..."
+        );
+        assert_eq!(
+            strip_golangci_global_opts("golangci-lint version"),
+            "golangci-lint version"
+        );
+        assert_eq!(strip_golangci_global_opts("cargo test"), "cargo test");
     }
 
     // --- #wc: wc filter was silently ignored by the hook ---

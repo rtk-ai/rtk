@@ -87,6 +87,8 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) where the full hook system works natively. See [Windows setup](#windows) below for details.
+
 ### Verify Installation
 
 ```bash
@@ -169,15 +171,16 @@ rtk gh run list                 # Workflow run status
 
 ### Test Runners
 ```bash
-rtk test cargo test             # Show failures only (-90%)
-rtk err npm run build           # Errors/warnings only
-rtk vitest run                  # Vitest compact (failures only)
+rtk jest                        # Jest compact (failures only)
+rtk vitest                      # Vitest compact (failures only)
 rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
+rtk err <cmd>                   # Filter errors only from any command
+rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
 ```
 
 ### Build & Lint
@@ -308,6 +311,43 @@ rtk init --show             # Verify installation
 
 After install, **restart Claude Code**.
 
+## Windows
+
+RTK works on Windows with some limitations. The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell, so on native Windows RTK falls back to **CLAUDE.md injection mode** — your AI assistant receives RTK instructions but commands are not rewritten automatically.
+
+### Recommended: WSL (full support)
+
+For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux). Inside WSL, RTK works exactly like Linux — full hook support, auto-rewrite, everything:
+
+```bash
+# Inside WSL
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+```
+
+### Native Windows (limited support)
+
+On native Windows (cmd.exe / PowerShell), RTK filters work but the hook does not auto-rewrite commands:
+
+```powershell
+# 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
+# 2. Add rtk.exe to your PATH
+# 3. Initialize (falls back to CLAUDE.md injection)
+rtk init -g
+# 4. Use rtk explicitly
+rtk cargo test
+rtk git status
+```
+
+**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+
+| Feature | WSL | Native Windows |
+|---------|-----|----------------|
+| Filters (cargo, git, etc.) | Full | Full |
+| Auto-rewrite hook | Yes | No (CLAUDE.md fallback) |
+| `rtk init -g` | Hook mode | CLAUDE.md mode |
+| `rtk gain` / analytics | Full | Full |
+
 ## Supported AI Tools
 
 RTK supports 12 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
@@ -370,7 +410,7 @@ brew uninstall rtk           # If installed via Homebrew
 
 ## Privacy & Telemetry
 
-RTK collects **anonymous, aggregate usage metrics** once per day, **enabled by default**. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers. For the full list of fields, data handling, and contributor guidelines, see **[docs/TELEMETRY.md](docs/TELEMETRY.md)**.
+RTK can collect **anonymous, aggregate usage metrics** once per day. Telemetry is **disabled by default** and requires **explicit opt-in consent** (GDPR Art. 6, 7) during `rtk init` or via `rtk telemetry enable`. This data helps us build a better product: identifying which commands need filters, which filters need improvement, and how much value RTK delivers. For the full list of fields, data handling, and contributor guidelines, see **[docs/TELEMETRY.md](docs/TELEMETRY.md)**.
 
 **What is collected and why:**
 
@@ -391,14 +431,17 @@ All data is **aggregate counts or anonymized command names** (first 3 words, no 
 
 **What is NOT collected:** source code, file paths, command arguments, secrets, environment variables, personal data, or repository contents.
 
-**Opt-out** (any of these):
+**Manage telemetry:**
 ```bash
-# Environment variable
-export RTK_TELEMETRY_DISABLED=1
+rtk telemetry status     # Check current consent state
+rtk telemetry enable     # Give consent (interactive prompt)
+rtk telemetry disable    # Withdraw consent — stops all collection immediately
+rtk telemetry forget     # Withdraw consent + delete all local data + request server-side erasure
+```
 
-# Or in config file (~/.config/rtk/config.toml)
-[telemetry]
-enabled = false
+**Override via environment:**
+```bash
+export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
 ```
 
 ## Star History

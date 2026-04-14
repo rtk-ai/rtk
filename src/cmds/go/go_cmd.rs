@@ -391,7 +391,13 @@ fn filter_go_test_json(output: &str) -> String {
     let total_fail: usize = packages.values().map(|p| p.fail).sum();
     let total_skip: usize = packages.values().map(|p| p.skip).sum();
     let total_build_fail: usize = packages.values().filter(|p| p.build_failed).count();
-    let total_pkg_fail: usize = packages.values().filter(|p| p.package_failed).count();
+    // Only count package-level fails for packages with no individual test or build failures.
+    // go test -json emits a trailing package-level {"action":"fail"} after any test failure
+    // too, but that event is just a cascade — the individual test failures are already counted.
+    let total_pkg_fail: usize = packages
+        .values()
+        .filter(|p| p.package_failed && p.fail == 0 && !p.build_failed)
+        .count();
 
     let has_failures = total_fail > 0 || total_build_fail > 0 || total_pkg_fail > 0;
 
@@ -418,9 +424,11 @@ fn filter_go_test_json(output: &str) -> String {
     result.push_str(&format!(" in {} packages\n", total_packages));
     result.push_str("═══════════════════════════════════════\n");
 
-    // Show package-level failures first (timeouts, signals, panics)
+    // Show package-level failures first (timeouts, signals, panics).
+    // Skip packages that already have individual test-level failures — those are displayed
+    // in the per-package section below and the package-level event is just a cascade.
     for (package, pkg_result) in packages.iter() {
-        if !pkg_result.package_failed {
+        if !pkg_result.package_failed || pkg_result.fail > 0 || pkg_result.build_failed {
             continue;
         }
 
@@ -750,6 +758,91 @@ mod tests {
         assert!(
             result.contains("FAIL"),
             "Expected failure output in summary, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_no_double_count_on_test_failure() {
+        // go test -json always emits a package-level {"action":"fail"} after each
+        // test-level failure. The package-level event is a cascade, not an additional
+        // failure. The summary header must show "1 failed", not "2 failed".
+        let output = r#"{"Time":"2024-01-01T10:00:00Z","Action":"run","Package":"example.com/foo","Test":"TestFail"}
+{"Time":"2024-01-01T10:00:01Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"=== RUN   TestFail\n"}
+{"Time":"2024-01-01T10:00:02Z","Action":"output","Package":"example.com/foo","Test":"TestFail","Output":"    Error: expected 5, got 3\n"}
+{"Time":"2024-01-01T10:00:03Z","Action":"fail","Package":"example.com/foo","Test":"TestFail","Elapsed":0.5}
+{"Time":"2024-01-01T10:00:03Z","Action":"fail","Package":"example.com/foo","Elapsed":0.5}"#;
+
+        let result = filter_go_test_json(output);
+        // The summary header must say "1 failed", not "2 failed" (no double-counting).
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "Expected header 'Go test: 0 passed, 1 failed', got: {}",
+            result
+        );
+        assert!(result.contains("TestFail"));
+        assert!(result.contains("expected 5, got 3"));
+        // The package must NOT appear twice (once as "[FAIL]" and once with test details).
+        assert_eq!(
+            result.matches("foo").count(),
+            1,
+            "Package name should appear exactly once, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_timeout_with_signal_quit_output() {
+        // Exact reproduction of the scenario from issue #958: the signal: quit line
+        // appears as a separate JSON output event.
+        let output = r#"{"Action":"start","Package":"example.com/pkg"}
+{"Action":"output","Package":"example.com/pkg","Output":"*** Test killed with quit: ran too long (1m30s).\n"}
+{"Action":"output","Package":"example.com/pkg","Output":"signal: quit\n"}
+{"Action":"output","Package":"example.com/pkg","Output":"FAIL\texample.com/pkg\t90.000s\n"}
+{"Action":"fail","Package":"example.com/pkg","Elapsed":90.001}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.starts_with("Go test: 0 passed, 1 failed"),
+            "Expected 'Go test: 0 passed, 1 failed', got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Must not say 'No tests found' on timeout, got: {}",
+            result
+        );
+        assert!(
+            result.contains("Test killed with quit"),
+            "Should show the timeout message, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_go_test_timeout_with_passing_tests_before_kill() {
+        // Some tests pass before the package times out.
+        // Summary should show both pass and fail counts.
+        let output = r#"{"Action":"run","Package":"example.com/foo","Test":"TestFast"}
+{"Action":"pass","Package":"example.com/foo","Test":"TestFast","Elapsed":0.001}
+{"Action":"run","Package":"example.com/foo","Test":"TestHang"}
+{"Action":"output","Package":"example.com/foo","Output":"*** Test killed with quit: ran too long (30s).\n"}
+{"Action":"fail","Package":"example.com/foo","Elapsed":30.001}"#;
+
+        let result = filter_go_test_json(output);
+        assert!(
+            result.starts_with("Go test: 1 passed, 1 failed"),
+            "Expected 'Go test: 1 passed, 1 failed', got: {}",
+            result
+        );
+        assert!(
+            !result.contains("No tests found"),
+            "Must not say 'No tests found', got: {}",
+            result
+        );
+        assert!(
+            result.contains("Test killed with quit"),
+            "Should show timeout message, got: {}",
             result
         );
     }

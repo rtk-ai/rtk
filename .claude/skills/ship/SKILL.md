@@ -79,11 +79,21 @@ name = "rtk"
 version = "0.17.0"  # New version
 ```
 
-**Commit message quality matters** — release-please generates CHANGELOG entries directly from your `feat:` and `fix:` commits:
-```
-feat(pytest): add Python test filtering with JSON output parsing
-fix(shell): correct PowerShell escaping on Windows
-perf(cargo): lazy-compile clippy regex patterns
+**CHANGELOG.md template**:
+```markdown
+## [0.17.0] - 2026-02-15
+
+### Added
+- `rtk pytest` command for Python test filtering (90% token reduction)
+- Support for `pytest` JSON output parsing
+- Integration with `uv` package manager auto-detection
+
+### Fixed
+- Shell escaping for PowerShell on Windows
+- Memory leak in regex pattern caching
+
+### Changed
+- Updated `cargo test` filter to show test names in failures
 ```
 
 ### Step 3: Build and Verify

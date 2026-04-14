@@ -95,7 +95,9 @@ fn build_command() -> Option<Command> {
     }
 
     // Fallback: try npx
+    eprintln!("[info] ccusage not installed globally, fetching via npx...");
     let npx_check = resolved_command("npx")
+        .arg("--yes")
         .arg("ccusage")
         .arg("--help")
         .stdout(std::process::Stdio::null())
@@ -104,6 +106,7 @@ fn build_command() -> Option<Command> {
 
     if npx_check.map(|s| s.success()).unwrap_or(false) {
         let mut cmd = resolved_command("npx");
+        cmd.arg("--yes");
         cmd.arg("ccusage");
         return Some(cmd);
     }

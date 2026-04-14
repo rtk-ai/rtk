@@ -75,7 +75,21 @@ fn filter_pytest_output(output: &str) -> String {
             }
             continue;
         } else if trimmed.starts_with("===")
-            && (trimmed.contains("passed") || trimmed.contains("failed"))
+            && (trimmed.contains("passed")
+                || trimmed.contains("failed")
+                || trimmed.contains("skipped"))
+        {
+            summary_line = trimmed.to_string();
+            continue;
+        // quiet mode (-q): bare summary without === wrapper, e.g. "5 failed, 1698 passed, 2 skipped in 108.89s"
+        } else if summary_line.is_empty()
+            && !trimmed.starts_with("===")
+            && !trimmed.starts_with("FAILED")
+            && !trimmed.starts_with("ERROR")
+            && (trimmed.contains(" passed")
+                || trimmed.contains(" failed")
+                || trimmed.contains(" skipped"))
+            && trimmed.contains(" in ")
         {
             summary_line = trimmed.to_string();
             continue;
@@ -136,7 +150,7 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
         return format!("Pytest: {} passed", passed);
     }
 
-    if passed == 0 && failed == 0 {
+    if passed == 0 && failed == 0 && skipped == 0 {
         return "Pytest: No tests collected".to_string();
     }
 
@@ -332,6 +346,54 @@ collected 0 items
         assert_eq!(
             parse_summary_line("=== 3 passed, 1 failed, 2 skipped in 1.0s ==="),
             (3, 1, 2)
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_quiet_mode_failures() {
+        // In -q mode, the final summary line has NO === wrapper
+        // This was causing "No tests collected" to be reported incorrectly
+        let output = r#"=== test session starts ===
+platform linux -- Python 3.12.11, pytest-8.1.0
+collected 1705 items
+
+.......F.......
+
+=== FAILURES ===
+___ test_something ___
+
+E   AssertionError: expected True
+
+=== short test summary info ===
+FAILED tests/test_foo.py::test_something - AssertionError
+5 failed, 1698 passed, 2 skipped in 108.89s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Should not report 'No tests collected' when tests ran. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("1698") || result.contains("5 failed"),
+            "Should show actual test counts. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_pytest_only_skipped() {
+        // If only skipped tests, should NOT say "No tests collected"
+        let output = r#"=== test session starts ===
+collected 3 items
+
+=== 3 skipped in 0.10s ==="#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            !result.contains("No tests collected"),
+            "Should not say 'No tests collected' when tests were skipped. Got: {}",
+            result
         );
     }
 }
