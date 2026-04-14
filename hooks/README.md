@@ -40,6 +40,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
+- **[`droid/`](droid/README.md)** — Shell hook (`PreToolUse`), Factory Droid `Execute` tool, same JSON format as Claude Code
 
 ## Supported Agents
 
@@ -50,6 +51,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Transparent rewrite | Yes (`updated_input`) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
+| Factory Droid | Shell hook (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
@@ -144,6 +146,30 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```
 
 **No rewrite**: `{"decision": "allow"}`
+
+### Factory Droid (Shell Hook)
+
+**Input** (stdin — same as Claude Code, but tool name is `Execute`):
+```json
+{
+  "tool_name": "Execute",
+  "tool_input": { "command": "git status" }
+}
+```
+
+**Output** (stdout, when rewritten — identical to Claude Code format):
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "permissionDecisionReason": "RTK auto-rewrite",
+    "updatedInput": { "command": "rtk git status" }
+  }
+}
+```
+
+**No rewrite**: No output (exit 0), command passes through unchanged.
 
 ### OpenCode (TypeScript Plugin)
 

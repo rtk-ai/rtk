@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Factory Droid (CLI agent)
+    Droid,
 }
 
 #[derive(Parser)]
@@ -1686,7 +1688,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                let droid_uninstall = agent == Some(AgentTarget::Droid);
+                hooks::init::uninstall(global, gemini, codex, cursor, droid_uninstall, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1716,6 +1719,7 @@ fn run_cli() -> Result<i32> {
                 let install_cursor = agent == Some(AgentTarget::Cursor);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
+                let install_droid = agent == Some(AgentTarget::Droid);
 
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1731,6 +1735,7 @@ fn run_cli() -> Result<i32> {
                     install_cursor,
                     install_windsurf,
                     install_cline,
+                    install_droid,
                     claude_md,
                     hook_only,
                     codex,
