@@ -412,14 +412,18 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     result.join("\n")
 }
 
-fn run_log(
-    args: &[String],
-    _max_lines: Option<usize>,
-    verbose: u8,
-    global_args: &[String],
-) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
+/// Parameters resolved from user args for `git log`.
+struct LogParams {
+    limit: usize,
+    user_set_limit: bool,
+    has_format_flag: bool,
+    has_reverse_flag: bool,
+}
 
+/// Build the `git log` Command with RTK defaults applied, and return resolved params.
+/// Extracted for testability: callers can inspect the assembled Command args without
+/// executing git.
+fn build_log_command(args: &[String], global_args: &[String]) -> (Command, LogParams) {
     let mut cmd = git_cmd(global_args);
     cmd.arg("log");
 
@@ -435,6 +439,9 @@ fn run_log(
             || arg.starts_with("--max-count")
     });
 
+    // Check if user requested reverse chronological order
+    let has_reverse_flag = args.iter().any(|arg| arg == "--reverse");
+
     // Apply RTK defaults only if user didn't specify them
     // Use %b (body) to preserve first line of commit body for agent context
     // (BREAKING CHANGE, Closes #xxx, design notes)
@@ -447,6 +454,14 @@ fn run_log(
         // User explicitly passed -N / -n N / --max-count=N → respect their choice
         let n = parse_user_limit(args).unwrap_or(10);
         (n, true)
+    } else if has_reverse_flag {
+        // --reverse without explicit -N: do NOT inject -N into git.
+        // `git log -50 --reverse` picks the 50 most-recent commits then reverses them —
+        // user sees 2025 commits oldest-first instead of historical data from 2022.
+        // Fix: let git stream all commits oldest-first, then RTK caps the output at
+        // the normal limit → user gets the N *oldest* commits (correct).
+        let limit = if has_format_flag { 50 } else { 10 };
+        (limit, false)
     } else if has_format_flag {
         // --oneline / --pretty without -N: user wants compact output, allow more
         cmd.arg("-50");
@@ -470,6 +485,33 @@ fn run_log(
         cmd.arg(arg);
     }
 
+    (
+        cmd,
+        LogParams {
+            limit,
+            user_set_limit,
+            has_format_flag,
+            has_reverse_flag,
+        },
+    )
+}
+
+fn run_log(
+    args: &[String],
+    _max_lines: Option<usize>,
+    verbose: u8,
+    global_args: &[String],
+) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let (mut cmd, params) = build_log_command(args, global_args);
+    let LogParams {
+        limit,
+        user_set_limit,
+        has_format_flag,
+        has_reverse_flag,
+    } = params;
+
     let result = exec_capture(&mut cmd).context("Failed to run git log")?;
 
     if !result.success() {
@@ -483,6 +525,40 @@ fn run_log(
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
     let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
+
+    // Warn when RTK silently truncated the output so the user knows to pass -N.
+    //
+    // Only meaningful when --reverse is set: that's the only case where RTK did NOT
+    // inject -N into git, so git returned all commits and we can count them.
+    // For all other cases RTK already limited git's output via -N, so we have no
+    // way of knowing how many total commits exist.
+    if !user_set_limit && has_reverse_flag {
+        let (raw_count, shown) = if has_format_flag {
+            // user_format=true: 1 line = 1 commit
+            (result.stdout.lines().count(), filtered.lines().count())
+        } else {
+            // RTK injected ---END--- separators: count blocks in raw output.
+            // In filtered output, each commit starts with a header line (no leading
+            // spaces); body lines are indented with "  ". Count header lines only.
+            let raw_commits = result.stdout
+                .split("---END---")
+                .filter(|s| !s.trim().is_empty())
+                .count();
+            let shown_commits = filtered
+                .lines()
+                .filter(|l| !l.starts_with(' '))
+                .count();
+            (raw_commits, shown_commits)
+        };
+        if raw_count > shown {
+            eprintln!(
+                "rtk: git log truncated to {} of {} commits (use -N or --max-count=N to see more)",
+                shown, raw_count
+            );
+        }
+    }
+
+
     println!("{}", filtered);
 
     timer.track(
@@ -2529,6 +2605,246 @@ no changes added to commit (use "git add" and/or "git commit -a")
             result.contains("+3 lines omitted"),
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
             result
+        );
+    }
+
+    // ── Regression tests for #1296: rtk git log --reverse ───────────────────────
+    //
+    // Bug: RTK injected `-50` before `--reverse`, so `git log -50 --reverse`
+    //   picked the 50 most-recent commits then reversed their order — user saw
+    //   2025 data instead of historical commits from 2022.
+    //
+    // Fix: when `--reverse` is present and no explicit `-N` was given, RTK must
+    //   NOT inject a `-N` limit into the git call. Git streams all commits
+    //   oldest-first; RTK's post-processor caps at the normal limit so the user
+    //   receives the N *oldest* commits.
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── build_log_command: -N injection decisions ─────────────────────────────
+
+    #[test]
+    fn test_build_log_command_reverse_does_not_inject_n() {
+        // Core regression: --reverse without -N must NOT add a -N arg to git.
+        let (cmd, params) = build_log_command(&args(&["--reverse"]), &[]);
+        let cmd_args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+
+        // No -N, -10, -50 may appear when --reverse is set without explicit limit
+        let has_injected_limit = cmd_args
+            .iter()
+            .any(|a| a == "-10" || a == "-50" || (a.starts_with('-') && a[1..].parse::<usize>().is_ok()));
+        assert!(
+            !has_injected_limit,
+            "--reverse: RTK must not inject a default -N, got args: {:?}",
+            cmd_args
+        );
+        assert!(!params.user_set_limit, "--reverse: user_set_limit must be false");
+        assert_eq!(params.limit, 10, "--reverse plain: default limit must be 10");
+        assert!(params.has_reverse_flag);
+    }
+
+    #[test]
+    fn test_build_log_command_reverse_with_format_does_not_inject_n() {
+        // --reverse + --oneline: still no -N injection, but limit becomes 50
+        let (cmd, params) = build_log_command(&args(&["--oneline", "--reverse"]), &[]);
+        let cmd_args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+
+        let has_injected_limit = cmd_args
+            .iter()
+            .any(|a| a == "-50" || (a.starts_with('-') && a[1..].parse::<usize>().is_ok()));
+        assert!(
+            !has_injected_limit,
+            "--reverse + --oneline: RTK must not inject -N, got args: {:?}",
+            cmd_args
+        );
+        assert_eq!(params.limit, 50, "--reverse + format: default limit must be 50");
+        assert!(!params.user_set_limit);
+    }
+
+    #[test]
+    fn test_build_log_command_reverse_with_explicit_n_respects_user_limit() {
+        // --reverse -20: combined form
+        let (_, params) = build_log_command(&args(&["--reverse", "-20"]), &[]);
+        assert!(params.user_set_limit);
+        assert_eq!(params.limit, 20);
+
+        // --reverse -n 200: two-token form (issue workaround)
+        let (_, params) = build_log_command(&args(&["--reverse", "-n", "200"]), &[]);
+        assert!(params.user_set_limit, "--reverse -n 200: user_set_limit must be true");
+        assert_eq!(params.limit, 200);
+
+        // --reverse --max-count=200: long form
+        let (_, params) = build_log_command(&args(&["--reverse", "--max-count=200"]), &[]);
+        assert!(params.user_set_limit, "--reverse --max-count=200: user_set_limit must be true");
+        assert_eq!(params.limit, 200);
+    }
+
+    #[test]
+    fn test_build_log_command_no_reverse_injects_n() {
+        // Without --reverse, RTK must inject -10 (plain) or -50 (format) as before
+        let (cmd_plain, _) = build_log_command(&args(&[]), &[]);
+        let plain_args: Vec<String> = cmd_plain
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            plain_args.contains(&"-10".to_string()),
+            "plain mode without flags must inject -10, got: {:?}",
+            plain_args
+        );
+
+        let (cmd_fmt, _) = build_log_command(&args(&["--oneline"]), &[]);
+        let fmt_args: Vec<String> = cmd_fmt
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            fmt_args.contains(&"-50".to_string()),
+            "--oneline without --reverse must inject -50, got: {:?}",
+            fmt_args
+        );
+    }
+
+    // ── Warning path: truncation notice when --reverse caps output ────────────
+
+    fn make_plain_blocks(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("abc{:04} commit {} (1 day ago) <author>\n\n---END---", i, i))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn make_plain_blocks_with_body(n: usize) -> String {
+        (0..n)
+            .map(|i| {
+                format!(
+                    "abc{:04} commit {} (1 day ago) <author>\nThis is body line one\nThis is body line two\n---END---",
+                    i, i
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    // Mirrors the counting logic in run_log's warning path so tests exercise
+    // the same code path (raw_count from stdout, shown from filter_log_output).
+    fn warning_counts(stdout: &str, limit: usize) -> (usize, usize) {
+        let raw_count = stdout
+            .split("---END---")
+            .filter(|s| !s.trim().is_empty())
+            .count();
+        let filtered = filter_log_output(stdout, limit, false, false);
+        // Mirror run_log's counting: header lines don't start with a space,
+        // body lines are indented with "  ".
+        let shown = filtered.lines().filter(|l| !l.starts_with(' ')).count();
+        (raw_count, shown)
+    }
+
+    #[test]
+    fn test_reverse_truncation_warning_fires_when_over_limit() {
+        // 20 commits, limit=10 → raw_count(20) > shown(10) → warning must fire
+        let stdout = make_plain_blocks(20);
+        let (raw_count, shown) = warning_counts(&stdout, 10);
+        assert!(
+            raw_count > shown,
+            "20 blocks with limit=10: raw_count({}) must exceed shown({})",
+            raw_count, shown
+        );
+    }
+
+    #[test]
+    fn test_reverse_truncation_warning_silent_when_under_limit() {
+        // 5 commits, limit=10 → raw_count(5) ≤ shown(5) → no warning
+        let stdout = make_plain_blocks(5);
+        let (raw_count, shown) = warning_counts(&stdout, 10);
+        assert!(
+            raw_count <= shown,
+            "5 blocks with limit=10: raw_count({}) must not exceed shown({})",
+            raw_count, shown
+        );
+    }
+
+    #[test]
+    fn test_reverse_truncation_warning_silent_at_exact_limit() {
+        // 10 commits, limit=10 → raw_count(10) == shown(10) → no warning (not strictly >)
+        let stdout = make_plain_blocks(10);
+        let (raw_count, shown) = warning_counts(&stdout, 10);
+        assert_eq!(raw_count, shown, "exactly at limit: raw_count must equal shown");
+        assert!(
+            raw_count <= shown,
+            "boundary: warning must not fire when raw_count == shown"
+        );
+    }
+
+    #[test]
+    fn test_reverse_truncation_warning_multiline_commits() {
+        // Regression: commits with body lines must still count as 1 commit each.
+        // Before fix: filtered.lines().count() returned header+body lines (e.g. 30
+        // for 10 commits × 3 lines), so shown > raw_count and warning never fired.
+        let stdout = make_plain_blocks_with_body(20);
+        let (raw_count, shown) = warning_counts(&stdout, 10);
+        assert_eq!(raw_count, 20, "raw_count must be 20 commits");
+        assert_eq!(shown, 10, "shown must be 10 commits (not lines), got {}", shown);
+        assert!(raw_count > shown, "warning must fire: 20 raw > 10 shown");
+    }
+
+    // ── filter_log_output: format path with --reverse data ───────────────────
+
+    #[test]
+    fn test_filter_log_output_reverse_format_path_oldest_first() {
+        // Covers the user_format=true branch of filter_log_output with real
+        // --oneline data already in oldest-first order (git --reverse output).
+        // Fixture has 50 lines; limit=10 → returns first 10 (oldest commits).
+        let input = include_str!("../../../tests/fixtures/git_log_reverse_oneline_raw.txt");
+        let result = filter_log_output(input, 10, false, true);
+
+        assert_eq!(
+            result.lines().count(),
+            10,
+            "--reverse + oneline: must cap at 10 oldest commits, got {}",
+            result.lines().count()
+        );
+        // First hash in fixture is 9c9879c (oldest commit in this repo)
+        assert!(
+            result.lines().next().unwrap().starts_with("9c9879c"),
+            "--reverse + oneline: first line must be oldest commit"
+        );
+    }
+
+    // ── Token savings: real fixture ───────────────────────────────────────────
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_reverse_token_savings_plain_fixture() {
+        // Real output from: git log --reverse --no-merges \
+        //   --pretty=format:"%h %s (%ar) <%an>%n%b%n---END---"
+        // filter_log_output strips trailers (Signed-off-by, Co-authored-by),
+        // caps body to 3 lines, truncates to 80 chars → ≥60% savings.
+        let input = include_str!("../../../tests/fixtures/git_log_reverse_raw.txt");
+        let filtered = filter_log_output(input, 10, false, false);
+
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&filtered);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(
+            savings >= 60.0,
+            "git log --reverse plain: expected ≥60% token savings, got {:.1}% \
+             (input={} tokens, output={} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
         );
     }
 }

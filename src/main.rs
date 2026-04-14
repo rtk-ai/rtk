@@ -757,9 +757,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// One-line commit history
+    /// One-line commit history (default: last 10 commits; use -N or --max-count to override)
     Log {
-        /// Git arguments (supports all git log flags like --oneline, --graph, --all)
+        /// Git arguments (supports all git log flags like --oneline, --graph, --all).
+        /// RTK limits output to 10 commits by default (50 with --oneline/--format).
+        /// Use -N (e.g. -100) or --max-count=N to change the limit.
+        /// With --reverse, no limit is injected so you see the N oldest commits.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

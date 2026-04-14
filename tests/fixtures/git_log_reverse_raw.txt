@@ -1,0 +1,50 @@
+9c9879c docs: add interface contract and Phase 0 stubs for docs reorganizatio...
+Creates docs/README.md (interface contract defining 3-tab structure,
+required frontmatter, and conventions) and 4 stub pages with valid
+frontmatter for docs/guide/, docs/reference/, and docs/architecture/.
+These are the prerequisites for the prepare-docs.mjs pipeline (Plan B)
+and for Adrien's Phase 1 content work.
+
+No existing files modified.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+Signed-off-by: Florian BRUNIAUX <florian@bruniaux.com>
+
+---END---
+25438b2 docs(guide): add 11 Phase 1 guide pages — full MVP content (10 дней н...
+Creates the complete user-facing guide for the docs website:
+
+Getting started:
+- quick-start.md: 5-minute walkthrough (init, first commands, rtk gain)
+- supported-agents.md: Claude Code, Cursor, Copilot, Gemini, Cline, Windsurf,
+  Codex, OpenCode — integration tiers, install commands, graceful degradation
+
+Commands (adapted from FEATURES.md, English, --help-first format):
+- git.md: status/log/diff/show/add/commit/push/pull/branch + gh CLI
+- cargo.md: test/nextest/build/check/clippy/install + generic test/err wrappers
+- files.md: ls/read/grep/find/diff/wc/smart with before/after examples
+- javascript.md: vitest/playwright/tsc/eslint/prettier/next/pnpm/npm/npx/prisma
+- python.md: pytest/ruff/mypy/pip/deps
+
+Reference:
+- filters/using-filters.md: 8-stage pipeline, lookup priority, TOML DSL refer...
+  Mermaid diagram (adapted from docs/filter-workflow.md)
+- analytics/gain.md: rtk gain flags, daily/weekly/monthly breakdowns, export
+  formats, token estimation, database management (from docs/AUDIT_GUIDE.md)
+- configuration.md: full config.toml reference, env vars, tee system, telemetry
+- troubleshooting.md: common issues and fixes (from docs/TROUBLESHOOTING.md)
+
+All pages carry valid frontmatter (title, description, sidebar.order).
+No existing files modified.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+Signed-off-by: Florian BRUNIAUX <florian@bruniaux.com>
+
+---END---
+974db2f docs(phase-4): complete reference, architecture tabs and remaining co...
+Guide — 10 new command and analytics pages:
+- commands/go.md: go test (NDJSON), golangci-lint
+- commands/ruby.md: rspec, rubocop, rake
+- commands/dotnet.md: dotnet build/test, binlog, format
+- commands/containers.md: docker ps/images/logs/compose, kubectl pods/service...
+- commands/github-cli.md: gh pr/issue/run, Graphite gt commands

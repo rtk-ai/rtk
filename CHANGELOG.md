@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **git:** remove `-u` short alias from `--ultra-compact` to fix `git push -u` upstream tracking ([#1086](https://github.com/rtk-ai/rtk/issues/1086))
+* **git:** fix `rtk git log --reverse` silently showing newest-N commits reversed instead of oldest-N commits; RTK no longer injects a default `-N` limit when `--reverse` is present, so git emits commits oldest-first and RTK caps to the first 50 ([#1296](https://github.com/rtk-ai/rtk/issues/1296))
 
 ## [0.35.0](https://github.com/rtk-ai/rtk/compare/v0.34.3...v0.35.0) (2026-04-06)
 

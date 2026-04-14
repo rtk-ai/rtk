@@ -1,0 +1,50 @@
+9c9879c docs: add interface contract and Phase 0 stubs for docs reorganization
+25438b2 docs(guide): add 11 Phase 1 guide pages — full MVP content
+974db2f docs(phase-4): complete reference, architecture tabs and remaining co...
+a94e949 docs: consolidate to user-facing guide, remove duplicates and legacy ...
+6e55f89 docs: address Adrien's review — structure, missing content, agents
+6938a9d docs: fix broken README links and reduce redundancy, point to docs site
+cea6e20 docs: add Star History and StarMapper to README
+47383e8 fix(security): correct email domain from .dev to .app
+da486bf fix(tee): prevent panic on UTF-8 multi-byte truncation boundary
+c85a387 fix: report package-level failures (timeouts, signals) in go test sum...
+15f666d fix(telemetry): 7 bugs in enrichment — privacy leak, broken meta_usag...
+be5c057 fix(docs): update TELEMETRY.md to match code after review fixes
+d0a3797 feat(init): add native support for Kilo Code and Google Antigravity
+b735068 docs: add Windows setup instructions and troubleshooting
+d442799 fix(init): honor CODEX_HOME for Codex global paths
+fd0c87a Update CLAUDE.md
+f4074f8 fix(clippy): show full error blocks instead of truncated headline
+cce0481 Update troubleshooting.md
+6a5bc84 fix(telemetry): RGPD-compliant, consent gate, erasure, privacy controls
+577c311 fix(curl): skip JSON schema conversion for internal/localhost URLs
+40462c0 fix(hooks): ensure default permission verdict prompts user for confir...
+40c9dbc fix(hooks): require all segments to match allow rules (#1213)
+9979c69 fix(git): re-insert -- separator when clap consumes it from git diff ...
+9722d5e fix(go): prevent double-counting failures when package-level fail cas...
+f68fa00 fix(ccusage): add --yes flag and warn when falling back to npx
+ba235d8 fix(pnpm): list command not working
+d22759b feat(benchmark): add multipass VM integration test suite
+d13c185 fix(benchmark): address review feedback from @FlorianBruniaux
+1fbb6d9 feat(benchmark): add Swift ecosystem tests (6 commands + savings)
+6634712 Update CHANGELOG.md
+87ee81f fix(benchmark): address PR review feedback
+7d99c9e Update CHANGELOG.md
+2e4cc4b fix(telemetry): consent, erasure, auth, docs
+7821e98 fix(telemetry): non-terminal consent, single config load
+8156081 fix(telemetry): clean code
+bab3a53 feat(discover): handle more npm/npx/pnpm/pnpx patterns
+325a42e fix: remove pnpx -> rtk pnpx rule as rtk pnpx command doesn't exist
+f936138 feat(pnpm): handle pnpm build rewrite
+c47edac chore: fix clippy warning
+45938b2 feat(js): distinguish between `jest` and `vitest` and don't rewrite `...
+70610da fix(vitest): rework command to handle differences between vitest and ...
+010596c Revert "feat(pnpm): handle pnpm build rewrite"
+630f0a2 Add liquibase TOML filter
+4f4e4d2 fix(golangci-lint): restore run wrapper and align guidance
+d85303e fix(discover): preserve golangci-lint flags in rewrite
+24f2ada fix(golangci-lint): support inline global flags before run
+dbeeaed fix(find): include hidden files when pattern targets dotfiles (#1101)
+3db8070 fix(permissions): glob_matches middle-wildcard matches commands witho...
+6b76fdb fix(git): remove -u short alias from --ultra-compact to fix git push -u
+0dffefc fix(git): fix --reverse showing newest commits instead of oldest
