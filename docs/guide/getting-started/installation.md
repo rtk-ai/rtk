@@ -39,8 +39,12 @@ brew install rtk-ai/tap/rtk
 
 ## Cargo
 
+:::caution[Name collision risk]
+`cargo install rtk` may install **Rust Type Kit** instead of Rust Token Killer — two unrelated projects share the same crate name. Use the explicit Git URL to guarantee the correct package:
+:::
+
 ```bash
-cargo install rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
 ```
 
 ## Pre-built binaries (Windows, Linux, macOS)

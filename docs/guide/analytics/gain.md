@@ -24,7 +24,8 @@ rtk gain --all            # all breakdowns at once
 # Classic flags
 rtk gain --graph          # ASCII graph, last 30 days
 rtk gain --history        # last 10 commands
-rtk gain --quota -t pro   # quota analysis (pro/5x/20x tiers)
+rtk gain --quota          # monthly quota savings estimate (default tier: 20x)
+rtk gain --quota -t pro   # use pro tier token budget for estimate
 
 # Export
 rtk gain --all --format json > savings.json
@@ -175,6 +176,23 @@ jobs:
       - run: rtk gain --weekly --format json > stats/week-$(date +%Y-%W).json
       - run: git add stats/ && git commit -m "Weekly rtk stats" && git push
 ```
+
+## Quota estimate
+
+`--quota` estimates how many tokens RTK has saved relative to your monthly subscription budget, so you can see the cost impact of those savings.
+
+```bash
+rtk gain --quota          # uses 20x tier by default
+rtk gain --quota -t pro   # Claude Pro plan budget
+rtk gain --quota -t 5x    # 5× usage plan budget
+rtk gain --quota -t 20x   # 20× usage plan budget
+```
+
+The tiers (`pro`, `5x`, `20x`) correspond to Anthropic Claude API subscription levels, each with a different monthly token allocation. RTK uses those allocations as a denominator to express your savings as a percentage of your budget.
+
+:::tip[Find missed savings]
+`rtk gain` shows what RTK saved. To find commands that ran *without* RTK and calculate what you lost, see [rtk discover](./discover.md).
+:::
 
 ## Troubleshooting
 

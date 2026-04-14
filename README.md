@@ -464,6 +464,15 @@ export RTK_TELEMETRY_DISABLED=1   # Blocks telemetry regardless of consent
   </picture>
 </a>
 
+## Core team
+
+- **Patrick Szymkowiak** — Founder
+  [GitHub](https://github.com/pszymkowiak) · [LinkedIn](https://www.linkedin.com/in/patrick-szymkowiak/)
+- **Florian Bruniaux** — Core contributor
+  [GitHub](https://github.com/FlorianBruniaux) · [LinkedIn](https://www.linkedin.com/in/florian-bruniaux-43408b83/)
+- **Adrien Eppling** — Core contributor
+  [GitHub](https://github.com/aeppling) · [LinkedIn](https://www.linkedin.com/in/adrien-eppling/)
+
 ## Contributing
 
 Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/rtk-ai/rtk).
