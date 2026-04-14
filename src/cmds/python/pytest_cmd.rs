@@ -148,14 +148,7 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
     let (passed, failed, skipped, xfailed) = parse_summary_line(summary);
 
     if failed == 0 && passed > 0 {
-        let mut result = format!("Pytest: {} passed", passed);
-        if skipped > 0 {
-            result.push_str(&format!(", {} skipped", skipped));
-        }
-        if xfailed > 0 {
-            result.push_str(&format!(", {} xfailed", xfailed));
-        }
-        return result;
+        return format!("Pytest: {} passed", passed);
     }
 
     if passed == 0 && failed == 0 && skipped == 0 && xfailed == 0 {
