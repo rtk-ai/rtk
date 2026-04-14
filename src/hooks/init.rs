@@ -11,6 +11,7 @@ use super::constants::{
     PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
+use crate::core::utils;
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
@@ -229,6 +230,7 @@ pub fn run(
     install_cursor: bool,
     install_windsurf: bool,
     install_cline: bool,
+    install_copilot: bool,
     claude_md: bool,
     hook_only: bool,
     codex: bool,
@@ -278,6 +280,15 @@ pub fn run(
         return run_cline_mode(verbose);
     }
 
+    // Copilot-only mode (always project-scoped — ignore -g if passed)
+    if install_copilot {
+        if global {
+            println!("Note: GitHub Copilot integration is always project-scoped (.github/).");
+            println!("      Ignoring -g flag.\n");
+        }
+        return run_copilot_mode(verbose);
+    }
+
     // Mode selection (Claude Code / OpenCode)
     match (install_claude, install_opencode, claude_md, hook_only) {
         (false, true, _, _) => run_opencode_only_mode(verbose)?,
@@ -285,7 +296,7 @@ pub fn run(
         (true, opencode, false, true) => run_hook_only_mode(global, patch_mode, verbose, opencode)?,
         (true, opencode, false, false) => run_default_mode(global, patch_mode, verbose, opencode)?,
         (false, false, _, _) => {
-            if !install_cursor {
+            if !install_cursor && !install_copilot {
                 anyhow::bail!("at least one of install_claude or install_opencode must be true")
             }
         }
@@ -596,9 +607,67 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
 }
 
 /// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
-pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
+pub fn uninstall(
+    global: bool,
+    gemini: bool,
+    codex: bool,
+    cursor: bool,
+    copilot: bool,
+    verbose: u8,
+) -> Result<()> {
     if codex {
         return uninstall_codex(global, verbose);
+    }
+
+    if copilot {
+        let instructions_path = PathBuf::from(".github/copilot-instructions.md");
+        let hook_path = PathBuf::from(".github/hooks/rtk-rewrite.json");
+        let mut removed = Vec::new();
+
+        if instructions_path.exists() {
+            let content = fs::read_to_string(&instructions_path).unwrap_or_default();
+            // Strip only the RTK section; preserve any pre-existing user content
+            let stripped = content
+                .replace(&format!("\n\n{}", COPILOT_INSTRUCTIONS), "")
+                .replace(COPILOT_INSTRUCTIONS, "");
+            let stripped = stripped.trim();
+            if stripped.is_empty() {
+                fs::remove_file(&instructions_path)
+                    .with_context(|| format!("Failed to remove {}", instructions_path.display()))?;
+                if verbose > 0 {
+                    eprintln!("Removed {}", instructions_path.display());
+                }
+            } else {
+                fs::write(&instructions_path, format!("{}\n", stripped))
+                    .with_context(|| format!("Failed to update {}", instructions_path.display()))?;
+                if verbose > 0 {
+                    eprintln!(
+                        "Updated {} (RTK section removed)",
+                        instructions_path.display()
+                    );
+                }
+            }
+            removed.push(instructions_path.display().to_string());
+        }
+
+        if hook_path.exists() {
+            fs::remove_file(&hook_path)
+                .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed {}", hook_path.display());
+            }
+            removed.push(hook_path.display().to_string());
+        }
+
+        if removed.is_empty() {
+            println!("RTK Copilot support was not installed in this project (nothing to remove)");
+        } else {
+            println!("\nRTK uninstalled (GitHub Copilot):");
+            for item in &removed {
+                println!("  - {}", item);
+            }
+        }
+        return Ok(());
     }
 
     if cursor {
@@ -1392,6 +1461,82 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
     }
     println!("  Antigravity will now use rtk commands for token savings.");
     println!("  Test with: git status\n");
+
+    Ok(())
+}
+
+/// Embedded GitHub Copilot RTK instructions
+const COPILOT_INSTRUCTIONS: &str = include_str!("../../hooks/copilot/rtk-awareness.md");
+
+/// Embedded VS Code / Copilot CLI hook JSON (single source of truth)
+const COPILOT_HOOK_JSON: &str = include_str!("../../.github/hooks/rtk-rewrite.json");
+
+// ─── GitHub Copilot support ──────────────────────────────────────
+
+fn run_copilot_mode(verbose: u8) -> Result<()> {
+    // GitHub Copilot reads .github/copilot-instructions.md (project-scoped)
+    // and .github/hooks/rtk-rewrite.json (PreToolUse hook for VS Code + Copilot CLI)
+    let github_dir = PathBuf::from(".github");
+    let hooks_dir = github_dir.join("hooks");
+    let instructions_path = github_dir.join("copilot-instructions.md");
+    let hook_path = hooks_dir.join("rtk-rewrite.json");
+
+    // Verify rtk is in PATH (required for the hook to work)
+    if !utils::tool_exists("rtk") {
+        eprintln!("Warning: rtk binary not found in PATH.");
+        eprintln!("  The hook will not work until rtk is installed globally.");
+        eprintln!("  Install: cargo install rtk-ai  (or see README for binary install)");
+    }
+
+    // Check if already fully configured
+    let hook_exists = hook_path.exists();
+    let instructions_exist = instructions_path.exists()
+        && fs::read_to_string(&instructions_path)
+            .unwrap_or_default()
+            .contains("rtk");
+    if hook_exists && instructions_exist {
+        println!("RTK already configured for GitHub Copilot in this project.");
+        println!("  Hook:         {}", hook_path.display());
+        println!("  Instructions: {}", instructions_path.display());
+        return Ok(());
+    }
+
+    fs::create_dir_all(&hooks_dir).context("Failed to create .github/hooks directory")?;
+
+    // 1. Install hook JSON (this is what actually intercepts commands)
+    if hook_exists {
+        if verbose > 0 {
+            println!("  Hook: {} (already present)", hook_path.display());
+        }
+    } else {
+        fs::write(&hook_path, COPILOT_HOOK_JSON)
+            .context("Failed to write .github/hooks/rtk-rewrite.json")?;
+        if verbose > 0 {
+            eprintln!("Wrote {}", hook_path.display());
+        }
+    }
+
+    // 2. Install instructions (soft layer: hints for the LLM)
+    let existing = fs::read_to_string(&instructions_path).unwrap_or_default();
+    if !instructions_exist {
+        let new_content = if existing.trim().is_empty() {
+            COPILOT_INSTRUCTIONS.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), COPILOT_INSTRUCTIONS)
+        };
+        fs::write(&instructions_path, &new_content)
+            .context("Failed to write .github/copilot-instructions.md")?;
+        if verbose > 0 {
+            eprintln!("Wrote {}", instructions_path.display());
+        }
+    }
+
+    println!("\nRTK configured for GitHub Copilot (project-scoped).\n");
+    println!("  Hook config:  {}", hook_path.display());
+    println!("  Instructions: {}", instructions_path.display());
+    println!("\n  VS Code Copilot Chat: transparent rewrite via updatedInput");
+    println!("  Copilot CLI:          deny-with-suggestion (re-runs with rtk prefix)");
+    println!("\n  Restart your IDE or Copilot CLI session to activate.\n");
 
     Ok(())
 }
@@ -2231,6 +2376,42 @@ fn show_claude_config() -> Result<()> {
         println!("[--] Cursor: home dir not found");
     }
 
+    // Check Copilot artifacts (project-scoped in .github/)
+    let copilot_hook = PathBuf::from(".github/hooks/rtk-rewrite.json");
+    let copilot_instructions = PathBuf::from(".github/copilot-instructions.md");
+    if copilot_hook.exists() {
+        let content = fs::read_to_string(&copilot_hook).unwrap_or_default();
+        if content.contains("rtk hook copilot") {
+            println!(
+                "[ok] Copilot hook: {} (rtk hook copilot configured)",
+                copilot_hook.display()
+            );
+        } else {
+            println!(
+                "[warn] Copilot hook: {} (exists but rtk not configured)",
+                copilot_hook.display()
+            );
+        }
+    } else {
+        println!("[--] Copilot hook: not found (run: rtk init --agent copilot)");
+    }
+    if copilot_instructions.exists() {
+        let content = fs::read_to_string(&copilot_instructions).unwrap_or_default();
+        if content.contains("rtk") {
+            println!(
+                "[ok] Copilot instructions: {} (rtk configured)",
+                copilot_instructions.display()
+            );
+        } else {
+            println!(
+                "[--] Copilot instructions: {} (exists but rtk not mentioned)",
+                copilot_instructions.display()
+            );
+        }
+    } else {
+        println!("[--] Copilot instructions: not found (run: rtk init --agent copilot)");
+    }
+
     println!("\nUsage:");
     println!("  rtk init              # Full injection into local CLAUDE.md");
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
@@ -2243,6 +2424,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
+    println!("  rtk init --agent copilot    # Install GitHub Copilot hook + instructions");
 
     Ok(())
 }
@@ -2523,49 +2705,6 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
     Ok(removed)
 }
 
-// ── Copilot integration ─────────────────────────────────────
-
-const COPILOT_HOOK_JSON: &str = r#"{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "type": "command",
-        "command": "rtk hook copilot",
-        "cwd": ".",
-        "timeout": 5
-      }
-    ]
-  }
-}
-"#;
-
-const COPILOT_INSTRUCTIONS: &str = r#"# RTK — Token-Optimized CLI
-
-**rtk** is a CLI proxy that filters and compresses command outputs, saving 60-90% tokens.
-
-## Rule
-
-Always prefix shell commands with `rtk`:
-
-```bash
-# Instead of:              Use:
-git status                 rtk git status
-git log -10                rtk git log -10
-cargo test                 rtk cargo test
-docker ps                  rtk docker ps
-kubectl get pods           rtk kubectl pods
-```
-
-## Meta commands (use directly)
-
-```bash
-rtk gain              # Token savings dashboard
-rtk gain --history    # Per-command savings history
-rtk discover          # Find missed rtk opportunities
-rtk proxy <cmd>       # Run raw (no filtering) but track usage
-```
-"#;
-
 /// Entry point for `rtk init --copilot`
 pub fn run_copilot(verbose: u8) -> Result<()> {
     // Install in current project's .github/ directory
@@ -2605,7 +2744,11 @@ pub fn run_copilot(verbose: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Serialize tests that change the process CWD (global state).
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_init_mentions_all_top_level_commands() {
@@ -2829,6 +2972,7 @@ More notes
             false,
             false,
             false,
+            false, // install_copilot
             false,
             false,
             true,
@@ -2851,6 +2995,7 @@ More notes
             false,
             false,
             false,
+            false, // install_copilot
             false,
             false,
             true,
@@ -3395,5 +3540,165 @@ More notes
         assert!(CURSOR_REWRITE_HOOK.contains("\"permission\": \"allow\""));
         assert!(CURSOR_REWRITE_HOOK.contains("\"updated_input\""));
         assert!(!CURSOR_REWRITE_HOOK.contains("hookSpecificOutput"));
+    }
+
+    // ─── GitHub Copilot init tests ──────────────────────────────────
+
+    #[test]
+    fn test_run_copilot_mode_installs_both_files() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        run_copilot_mode(0).unwrap();
+
+        let instructions = temp.path().join(".github/copilot-instructions.md");
+        let hook = temp.path().join(".github/hooks/rtk-rewrite.json");
+
+        assert!(
+            instructions.exists(),
+            "copilot-instructions.md should be created"
+        );
+        assert!(
+            hook.exists(),
+            ".github/hooks/rtk-rewrite.json should be created"
+        );
+
+        let hook_content = fs::read_to_string(&hook).unwrap();
+        assert!(
+            hook_content.contains("rtk hook copilot"),
+            "hook JSON must invoke 'rtk hook copilot', got: {}",
+            hook_content
+        );
+
+        let instructions_content = fs::read_to_string(&instructions).unwrap();
+        assert!(
+            instructions_content.contains("RTK") || instructions_content.contains("rtk"),
+            "instructions should mention RTK"
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_run_copilot_mode_idempotent() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        run_copilot_mode(0).unwrap();
+        run_copilot_mode(0).unwrap(); // second run should not panic or duplicate
+
+        let instructions = temp.path().join(".github/copilot-instructions.md");
+        let content = fs::read_to_string(&instructions).unwrap();
+        // RTK block should appear exactly once (not duplicated)
+        let count = content.matches("# RTK").count();
+        assert!(
+            count <= 1,
+            "RTK block should not be duplicated, found {} times",
+            count
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_copilot_removes_both_files() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        run_copilot_mode(0).unwrap();
+
+        let instructions = temp.path().join(".github/copilot-instructions.md");
+        let hook = temp.path().join(".github/hooks/rtk-rewrite.json");
+        assert!(instructions.exists());
+        assert!(hook.exists());
+
+        uninstall(false, false, false, false, true, 0).unwrap();
+
+        assert!(
+            !instructions.exists(),
+            "instructions should be removed on uninstall"
+        );
+        assert!(!hook.exists(), "hook JSON should be removed on uninstall");
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_copilot_preserves_user_content() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        // Create a file with pre-existing user content
+        let github_dir = temp.path().join(".github");
+        fs::create_dir_all(&github_dir).unwrap();
+        let instructions = github_dir.join("copilot-instructions.md");
+        fs::write(
+            &instructions,
+            "# My custom instructions\n\nDo not break me.\n",
+        )
+        .unwrap();
+
+        // Install appends RTK section to existing content
+        run_copilot_mode(0).unwrap();
+        let after_install = fs::read_to_string(&instructions).unwrap();
+        assert!(
+            after_install.contains("My custom instructions"),
+            "install must preserve user content"
+        );
+        assert!(
+            after_install.contains("RTK"),
+            "install must append RTK section"
+        );
+
+        // Uninstall should strip RTK section but keep user content
+        uninstall(false, false, false, false, true, 0).unwrap();
+        assert!(
+            instructions.exists(),
+            "instructions file should remain when user content exists"
+        );
+        let after_uninstall = fs::read_to_string(&instructions).unwrap();
+        assert!(
+            after_uninstall.contains("My custom instructions"),
+            "user content must be preserved after uninstall"
+        );
+        assert!(
+            !after_uninstall.contains("rtk hook copilot"),
+            "RTK section must be removed on uninstall"
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_uninstall_copilot_noop_when_not_installed() {
+        let _guard = CWD_LOCK.lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        // Should not error even if nothing is installed
+        uninstall(false, false, false, false, true, 0).unwrap();
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_copilot_hook_json_contains_correct_command() {
+        assert!(
+            COPILOT_HOOK_JSON.contains("rtk hook copilot"),
+            "embedded hook JSON must invoke 'rtk hook copilot'"
+        );
+        assert!(
+            COPILOT_HOOK_JSON.contains("PreToolUse"),
+            "hook JSON must use PreToolUse event"
+        );
     }
 }

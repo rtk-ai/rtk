@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// GitHub Copilot (VS Code Copilot Chat + Copilot CLI)
+    Copilot,
 }
 
 #[derive(Parser)]
@@ -1048,6 +1050,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "init",
     "config",
     "proxy",
+    "hook",
     "hook-audit",
     "cc-economics",
     "verify",
@@ -1684,7 +1687,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                let copilot = agent == Some(AgentTarget::Copilot);
+                hooks::init::uninstall(global, gemini, codex, cursor, copilot, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1714,6 +1718,7 @@ fn run_cli() -> Result<i32> {
                 let install_cursor = agent == Some(AgentTarget::Cursor);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
+                let install_copilot = agent == Some(AgentTarget::Copilot);
 
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1729,6 +1734,7 @@ fn run_cli() -> Result<i32> {
                     install_cursor,
                     install_windsurf,
                     install_cline,
+                    install_copilot,
                     claude_md,
                     hook_only,
                     codex,
