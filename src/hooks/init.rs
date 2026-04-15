@@ -1722,14 +1722,24 @@ fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
 }
 
 fn resolve_claude_dir() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+    resolve_claude_dir_with(dirs::home_dir(), std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+fn resolve_claude_dir_with(
+    home_dir: Option<PathBuf>,
+    env_override: Option<std::ffi::OsString>,
+) -> Result<PathBuf> {
+    if let Some(dir) = env_override {
         let path = PathBuf::from(dir);
         if path.as_os_str().is_empty() {
             anyhow::bail!("CLAUDE_CONFIG_DIR is set but empty");
         }
         return Ok(path);
     }
-    resolve_home_subdir(CLAUDE_DIR)
+
+    home_dir
+        .map(|h| h.join(CLAUDE_DIR))
+        .context("Cannot determine home directory. Is $HOME set?")
 }
 
 fn resolve_codex_dir() -> Result<PathBuf> {
