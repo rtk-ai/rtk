@@ -623,6 +623,21 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
         }
     }
 
+    // Route direct `pnpm lint ...` through `rtk pnpm` instead of `rtk lint`.
+    // This preserves pnpm-specific argument handling for lint scripts.
+    let stripped_for_pnpm = ENV_PREFIX.replace(cmd_part, "");
+    let env_prefix_len_for_pnpm = cmd_part.len() - stripped_for_pnpm.len();
+    let env_prefix_for_pnpm = &cmd_part[..env_prefix_len_for_pnpm];
+    let cmd_clean_for_pnpm = stripped_for_pnpm.trim();
+    if let Some(rest) = strip_word_prefix(cmd_clean_for_pnpm, "pnpm") {
+        if rest == "lint" || rest.starts_with("lint ") {
+            return Some(format!(
+                "{}rtk pnpm {}{}",
+                env_prefix_for_pnpm, rest, redirect_suffix
+            ));
+        }
+    }
+
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
@@ -2296,7 +2311,6 @@ mod tests {
             "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
@@ -2356,7 +2370,6 @@ mod tests {
             "npx lint",
             "pnpm biome",
             "pnpm eslint",
-            "pnpm lint",
             "pnpx biome",
             "pnpx eslint",
             "pnpx lint",
