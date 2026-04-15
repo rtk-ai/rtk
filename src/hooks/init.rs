@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CODEX_DIR, GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, BLACKBOX_DIR, BLACKBOX_HOOK_FILE, BLACKBOX_MD, CLAUDE_DIR, CODEX_DIR,
+    GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -24,6 +24,10 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+
+// Embedded Blackbox CLI hook script and awareness instructions
+const BLACKBOX_REWRITE_HOOK: &str = include_str!("../../hooks/blackbox/rtk-rewrite.sh");
+const RTK_SLIM_BLACKBOX: &str = include_str!("../../hooks/blackbox/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -695,6 +699,10 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     // 6. Remove Cursor hooks
     let cursor_removed = remove_cursor_hooks(verbose)?;
     removed.extend(cursor_removed);
+
+    // 7. Remove Blackbox CLI artifacts
+    let blackbox_removed = uninstall_blackbox(verbose)?;
+    removed.extend(blackbox_removed);
 
     // Report results
     if removed.is_empty() {
@@ -2595,6 +2603,187 @@ pub fn run_copilot(verbose: u8) -> Result<()> {
     println!("\n  Restart your IDE or Copilot CLI session to activate.\n");
 
     Ok(())
+}
+
+// ── Blackbox CLI integration ─────────────────────────────────────
+
+/// Resolve the Blackbox CLI config directory (~/.blackboxcli).
+fn resolve_blackbox_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Cannot determine home directory")?;
+    Ok(home.join(BLACKBOX_DIR))
+}
+
+/// Entry point for `rtk init -g --agent blackbox`
+pub fn run_blackbox(global: bool, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Blackbox CLI support is global-only. Use: rtk init -g --agent blackbox");
+    }
+
+    let blackbox_dir = resolve_blackbox_dir()?;
+    fs::create_dir_all(&blackbox_dir).with_context(|| {
+        format!(
+            "Failed to create Blackbox config dir: {}",
+            blackbox_dir.display()
+        )
+    })?;
+
+    // 1. Install hook script
+    let hook_dir = blackbox_dir.join(HOOKS_SUBDIR);
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("Failed to create hook dir: {}", hook_dir.display()))?;
+    let hook_path = hook_dir.join(BLACKBOX_HOOK_FILE);
+    write_if_changed(&hook_path, BLACKBOX_REWRITE_HOOK, "Blackbox hook", verbose)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
+
+    // 2. Install BLACKBOX.md (RTK awareness for Blackbox CLI)
+    let blackbox_md_path = blackbox_dir.join(BLACKBOX_MD);
+    write_if_changed(&blackbox_md_path, RTK_SLIM_BLACKBOX, BLACKBOX_MD, verbose)?;
+
+    // 3. Patch ~/.blackboxcli/settings.json
+    patch_blackbox_settings(&blackbox_dir, &hook_path, verbose)?;
+
+    println!("\nBlackbox CLI hook installed (global).\n");
+    println!("  Hook:        {}", hook_path.display());
+    println!("  BLACKBOX.md: {}", blackbox_md_path.display());
+    println!("  Restart Blackbox CLI. Test with: git status\n");
+    Ok(())
+}
+
+/// Patch ~/.blackboxcli/settings.json with the PreToolUse hook
+fn patch_blackbox_settings(blackbox_dir: &Path, hook_path: &Path, verbose: u8) -> Result<()> {
+    let settings_path = blackbox_dir.join("settings.json");
+    let hook_cmd = hook_path.to_string_lossy().to_string();
+
+    // Read or create settings.json
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    // Check if hook already present
+    if let Some(hooks) = settings.pointer("/tools/hooks/PreToolUse") {
+        if let Some(arr) = hooks.as_array() {
+            if arr.iter().any(|h| {
+                h.get("command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|c| c.contains("rtk"))
+            }) {
+                if verbose > 0 {
+                    eprintln!("Blackbox settings.json already has RTK hook");
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    // Build hook entry
+    let hook_entry = serde_json::json!({
+        "type": "command",
+        "command": hook_cmd,
+        "timeout": 5
+    });
+
+    // Insert into settings.tools.hooks.PreToolUse
+    let tools = settings
+        .as_object_mut()
+        .context("settings.json is not an object")?
+        .entry("tools")
+        .or_insert(serde_json::json!({}));
+
+    let hooks = tools
+        .as_object_mut()
+        .context("tools is not an object")?
+        .entry("hooks")
+        .or_insert(serde_json::json!({}));
+
+    let pre_tool_use = hooks
+        .as_object_mut()
+        .context("hooks is not an object")?
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert(serde_json::json!([]));
+
+    pre_tool_use
+        .as_array_mut()
+        .context("PreToolUse is not an array")?
+        .push(hook_entry);
+
+    // Write atomically
+    let content = serde_json::to_string_pretty(&settings)?;
+    let tmp = NamedTempFile::new_in(blackbox_dir)?;
+    fs::write(tmp.path(), &content)?;
+    tmp.persist(&settings_path)
+        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Patched {}", settings_path.display());
+    }
+
+    Ok(())
+}
+
+/// Remove Blackbox CLI artifacts during uninstall
+pub fn uninstall_blackbox(verbose: u8) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    let blackbox_dir = match resolve_blackbox_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(removed),
+    };
+
+    // Remove hook script
+    let hook_path = blackbox_dir.join(HOOKS_SUBDIR).join(BLACKBOX_HOOK_FILE);
+    if hook_path.exists() {
+        fs::remove_file(&hook_path)
+            .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
+        removed.push(format!("Blackbox hook: {}", hook_path.display()));
+    }
+
+    // Remove BLACKBOX.md
+    let blackbox_md = blackbox_dir.join(BLACKBOX_MD);
+    if blackbox_md.exists() {
+        fs::remove_file(&blackbox_md)
+            .with_context(|| format!("Failed to remove {}", blackbox_md.display()))?;
+        removed.push(format!("BLACKBOX.md: {}", blackbox_md.display()));
+    }
+
+    // Remove hook from settings.json
+    let settings_path = blackbox_dir.join("settings.json");
+    if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)?;
+        if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(arr) = settings
+                .pointer_mut("/tools/hooks/PreToolUse")
+                .and_then(|v| v.as_array_mut())
+            {
+                let before = arr.len();
+                arr.retain(|h| {
+                    !h.get("command")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|c| c.contains("rtk"))
+                });
+                if arr.len() < before {
+                    let new_content = serde_json::to_string_pretty(&settings)?;
+                    fs::write(&settings_path, new_content)?;
+                    removed
+                        .push("Blackbox settings.json: removed RTK hook entry".to_string());
+                }
+            }
+        }
+    }
+
+    if verbose > 0 && !removed.is_empty() {
+        eprintln!("Blackbox CLI artifacts removed");
+    }
+
+    Ok(removed)
 }
 
 #[cfg(test)]

@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Blackbox CLI
+    Blackbox,
 }
 
 #[derive(Parser)]
@@ -1710,6 +1712,8 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Blackbox) {
+                hooks::init::run_blackbox(global, cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
