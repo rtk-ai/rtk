@@ -63,6 +63,12 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 brew install rtk
 ```
 
+### winget (Windows)
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### Quick Install (Linux/macOS)
 
 ```bash

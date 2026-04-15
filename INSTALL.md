@@ -41,6 +41,12 @@ If you accidentally installed Rust Type Kit:
 cargo uninstall rtk
 ```
 
+### winget (Windows)
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### Quick Install (Linux/macOS)
 
 ```bash
@@ -265,6 +271,7 @@ cargo uninstall rtk
 
 # If installed via package manager
 brew uninstall rtk          # macOS Homebrew
+winget uninstall rtk-ai.rtk # Windows winget
 sudo apt remove rtk         # Debian/Ubuntu
 sudo dnf remove rtk         # Fedora/RHEL
 ```
