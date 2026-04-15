@@ -3,7 +3,7 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
-use super::lexer::{tokenize, TokenKind};
+use super::lexer::{split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
@@ -221,46 +221,25 @@ fn extract_base_command(cmd: &str) -> &str {
     }
 }
 
+/// Quote-aware heredoc detection — `<<` inside quotes is not a heredoc.
+pub fn has_heredoc(cmd: &str) -> bool {
+    tokenize(cmd)
+        .iter()
+        .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
+}
+
 pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return vec![];
     }
 
-    if trimmed.contains("<<") || trimmed.contains("$((") {
+    // Lexer-based for `<<`; string-based for `$((` (lexer splits it across tokens).
+    if has_heredoc(trimmed) || trimmed.contains("$((") {
         return vec![trimmed];
     }
 
-    let tokens = tokenize(trimmed);
-    let mut results = Vec::new();
-    let mut seg_start: usize = 0;
-
-    for tok in &tokens {
-        match tok.kind {
-            TokenKind::Operator => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            TokenKind::Pipe => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                return results;
-            }
-            _ => {}
-        }
-    }
-
-    let segment = trimmed[seg_start..].trim();
-    if !segment.is_empty() {
-        results.push(segment);
-    }
-
-    results
+    split_on_operators(trimmed, true)
 }
 
 /// Strip git global options before the subcommand (#163).
@@ -456,15 +435,15 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
-/// For pipes (`|`), only rewrites the first command (the filter stays raw).
+/// For pipes (`|`), only rewrites the left-hand command (pipe targets stay raw),
+/// but continues rewriting segments after subsequent `&&`/`||`/`;` operators.
 pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    // Heredoc or arithmetic expansion — unsafe to split/rewrite
-    if trimmed.contains("<<") || trimmed.contains("$((") {
+    if has_heredoc(trimmed) || trimmed.contains("$((") {
         return None;
     }
 
@@ -491,6 +470,9 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
     let mut seg_start: usize = 0;
 
     for tok in &tokens {
+        if tok.offset < seg_start {
+            continue;
+        }
         match tok.kind {
             TokenKind::Operator => {
                 let seg = cmd[seg_start..tok.offset].trim();
@@ -530,9 +512,25 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                result.push(' ');
-                result.push_str(cmd[tok.offset..].trim_start());
-                return if any_changed { Some(result) } else { None };
+
+                let pipe_group_end = tokens.iter().find(|t| {
+                    t.offset > tok.offset
+                        && (t.kind == TokenKind::Operator
+                            || (t.kind == TokenKind::Shellism && t.value == "&"))
+                });
+
+                match pipe_group_end {
+                    Some(next_op) => {
+                        result.push(' ');
+                        result.push_str(cmd[tok.offset..next_op.offset].trim());
+                        seg_start = next_op.offset;
+                    }
+                    None => {
+                        result.push(' ');
+                        result.push_str(cmd[tok.offset..].trim_start());
+                        return if any_changed { Some(result) } else { None };
+                    }
+                }
             }
             TokenKind::Shellism if tok.value == "&" => {
                 let seg = cmd[seg_start..tok.offset].trim();
@@ -591,13 +589,36 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     None
 }
 
-/// Rewrite a single (non-compound) command segment.
-/// Returns `Some(rewritten)` if matched (including already-RTK pass-through).
-/// Returns `None` if no match (caller uses original segment).
+/// Shell prefix builtins that modify how the shell runs a command
+/// but don't change which command runs. Strip before routing, re-prepend after.
+const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+
+const MAX_PREFIX_DEPTH: usize = 10;
+
 fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
+    rewrite_segment_inner(seg, excluded, 0)
+}
+
+fn rewrite_segment_inner(seg: &str, excluded: &[String], depth: usize) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
         return None;
+    }
+
+    if depth >= MAX_PREFIX_DEPTH {
+        return None;
+    }
+
+    for &prefix in SHELL_PREFIX_BUILTINS {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            if rest.is_empty() {
+                return None;
+            }
+            return match rewrite_segment_inner(rest, excluded, depth + 1) {
+                Some(rewritten) => Some(format!("{} {}", prefix, rewritten)),
+                None => None,
+            };
+        }
     }
 
     // Strip trailing stderr/stdout redirects before matching (#530)
@@ -3136,6 +3157,125 @@ mod tests {
         assert_eq!(
             split_command_chain("git log $(git rev-parse HEAD~1)"),
             vec!["git log $(git rev-parse HEAD~1)"]
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_noglob() {
+        assert_eq!(
+            rewrite_command("noglob git status", &[]),
+            Some("noglob rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_command() {
+        assert_eq!(
+            rewrite_command("command git status", &[]),
+            Some("command rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_builtin_exec_nocorrect() {
+        assert_eq!(
+            rewrite_command("builtin git status", &[]),
+            Some("builtin rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command("exec git status", &[]),
+            Some("exec rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command("nocorrect git status", &[]),
+            Some("nocorrect rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_unknown_inner() {
+        assert_eq!(rewrite_command("noglob unknown_cmd --flag", &[]), None);
+    }
+
+    #[test]
+    fn test_python3_m_pytest() {
+        assert_eq!(
+            rewrite_command("python3 -m pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_pip_show() {
+        assert_eq!(
+            rewrite_command("pip show flask", &[]),
+            Some("rtk pip show flask".into())
+        );
+    }
+
+    #[test]
+    fn test_gt_graphite() {
+        assert_eq!(rewrite_command("gt log", &[]), Some("rtk gt log".into()));
+    }
+
+    #[test]
+    fn test_command_no_longer_ignored() {
+        assert_ne!(
+            classify_command("command git status"),
+            Classification::Ignored
+        );
+    }
+
+    // --- Pipe + operator rewrite ---
+
+    #[test]
+    fn test_rewrite_pipe_then_and() {
+        assert_eq!(
+            rewrite_command("git log | head -5 && git stash", &[]),
+            Some("rtk git log | head -5 && rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_then_semicolon() {
+        assert_eq!(
+            rewrite_command("cargo test | head; git status", &[]),
+            Some("rtk cargo test | head; rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_then_or() {
+        assert_eq!(
+            rewrite_command("cargo test | grep FAIL || git stash", &[]),
+            Some("rtk cargo test | grep FAIL || rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_pipe_then_and() {
+        assert_eq!(
+            rewrite_command(
+                "RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && git stash",
+                &[]
+            ),
+            Some("RUST_BACKTRACE=1 rtk cargo test 2>&1 | grep FAILED && rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_and_then_pipe() {
+        assert_eq!(
+            rewrite_command("git status && cargo test | grep FAIL", &[]),
+            Some("rtk git status && rtk cargo test | grep FAIL".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_multi_pipe_then_and() {
+        assert_eq!(
+            rewrite_command("git log | head | tail && git status", &[]),
+            Some("rtk git log | head | tail && rtk git status".into())
         );
     }
 }

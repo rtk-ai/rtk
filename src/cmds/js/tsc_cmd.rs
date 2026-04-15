@@ -1,13 +1,20 @@
 //! Filters TypeScript compiler errors, grouping them by file and error code.
 
 use crate::core::runner;
+use crate::core::stream::{BlockHandler, BlockStreamFilter};
 use crate::core::utils::{resolved_command, tool_exists, truncate};
 use anyhow::Result;
+use lazy_static::lazy_static;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+lazy_static! {
+    static ref TSC_ERROR: Regex = Regex::new(
+        r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$"
+    ).unwrap();
+}
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    // Try tsc directly first, fallback to npx if not found
     let tsc_exists = tool_exists("tsc");
 
     let mut cmd = if tsc_exists {
@@ -27,23 +34,78 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", tool, args.join(" "));
     }
 
-    runner::run_filtered(
+    runner::run_streamed(
         cmd,
         "tsc",
         &args.join(" "),
-        filter_tsc_output,
+        Box::new(BlockStreamFilter::new(TscHandler::new())),
         runner::RunOptions::with_tee("tsc"),
     )
 }
 
-/// Filter TypeScript compiler output - group errors by file, show every error
-fn filter_tsc_output(output: &str) -> String {
-    lazy_static::lazy_static! {
-        // Pattern: src/file.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
-        static ref TSC_ERROR: Regex = Regex::new(
-            r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$"
-        ).unwrap();
+struct TscHandler {
+    error_count: usize,
+    files: HashSet<String>,
+    code_counts: HashMap<String, usize>,
+}
+
+impl TscHandler {
+    fn new() -> Self {
+        Self {
+            error_count: 0,
+            files: HashSet::new(),
+            code_counts: HashMap::new(),
+        }
     }
+}
+
+impl BlockHandler for TscHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        line.starts_with("Found ")
+    }
+
+    fn is_block_start(&mut self, line: &str) -> bool {
+        if let Some(caps) = TSC_ERROR.captures(line) {
+            self.error_count += 1;
+            self.files.insert(caps[1].to_string());
+            *self.code_counts.entry(caps[5].to_string()).or_insert(0) += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+        line.starts_with("  ") || line.starts_with('\t')
+    }
+
+    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        if self.error_count == 0 {
+            return Some("TypeScript: No errors found\n".to_string());
+        }
+
+        let mut result = format!(
+            "═══════════════════════════════════════\nTypeScript: {} errors in {} files\n",
+            self.error_count,
+            self.files.len()
+        );
+
+        if self.code_counts.len() > 1 {
+            let mut counts: Vec<_> = self.code_counts.iter().collect();
+            counts.sort_by(|a, b| b.1.cmp(a.1));
+            let codes_str: Vec<String> = counts
+                .iter()
+                .take(5)
+                .map(|(code, count)| format!("{} ({}x)", code, count))
+                .collect();
+            result.push_str(&format!("Top codes: {}\n", codes_str.join(", ")));
+        }
+
+        Some(result)
+    }
+}
+
+pub(crate) fn filter_tsc_output(output: &str) -> String {
 
     struct TsError {
         file: String,
@@ -232,5 +294,52 @@ src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable to 
         let output = "Found 0 errors. Watching for file changes.";
         let result = filter_tsc_output(output);
         assert!(result.contains("No errors found"));
+    }
+
+    // --- Streaming handler tests ---
+
+    use crate::core::stream::tests::run_block_filter;
+
+    #[test]
+    fn test_tsc_stream_errors() {
+        let input = "\
+src/server/api/auth.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
+src/server/api/auth.ts(15,10): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.
+src/components/Button.tsx(8,3): error TS2339: Property 'onClick' does not exist on type 'ButtonProps'.
+
+Found 3 errors in 2 files.
+";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("TS2322"), "got: {}", result);
+        assert!(result.contains("TS2345"), "got: {}", result);
+        assert!(result.contains("3 errors in 2 files"), "got: {}", result);
+        assert!(!result.contains("Found 3"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_no_errors() {
+        let input = "Found 0 errors. Watching for file changes.\n";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(result.contains("No errors found"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_tsc_stream_continuation_lines() {
+        let input = "\
+src/app.tsx(10,3): error TS2322: Type '{ children: Element; }' is not assignable to type 'Props'.
+  Property 'children' does not exist on type 'Props'.
+src/app.tsx(20,5): error TS2345: Argument of type 'number' is not assignable.
+";
+        let mut f = BlockStreamFilter::new(TscHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(
+            result.contains("Property 'children' does not exist"),
+            "got: {}",
+            result
+        );
+        assert!(result.contains("TS2322"), "got: {}", result);
+        assert!(result.contains("TS2345"), "got: {}", result);
     }
 }

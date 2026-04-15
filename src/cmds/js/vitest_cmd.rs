@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
 use crate::parser::{
@@ -241,15 +242,11 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let output = cmd
-        .output()
-        .context(format!("Failed to run {}", framework))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr);
+    let result = exec_capture(&mut cmd).context(format!("Failed to run {}", framework))?;
+    let combined = result.combined();
 
     // Parse output using VitestParser
-    let parse_result = VitestParser::parse(&stdout);
+    let parse_result = VitestParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -271,9 +268,8 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
         }
     };
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, framework);
     if let Some(hint) =
-        crate::core::tee::tee_and_hint(&combined, format!("{}_run", framework).as_str(), exit_code)
+        crate::core::tee::tee_and_hint(&combined, format!("{}_run", framework).as_str(), result.exit_code)
     {
         println!("{}\n{}", filtered, hint);
     } else {
@@ -287,8 +283,8 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
         &filtered,
     );
 
-    if !output.status.success() {
-        return Ok(exit_code);
+    if !result.success() {
+        return Ok(result.exit_code);
     }
     Ok(0)
 }

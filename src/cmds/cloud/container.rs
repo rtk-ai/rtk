@@ -1,8 +1,9 @@
 //! Filters Docker and kubectl output into compact summaries.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::ffi::OsString;
@@ -53,29 +54,24 @@ where
 fn docker_ps(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let raw = resolved_command("docker")
-        .args(["ps"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    let raw = exec_capture(resolved_command("docker").args(["ps"]))
+        .map(|r| r.stdout)
         .unwrap_or_default();
 
-    let output = resolved_command("docker")
-        .args([
-            "ps",
-            "--format",
-            "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
-        ])
-        .output()
-        .context("Failed to run docker ps")?;
+    let result = exec_capture(resolved_command("docker").args([
+        "ps",
+        "--format",
+        "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
+    ]))
+    .context("Failed to run docker ps")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprint!("{}", stderr);
+    if !result.success() {
+        eprint!("{}", result.stderr);
         timer.track("docker ps", "rtk docker ps", &raw, &raw);
-        return Ok(exit_code_from_output(&output, "docker"));
+        return Ok(result.exit_code);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = result.stdout;
     let mut rtk = String::new();
 
     if stdout.trim().is_empty() {
@@ -122,25 +118,24 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
 fn docker_images(_verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let raw = resolved_command("docker")
-        .args(["images"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+    let raw = exec_capture(resolved_command("docker").args(["images"]))
+        .map(|r| r.stdout)
         .unwrap_or_default();
 
-    let output = resolved_command("docker")
-        .args(["images", "--format", "{{.Repository}}:{{.Tag}}\t{{.Size}}"])
-        .output()
-        .context("Failed to run docker images")?;
+    let result = exec_capture(resolved_command("docker").args([
+        "images",
+        "--format",
+        "{{.Repository}}:{{.Tag}}\t{{.Size}}",
+    ]))
+    .context("Failed to run docker images")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprint!("{}", stderr);
+    if !result.success() {
+        eprint!("{}", result.stderr);
         timer.track("docker images", "rtk docker images", &raw, &raw);
-        return Ok(exit_code_from_output(&output, "docker"));
+        return Ok(result.exit_code);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = result.stdout;
     let lines: Vec<&str> = stdout.lines().collect();
     let mut rtk = String::new();
 
@@ -532,35 +527,29 @@ pub fn run_compose_ps(verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Raw output for token tracking
-    let raw_output = resolved_command("docker")
-        .args(["compose", "ps"])
-        .output()
+    let raw_result = exec_capture(resolved_command("docker").args(["compose", "ps"]))
         .context("Failed to run docker compose ps")?;
 
-    if !raw_output.status.success() {
-        let stderr = String::from_utf8_lossy(&raw_output.stderr);
-        eprintln!("{}", stderr);
-        return Ok(exit_code_from_output(&raw_output, "docker"));
+    if !raw_result.success() {
+        eprintln!("{}", raw_result.stderr);
+        return Ok(raw_result.exit_code);
     }
-    let raw = String::from_utf8_lossy(&raw_output.stdout).to_string();
+    let raw = raw_result.stdout;
 
     // Structured output for parsing (same pattern as docker_ps)
-    let output = resolved_command("docker")
-        .args([
-            "compose",
-            "ps",
-            "--format",
-            "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
-        ])
-        .output()
-        .context("Failed to run docker compose ps --format")?;
+    let result = exec_capture(resolved_command("docker").args([
+        "compose",
+        "ps",
+        "--format",
+        "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
+    ]))
+    .context("Failed to run docker compose ps --format")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("{}", stderr);
-        return Ok(exit_code_from_output(&output, "docker"));
+    if !result.success() {
+        eprintln!("{}", result.stderr);
+        return Ok(result.exit_code);
     }
-    let structured = String::from_utf8_lossy(&output.stdout).to_string();
+    let structured = result.stdout;
 
     if verbose > 0 {
         eprintln!("raw docker compose ps:\n{}", raw);

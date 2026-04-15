@@ -4,6 +4,7 @@
 //! Claude Code API usage metrics. Handles subprocess execution, JSON parsing,
 //! and graceful degradation when ccusage is unavailable.
 
+use crate::core::stream::exec_capture;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -134,34 +135,30 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
         Granularity::Monthly => "monthly",
     };
 
-    let output = cmd
-        .arg(subcommand)
+    cmd.arg(subcommand)
         .arg("--json")
         .arg("--since")
-        .arg("20250101") // 90 days back approx
-        .output();
+        .arg("20250101"); // 90 days back approx
 
-    let output = match output {
+    let result = match exec_capture(&mut cmd) {
         Err(e) => {
             eprintln!("[warn] ccusage execution failed: {}", e);
             return Ok(None);
         }
-        Ok(o) => o,
+        Ok(r) => r,
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !result.success() {
         eprintln!(
             "[warn] ccusage exited with {}: {}",
-            output.status,
-            stderr.trim()
+            result.exit_code,
+            result.stderr.trim()
         );
         return Ok(None);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let periods =
-        parse_json(&stdout, granularity).context("Failed to parse ccusage JSON output")?;
+        parse_json(&result.stdout, granularity).context("Failed to parse ccusage JSON output")?;
 
     Ok(Some(periods))
 }

@@ -1,7 +1,8 @@
 //! Runs curl and auto-compresses JSON responses.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
+use crate::core::utils::{resolved_command, truncate};
 use crate::json_cmd;
 use anyhow::{Context, Result};
 
@@ -20,25 +21,23 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: curl -s {}", args.join(" "));
     }
 
-    let output = cmd.output().context("Failed to run curl")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run curl")?;
 
     // Early exit: don't feed HTTP error bodies (HTML 404 etc.) through JSON schema filter
-    if !output.status.success() {
-        let msg = if stderr.trim().is_empty() {
-            stdout.trim().to_string()
+    if !result.success() {
+        let msg = if result.stderr.trim().is_empty() {
+            result.stdout.trim().to_string()
         } else {
-            stderr.trim().to_string()
+            result.stderr.trim().to_string()
         };
         eprintln!("FAILED: curl {}", msg);
-        return Ok(exit_code_from_output(&output, "curl"));
+        return Ok(result.exit_code);
     }
 
-    let raw = stdout.to_string();
+    let raw = result.stdout.clone();
 
     // Auto-detect JSON and pipe through filter
-    let filtered = filter_curl_output(&stdout, args);
+    let filtered = filter_curl_output(&result.stdout, args);
     println!("{}", filtered);
 
     timer.track(
