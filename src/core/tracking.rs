@@ -1073,6 +1073,32 @@ impl Tracker {
         Ok(count)
     }
 
+    /// Output statistics per command for the last 30 days (count >= 5).
+    /// Returns (command_name, count, avg_output_tokens, max_output_tokens).
+    pub fn output_percentiles_by_command(&self) -> Result<Vec<(String, usize, usize, usize)>> {
+        let since = (chrono::Utc::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT rtk_cmd, COUNT(*) as cnt,
+                    CAST(AVG(output_tokens) AS INTEGER) as avg_out,
+                    CAST(MAX(output_tokens) AS INTEGER) as max_out
+             FROM commands
+             WHERE timestamp >= ?1 AND output_tokens > 0
+             GROUP BY rtk_cmd
+             HAVING cnt >= 5
+             ORDER BY cnt DESC",
+        )?;
+        let rows = stmt.query_map(params![since], |row| {
+            let cmd: String = row.get(0)?;
+            let cnt: i64 = row.get(1)?;
+            let avg: i64 = row.get(2)?;
+            let max: i64 = row.get(3)?;
+            Ok((cmd, cnt as usize, avg as usize, max as usize))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// Ecosystem distribution as percentages (top categories by command prefix).
     pub fn ecosystem_mix(&self) -> Result<Vec<(String, f64)>> {
         let total: f64 = self.conn.query_row(

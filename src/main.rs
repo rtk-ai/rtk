@@ -4,6 +4,7 @@ mod core;
 mod discover;
 mod hooks;
 mod learn;
+mod optimize;
 mod parser;
 
 // Re-export command modules for routing
@@ -582,6 +583,37 @@ enum Commands {
         min_occurrences: usize,
     },
 
+    /// Analyze session history and generate personalized optimization suggestions
+    Optimize {
+        /// Filter by project path (substring match)
+        #[arg(short, long)]
+        project: Option<String>,
+        /// Scan all projects (default: current project only)
+        #[arg(short, long)]
+        all: bool,
+        /// Limit to sessions from last N days
+        #[arg(short, long, default_value = "30")]
+        since: u64,
+        /// Max sessions to analyze
+        #[arg(long, default_value = "50")]
+        sessions: usize,
+        /// Output format: text, json
+        #[arg(short, long, default_value = "text")]
+        format: String,
+        /// Apply all suggestions
+        #[arg(long)]
+        apply: bool,
+        /// Preview changes without applying
+        #[arg(long)]
+        dry_run: bool,
+        /// Minimum command frequency to suggest filter
+        #[arg(long, default_value = "5")]
+        min_frequency: usize,
+        /// Minimum estimated savings percentage for TOML filters
+        #[arg(long, default_value = "30")]
+        min_savings: f64,
+    },
+
     /// Execute command without filtering but track usage
     Proxy {
         /// Command and arguments to execute
@@ -1045,6 +1077,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "gain",
     "discover",
     "learn",
+    "optimize",
     "init",
     "config",
     "proxy",
@@ -1922,6 +1955,29 @@ fn run_cli() -> Result<i32> {
             )?;
             0
         }
+
+        Commands::Optimize {
+            project,
+            all,
+            since,
+            sessions,
+            format,
+            apply,
+            dry_run,
+            min_frequency,
+            min_savings,
+        } => optimize::run(
+            project,
+            all,
+            since,
+            sessions,
+            format,
+            apply,
+            dry_run,
+            min_frequency,
+            min_savings,
+            cli.verbose,
+        )?,
 
         Commands::Npx { args } => {
             if args.is_empty() {

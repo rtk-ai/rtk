@@ -253,6 +253,29 @@ rtk discover                    # Find missed savings opportunities
 rtk discover --all --since 7    # All projects, last 7 days
 
 rtk session                     # Show RTK adoption across recent sessions
+
+rtk optimize                    # Personalized optimization suggestions
+rtk optimize --since 7          # Analyze last 7 days of sessions
+rtk optimize --format json      # JSON output for tooling
+rtk optimize --dry-run          # Preview changes without applying
+rtk optimize --apply            # Auto-apply all suggestions
+```
+
+### Personalized Optimization
+
+`rtk optimize` analyzes your Claude Code session history and generates personalized suggestions:
+
+- **Uncovered commands** — Detects high-frequency commands without RTK filters and auto-generates TOML filter definitions
+- **Config tuning** — Suggests parameter adjustments based on actual usage patterns (exclusions, truncation limits)
+- **CLI corrections** — Extracts error/retry patterns into `.claude/rules/` correction rules
+- **Coverage report** — Shows current vs projected RTK filter coverage
+
+```bash
+rtk optimize                          # Analyze last 30 days, text report
+rtk optimize --since 7 --format json  # Last 7 days, JSON output
+rtk optimize --dry-run                # Show what --apply would change
+rtk optimize --apply                  # Apply all suggestions (with backups)
+rtk optimize --min-frequency 3        # Lower threshold for detection
 ```
 
 ## Global Flags
