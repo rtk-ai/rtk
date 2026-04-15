@@ -2,6 +2,7 @@
 
 pub mod constants;
 pub mod hook_audit_cmd;
+pub mod mcp_filter;
 pub mod hook_check;
 pub mod hook_cmd;
 pub mod init;

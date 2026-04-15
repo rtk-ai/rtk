@@ -14,6 +14,7 @@ use super::integrity;
 
 // Embedded hook script (guards before set -euo pipefail)
 const REWRITE_HOOK: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
+const POST_TOOL_USE_HOOK: &str = include_str!("../../hooks/rtk-post-tool-use.sh");
 
 // Embedded Cursor hook script (preToolUse format)
 const CURSOR_REWRITE_HOOK: &str = include_str!("../../hooks/cursor/rtk-rewrite.sh");
@@ -301,6 +302,122 @@ pub fn run(
     println!();
 
     Ok(())
+}
+
+fn prepare_post_tool_use_hook_path() -> Result<PathBuf> {
+    let claude_dir = resolve_claude_dir()?;
+    let hook_dir = claude_dir.join("hooks");
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("Failed to create hook directory: {}", hook_dir.display()))?;
+    Ok(hook_dir.join("rtk-post-tool-use.sh"))
+}
+
+#[cfg(unix)]
+fn ensure_post_tool_use_hook_installed(hook_path: &Path, verbose: u8) -> Result<bool> {
+    let changed = if hook_path.exists() {
+        let existing = fs::read_to_string(hook_path)
+            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+        if existing == POST_TOOL_USE_HOOK {
+            if verbose > 0 {
+                eprintln!("PostToolUse hook already up to date: {}", hook_path.display());
+            }
+            false
+        } else {
+            fs::write(hook_path, POST_TOOL_USE_HOOK)
+                .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+            true
+        }
+    } else {
+        fs::write(hook_path, POST_TOOL_USE_HOOK)
+            .with_context(|| format!("Failed to write hook to {}", hook_path.display()))?;
+        true
+    };
+
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(hook_path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+
+    Ok(changed)
+}
+
+fn insert_post_tool_use_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("Just created object")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .expect("hooks must be an object");
+
+    let post_tool_use = hooks
+        .entry("PostToolUse")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .expect("PostToolUse must be an array");
+
+    post_tool_use.push(serde_json::json!({
+        "matcher": "mcp__.*",
+        "hooks": [{
+            "type": "command",
+            "command": hook_command
+        }]
+    }));
+}
+
+fn post_tool_use_hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    let arr = match root
+        .get("hooks")
+        .and_then(|h| h.get("PostToolUse"))
+        .and_then(|p| p.as_array())
+    {
+        Some(a) => a,
+        None => return false,
+    };
+
+    arr.iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| {
+            cmd == hook_command
+                || (cmd.contains("rtk-post-tool-use.sh")
+                    && hook_command.contains("rtk-post-tool-use.sh"))
+        })
+}
+
+fn remove_post_tool_use_hook_entry(root: &mut serde_json::Value, hook_command: &str) {
+    let hooks = match root.get_mut("hooks").and_then(|h| h.get_mut("PostToolUse")) {
+        Some(h) => h,
+        None => return,
+    };
+
+    let arr = match hooks.as_array_mut() {
+        Some(a) => a,
+        None => return,
+    };
+
+    arr.retain(|entry| {
+        let hooks_arr = match entry.get("hooks").and_then(|h| h.as_array()) {
+            Some(a) => a,
+            None => return true,
+        };
+        !hooks_arr.iter().any(|hook| {
+            hook.get("command")
+                .and_then(|c| c.as_str())
+                .map(|cmd| {
+                    cmd == hook_command
+                        || (cmd.contains("rtk-post-tool-use.sh")
+                            && hook_command.contains("rtk-post-tool-use.sh"))
+                })
+                .unwrap_or(false)
+        })
+    });
 }
 
 /// Prepare hook directory and return paths (hook_dir, hook_path)
@@ -595,6 +712,62 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     Ok(removed)
 }
 
+fn remove_post_tool_use_hook_from_settings(verbose: u8) -> Result<bool> {
+    let claude_dir = resolve_claude_dir()?;
+    let settings_path = claude_dir.join("settings.json");
+
+    if !settings_path.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(&settings_path)
+        .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?;
+
+    let hook_command = resolve_claude_dir()?
+        .join("hooks")
+        .join("rtk-post-tool-use.sh");
+    let hook_command = hook_command.to_string_lossy().to_string();
+
+    let had_entry = post_tool_use_hook_already_present(&root, &hook_command);
+    if !had_entry {
+        return Ok(false);
+    }
+
+    remove_post_tool_use_hook_entry(&mut root, &hook_command);
+
+    // Verify removal
+    let still_present = root
+        .get("hooks")
+        .and_then(|h| h.get("PostToolUse"))
+        .and_then(|p| p.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+
+    let backup_path = settings_path.with_extension("json.bak");
+    fs::copy(&settings_path, &backup_path)
+        .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+    atomic_write(&settings_path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("Removed PostToolUse hook from settings.json");
+        if still_present {
+            eprintln!("  Note: other PostToolUse hooks remain");
+        }
+    }
+
+    Ok(true)
+}
+
 /// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
 pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
     if codex {
@@ -697,6 +870,19 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         removed.push(format!("OpenCode plugin: {}", path.display()));
     }
 
+    // Remove PostToolUse hook file
+    let post_hook_path = claude_dir.join("hooks").join("rtk-post-tool-use.sh");
+    if post_hook_path.exists() {
+        fs::remove_file(&post_hook_path)
+            .with_context(|| format!("Failed to remove hook: {}", post_hook_path.display()))?;
+        removed.push(format!("PostHook: {}", post_hook_path.display()));
+    }
+
+    // Remove PostToolUse entry from settings.json
+    if remove_post_tool_use_hook_from_settings(verbose)? {
+        removed.push("settings.json: removed PostToolUse hook entry".to_string());
+    }
+
     // 6. Remove Cursor hooks
     let cursor_removed = remove_cursor_hooks(verbose)?;
     removed.extend(cursor_removed);
@@ -761,6 +947,54 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
     }
 
     Ok(removed)
+}
+
+fn patch_settings_json_post_tool_use(
+    hook_path: &Path,
+    _mode: PatchMode,
+    verbose: u8,
+) -> Result<PatchResult> {
+    let claude_dir = resolve_claude_dir()?;
+    let settings_path = claude_dir.join("settings.json");
+    let hook_command = hook_path
+        .to_str()
+        .context("Hook path contains invalid UTF-8")?;
+
+    let mut root = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", settings_path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    if post_tool_use_hook_already_present(&root, hook_command) {
+        if verbose > 0 {
+            eprintln!("settings.json: PostToolUse hook already present");
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    insert_post_tool_use_hook_entry(&mut root, hook_command);
+
+    if settings_path.exists() {
+        let backup_path = settings_path.with_extension("json.bak");
+        fs::copy(&settings_path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+    atomic_write(&settings_path, &serialized)?;
+
+    println!("  settings.json: PostToolUse hook added");
+
+    Ok(PatchResult::Patched)
 }
 
 /// Orchestrator: patch settings.json with RTK hook
@@ -975,6 +1209,9 @@ fn run_default_mode(
     // 1. Prepare hook directory and install hook
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
+    let post_hook_path = prepare_post_tool_use_hook_path()?;
+    let _post_hook_changed = ensure_post_tool_use_hook_installed(&post_hook_path, verbose)?;
+    patch_settings_json_post_tool_use(&post_hook_path, patch_mode, verbose)?;
 
     // 2. Write RTK.md
     write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, verbose)?;
@@ -1114,6 +1351,9 @@ fn run_hook_only_mode(
     // Prepare and install hook
     let (_hook_dir, hook_path) = prepare_hook_paths()?;
     let hook_changed = ensure_hook_installed(&hook_path, verbose)?;
+    let post_hook_path = prepare_post_tool_use_hook_path()?;
+    let _post_hook_changed = ensure_post_tool_use_hook_installed(&post_hook_path, verbose)?;
+    patch_settings_json_post_tool_use(&post_hook_path, patch_mode, verbose)?;
 
     let opencode_plugin_path = if install_opencode {
         let path = prepare_opencode_plugin_path()?;
