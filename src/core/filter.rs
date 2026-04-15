@@ -268,7 +268,8 @@ impl FilterStrategy for AggressiveFilter {
                 result.push_str(line);
                 result.push('\n');
                 in_impl_body = true;
-                brace_depth = 0;
+                brace_depth = trimmed.matches('{').count() as i32
+                    - trimmed.matches('}').count() as i32;
                 continue;
             }
 
@@ -522,6 +523,26 @@ fn main() {
             kept_count,
             reported_more,
             total_lines
+        );
+    }
+
+    #[test]
+    fn test_aggressive_brace_tracking() {
+        let filter = AggressiveFilter;
+        let input = r#"fn compute(x: i32) -> i32 {
+    let result = x * 2;
+    let extra = result + 1;
+    extra
+}
+"#;
+        let result = filter.filter(input, &Language::Rust);
+        assert!(
+            !result.contains("let result = x * 2;"),
+            "let binding inside function body should be filtered out"
+        );
+        assert!(
+            !result.contains("let extra = result + 1;"),
+            "let binding inside function body should be filtered out"
         );
     }
 }
