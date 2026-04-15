@@ -38,6 +38,7 @@ pub(crate) fn check_command_with_rules(
     // compound command to receive Allow. See issue #1213: previously a single
     // matching segment escalated the entire chain to Allow, enabling bypass.
     let mut all_segments_allowed = true;
+    let mut all_segments_readonly = true;
     let mut saw_segment = false;
 
     for segment in &segments {
@@ -46,6 +47,9 @@ pub(crate) fn check_command_with_rules(
             continue;
         }
         saw_segment = true;
+        if !is_implicitly_readonly_segment(segment) {
+            all_segments_readonly = false;
+        }
 
         // Deny takes highest priority — any segment matching Deny blocks the whole chain.
         for pattern in deny_rules {
@@ -80,10 +84,57 @@ pub(crate) fn check_command_with_rules(
     // Allow requires (1) at least one segment seen, (2) all segments matched, (3) non-empty rules.
     if any_ask {
         PermissionVerdict::Ask
-    } else if saw_segment && all_segments_allowed && !allow_rules.is_empty() {
+    } else if saw_segment
+        && ((all_segments_allowed && !allow_rules.is_empty()) || all_segments_readonly)
+    {
         PermissionVerdict::Allow
     } else {
         PermissionVerdict::Default
+    }
+}
+
+/// Built-in read-only commands that are safe to auto-allow when rewritten.
+fn is_implicitly_readonly_segment(segment: &str) -> bool {
+    let seg = segment.trim();
+    if seg.is_empty() {
+        return false;
+    }
+    if seg.contains('>') || seg.contains("<<") {
+        return false;
+    }
+
+    let args: Vec<&str> = seg.split_whitespace().collect();
+    if args.is_empty() {
+        return false;
+    }
+
+    let mut i = 0usize;
+    while i < args.len() {
+        let tok = args[i];
+        let looks_like_env = tok.contains('=')
+            && tok
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic() || c == '_')
+                .unwrap_or(false);
+        if looks_like_env || tok == "env" || tok == "sudo" {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+
+    let Some(base) = args.get(i).copied() else {
+        return false;
+    };
+
+    match base {
+        "ls" | "ll" | "grep" | "rg" | "wc" | "cat" | "head" | "tail" | "stat" | "file" => true,
+        "find" => !args
+            .iter()
+            .skip(i + 1)
+            .any(|a| matches!(*a, "-exec" | "-ok" | "-delete")),
+        _ => false,
     }
 }
 
@@ -685,6 +736,51 @@ mod tests {
         assert_eq!(
             check_command_with_rules("git status && git push origin main", &[], &ask, &allow),
             PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_readonly_single_command_auto_allowed() {
+        assert_eq!(
+            check_command_with_rules("ls -la /tmp", &[], &[], &[]),
+            PermissionVerdict::Allow
+        );
+        assert_eq!(
+            check_command_with_rules("grep -n foo src/main.rs", &[], &[], &[]),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_readonly_compound_commands_auto_allowed() {
+        assert_eq!(
+            check_command_with_rules("ls -la && wc -l Cargo.toml", &[], &[], &[]),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_readonly_mixed_with_non_readonly_falls_back_to_default() {
+        assert_eq!(
+            check_command_with_rules("ls -la && git push origin main", &[], &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_ask_still_overrides_readonly_auto_allow() {
+        let ask = vec!["ls *".to_string()];
+        assert_eq!(
+            check_command_with_rules("ls -la /tmp", &[], &ask, &[]),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn test_find_with_delete_is_not_treated_as_readonly() {
+        assert_eq!(
+            check_command_with_rules("find . -name '*.tmp' -delete", &[], &[], &[]),
+            PermissionVerdict::Default
         );
     }
 }
