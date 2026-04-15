@@ -1,0 +1,130 @@
+{
+  "ancestors": [
+    {
+      "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/content/100"},
+      "id": "100",
+      "status": "current",
+      "title": "Engineering",
+      "type": "page"
+    },
+    {
+      "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/content/101"},
+      "id": "101",
+      "status": "current",
+      "title": "Backend Services",
+      "type": "page"
+    }
+  ],
+  "children": {
+    "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/content/123456/child"}
+  },
+  "container": {
+    "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/space/ENG"},
+    "id": 9001,
+    "key": "ENG",
+    "name": "Engineering",
+    "type": "global"
+  },
+  "descendants": {
+    "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/content/123456/descendant"}
+  },
+  "extensions": {
+    "mediaType": "page",
+    "position": "none"
+  },
+  "history": {
+    "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/content/123456/history"},
+    "createdBy": {
+      "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/user?accountId=abc123def456"},
+      "accountId": "abc123def456",
+      "accountType": "atlassian",
+      "displayName": "Alice Smith",
+      "isExternalCollaborator": false,
+      "profilePicture": {
+        "height": 48,
+        "isDefault": false,
+        "path": "/wiki/aa-avatar/abc123def456",
+        "width": 48
+      },
+      "publicName": "Alice Smith",
+      "type": "known"
+    },
+    "createdDate": "2024-01-05T08:00:00.000Z",
+    "latest": true
+  },
+  "id": "123456",
+  "metadata": {
+    "labels": {
+      "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/content/123456/label"},
+      "limit": 200,
+      "results": [
+        {"id": "1", "label": "authentication", "name": "authentication", "prefix": "global"},
+        {"id": "2", "label": "jwt", "name": "jwt", "prefix": "global"},
+        {"id": "3", "label": "security", "name": "security", "prefix": "global"}
+      ],
+      "size": 3,
+      "start": 0
+    }
+  },
+  "operations": [
+    {"operation": "administer", "targetType": "page"},
+    {"operation": "copy", "targetType": "page"},
+    {"operation": "create", "targetType": "attachment"},
+    {"operation": "create", "targetType": "comment"},
+    {"operation": "delete", "targetType": "page"},
+    {"operation": "export", "targetType": "page"},
+    {"operation": "move", "targetType": "page"},
+    {"operation": "purge", "targetType": "page"},
+    {"operation": "purge_version", "targetType": "page"},
+    {"operation": "read", "targetType": "page"},
+    {"operation": "restore", "targetType": "page"},
+    {"operation": "update", "targetType": "page"}
+  ],
+  "space": {
+    "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/space/ENG", "webui": "/spaces/ENG"},
+    "id": 9001,
+    "key": "ENG",
+    "name": "Engineering",
+    "type": "global"
+  },
+  "status": "current",
+  "title": "API Authentication Guide",
+  "type": "page",
+  "version": {
+    "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/content/123456/version/3"},
+    "by": {
+      "_links": {"self": "https://demo.atlassian.net/wiki/rest/api/user?accountId=abc123def456"},
+      "accountId": "abc123def456",
+      "accountType": "atlassian",
+      "displayName": "Alice Smith",
+      "isExternalCollaborator": false,
+      "profilePicture": {
+        "height": 48,
+        "isDefault": false,
+        "path": "/wiki/aa-avatar/abc123def456",
+        "width": 48
+      },
+      "publicName": "Alice Smith",
+      "type": "known"
+    },
+    "hidden": false,
+    "message": "Updated security considerations section",
+    "minorEdit": false,
+    "number": 3,
+    "when": "2024-01-12T11:00:00.000Z"
+  },
+  "_links": {
+    "base": "https://demo.atlassian.net/wiki",
+    "context": "/wiki",
+    "editui": "/pages/resumedraft.action?draftId=123456",
+    "self": "https://demo.atlassian.net/wiki/rest/api/content/123456",
+    "tinyui": "/x/abc123",
+    "webui": "/spaces/ENG/pages/123456/API+Authentication+Guide"
+  },
+  "body": {
+    "atlas_doc_format": {
+      "representation": "atlas_doc_format",
+      "value": "{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"heading\",\"attrs\":{\"level\":1},\"content\":[{\"type\":\"text\",\"text\":\"API Authentication Guide\"}]},{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"This page describes the JWT-based authentication flow used by all internal services.\"}]},{\"type\":\"heading\",\"attrs\":{\"level\":2},\"content\":[{\"type\":\"text\",\"text\":\"Overview\"}]},{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"Authentication is handled via short-lived JWT access tokens (15 min TTL) and long-lived refresh tokens (30 day TTL). All API endpoints require a valid Bearer token in the Authorization header.\"}]},{\"type\":\"heading\",\"attrs\":{\"level\":2},\"content\":[{\"type\":\"text\",\"text\":\"Endpoints\"}]},{\"type\":\"bulletList\",\"content\":[{\"type\":\"listItem\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"POST /auth/login — accepts email + password, returns access token and refresh token\"}]}]},{\"type\":\"listItem\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"POST /auth/refresh — accepts refresh token, returns new access token\"}]}]},{\"type\":\"listItem\",\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"POST /auth/logout — invalidates the refresh token server-side\"}]}]}]},{\"type\":\"heading\",\"attrs\":{\"level\":2},\"content\":[{\"type\":\"text\",\"text\":\"Security Considerations\"}]},{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"Refresh tokens are stored as HTTP-only cookies and are rotated on each use. Access tokens are never stored client-side beyond memory.\"}]}]}"
+    }
+  }
+}

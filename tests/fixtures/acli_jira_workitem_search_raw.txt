@@ -1,0 +1,110 @@
+[
+  {
+    "changelog": null,
+    "editmeta": null,
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "fields": {
+      "assignee": {
+        "displayName": "Alice Smith"
+      },
+      "issuetype": {
+        "name": "Story",
+        "subtask": false
+      },
+      "priority": {"name": "High"},
+      "status": {
+        "name": "In Progress",
+        "statusCategory": {"name": "In Progress"}
+      },
+      "summary": "Implement JWT authentication for mobile app login"
+    },
+    "id": "20001",
+    "key": "DEMO-1234"
+  },
+  {
+    "changelog": null,
+    "editmeta": null,
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "fields": {
+      "assignee": {
+        "displayName": "Bob Jones"
+      },
+      "issuetype": {
+        "name": "Bug",
+        "subtask": false
+      },
+      "priority": {"name": "Critical"},
+      "status": {
+        "name": "Open",
+        "statusCategory": {"name": "To Do"}
+      },
+      "summary": "Login endpoint returns 500 on empty password field"
+    },
+    "id": "20002",
+    "key": "DEMO-1235"
+  },
+  {
+    "changelog": null,
+    "editmeta": null,
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "fields": {
+      "assignee": null,
+      "issuetype": {
+        "name": "Task",
+        "subtask": false
+      },
+      "priority": {"name": "Medium"},
+      "status": {
+        "name": "Open",
+        "statusCategory": {"name": "To Do"}
+      },
+      "summary": "Add rate limiting to authentication endpoints"
+    },
+    "id": "20003",
+    "key": "DEMO-1236"
+  },
+  {
+    "changelog": null,
+    "editmeta": null,
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "fields": {
+      "assignee": {
+        "displayName": "Alice Smith"
+      },
+      "issuetype": {
+        "name": "Story",
+        "subtask": false
+      },
+      "priority": {"name": "High"},
+      "status": {
+        "name": "Done",
+        "statusCategory": {"name": "Done"}
+      },
+      "summary": "Set up CI pipeline for auth service"
+    },
+    "id": "20004",
+    "key": "DEMO-1237"
+  },
+  {
+    "changelog": null,
+    "editmeta": null,
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "fields": {
+      "assignee": {
+        "displayName": "Carol White"
+      },
+      "issuetype": {
+        "name": "Sub-task",
+        "subtask": true
+      },
+      "priority": {"name": "Highest"},
+      "status": {
+        "name": "In Review",
+        "statusCategory": {"name": "In Progress"}
+      },
+      "summary": "Write integration tests for token refresh flow"
+    },
+    "id": "20005",
+    "key": "DEMO-1238"
+  }
+]

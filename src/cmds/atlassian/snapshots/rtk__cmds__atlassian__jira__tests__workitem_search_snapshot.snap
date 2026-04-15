@@ -1,0 +1,11 @@
+---
+source: src/cmds/atlassian/jira.rs
+expression: output
+---
+KEY        TYPE        STATUS      PRI  ASSIGNEE       SUMMARY
+----------------------------------------------------------------------------------------------------
+DEMO-1234  Story       In Progress H    Alice Smith    Implement JWT authentication for mobile app login
+DEMO-1235  Bug         Open        C    Bob Jones      Login endpoint returns 500 on empty password field
+DEMO-1236  Task        Open        M                   Add rate limiting to authentication endpoints
+DEMO-1237  Story       Done        H    Alice Smith    Set up CI pipeline for auth service
+DEMO-1238  Sub-task    In Review   H    Carol White    Write integration tests for token refresh flow
