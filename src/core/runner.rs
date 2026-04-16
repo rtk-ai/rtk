@@ -79,6 +79,9 @@ pub fn run(
             let raw_stdout = &result.raw_stdout;
 
             if opts.skip_filter_on_failure && exit_code != 0 {
+                if !raw.trim().is_empty() {
+                    eprint!("{}", raw);
+                }
                 timer.track(&cmd_label, &format!("rtk {}", cmd_label), raw, raw);
                 return Ok(exit_code);
             }

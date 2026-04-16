@@ -965,7 +965,9 @@ fn run_default_mode(
 }
 
 /// Migrate old hook script to new binary command.
-/// Deletes `~/.claude/hooks/rtk-rewrite.sh` and `.rtk-hook.sha256` if present.
+/// Deletes `~/.claude/hooks/rtk-rewrite.sh` and `.rtk-hook.sha256` if present,
+/// and removes the stale settings.json entry so the new `rtk hook claude` entry
+/// can be registered.
 fn migrate_old_hook_script(verbose: u8) {
     if let Some(home) = dirs::home_dir() {
         let old_hook = home
@@ -977,8 +979,16 @@ fn migrate_old_hook_script(verbose: u8) {
                 if verbose > 0 {
                     eprintln!("  [warn] Failed to remove old hook script: {e}");
                 }
-            } else if verbose > 0 {
-                eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
+            } else {
+                if verbose > 0 {
+                    eprintln!("  [ok] Removed old hook script: {}", old_hook.display());
+                }
+                // Clean up the stale settings.json entry that pointed to the deleted script
+                if let Err(e) = remove_legacy_settings_entries(verbose) {
+                    if verbose > 0 {
+                        eprintln!("  [warn] Failed to clean legacy settings.json entry: {e}");
+                    }
+                }
             }
         }
         // Remove legacy hash file
@@ -995,6 +1005,76 @@ fn migrate_old_hook_script(verbose: u8) {
             let _ = std::fs::remove_file(&cursor_hook);
         }
     }
+}
+
+/// Remove only legacy `rtk-rewrite.sh` entries from settings.json.
+/// Preserves any existing `rtk hook claude` entries (new format).
+fn remove_legacy_settings_entries(verbose: u8) -> Result<()> {
+    let claude_dir = resolve_claude_dir()?;
+    let settings_path = claude_dir.join(SETTINGS_JSON);
+
+    if !settings_path.exists() {
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&settings_path)
+        .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", settings_path.display()))?;
+
+    if !remove_legacy_hook_entries_from_json(&mut root) {
+        return Ok(());
+    }
+
+    // Backup before modifying
+    let backup_path = settings_path.with_extension("json.bak");
+    fs::copy(&settings_path, &backup_path)
+        .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+    atomic_write(&settings_path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("  [ok] Removed legacy rtk-rewrite.sh entry from settings.json");
+    }
+    Ok(())
+}
+
+/// Remove only legacy `rtk-rewrite.sh` hook entries from a parsed settings.json.
+/// Returns true if any entries were removed.
+/// Does NOT remove `rtk hook claude` entries — those are the new format.
+fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
+    let pre_tool_use_array = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let original_len = pre_tool_use_array.len();
+    pre_tool_use_array.retain(|entry| {
+        let dominated_by_legacy = entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hooks| {
+                hooks.iter().all(|hook| {
+                    hook.get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
+                })
+            })
+            .unwrap_or(false);
+        !dominated_by_legacy
+    });
+
+    pre_tool_use_array.len() < original_len
 }
 
 /// Generate .rtk/filters.toml template in the current directory if not present.
@@ -1766,6 +1846,13 @@ fn install_cursor_hooks(verbose: u8) -> Result<()> {
                 old_hook.display()
             );
         }
+        // Clean stale hooks.json entry pointing to the deleted script
+        let hooks_json_path = cursor_dir.join(HOOKS_JSON);
+        if let Err(e) = remove_legacy_cursor_hooks_json_entries(&hooks_json_path, verbose) {
+            if verbose > 0 {
+                eprintln!("  [warn] Failed to clean legacy Cursor hooks.json entry: {e}");
+            }
+        }
     }
 
     // Create or patch hooks.json with binary command
@@ -1881,6 +1968,60 @@ fn insert_cursor_hook_entry(root: &mut serde_json::Value) -> Result<()> {
         "matcher": "Shell"
     }));
     Ok(())
+}
+
+/// Remove only legacy `rtk-rewrite.sh` entries from Cursor hooks.json.
+/// Preserves any existing `rtk hook cursor` entries (new format).
+fn remove_legacy_cursor_hooks_json_entries(path: &Path, verbose: u8) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+
+    if !remove_legacy_cursor_hook_entries_from_json(&mut root) {
+        return Ok(());
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
+    atomic_write(path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("  [ok] Removed legacy rtk-rewrite.sh entry from Cursor hooks.json");
+    }
+    Ok(())
+}
+
+/// Remove only legacy `rtk-rewrite.sh` entries from parsed Cursor hooks.json.
+/// Returns true if any entries were removed.
+/// Does NOT remove `rtk hook cursor` entries — those are the new format.
+fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
+    let pre_tool_use = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("preToolUse"))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let original_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| {
+        !entry
+            .get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
+    });
+
+    pre_tool_use.len() < original_len
 }
 
 /// Remove Cursor RTK artifacts: hook script + hooks.json entry
@@ -2292,6 +2433,10 @@ pub fn run_gemini(global: bool, hook_only: bool, patch_mode: PatchMode, verbose:
         fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
     }
+
+    // Store integrity baseline for tamper detection
+    integrity::store_hash(&hook_path)
+        .with_context(|| format!("Failed to store integrity hash for {}", hook_path.display()))?;
 
     // 2. Install GEMINI.md (RTK awareness for Gemini)
     if !hook_only {
@@ -3381,5 +3526,146 @@ More notes
 
         let removed = remove_cursor_hook_from_json(&mut json_content);
         assert!(!removed);
+    }
+
+    // ─── Legacy migration tests ──────────────────────────────────────
+
+    #[test]
+    fn test_remove_legacy_hook_entries_strips_old_script() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/home/user/.claude/hooks/rtk-rewrite.sh"
+                    }]
+                }]
+            }
+        });
+
+        assert!(remove_legacy_hook_entries_from_json(&mut root));
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn test_remove_legacy_hook_entries_preserves_new_command() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/home/user/.claude/hooks/rtk-rewrite.sh"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": CLAUDE_HOOK_COMMAND
+                        }]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_legacy_hook_entries_from_json(&mut root));
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(cmd, CLAUDE_HOOK_COMMAND);
+    }
+
+    #[test]
+    fn test_remove_legacy_hook_entries_noop_when_no_legacy() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "command",
+                        "command": CLAUDE_HOOK_COMMAND
+                    }]
+                }]
+            }
+        });
+
+        assert!(!remove_legacy_hook_entries_from_json(&mut root));
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_legacy_hook_entries_preserves_third_party_hooks() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/home/user/.claude/hooks/rtk-rewrite.sh"
+                        }]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "some-other-tool --hook"
+                        }]
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_legacy_hook_entries_from_json(&mut root));
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(cmd, "some-other-tool --hook");
+    }
+
+    #[test]
+    fn test_remove_legacy_cursor_entries_strips_old_script() {
+        let mut root = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [{
+                    "command": "./hooks/rtk-rewrite.sh",
+                    "matcher": "Shell"
+                }]
+            }
+        });
+
+        assert!(remove_legacy_cursor_hook_entries_from_json(&mut root));
+        let arr = root["hooks"]["preToolUse"].as_array().unwrap();
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn test_remove_legacy_cursor_entries_preserves_new_command() {
+        let mut root = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "preToolUse": [
+                    {
+                        "command": "./hooks/rtk-rewrite.sh",
+                        "matcher": "Shell"
+                    },
+                    {
+                        "command": CURSOR_HOOK_COMMAND,
+                        "matcher": "Shell"
+                    }
+                ]
+            }
+        });
+
+        assert!(remove_legacy_cursor_hook_entries_from_json(&mut root));
+        let arr = root["hooks"]["preToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["command"].as_str().unwrap(), CURSOR_HOOK_COMMAND);
     }
 }

@@ -123,6 +123,7 @@ fn get_rewritten(cmd: &str) -> Option<String> {
 fn handle_vscode(cmd: &str) -> Result<()> {
     let verdict = permissions::check_command(cmd);
     if verdict == PermissionVerdict::Deny {
+        audit_log("deny", cmd, "");
         return Ok(());
     }
 
@@ -138,6 +139,8 @@ fn handle_vscode(cmd: &str) -> Result<()> {
         _ => "ask",
     };
 
+    audit_log("rewrite", cmd, &rewritten);
+
     let output = json!({
         "hookSpecificOutput": {
             "hookEventName": PRE_TOOL_USE_KEY,
@@ -152,6 +155,7 @@ fn handle_vscode(cmd: &str) -> Result<()> {
 
 fn handle_copilot_cli(cmd: &str) -> Result<()> {
     if permissions::check_command(cmd) == PermissionVerdict::Deny {
+        audit_log("deny", cmd, "");
         return Ok(());
     }
 
@@ -159,6 +163,8 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
         Some(r) => r,
         None => return Ok(()),
     };
+
+    audit_log("rewrite", cmd, &rewritten);
 
     let output = json!({
         "permissionDecision": "deny",
@@ -210,7 +216,10 @@ pub fn run_gemini() -> Result<()> {
         .unwrap_or_default();
 
     match rewrite_command(cmd, &excluded) {
-        Some(rewritten) => print_rewrite(&rewritten),
+        Some(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            print_rewrite(rewritten);
+        }
         None => print_allow(),
     }
 
@@ -420,7 +429,9 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    if permissions::check_command(&cmd) == PermissionVerdict::Deny {
+    let verdict = permissions::check_command(&cmd);
+    if verdict == PermissionVerdict::Deny {
+        audit_log("deny", &cmd, "");
         let _ = writeln!(io::stdout(), "{{}}");
         return Ok(());
     }
@@ -433,8 +444,15 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
+    let decision = match verdict {
+        PermissionVerdict::Allow => "allow",
+        _ => "ask",
+    };
+
+    audit_log("rewrite", &cmd, &rewritten);
+
     let output = json!({
-        "permission": "allow",
+        "permission": decision,
         "updated_input": { "command": rewritten }
     });
     let _ = writeln!(io::stdout(), "{output}");
@@ -458,14 +476,19 @@ fn run_cursor_inner(input: &str) -> String {
         None => return "{}".to_string(),
     };
 
-    if permissions::check_command(&cmd) == PermissionVerdict::Deny {
+    let verdict = permissions::check_command(&cmd);
+    if verdict == PermissionVerdict::Deny {
         return "{}".to_string();
     }
 
     match get_rewritten(&cmd) {
         Some(rewritten) => {
+            let decision = match verdict {
+                PermissionVerdict::Allow => "allow",
+                _ => "ask",
+            };
             let output = json!({
-                "permission": "allow",
+                "permission": decision,
                 "updated_input": { "command": rewritten }
             });
             output.to_string()
@@ -738,7 +761,8 @@ mod tests {
     fn test_cursor_rewrite_flat_format() {
         let result = run_cursor_inner(&cursor_input("git status"));
         let v: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(v["permission"], "allow");
+        // Default permission (no explicit allow rule) → "ask"
+        assert_eq!(v["permission"], "ask");
         assert_eq!(v["updated_input"]["command"], "rtk git status");
         assert!(v.get("hookSpecificOutput").is_none());
     }
@@ -772,7 +796,12 @@ mod tests {
         let result = run_cursor_inner(&cursor_input("cargo test"));
         let v: Value = serde_json::from_str(&result).unwrap();
         assert!(v.get("hookSpecificOutput").is_none());
-        assert_eq!(v["permission"], "allow");
+        // Permission is "allow" or "ask" depending on settings.json rules
+        let perm = v["permission"].as_str().unwrap();
+        assert!(
+            perm == "allow" || perm == "ask",
+            "expected allow or ask, got {perm}"
+        );
     }
 
     // --- Audit logging ---
