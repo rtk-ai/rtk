@@ -7,9 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Features
+
+* **aws:** expand CLI filters from 8 to 25 subcommands — CloudWatch Logs, CloudFormation events, Lambda, IAM, DynamoDB (with type unwrapping), ECS tasks, EC2 security groups, S3API objects, S3 sync/cp, EKS, SQS, Secrets Manager ([#885](https://github.com/rtk-ai/rtk/pull/885))
+* **aws:** add shared runner `run_aws_filtered()` eliminating per-handler boilerplate
+* **tee:** add `force_tee_hint()` — truncated output saves full data to file with recovery hint
+* **codex:** add native Codex hook integration with `PreToolUse` deny-and-retry, `CODEX_HOME` support, and Windows `0.120.0+` hooks with prompt-only fallback on older Codex builds
+
 ### Bug Fixes
 
 * **git:** remove `-u` short alias from `--ultra-compact` to fix `git push -u` upstream tracking ([#1086](https://github.com/rtk-ai/rtk/issues/1086))
+* **wc:** `wc` filter was never invoked by the hook — removed `"wc "` from `IGNORED_PREFIXES` and added registry entry so `wc` commands are rewritten to `rtk wc`
+* **diff:** correct truncation overflow count in condense_unified_diff ([#833](https://github.com/rtk-ai/rtk/pull/833)) ([5399f83](https://github.com/rtk-ai/rtk/commit/5399f83))
+* **git:** replace vague truncation markers with exact counts in log and grep output ([#833](https://github.com/rtk-ai/rtk/pull/833)) ([185fb97](https://github.com/rtk-ai/rtk/commit/185fb97))
+* **init:** honor `CODEX_HOME` for Codex global install paths and cleanup
 
 ## [0.35.0](https://github.com/rtk-ai/rtk/compare/v0.34.3...v0.35.0) (2026-04-06)
 
@@ -49,14 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **security:** default to ask when no permission rule matches ([#886](https://github.com/rtk-ai/rtk/issues/886)) ([158c745](https://github.com/rtk-ai/rtk/commit/158c74527f6591d372e40a78cd604d73a20649a9))
 * **security:** default to ask when no permission rule matches ([#886](https://github.com/rtk-ai/rtk/issues/886)) ([41a6c6b](https://github.com/rtk-ai/rtk/commit/41a6c6bf6da78a4754794fdc6a1469df2e327920))
 * **tracking:** use std::env::temp_dir() for compatibility (instead of unix tmp) ([e918661](https://github.com/rtk-ai/rtk/commit/e918661440d7b50321f0535032f52c5e87aaf3cb))
-
-## [Unreleased]
-
-### Features
-
-* **aws:** expand CLI filters from 8 to 25 subcommands — CloudWatch Logs, CloudFormation events, Lambda, IAM, DynamoDB (with type unwrapping), ECS tasks, EC2 security groups, S3API objects, S3 sync/cp, EKS, SQS, Secrets Manager ([#885](https://github.com/rtk-ai/rtk/pull/885))
-* **aws:** add shared runner `run_aws_filtered()` eliminating per-handler boilerplate
-* **tee:** add `force_tee_hint()` — truncated output saves full data to file with recovery hint
 
 ## [0.34.3](https://github.com/rtk-ai/rtk/compare/v0.34.2...v0.34.3) (2026-04-02)
 
@@ -123,6 +126,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **truncation:** accurate overflow counts and omission indicators ([58a9633](https://github.com/rtk-ai/rtk/commit/58a963347467613d48db05ad56bc8f1f3a06b65d))
 
 ## [Unreleased]
+
+### Features
+
+* **codex:** add native Codex hook integration with `PreToolUse` deny-and-retry, `CODEX_HOME` support, and Windows `0.120.0+` hooks with prompt-only fallback on older Codex builds
 
 ### Bug Fixes
 

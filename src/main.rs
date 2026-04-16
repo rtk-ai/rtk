@@ -349,7 +349,7 @@ enum Commands {
         #[arg(long)]
         uninstall: bool,
 
-        /// Target Codex CLI (uses AGENTS.md + RTK.md, no Claude hook patching)
+        /// Target Codex CLI (inlines RTK guidance into AGENTS.md; Windows hooks require codex-cli 0.120.0+)
         #[arg(long)]
         codex: bool,
 
@@ -738,6 +738,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
+    Codex,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1261,7 +1263,28 @@ enum GtCommands {
 /// Split a string into shell-like tokens, respecting single and double quotes.
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
 fn shell_split(input: &str) -> Vec<String> {
-    discover::lexer::shell_split(input)
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let chars = input.chars();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for c in chars {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ' ' | '\t' if !in_single && !in_double => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 /// Merge pnpm global filters args with other ones for standard String-based commands
@@ -1408,7 +1431,6 @@ fn run_cli() -> Result<i32> {
             literal_pathspecs,
             command,
         } => {
-            // Build global git args (inserted between "git" and subcommand)
             let mut global_args: Vec<String> = Vec::new();
             for dir in &directory {
                 global_args.push("-C".to_string());
@@ -1690,7 +1712,7 @@ fn run_cli() -> Result<i32> {
             max,
             context_only,
             file_type,
-            line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            line_numbers: _,
             extra_args,
         } => grep_cmd::run(
             &pattern,
@@ -1780,7 +1802,6 @@ fn run_cli() -> Result<i32> {
             if output.as_deref() == Some("-") {
                 wget_cmd::run_stdout(&url, &args, cli.verbose)?
             } else {
-                // Pass -O <file> through to wget via args
                 let mut all_args = Vec::new();
                 if let Some(out_file) = &output {
                     all_args.push("-O".to_string());
@@ -1794,7 +1815,7 @@ fn run_cli() -> Result<i32> {
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
         Commands::Gain {
-            project, // added
+            project,
             graph,
             history,
             quota,
@@ -1807,7 +1828,7 @@ fn run_cli() -> Result<i32> {
             failures,
         } => {
             analytics::gain::run(
-                project, // added: pass project flag
+                project,
                 graph,
                 history,
                 quota,
@@ -1965,12 +1986,10 @@ fn run_cli() -> Result<i32> {
                 anyhow::bail!("npx requires a command argument");
             }
 
-            // Intelligent routing: delegate to specialized filters
             match args[0].as_str() {
                 "tsc" | "typescript" => tsc_cmd::run(&args[1..], cli.verbose)?,
                 "eslint" => lint_cmd::run(&args[1..], cli.verbose)?,
                 "prisma" => {
-                    // Route to prisma_cmd based on subcommand
                     if args.len() > 1 {
                         let prisma_args: Vec<String> = args[2..].to_vec();
                         match args[1].as_str() {
@@ -1985,7 +2004,6 @@ fn run_cli() -> Result<i32> {
                                 cli.verbose,
                             )?,
                             _ => {
-                                // Passthrough other prisma subcommands
                                 let timer = core::tracking::TimedExecution::start();
                                 let mut cmd = core::utils::resolved_command("npx");
                                 for arg in &args {
@@ -2013,10 +2031,7 @@ fn run_cli() -> Result<i32> {
                 "next" => next_cmd::run(&args[1..], cli.verbose)?,
                 "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
                 "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
-                _ => {
-                    // Generic passthrough with npm boilerplate filter
-                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?
-                }
+                _ => npm_cmd::run(&args, cli.verbose, cli.skip_env)?,
             }
         }
 
@@ -2073,6 +2088,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Codex => {
+                hooks::hook_cmd::run_codex()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2143,9 +2162,6 @@ fn run_cli() -> Result<i32> {
 
             let timer = core::tracking::TimedExecution::start();
 
-            // If a single quoted arg contains spaces, split it respecting quotes (#388).
-            // e.g. rtk proxy 'head -50 file.php' → cmd=head, args=["-50", "file.php"]
-            // e.g. rtk proxy 'git log --format="%H %s"' → cmd=git, args=["log", "--format=%H %s"]
             let (cmd_name, cmd_args): (String, Vec<String>) = if args.len() == 1 {
                 let full = args[0].to_string_lossy();
                 let parts = shell_split(&full);
@@ -2291,7 +2307,6 @@ fn run_cli() -> Result<i32> {
             let stderr = String::from_utf8_lossy(&stderr_bytes);
             let full_output = format!("{}{}", stdout, stderr);
 
-            // Track usage (input = output since no filtering)
             timer.track(
                 &format!("{} {}", cmd_name, cmd_args.join(" ")),
                 &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
@@ -2317,10 +2332,8 @@ fn run_cli() -> Result<i32> {
             require_all,
         } => {
             if filter.is_some() {
-                // Filter-specific mode: run only that filter's tests
                 hooks::verify_cmd::run(filter, require_all)?;
             } else {
-                // Default or --require-all: always run integrity check first
                 hooks::integrity::run_verify(cli.verbose)?;
                 hooks::verify_cmd::run(None, require_all)?;
             }

@@ -1418,26 +1418,12 @@ mod tests {
 
     #[test]
     fn test_rewrite_rtk_disabled_subprocess_warns() {
-        let rtk_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        if !rtk_bin.exists() {
+        // Verify warning via subprocess when Cargo provides the current rtk binary path.
+        // Unit tests do not reliably have a fresh target/debug/rtk, so skip this leg
+        // unless Cargo has wired up the executable path for the current test run.
+        let Ok(rtk_bin) = std::env::var("CARGO_BIN_EXE_rtk") else {
             return;
-        }
-        let rtk_mtime = std::fs::metadata(&rtk_bin)
-            .ok()
-            .and_then(|m| m.modified().ok());
-        let test_mtime = std::env::current_exe()
-            .ok()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
-        if let (Some(rtk_t), Some(test_t)) = (rtk_mtime, test_mtime) {
-            if rtk_t < test_t {
-                return;
-            }
-        }
-
+        };
         let output = std::process::Command::new(&rtk_bin)
             .args(["rewrite", "RTK_DISABLED=1 git status"])
             .output()

@@ -64,6 +64,189 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
+  codex-smoke-windows:
+    name: codex smoke (windows-latest, codex-cli ${{ matrix.codex_version }})
+    needs: clippy
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - codex_version: 0.119.0
+            expect_hooks: "false"
+          - codex_version: 0.120.0
+            expect_hooks: "true"
+    env:
+      CODEX_VERSION: ${{ matrix.codex_version }}
+      EXPECT_HOOKS: ${{ matrix.expect_hooks }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Prepare Windows smoke-test paths
+        shell: pwsh
+        run: |
+          "CODEX_HOME=$(Join-Path $env:RUNNER_TEMP 'codex-home')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RTK_INSTALL_ROOT=$(Join-Path $env:RUNNER_TEMP 'rtk-root')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEX_STUB_DIR=$(Join-Path $env:RUNNER_TEMP 'codex-bin')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install RTK from workspace
+        shell: pwsh
+        run: |
+          cargo install --path . --root "$env:RTK_INSTALL_ROOT" --force
+          "$env:RTK_INSTALL_ROOT\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Stub Codex CLI version for Windows hook support
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:CODEX_STUB_DIR" | Out-Null
+          @'
+          @echo off
+          echo codex-cli %CODEX_VERSION%
+          '@ | Set-Content -Path "$env:CODEX_STUB_DIR\codex.cmd" -Encoding ascii
+          "$env:CODEX_STUB_DIR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          New-Item -ItemType Directory -Force -Path "$env:CODEX_HOME" | Out-Null
+
+      - name: Run Codex install flow
+        shell: pwsh
+        run: |
+          rtk --version
+          codex --version
+          rtk init -g --codex
+          rtk init --codex
+
+      - name: Assert installed Codex artifacts
+        shell: pwsh
+        run: |
+          $globalAgents = Join-Path $env:CODEX_HOME 'AGENTS.md'
+          $globalRtk = Join-Path $env:CODEX_HOME 'RTK.md'
+          $globalConfig = Join-Path $env:CODEX_HOME 'config.toml'
+          $globalHooks = Join-Path $env:CODEX_HOME 'hooks.json'
+          $localAgents = Join-Path $PWD 'AGENTS.md'
+          $localRtk = Join-Path $PWD 'RTK.md'
+          $localConfig = Join-Path $PWD '.codex\config.toml'
+          $localHooks = Join-Path $PWD '.codex\hooks.json'
+
+          foreach ($path in @($globalAgents, $globalRtk, $localAgents, $localRtk)) {
+            if (-not (Test-Path $path)) {
+              throw "Missing expected Codex artifact: $path"
+            }
+          }
+
+          if (-not (Select-String -Path $globalAgents -Pattern '<!-- rtk-instructions v2 -->' -SimpleMatch -Quiet)) {
+            throw "Global AGENTS.md is missing the RTK inline block"
+          }
+          if (-not (Select-String -Path $localAgents -Pattern '<!-- rtk-instructions v2 -->' -SimpleMatch -Quiet)) {
+            throw "Local AGENTS.md is missing the RTK inline block"
+          }
+
+          if ($env:EXPECT_HOOKS -eq 'true') {
+            foreach ($path in @($globalConfig, $globalHooks, $localConfig, $localHooks)) {
+              if (-not (Test-Path $path)) {
+                throw "Missing expected Codex hook artifact: $path"
+              }
+            }
+            if (-not (Select-String -Path $globalConfig -Pattern 'codex_hooks = true' -SimpleMatch -Quiet)) {
+              throw "Global config.toml is missing codex_hooks = true"
+            }
+            if (-not (Select-String -Path $localConfig -Pattern 'codex_hooks = true' -SimpleMatch -Quiet)) {
+              throw "Local config.toml is missing codex_hooks = true"
+            }
+            if (-not (Select-String -Path $globalHooks -Pattern 'rtk hook codex' -SimpleMatch -Quiet)) {
+              throw "Global hooks.json is missing the RTK Codex hook"
+            }
+            if (-not (Select-String -Path $localHooks -Pattern 'rtk hook codex' -SimpleMatch -Quiet)) {
+              throw "Local hooks.json is missing the RTK Codex hook"
+            }
+          } else {
+            foreach ($path in @($globalConfig, $globalHooks, $localConfig, $localHooks)) {
+              if (Test-Path $path) {
+                throw "Codex hook artifact should not exist for codex-cli $env:CODEX_VERSION: $path"
+              }
+            }
+          }
+
+      - name: Assert show and verify output
+        shell: pwsh
+        run: |
+          $show = (& rtk init --show --codex | Out-String)
+          $verify = (& rtk verify | Out-String)
+
+          $show | Set-Content -Path codex-show.txt -Encoding utf8
+          $verify | Set-Content -Path codex-verify.txt -Encoding utf8
+
+          foreach ($expected in @(
+            'Global AGENTS.md: RTK inline guidance configured',
+            'Local AGENTS.md: RTK inline guidance configured'
+          )) {
+            if (-not $show.Contains($expected)) {
+              throw "Missing expected init --show output: $expected"
+            }
+          }
+
+          foreach ($expected in @(
+            'PASS  Codex global AGENTS guidance configured',
+            'PASS  Codex local AGENTS guidance configured'
+          )) {
+            if (-not $verify.Contains($expected)) {
+              throw "Missing expected verify output: $expected"
+            }
+          }
+
+          if ($env:EXPECT_HOOKS -eq 'true') {
+            foreach ($expected in @(
+              'Global .codex/config.toml: codex_hooks enabled',
+              'Global .codex/hooks.json: RTK PreToolUse configured',
+              'Local .codex/config.toml: codex_hooks enabled',
+              'Local .codex/hooks.json: RTK PreToolUse configured',
+              'PASS  Codex global hooks configured',
+              'PASS  Codex local hooks configured'
+            )) {
+              if (-not ($show.Contains($expected) -or $verify.Contains($expected))) {
+                throw "Missing expected supported-version output: $expected"
+              }
+            }
+          } else {
+            if (-not $show.Contains('detected 0.119.0')) {
+              throw 'Expected init --show output to mention detected codex-cli 0.119.0'
+            }
+            foreach ($expected in @(
+              'Global .codex/config.toml: not found',
+              'Global .codex/hooks.json: not found',
+              'Local .codex/config.toml: not found',
+              'Local .codex/hooks.json: not found',
+              'SKIP  Codex global hook verification not applicable',
+              'SKIP  Codex local hook verification not applicable'
+            )) {
+              if (-not ($show.Contains($expected) -or $verify.Contains($expected))) {
+                throw "Missing expected prompt-only output: $expected"
+              }
+            }
+          }
+
+      - name: Assert Codex hook behavior
+        shell: pwsh
+        run: |
+          $denyInput = @{ tool_name = 'Bash'; tool_input = @{ command = 'git status' } } | ConvertTo-Json -Compress
+          $denyOutput = ($denyInput | & rtk hook codex | Out-String).Trim()
+          if ([string]::IsNullOrWhiteSpace($denyOutput)) {
+            throw 'Expected deny output for supported Codex Bash command'
+          }
+          $denyJson = $denyOutput | ConvertFrom-Json
+          if ($denyJson.hookSpecificOutput.permissionDecision -ne 'deny') {
+            throw "Expected permissionDecision=deny, got: $($denyJson.hookSpecificOutput.permissionDecision)"
+          }
+          if ($denyJson.hookSpecificOutput.permissionDecisionReason -notmatch 'rtk git status') {
+            throw "Expected deny reason to suggest `rtk git status`, got: $($denyJson.hookSpecificOutput.permissionDecisionReason)"
+          }
+
+          $allowInput = @{ tool_name = 'Bash'; tool_input = @{ command = 'rtk git status' } } | ConvertTo-Json -Compress
+          $allowOutput = ($allowInput | & rtk hook codex | Out-String).Trim()
+          if (-not [string]::IsNullOrWhiteSpace($allowOutput)) {
+            throw "Expected no output for already-rewritten command, got: $allowOutput"
+          }
+
   security:
     name: Security Scan
     needs: clippy

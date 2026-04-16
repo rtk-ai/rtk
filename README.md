@@ -112,10 +112,10 @@ rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
 
 # 2. Restart your AI tool, then test
-git status  # Automatically rewritten to rtk git status
+git status  # Hook rewrites it or suggests `rtk git status`, depending on the tool
 ```
 
-The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+Hooks either transparently rewrite Bash commands (for example `git status` -> `rtk git status`) or, when a harness cannot update the command input yet, block the raw command and tell the model to retry with the exact `rtk ...` replacement.
 
 **Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
@@ -358,8 +358,8 @@ RTK supports 12 AI coding tools. Each integration transparently rewrites shell c
 | **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
-| **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
-| **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook (`rtk hook gemini`) |
+| **Codex** | `rtk init -g --codex` | PreToolUse deny-with-suggestion + inline `AGENTS.md` guidance |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
@@ -368,6 +368,135 @@ RTK supports 12 AI coding tools. Each integration transparently rewrites shell c
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
 
+Codex on Windows now supports lifecycle hooks in Codex CLI `0.120.0+`. Older Windows builds still fall back to prompt-only setup.
+
+### Claude Code (default)
+
+```bash
+rtk init -g                 # Install hook + RTK.md
+rtk init -g --auto-patch    # Non-interactive (CI/CD)
+rtk init --show             # Verify installation
+rtk init -g --uninstall     # Remove
+```
+
+### GitHub Copilot (VS Code + CLI)
+
+```bash
+rtk init -g --copilot         # Install hook + instructions
+```
+
+Creates `.github/hooks/rtk-rewrite.json` (PreToolUse hook) and `.github/copilot-instructions.md` (prompt-level awareness).
+
+The hook (`rtk hook copilot`) auto-detects the format:
+- **VS Code Copilot Chat**: transparent rewrite via `updatedInput` (same as Claude Code)
+- **Copilot CLI**: deny-with-suggestion (CLI does not support `updatedInput` yet — see [copilot-cli#2013](https://github.com/github/copilot-cli/issues/2013))
+
+### Cursor
+
+```bash
+rtk init -g --agent cursor
+```
+
+Creates `~/.cursor/hooks/rtk-rewrite.sh` + patches `~/.cursor/hooks.json` with preToolUse matcher. Works with both Cursor editor and `cursor-agent` CLI.
+
+### Gemini CLI
+
+```bash
+rtk init -g --gemini
+rtk init -g --gemini --uninstall
+```
+
+Creates `~/.gemini/hooks/rtk-hook-gemini.sh` + patches `~/.gemini/settings.json` with BeforeTool hook.
+
+### Codex (OpenAI)
+
+```bash
+rtk init -g --codex
+rtk init --codex
+rtk init -g --codex --uninstall
+```
+
+On macOS and Linux, global install writes `${CODEX_HOME:-~/.codex}/RTK.md`, `${CODEX_HOME:-~/.codex}/AGENTS.md`, `${CODEX_HOME:-~/.codex}/config.toml`, and `${CODEX_HOME:-~/.codex}/hooks.json`. Project-scoped install writes the same files under `./.codex/`. On Windows, native hook files are also installed when Codex CLI is `0.120.0+`.
+
+RTK writes Codex guidance inline into `AGENTS.md` so Codex does not need to resolve `@RTK.md` includes for either global or project-local installs.
+
+RTK enables `features.codex_hooks = true` and installs a `PreToolUse` Bash hook that runs `rtk hook codex`.
+
+Codex does not support transparent `updatedInput` rewrites yet, so supported raw Bash commands are denied with the exact `rtk ...` replacement instead of being silently rewritten.
+
+Notes:
+- If `CODEX_HOME` is set, `rtk init -g --codex` uses that directory instead of `~/.codex`.
+- On Windows, Codex CLI `0.120.0+` uses the same native `config.toml` + `hooks.json` setup. Older Codex versions fall back to inline `AGENTS.md` guidance plus `RTK.md`.
+- Project-scoped `.codex/` installs only activate when Codex trusts the project.
+
+### Windsurf
+
+```bash
+rtk init --agent windsurf
+```
+
+Creates `.windsurfrules` in the current project. Cascade reads rules and prefixes commands with `rtk`.
+
+### Cline / Roo Code
+
+```bash
+rtk init --agent cline
+```
+
+Creates `.clinerules` in the current project. Cline reads rules and prefixes commands with `rtk`.
+
+### OpenCode
+
+```bash
+rtk init -g --opencode
+```
+
+Creates `~/.config/opencode/plugins/rtk.ts`. Uses `tool.execute.before` hook.
+
+### OpenClaw
+
+```bash
+openclaw plugins install ./openclaw
+```
+
+Plugin in `openclaw/` directory. Uses `before_tool_call` hook, delegates to `rtk rewrite`.
+
+### Mistral Vibe (planned)
+
+Blocked on upstream BeforeToolCallback support ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531), [PR #533](https://github.com/mistralai/mistral-vibe/pull/533)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
+
+### Commands Rewritten
+
+| Raw Command | Rewritten To |
+|-------------|-------------|
+| `git status/diff/log/add/commit/push/pull` | `rtk git ...` |
+| `gh pr/issue/run` | `rtk gh ...` |
+| `cargo test/build/clippy` | `rtk cargo ...` |
+| `cat/head/tail <file>` | `rtk read <file>` |
+| `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `ls` | `rtk ls` |
+| `vitest/jest` | `rtk vitest run` |
+| `tsc` | `rtk tsc` |
+| `eslint/biome` | `rtk lint` |
+| `prettier` | `rtk prettier` |
+| `playwright` | `rtk playwright` |
+| `prisma` | `rtk prisma` |
+| `ruff check/format` | `rtk ruff ...` |
+| `pytest` | `rtk pytest` |
+| `pip list/install` | `rtk pip ...` |
+| `go test/build/vet` | `rtk go ...` |
+| `golangci-lint` | `rtk golangci-lint` |
+| `rake test` / `rails test` | `rtk rake test` |
+| `rspec` / `bundle exec rspec` | `rtk rspec` |
+| `rubocop` / `bundle exec rubocop` | `rtk rubocop` |
+| `bundle install/update` | `rtk bundle ...` |
+| `aws sts/ec2/lambda/...` | `rtk aws ...` |
+| `docker ps/images/logs` | `rtk docker ...` |
+| `kubectl get/logs` | `rtk kubectl ...` |
+| `curl` | `rtk curl` |
+| `pnpm list/outdated` | `rtk pnpm ...` |
+
+Commands already using `rtk`, heredocs (`<<`), and unrecognized commands pass through unchanged.
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents).
 
 ## Configuration
@@ -395,7 +524,7 @@ For the full config reference (all sections, env vars, per-project filters), see
 ### Uninstall
 
 ```bash
-rtk init -g --uninstall     # Remove hook, RTK.md, settings.json entry
+rtk init -g --uninstall     # Remove RTK-managed hook, RTK.md, and harness config entry
 cargo uninstall rtk          # Remove binary
 brew uninstall rtk           # If installed via Homebrew
 ```
