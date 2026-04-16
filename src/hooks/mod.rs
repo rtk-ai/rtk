@@ -1,5 +1,6 @@
 //! Hook installation and lifecycle management for AI coding agents.
 
+pub(crate) mod claude_path;
 pub mod constants;
 pub mod hook_audit_cmd;
 pub mod hook_check;
