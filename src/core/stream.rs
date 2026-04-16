@@ -522,6 +522,7 @@ pub(crate) mod tests {
             exit_code: 0,
             raw: String::new(),
             raw_stdout: String::new(),
+            raw_stderr: String::new(),
             filtered: String::new(),
         };
         assert!(r.success());
@@ -533,6 +534,7 @@ pub(crate) mod tests {
             exit_code: 1,
             raw: String::new(),
             raw_stdout: String::new(),
+            raw_stderr: String::new(),
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -544,6 +546,7 @@ pub(crate) mod tests {
             exit_code: 137,
             raw: String::new(),
             raw_stdout: String::new(),
+            raw_stderr: String::new(),
             filtered: String::new(),
         };
         assert!(!r.success());
