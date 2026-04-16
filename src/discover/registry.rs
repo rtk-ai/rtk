@@ -1040,6 +1040,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_bunx_tsc() {
+        assert_eq!(
+            rewrite_command("bunx tsc --noEmit", &[]),
+            Some("rtk tsc --noEmit".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_cat_file() {
         assert_eq!(
             rewrite_command("cat src/main.rs", &[]),
@@ -1891,6 +1899,30 @@ mod tests {
     fn test_rewrite_pnpm_vitest() {
         assert_eq!(
             rewrite_command("pnpm vitest run", &[]),
+            Some("rtk vitest run".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bun_test() {
+        assert_eq!(
+            rewrite_command("bun test", &[]),
+            Some("rtk vitest".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bun_test_with_path() {
+        assert_eq!(
+            rewrite_command("bun test src/", &[]),
+            Some("rtk vitest src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bunx_vitest() {
+        assert_eq!(
+            rewrite_command("bunx vitest run", &[]),
             Some("rtk vitest run".into())
         );
     }

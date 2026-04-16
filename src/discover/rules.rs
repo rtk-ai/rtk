@@ -107,9 +107,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^(npx\s+|pnpm\s+)?tsc(\s|$)",
+        pattern: r"^(npx\s+|pnpm\s+|bunx\s+)?tsc(\s|$)",
         rtk_cmd: "rtk tsc",
-        rewrite_prefixes: &["pnpm tsc", "npx tsc", "tsc"],
+        rewrite_prefixes: &["pnpm tsc", "npx tsc", "bunx tsc", "tsc"],
         category: "Build",
         savings_pct: 83.0,
         subcmd_savings: &[],
@@ -150,9 +150,9 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^(pnpm\s+|npx\s+)?(vitest|jest|test)(\s|$)",
+        pattern: r"^(pnpm\s+|npx\s+|bunx\s+)?(vitest|jest|test)(\s|$)|^bun\s+test(\s|$)",
         rtk_cmd: "rtk vitest",
-        rewrite_prefixes: &["pnpm vitest", "npx vitest", "vitest", "jest"],
+        rewrite_prefixes: &["pnpm vitest", "npx vitest", "bunx vitest", "vitest", "jest", "bun test"],
         category: "Tests",
         savings_pct: 99.0,
         subcmd_savings: &[],
