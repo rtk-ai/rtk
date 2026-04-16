@@ -1,0 +1,66 @@
+[
+  {
+    "changelog": null,
+    "editmeta": null,
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "fields": {
+      "assignee": {
+        "displayName": "Alice Smith"
+      },
+      "issuetype": {
+        "name": "Story",
+        "subtask": false
+      },
+      "priority": {"name": "High"},
+      "status": {
+        "name": "In Progress",
+        "statusCategory": {"name": "In Progress"}
+      },
+      "summary": "Implement JWT authentication for mobile app login"
+    },
+    "id": "20001",
+    "key": "DEMO-1234"
+  },
+  {
+    "changelog": null,
+    "editmeta": null,
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "fields": {
+      "assignee": {
+        "displayName": "Bob Jones"
+      },
+      "issuetype": {
+        "name": "Bug",
+        "subtask": false
+      },
+      "priority": {"name": "Critical"},
+      "status": {
+        "name": "Open",
+        "statusCategory": {"name": "To Do"}
+      },
+      "summary": "Login endpoint returns 500 on empty password field"
+    },
+    "id": "20002",
+    "key": "DEMO-1235"
+  },
+  {
+    "changelog": null,
+    "editmeta": null,
+    "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+    "fields": {
+      "assignee": null,
+      "issuetype": {
+        "name": "Task",
+        "subtask": false
+      },
+      "priority": {"name": "Medium"},
+      "status": {
+        "name": "Open",
+        "statusCategory": {"name": "To Do"}
+      },
+      "summary": "Add rate limiting to authentication endpoints"
+    },
+    "id": "20003",
+    "key": "DEMO-1236"
+  }
+]

@@ -1,0 +1,19 @@
+---
+source: src/cmds/atlassian/confluence.rs
+expression: output
+---
+API Authentication Guide
+Status: current  v3
+URL: https://demo.atlassian.net/wiki/spaces/ENG/pages/123456/API+Authentication+Guide
+
+---
+# API Authentication Guide
+This page describes the JWT-based authentication flow used by all internal services.
+## Overview
+Authentication is handled via short-lived JWT access tokens (15 min TTL) and long-lived refresh tokens (30 day TTL). All API endpoints require a valid Bearer token in the Authorization header.
+## Endpoints
+  • POST /auth/login — accepts email + password, returns access token and refresh token
+  • POST /auth/refresh — accepts refresh token, returns new access token
+  • POST /auth/logout — invalidates the refresh token server-side
+## Security Considerations
+Refresh tokens are stored as HTTP-only cookies and are rotated on each use. Access tokens are never stored client-side beyond memory.

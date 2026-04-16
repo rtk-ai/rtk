@@ -537,6 +537,20 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^acli\s+(jira|confluence|admin)\b",
+        rtk_cmd: "rtk acli",
+        rewrite_prefixes: &["acli"],
+        category: "Atlassian",
+        savings_pct: 80.0,
+        subcmd_savings: &[
+            ("jira workitem view", 87.0),
+            ("jira workitem search", 75.0),
+            ("confluence page view", 80.0),
+            ("jira sprint list-workitems", 75.0),
+        ],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^psql(\s|$)",
         rtk_cmd: "rtk psql",
         rewrite_prefixes: &["psql"],

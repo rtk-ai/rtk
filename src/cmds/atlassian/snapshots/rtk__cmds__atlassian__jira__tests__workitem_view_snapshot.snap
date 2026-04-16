@@ -1,0 +1,30 @@
+---
+source: src/cmds/atlassian/jira.rs
+expression: output
+---
+DEMO-1234 [Story] Implement JWT authentication for mobile app login
+Parent: DEMO-1200 — Mobile App Authentication Overhaul
+Status: In Progress
+Priority: High
+Assignee: Alice Smith
+Reporter: Bob Jones
+
+Description:
+Implement JWT-based user authentication for the mobile app.
+## Background
+The current session-based auth does not support offline scenarios and creates state management issues. We need a stateless token-based approach.
+## Scope
+  • POST /auth/login — returns JWT + refresh token
+  • POST /auth/refresh — exchanges refresh token for new JWT
+  • POST /auth/logout — invalidates refresh token
+
+Acceptance Criteria:
+AC-1: User can log in with valid credentials and receive a JWT token.
+AC-2: Invalid credentials return a 401 error with a meaningful message.
+AC-3: JWT token expires after 24 hours and refresh token flow works correctly.
+AC-4: All authentication endpoints are covered by integration tests.
+
+Comments (3):
+  Alice Smith: I've started the implementation. Will update once the core flow is done.
+  Bob Jones: Please make sure to add unit tests for the token refresh path.
+  Alice Smith: Token refresh tests added. Opening PR shortly.

@@ -1,0 +1,25 @@
+[filters.acli-project]
+description = "Compact acli jira project/filter/dashboard output — strip pagination metadata, internal IDs, blank lines"
+match_command = "^acli\\s+jira\\s+(project|filter|dashboard)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Fetching",
+  "^Loading",
+  "^Total:",
+  "^Page \\d+ of \\d+",
+  "^\\s*self:\\s+https://",
+  "^\\s*avatarUrls:",
+]
+truncate_lines_at = 120
+max_lines = 60
+
+[[tests.acli-project]]
+name = "strips pagination and blank lines from project list"
+input = "KEY    NAME           TYPE\n\nAWM    Anywhere Mobile  Software\nBKD    Backend          Software\n\nPage 1 of 2\nTotal: 42"
+expected = "KEY    NAME           TYPE\nAWM    Anywhere Mobile  Software\nBKD    Backend          Software"
+
+[[tests.acli-project]]
+name = "passthrough single line"
+input = "Project AWM found."
+expected = "Project AWM found."

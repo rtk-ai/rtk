@@ -1,0 +1,24 @@
+[filters.acli-board]
+description = "Compact acli jira board output — strip UUID fields, internal metadata, blank lines"
+match_command = "^acli\\s+jira\\s+board\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Fetching",
+  "^Loading",
+  "^\\s*self:\\s+https://",
+  "^\\s*avatarUrls:",
+  "^\\s*https://",
+]
+truncate_lines_at = 120
+max_lines = 50
+
+[[tests.acli-board]]
+name = "strips blank lines and URL noise from board get"
+input = "Board ID: 42\n\nName: AWM Board\n\nself: https://jira.example.com/board/42\nType: scrum\navatarUrls: ...\nLocation: AWM"
+expected = "Board ID: 42\nName: AWM Board\nType: scrum\nLocation: AWM"
+
+[[tests.acli-board]]
+name = "passthrough single line"
+input = "Board 42 found."
+expected = "Board 42 found."

@@ -1,0 +1,23 @@
+[filters.acli-sprint]
+description = "Compact acli jira sprint output — strip progress bars, blank lines, metadata noise"
+match_command = "^acli\\s+jira\\s+sprint\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*[─┌┐└┘├┤┬┴┼│]+\\s*$",
+  "^Fetching",
+  "^Loading",
+  "^\\s*\\d+%",
+]
+truncate_lines_at = 120
+max_lines = 50
+
+[[tests.acli-sprint]]
+name = "strips blank lines and progress noise from sprint view"
+input = "Sprint: Sprint 42\n\nState: active\nGoal: Ship the feature\n\nFetching work items...\nLoaded.\n\nStart Date: 2026-04-01\nEnd Date: 2026-04-15"
+expected = "Sprint: Sprint 42\nState: active\nGoal: Ship the feature\nStart Date: 2026-04-01\nEnd Date: 2026-04-15"
+
+[[tests.acli-sprint]]
+name = "passthrough single line"
+input = "Sprint 42 updated successfully."
+expected = "Sprint 42 updated successfully."

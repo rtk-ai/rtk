@@ -1,0 +1,187 @@
+{
+  "changelog": null,
+  "editmeta": null,
+  "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+  "fields": {
+    "aggregateprogress": {"progress": 0, "total": 0},
+    "assignee": {
+      "accountId": "abc123def456",
+      "accountType": "atlassian",
+      "active": true,
+      "displayName": "Alice Smith",
+      "emailAddress": "alice.smith@example.com",
+      "self": "https://demo.atlassian.net/rest/api/3/user?accountId=abc123def456",
+      "timeZone": "UTC"
+    },
+    "comment": {
+      "comments": [
+        {
+          "author": {
+            "accountId": "abc123def456",
+            "displayName": "Alice Smith",
+            "emailAddress": "alice.smith@example.com"
+          },
+          "body": {
+            "content": [
+              {
+                "content": [{"text": "I've started the implementation. Will update once the core flow is done.", "type": "text"}],
+                "type": "paragraph"
+              }
+            ],
+            "type": "doc",
+            "version": 1
+          },
+          "created": "2024-01-10T09:00:00.000+0000",
+          "id": "10001"
+        },
+        {
+          "author": {
+            "accountId": "def456ghi789",
+            "displayName": "Bob Jones",
+            "emailAddress": "bob.jones@example.com"
+          },
+          "body": {
+            "content": [
+              {
+                "content": [{"text": "Please make sure to add unit tests for the token refresh path.", "type": "text"}],
+                "type": "paragraph"
+              }
+            ],
+            "type": "doc",
+            "version": 1
+          },
+          "created": "2024-01-11T14:30:00.000+0000",
+          "id": "10002"
+        },
+        {
+          "author": {
+            "accountId": "abc123def456",
+            "displayName": "Alice Smith",
+            "emailAddress": "alice.smith@example.com"
+          },
+          "body": {
+            "content": [
+              {
+                "content": [{"text": "Token refresh tests added. Opening PR shortly.", "type": "text"}],
+                "type": "paragraph"
+              }
+            ],
+            "type": "doc",
+            "version": 1
+          },
+          "created": "2024-01-12T10:15:00.000+0000",
+          "id": "10003"
+        }
+      ],
+      "maxResults": 10,
+      "self": "https://demo.atlassian.net/rest/api/3/issue/DEMO-1234/comment",
+      "startAt": 0,
+      "total": 3
+    },
+    "created": "2024-01-05T08:00:00.000+0000",
+    "customfield_10014": "DEMO-1200",
+    "customfield_10047": {
+      "content": [
+        {
+          "content": [{"text": "AC-1: User can log in with valid credentials and receive a JWT token.", "type": "text"}],
+          "type": "paragraph"
+        },
+        {
+          "content": [{"text": "AC-2: Invalid credentials return a 401 error with a meaningful message.", "type": "text"}],
+          "type": "paragraph"
+        },
+        {
+          "content": [{"text": "AC-3: JWT token expires after 24 hours and refresh token flow works correctly.", "type": "text"}],
+          "type": "paragraph"
+        },
+        {
+          "content": [{"text": "AC-4: All authentication endpoints are covered by integration tests.", "type": "text"}],
+          "type": "paragraph"
+        }
+      ],
+      "type": "doc",
+      "version": 1
+    },
+    "description": {
+      "content": [
+        {
+          "content": [{"text": "Implement JWT-based user authentication for the mobile app.", "type": "text"}],
+          "type": "paragraph"
+        },
+        {
+          "attrs": {"level": 2},
+          "content": [{"text": "Background", "type": "text"}],
+          "type": "heading"
+        },
+        {
+          "content": [{"text": "The current session-based auth does not support offline scenarios and creates state management issues. We need a stateless token-based approach.", "type": "text"}],
+          "type": "paragraph"
+        },
+        {
+          "attrs": {"level": 2},
+          "content": [{"text": "Scope", "type": "text"}],
+          "type": "heading"
+        },
+        {
+          "content": [
+            {
+              "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "POST /auth/login — returns JWT + refresh token"}]}
+              ],
+              "type": "listItem"
+            },
+            {
+              "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "POST /auth/refresh — exchanges refresh token for new JWT"}]}
+              ],
+              "type": "listItem"
+            },
+            {
+              "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "POST /auth/logout — invalidates refresh token"}]}
+              ],
+              "type": "listItem"
+            }
+          ],
+          "type": "bulletList"
+        }
+      ],
+      "type": "doc",
+      "version": 1
+    },
+    "issuetype": {
+      "description": "A user story.",
+      "hierarchyLevel": 1,
+      "id": "10001",
+      "name": "Story",
+      "subtask": false
+    },
+    "parent": {
+      "fields": {
+        "issuetype": {"hierarchyLevel": 2, "name": "Epic", "subtask": false},
+        "priority": {"name": "High"},
+        "status": {"name": "In Progress", "statusCategory": {"name": "In Progress"}},
+        "summary": "Mobile App Authentication Overhaul"
+      },
+      "id": "10000",
+      "key": "DEMO-1200",
+      "self": "https://demo.atlassian.net/rest/api/3/issue/10000"
+    },
+    "priority": {"id": "2", "name": "High"},
+    "reporter": {
+      "accountId": "def456ghi789",
+      "displayName": "Bob Jones",
+      "emailAddress": "bob.jones@example.com"
+    },
+    "status": {
+      "description": "",
+      "id": "3",
+      "name": "In Progress",
+      "statusCategory": {"id": 4, "name": "In Progress"}
+    },
+    "summary": "Implement JWT authentication for mobile app login"
+  },
+  "id": "20001",
+  "key": "DEMO-1234",
+  "self": "https://demo.atlassian.net/rest/api/3/issue/20001"
+}
