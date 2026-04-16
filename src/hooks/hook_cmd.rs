@@ -459,9 +459,18 @@ pub fn run_cursor() -> Result<()> {
     Ok(())
 }
 
-/// Process a Cursor hook payload from a string (for testing).
 #[cfg(test)]
 fn run_cursor_inner(input: &str) -> String {
+    run_cursor_inner_with_rules(input, &[], &[], &[])
+}
+
+#[cfg(test)]
+fn run_cursor_inner_with_rules(
+    input: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> String {
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(_) => return "{}".to_string(),
@@ -476,7 +485,7 @@ fn run_cursor_inner(input: &str) -> String {
         None => return "{}".to_string(),
     };
 
-    let verdict = permissions::check_command(&cmd);
+    let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
     if verdict == PermissionVerdict::Deny {
         return "{}".to_string();
     }
@@ -796,12 +805,7 @@ mod tests {
         let result = run_cursor_inner(&cursor_input("cargo test"));
         let v: Value = serde_json::from_str(&result).unwrap();
         assert!(v.get("hookSpecificOutput").is_none());
-        // Permission is "allow" or "ask" depending on settings.json rules
-        let perm = v["permission"].as_str().unwrap();
-        assert!(
-            perm == "allow" || perm == "ask",
-            "expected allow or ask, got {perm}"
-        );
+        assert_eq!(v["permission"], "ask");
     }
 
     // --- Audit logging ---
