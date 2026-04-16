@@ -19,8 +19,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read, summary,
-    tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -62,7 +62,7 @@ struct Cli {
     verbose: u8,
 
     /// Ultra-compact mode: ASCII icons, inline format (Level 2 optimizations)
-    #[arg(short = 'u', long, global = true)]
+    #[arg(long, global = true)]
     ultra_compact: bool,
 
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
@@ -70,7 +70,7 @@ struct Cli {
     skip_env: bool,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// List directory contents with token-optimized output (proxy to native ls)
     Ls {
@@ -440,10 +440,18 @@ enum Commands {
         create: bool,
     },
 
+    /// Jest commands with compact output
+    Jest {
+        /// Additional jest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Vitest commands with compact output
     Vitest {
-        #[command(subcommand)]
-        command: VitestCommands,
+        /// Additional vitest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Prisma commands with compact output (no ASCII art)
@@ -543,6 +551,12 @@ enum Commands {
     /// Show RTK adoption across Claude Code sessions
     Session {},
 
+    /// Manage telemetry consent and data (RGPD/GDPR)
+    Telemetry {
+        #[command(subcommand)]
+        command: core::telemetry_cmd::TelemetrySubcommand,
+    },
+
     /// Learn CLI corrections from Claude Code error history
     Learn {
         /// Filter by project path (substring match)
@@ -568,11 +582,32 @@ enum Commands {
         min_occurrences: usize,
     },
 
+    /// Execute a shell command via sh -c (raw, no filtering or tracking)
+    Run {
+        /// Command string to execute (use -c for shell-like invocation)
+        #[arg(short = 'c', long = "command")]
+        command: Option<String>,
+        /// Positional command arguments (alternative to -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Execute command without filtering but track usage
     Proxy {
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
+    },
+
+    /// Read stdin, apply filter, print filtered output (Unix pipe mode)
+    Pipe {
+        /// Filter name (cargo-test, pytest, grep, find, git-log, etc.)
+        #[arg(short, long)]
+        filter: Option<String>,
+
+        /// Pass stdin through without filtering
+        #[arg(long)]
+        passthrough: bool,
     },
 
     /// Trust project-local TOML filters in current directory
@@ -656,10 +691,10 @@ enum Commands {
         command: GtCommands,
     },
 
-    /// golangci-lint with compact output
+    /// golangci-lint wrapper with compact `run` support and passthrough for other invocations
     #[command(name = "golangci-lint")]
     GolangciLint {
-        /// golangci-lint arguments
+        /// Additional golangci-lint arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -693,17 +728,30 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum HookCommands {
+    /// Process Claude Code PreToolUse hook (reads JSON from stdin)
+    Claude,
+    /// Process Cursor Agent hook (reads JSON from stdin)
+    Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
     /// Process Codex CLI PreToolUse hook (reads JSON from stdin)
     Codex,
+    /// Check how a command would be rewritten by the hook engine (dry-run)
+    Check {
+        /// Target agent
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Command to check
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum GitCommands {
     /// Condensed diff output
     Diff {
@@ -784,7 +832,7 @@ enum GitCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum PnpmCommands {
     /// List installed packages (ultra-dense)
     List {
@@ -820,7 +868,7 @@ enum PnpmCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum DockerCommands {
     /// List running containers
     Ps,
@@ -838,7 +886,7 @@ enum DockerCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum ComposeCommands {
     /// List compose services (compact)
     Ps,
@@ -857,7 +905,7 @@ enum ComposeCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum KubectlCommands {
     /// List pods
     Pods {
@@ -886,17 +934,7 @@ enum KubectlCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
-enum VitestCommands {
-    /// Run tests with filtered output (90% token reduction)
-    Run {
-        /// Additional vitest arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-}
-
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum PrismaCommands {
     /// Generate Prisma Client (strip ASCII art)
     Generate {
@@ -917,7 +955,7 @@ enum PrismaCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum PrismaMigrateCommands {
     /// Create and apply migration
     Dev {
@@ -942,7 +980,7 @@ enum PrismaMigrateCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum CargoCommands {
     /// Build with compact output (strip Compiling lines, keep errors)
     Build {
@@ -985,7 +1023,7 @@ enum CargoCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum DotnetCommands {
     /// Build with compact output
     Build {
@@ -1012,7 +1050,7 @@ enum DotnetCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum GoCommands {
     /// Run tests with compact output (90% token reduction via JSON streaming)
     Test {
@@ -1046,6 +1084,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "init",
     "config",
     "proxy",
+    "run",
     "hook-audit",
     "cc-economics",
     "verify",
@@ -1095,26 +1134,44 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
     if let Some(filter) = toml_match {
         // TOML match: capture stdout for filtering
-        let result = core::utils::resolved_command(&args[0])
-            .args(&args[1..])
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::piped()) // capture
-            .stderr(std::process::Stdio::inherit()) // stderr always direct
-            .output();
+        let result = if filter.filter_stderr {
+            // Merge stderr into stdout so the filter can strip banners emitted by tools like liquibase
+            core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()) // captured for merging
+                .output()
+        } else {
+            core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::piped()) // capture
+                .stderr(std::process::Stdio::inherit()) // stderr always direct
+                .output()
+        };
 
         match result {
             Ok(output) => {
                 let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
                 let stdout_raw = String::from_utf8_lossy(&output.stdout);
+                let stderr_raw = String::from_utf8_lossy(&output.stderr);
 
+                // Merge stderr into the text to filter when filter_stderr is enabled;
+                // otherwise emit stderr directly so it is always visible.
+                let combined_raw = if filter.filter_stderr {
+                    format!("{}{}", stdout_raw, stderr_raw)
+                } else {
+                    stdout_raw.to_string()
+                };
                 // Tee raw output BEFORE filtering on failure — lets LLM re-read if needed
                 let tee_hint = if !output.status.success() {
-                    core::tee::tee_and_hint(&stdout_raw, &raw_command, exit_code)
+                    core::tee::tee_and_hint(&combined_raw, &raw_command, exit_code)
                 } else {
                     None
                 };
 
-                let filtered = core::toml_filter::apply_filter(filter, &stdout_raw);
+                let filtered = core::toml_filter::apply_filter(filter, &combined_raw);
                 println!("{}", filtered);
                 if let Some(hint) = tee_hint {
                     println!("{}", hint);
@@ -1123,7 +1180,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 timer.track(
                     &raw_command,
                     &format!("rtk:toml {}", raw_command),
-                    &stdout_raw,
+                    &combined_raw,
                     &filtered,
                 );
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
@@ -1164,7 +1221,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     }
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum GtCommands {
     /// Compact stack log output
     Log {
@@ -1806,11 +1863,9 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Vitest { command } => match command {
-            VitestCommands::Run { args } => {
-                vitest_cmd::run(vitest_cmd::VitestCommand::Run, &args, cli.verbose)?
-            }
-        },
+        Commands::Jest { ref args } | Commands::Vitest { ref args } => {
+            vitest_cmd::run_test(&cli.command, args, cli.verbose)?
+        }
 
         Commands::Prisma { command } => match command {
             PrismaCommands::Generate { args } => {
@@ -1895,6 +1950,11 @@ fn run_cli() -> Result<i32> {
 
         Commands::Session {} => {
             analytics::session_cmd::run(cli.verbose)?;
+            0
+        }
+
+        Commands::Telemetry { command } => {
+            core::telemetry_cmd::run(&command)?;
             0
         }
 
@@ -2011,19 +2071,79 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Hook { command } => {
-            match command {
-                HookCommands::Gemini => hooks::hook_cmd::run_gemini()?,
-                HookCommands::Copilot => hooks::hook_cmd::run_copilot()?,
-                HookCommands::Codex => hooks::hook_cmd::run_codex()?,
+        Commands::Hook { command } => match command {
+            HookCommands::Claude => {
+                hooks::hook_cmd::run_claude()?;
+                0
             }
-            0
-        }
+            HookCommands::Cursor => {
+                hooks::hook_cmd::run_cursor()?;
+                0
+            }
+            HookCommands::Gemini => {
+                hooks::hook_cmd::run_gemini()?;
+                0
+            }
+            HookCommands::Copilot => {
+                hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Codex => {
+                hooks::hook_cmd::run_codex()?;
+                0
+            }
+            HookCommands::Check { agent: _, command } => {
+                use crate::discover::registry::rewrite_command;
+                let raw = command.join(" ");
+                let excluded = crate::core::config::Config::load()
+                    .map(|c| c.hooks.exclude_commands)
+                    .unwrap_or_default();
+                match rewrite_command(&raw, &excluded) {
+                    Some(rewritten) => {
+                        println!("{}", rewritten);
+                        0
+                    }
+                    None => {
+                        eprintln!("No rewrite for: {}", raw);
+                        1
+                    }
+                }
+            }
+        },
 
         Commands::Rewrite { args } => {
             let cmd = args.join(" ");
             hooks::rewrite_cmd::run(&cmd)?;
             0
+        }
+
+        Commands::Pipe {
+            filter,
+            passthrough,
+        } => {
+            pipe_cmd::run(filter.as_deref(), passthrough)?;
+            0
+        }
+
+        Commands::Run { command, args } => {
+            let raw = match command {
+                Some(c) => c,
+                None if !args.is_empty() => args.join(" "),
+                None => String::new(),
+            };
+            if raw.trim().is_empty() {
+                0
+            } else {
+                use std::process::Command as ProcCommand;
+                let shell = if cfg!(windows) { "cmd" } else { "sh" };
+                let flag = if cfg!(windows) { "/C" } else { "-c" };
+                let status = ProcCommand::new(shell)
+                    .arg(flag)
+                    .arg(&raw)
+                    .status()
+                    .with_context(|| format!("Failed to execute: {}", raw))?;
+                status.code().unwrap_or(1)
+            }
         }
 
         Commands::Proxy { args } => {
@@ -2490,7 +2610,7 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in RTK_META_COMMANDS {
-            if matches!(*cmd, "proxy" | "rewrite" | "session") {
+            if matches!(*cmd, "proxy" | "run" | "rewrite" | "session") {
                 continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
@@ -2499,6 +2619,71 @@ mod tests {
                 "Meta-command '{}' with bad flag should fail to parse",
                 cmd
             );
+        }
+    }
+
+    #[test]
+    fn test_run_command_with_dash_c() {
+        let cli = Cli::try_parse_from(["rtk", "run", "-c", "git status && echo done"]).unwrap();
+        match cli.command {
+            Commands::Run { command, args } => {
+                assert_eq!(command, Some("git status && echo done".to_string()));
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_command_positional_args() {
+        let cli = Cli::try_parse_from(["rtk", "run", "echo", "hello"]).unwrap();
+        match cli.command {
+            Commands::Run { command, args } => {
+                assert!(command.is_none());
+                assert_eq!(args, vec!["echo", "hello"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_claude_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "claude"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_check_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "check", "git", "status"]).unwrap();
+        match cli.command {
+            Commands::Hook {
+                command: HookCommands::Check { agent, command },
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(command, vec!["git", "status"]);
+            }
+            _ => panic!("Expected Hook Check command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_check_with_agent() {
+        let cli =
+            Cli::try_parse_from(["rtk", "hook", "check", "--agent", "gemini", "cargo", "test"])
+                .unwrap();
+        match cli.command {
+            Commands::Hook {
+                command: HookCommands::Check { agent, command },
+            } => {
+                assert_eq!(agent, "gemini");
+                assert_eq!(command, vec!["cargo", "test"]);
+            }
+            _ => panic!("Expected Hook Check command"),
         }
     }
 
@@ -2512,6 +2697,7 @@ mod tests {
             vec!["rtk", "init"],
             vec!["rtk", "config"],
             vec!["rtk", "proxy", "echo", "hi"],
+            vec!["rtk", "run", "-c", "echo hi"],
             vec!["rtk", "hook-audit"],
             vec!["rtk", "cc-economics"],
         ];
@@ -2676,6 +2862,28 @@ mod tests {
     }
 
     #[test]
+    fn test_git_push_u_flag_passes_through() {
+        let cli = Cli::try_parse_from(["rtk", "git", "push", "-u", "origin", "my-branch"]).unwrap();
+        assert!(
+            !cli.ultra_compact,
+            "-u on git push must NOT be consumed as --ultra-compact"
+        );
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::Push { args },
+                ..
+            } => {
+                assert!(
+                    args.contains(&"-u".to_string()),
+                    "-u must be forwarded to git push, got: {:?}",
+                    args
+                );
+            }
+            _ => panic!("Expected Git Push command"),
+        }
+    }
+
+    #[test]
     fn test_pnpm_subcommand_with_short_filter() {
         // -F is the short form of --filter in pnpm
         let cli =
@@ -2736,5 +2944,14 @@ mod tests {
             }
             _ => panic!("Expected Pnpm Build command"),
         }
+    }
+
+    #[test]
+    fn test_ultra_compact_long_form_still_works() {
+        let cli = Cli::try_parse_from(["rtk", "--ultra-compact", "git", "status"]).unwrap();
+        assert!(
+            cli.ultra_compact,
+            "--ultra-compact long form must still enable ultra-compact mode"
+        );
     }
 }

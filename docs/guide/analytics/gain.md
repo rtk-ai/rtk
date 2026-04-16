@@ -94,7 +94,8 @@ Same columns as daily, aggregated by Sunday-Saturday week or calendar month.
 |---------|----------------|-----------|
 | `git status` | 77-93% | Compact stat format |
 | `eslint` | 84% | Group by rule |
-| `vitest run` | 94-99% | Show failures only |
+| `jest` | 94-99% | Show failures only |
+| `vitest` | 94-99% | Show failures only |
 | `find` | 75% | Tree format |
 | `pnpm list` | 70-90% | Compact dependencies |
 | `grep` | 70% | Truncate + group |

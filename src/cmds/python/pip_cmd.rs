@@ -1,7 +1,8 @@
 //! Filters pip and uv package manager output.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command, tool_exists};
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -67,19 +68,15 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
         eprintln!("Running: {} pip list --format=json", base_cmd);
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip list", base_cmd))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_list(&stdout);
+    let filtered = filter_pip_list(&result.stdout);
     println!("{}", filtered);
 
-    let exit_code = exit_code_from_output(&output, "pip");
-    Ok((raw, filtered, exit_code))
+    Ok((raw, filtered, result.exit_code))
 }
 
 fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
@@ -99,19 +96,15 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
         eprintln!("Running: {} pip list --outdated --format=json", base_cmd);
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip list --outdated", base_cmd))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_outdated(&stdout);
+    let filtered = filter_pip_outdated(&result.stdout);
     println!("{}", filtered);
 
-    let exit_code = exit_code_from_output(&output, "pip");
-    Ok((raw, filtered, exit_code))
+    Ok((raw, filtered, result.exit_code))
 }
 
 fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
@@ -129,19 +122,15 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
         eprintln!("Running: {} pip {}", base_cmd, args.join(" "));
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip {}", base_cmd, args.join(" ")))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    print!("{}", stdout);
-    eprint!("{}", stderr);
+    print!("{}", result.stdout);
+    eprint!("{}", result.stderr);
 
-    let exit_code = exit_code_from_output(&output, "pip");
-    Ok((raw.clone(), raw, exit_code))
+    Ok((raw.clone(), raw, result.exit_code))
 }
 
 /// Filter pip list JSON output

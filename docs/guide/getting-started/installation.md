@@ -43,6 +43,16 @@ brew install rtk-ai/tap/rtk
 cargo install rtk
 ```
 
+## Pre-built binaries (Windows, Linux, macOS)
+
+Download from [GitHub releases](https://github.com/rtk-ai/rtk/releases):
+
+- macOS: `rtk-x86_64-apple-darwin.tar.gz` / `rtk-aarch64-apple-darwin.tar.gz`
+- Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
+- Windows: `rtk-x86_64-pc-windows-msvc.zip`
+
+**Windows users**: Extract the zip and place `rtk.exe` in a directory on your PATH. Run RTK from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe` (it prints usage and exits immediately). For full hook support, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) instead.
+
 ## Verify installation
 
 ```bash

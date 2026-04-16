@@ -4,6 +4,7 @@
 //! Claude Code API usage metrics. Handles subprocess execution, JSON parsing,
 //! and graceful degradation when ccusage is unavailable.
 
+use crate::core::stream::exec_capture;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -95,7 +96,9 @@ fn build_command() -> Option<Command> {
     }
 
     // Fallback: try npx
+    eprintln!("[info] ccusage not installed globally, fetching via npx...");
     let npx_check = resolved_command("npx")
+        .arg("--yes")
         .arg("ccusage")
         .arg("--help")
         .stdout(std::process::Stdio::null())
@@ -104,6 +107,7 @@ fn build_command() -> Option<Command> {
 
     if npx_check.map(|s| s.success()).unwrap_or(false) {
         let mut cmd = resolved_command("npx");
+        cmd.arg("--yes");
         cmd.arg("ccusage");
         return Some(cmd);
     }
@@ -131,34 +135,30 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
         Granularity::Monthly => "monthly",
     };
 
-    let output = cmd
-        .arg(subcommand)
+    cmd.arg(subcommand)
         .arg("--json")
         .arg("--since")
-        .arg("20250101") // 90 days back approx
-        .output();
+        .arg("20250101"); // 90 days back approx
 
-    let output = match output {
+    let result = match exec_capture(&mut cmd) {
         Err(e) => {
             eprintln!("[warn] ccusage execution failed: {}", e);
             return Ok(None);
         }
-        Ok(o) => o,
+        Ok(r) => r,
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !result.success() {
         eprintln!(
             "[warn] ccusage exited with {}: {}",
-            output.status,
-            stderr.trim()
+            result.exit_code,
+            result.stderr.trim()
         );
         return Ok(None);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let periods =
-        parse_json(&stdout, granularity).context("Failed to parse ccusage JSON output")?;
+        parse_json(&result.stdout, granularity).context("Failed to parse ccusage JSON output")?;
 
     Ok(Some(periods))
 }

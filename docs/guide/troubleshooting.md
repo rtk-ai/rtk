@@ -90,7 +90,35 @@ source ~/.zshrc    # or ~/.bashrc
 rtk --version
 ```
 
-## RTK not working on Windows
+## RTK on Windows
+
+### Double-clicking rtk.exe does nothing
+
+**Symptom:** You double-click `rtk.exe`, a terminal flashes and closes instantly.
+
+**Cause:** RTK is a command-line tool. With no arguments, it prints usage and exits. The console window opens and closes before you can read anything.
+
+**Fix:** Open a terminal first, then run RTK from there:
+- Press `Win+R`, type `cmd`, press Enter
+- Or open PowerShell or Windows Terminal
+- Then run: `rtk --version`
+
+### Hook not working (no auto-rewrite)
+
+**Symptom:** `rtk init -g` shows "Falling back to --claude-md mode" on Windows.
+
+**Cause:** The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell. Native Windows doesn't have one.
+
+**Fix:** Use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) for full hook support:
+```bash
+# Inside WSL
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g    # full hook mode works in WSL
+```
+
+On native Windows, RTK falls back to CLAUDE.md injection. Your AI assistant gets RTK instructions but won't auto-rewrite commands. It can still use RTK manually: `rtk cargo test`, `rtk git status`, etc.
+
+### Node.js tools not found
 
 **Symptom:**
 ```

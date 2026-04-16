@@ -107,15 +107,50 @@ For the step-by-step checklist (create filter, register rewrite pattern, registe
 
 ---
 
+## Commit Messages & Changelog
+
+RTK uses [Conventional Commits](https://www.conventionalcommits.org/) and [release-please](https://github.com/googleapis/release-please) to **auto-generate CHANGELOG.md, version bumps, and GitHub releases**. Never edit `CHANGELOG.md` manually — it is fully managed by release-please from your commit messages.
+
+### Commit format
+
+```
+<type>(<scope>): <short description>
+```
+
+| Type | Semver Impact | When to Use |
+|------|---------------|-------------|
+| `feat` | Minor | New features, new filters, new command support |
+| `fix` | Patch | Bug fixes, corrections |
+| `perf` | Patch | Performance improvements |
+| `refactor` | — | Code restructuring (no changelog entry) |
+| `docs` | — | Documentation only |
+| `chore` | — | Maintenance, CI, deps |
+| `feat!` / `fix!` | Major | Breaking changes (add `!` after type) |
+
+**Scope** should match the module or area: `git`, `cargo`, `gh`, `hook`, `tracking`, `cicd`, etc.
+
+### Examples
+
+```
+feat(kubectl): add pod log filtering
+fix(git): preserve merge commit messages in log filter
+perf(cargo): lazy-compile clippy regex patterns
+feat!(hook): change rewrite config format
+```
+
+These commit messages directly become CHANGELOG entries when release-please creates a release PR. Write them as if they will be read by users.
+
+---
+
 ## Branch Naming Convention
 
 Git branch names cannot include spaces or colons, so we use slash-prefixed names. Pick the prefix that matches your change type and follow it with an optional scope and a short, kebab-case description.
 
-| Prefix | Semver Impact | When to Use |
-|--------|---------------|-------------|
-| `fix/` | Patch | Bug fixes, corrections, minor adjustments |
-| `feat/` | Minor | New features, new filters, new command support |
-| `chore/` | Major | Breaking changes, API changes, removed functionality |
+| Prefix | When to Use |
+|--------|-------------|
+| `fix/` | Bug fixes, corrections, minor adjustments |
+| `feat/` | New features, new filters, new command support |
+| `chore/` | CI/CD, deps, maintenance, breaking changes |
 
 Combine the prefix with a scope if it adds clarity (e.g. `git`, `kubectl`, `filter`, `tracking`, `config`) and finish with a descriptive slug: `fix/<scope>-<description>` or `feat/<description>`.
 
@@ -137,7 +172,7 @@ chore/release-pipeline-cleanup
 **For large features or refactors**, prefer multi-part PRs over one enormous PR. Split the work into logical, reviewable chunks that can each be merged independently. Examples:
 - feat(Part 1): Add data model and tests
 - feat(Part 2): Add CLI command and integration
-- feat(Part 3): Update documentation and CHANGELOG
+- feat(Part 3): Update documentation
 
 **Why**: Small, focused PRs are easier to review, safer to merge, and faster to ship. Large PRs slow down review, hide bugs, and increase merge conflict risk.
 
@@ -166,7 +201,7 @@ Every change **must** include tests. See [Testing](#testing) below.
 
 ### 4. Add Documentation
 
-Every change **must** include documentation updates. See [Documentation](#documentation) below.
+Documentation updates are required for new filters, new features, and changes that affect already-documented behavior. Bug fixes and refactors typically don't need doc updates. See [Documentation](#documentation) below.
 
 ### Contributor License Agreement (CLA)
 
@@ -235,17 +270,18 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 
 ## Documentation
 
-Every change **must** include documentation updates. Use this table to find which docs to update:
+Documentation updates are required for new filters, new features, and changes that affect already-documented behavior. Use this table to find which docs to update:
 
 | What you changed | Update these docs |
 |------------------|-------------------|
-| New Rust filter (`src/cmds/`) | Ecosystem `README.md` (e.g., `src/cmds/git/README.md`), [README.md](README.md) command list, [CHANGELOG.md](CHANGELOG.md) |
-| New TOML filter (`src/filters/`) | [src/filters/README.md](src/filters/README.md) if naming conventions change, [README.md](README.md) command list, [CHANGELOG.md](CHANGELOG.md) |
+| New Rust filter (`src/cmds/`) | Ecosystem `README.md` (e.g., `src/cmds/git/README.md`), [README.md](README.md) command list |
+| New TOML filter (`src/filters/`) | [src/filters/README.md](src/filters/README.md) if naming conventions change, [README.md](README.md) command list |
 | New rewrite pattern | `src/discover/rules.rs` — see [Adding a New Command Filter](src/cmds/README.md#adding-a-new-command-filter) |
 | Core infrastructure (`src/core/`) | [src/core/README.md](src/core/README.md), [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) if flow changes |
 | Hook system (`src/hooks/`) | [src/hooks/README.md](src/hooks/README.md), [hooks/README.md](hooks/README.md) for agent-facing docs |
 | Architecture or design change | [ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md), [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) |
-| Bug fix or breaking change | [CHANGELOG.md](CHANGELOG.md) |
+
+> **Note**: Do NOT edit `CHANGELOG.md` manually — it is auto-generated by [release-please](https://github.com/googleapis/release-please) from your commit messages. See [Commit Messages & Changelog](#commit-messages--changelog).
 
 **Navigation**: [CONTRIBUTING.md](CONTRIBUTING.md) (you are here) → [docs/contributing/TECHNICAL.md](docs/contributing/TECHNICAL.md) (architecture + flow) → each folder's `README.md` (implementation details).
 

@@ -51,7 +51,8 @@ Once RTK is installed with a hook, these commands are automatically intercepted 
 
 | Command | Savings | What changes |
 |---------|---------|--------------|
-| `vitest run` | 94-99% | Failures only |
+| `jest` | 94-99% | Failures only |
+| `vitest` | 94-99% | Failures only |
 | `tsc` | 75% | Type errors grouped by file |
 | `eslint` | 84% | Violations grouped by rule |
 | `pnpm list` | 70-90% | Compact dependency tree |

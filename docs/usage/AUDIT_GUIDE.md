@@ -267,7 +267,8 @@ Savings %       = (Saved / Input) × 100
 |---------|----------------|-----------|
 | `rtk git status` | 77-93% | Compact stat format |
 | `rtk eslint` | 84% | Group by rule |
-| `rtk vitest run` | 94-99% | Show failures only |
+| `rtk jest` | 94-99% | Show failures only |
+| `rtk vitest` | 94-99% | Show failures only |
 | `rtk find` | 75% | Tree format |
 | `rtk pnpm list` | 70-90% | Compact dependencies |
 | `rtk grep` | 70% | Truncate + group |

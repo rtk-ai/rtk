@@ -1,6 +1,11 @@
 # Telemetry
 
-RTK collects anonymous, aggregate usage metrics once per day to help improve the product. Telemetry is **enabled by default** and can be disabled at any time.
+RTK collects anonymous, aggregate usage metrics once per day to help improve the product. Telemetry is **disabled by default** and requires explicit consent during `rtk init` or `rtk telemetry enable`.
+
+## Data Collector
+
+**Entity**: `RTK AI Labs`
+**Contact**: contact@rtk-ai.app
 
 ## Why we collect telemetry
 
@@ -29,7 +34,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 
 | Field | Example | Purpose |
 |-------|---------|---------|
-| `device_hash` | `a3f8c9...` (64 hex chars) | Count unique installations. Salted SHA-256 of hostname + username with a per-device random salt stored locally (`~/.local/share/rtk/.device_salt`). Not reversible. |
+| `device_hash` | `a3f8c9...` (64 hex chars) | Count unique installations. SHA-256 of a per-device random salt stored locally (`~/.local/share/rtk/.device_salt`). Not reversible. No hostname or username included. |
 
 ### Environment
 
@@ -109,31 +114,61 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 - Secrets, API keys, or environment variable values
 - Repository names or URLs
 - Personally identifiable information
-- IP addresses (not logged server-side)
+- IP addresses (not stored in telemetry pings; stored temporarily in erasure audit log for accountability, anonymized after 6 months)
 
-## Opt-out
+## Consent
 
-Telemetry can be disabled instantly with either method:
+Telemetry requires explicit opt-in consent (GDPR Art. 6, 7). Consent is requested during `rtk init` or via `rtk telemetry enable`. Without consent, no data is sent.
 
 ```bash
-# Environment variable (per-session or in shell profile)
-export RTK_TELEMETRY_DISABLED=1
-
-# Or permanently in config file
-# ~/.config/rtk/config.toml
-[telemetry]
-enabled = false
+rtk telemetry status     # Check current consent state
+rtk telemetry enable     # Give consent (interactive prompt)
+rtk telemetry disable    # Withdraw consent
+rtk telemetry forget     # Withdraw consent + delete local data + request server erasure
 ```
 
-When disabled, `rtk init` shows `[info] Anonymous telemetry is disabled`. No data is sent, no background thread is spawned, no network requests are made.
+Environment variable override (blocks telemetry regardless of consent):
+```bash
+export RTK_TELEMETRY_DISABLED=1
+```
 
-## Data handling
+## Retention Policy
+
+- **Server-side**: telemetry records are retained for a maximum of **12 months**, then automatically purged (periodic task every 24 hours).
+- **Server-side (erasure log)**: IP addresses in the erasure audit log are **anonymized after 6 months** (GDPR — IP is personal data).
+- **Client-side**: the local SQLite database (`~/.local/share/rtk/tracking.db`) retains data for **90 days** by default (configurable via `tracking.history_days` in `config.toml`). Deleted entirely by `rtk telemetry forget`.
+
+## Your Rights (GDPR)
+
+Under the EU General Data Protection Regulation, you have the right to:
+
+- **Access** your data: `rtk telemetry status` shows your device hash; the telemetry payload is fully documented above.
+- **Rectification**: since data is anonymous and aggregate, rectification is not applicable.
+- **Erasure** (Art. 17): run `rtk telemetry forget` to delete local data and send an erasure request to the server. Alternatively, email contact@rtk-ai.app with your device hash.
+- **Restriction of processing**: `rtk telemetry disable` stops all data collection immediately.
+- **Portability**: the local SQLite database at `~/.local/share/rtk/tracking.db` contains all locally stored data.
+- **Objection**: `rtk telemetry disable` or `export RTK_TELEMETRY_DISABLED=1`.
+
+## Erasure Procedure
+
+1. Run `rtk telemetry forget` — this disables telemetry, deletes your device salt, ping marker, and local tracking database (`history.db`), then sends an erasure request to the server.
+2. If the server is unreachable, the CLI prints your full device hash and fallback instructions to email contact@rtk-ai.app for manual erasure.
+3. You can also email contact@rtk-ai.app directly to request manual erasure.
+
+## Data Handling
 
 - Telemetry endpoint URL and auth token are injected at **compile time** via `option_env!()` — they are not in the source code
-- The server is hosted on GCP Cloud Run with TLS
+- All communications use HTTPS (TLS)
 - Data is used exclusively for RTK product improvement
 - No data is sold or shared with third parties
 - Aggregate statistics may be published (e.g. "70% of RTK users are on macOS")
+
+### Server-side Requirements
+
+The telemetry server must implement:
+- `POST /erasure` endpoint accepting `{"device_hash": "...", "action": "erasure"}`, authenticated via `X-RTK-Token`
+- Automatic periodic purge of telemetry records older than 12 months
+- Audit log for erasure requests (GDPR Art. 17(2) accountability) with IP anonymization after 6 months
 
 ## For contributors
 

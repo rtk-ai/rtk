@@ -576,12 +576,13 @@ Filtre la sortie de `cargo nextest` pour n'afficher que les echecs.
 
 ---
 
-### `rtk vitest run` -- Tests Vitest
+### `rtk jest` / `rtk vitest` -- Tests Jest/Vitest
 
 **Economies :** ~99.5%
 
 ```bash
-rtk vitest run [args...]
+rtk jest [args...]
+rtk vitest [args...]
 ```
 
 ---
@@ -1258,7 +1259,8 @@ rtk verify
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |
-| `vitest/jest` | `rtk vitest run` |
+| `jest` | `rtk jest` |
+| `vitest` | `rtk vitest` |
 | `tsc` | `rtk tsc` |
 | `eslint/biome` | `rtk lint` |
 | `prettier` | `rtk prettier` |
@@ -1322,7 +1324,9 @@ max_files = 20              # Rotation : garder les N derniers fichiers
 # directory = "/custom/tee/path"  # Chemin personnalise (optionnel)
 
 [telemetry]
-enabled = true              # Telemetrie anonyme (1 ping/jour, opt-out possible)
+enabled = false             # Telemetrie anonyme (1 ping/jour, requiert consentement)
+# consent_given = true      # Defini automatiquement par `rtk init` ou `rtk telemetry enable`
+# consent_date = "..."      # Date du consentement (RFC 3339)
 
 [hooks]
 exclude_commands = []       # Commandes a exclure de la recriture automatique
@@ -1371,21 +1375,26 @@ FAILED: 2/15 tests
 
 ## Telemetrie
 
-RTK envoie un ping anonyme une fois par jour (23h d'intervalle) pour des statistiques d'utilisation.
+RTK peut envoyer un ping anonyme une fois par jour (23h d'intervalle) pour des statistiques d'utilisation. La telemetrie est **desactivee par defaut** et requiert un consentement explicite (RGPD Art. 6, 7).
 
-**Donnees envoyees :** hash de device, version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage d'economies.
+**Donnees envoyees :** hash de device (SHA-256 d'un sel aleatoire), version, OS, architecture, nombre de commandes/24h, top commandes, pourcentage d'economies.
 
-**Desactiver :**
+**Responsable du traitement :** `RTK AI Labs`, contact@rtk-ai.app
+
+**Gerer la telemetrie :**
 ```bash
-# Via variable d'environnement
-export RTK_TELEMETRY_DISABLED=1
-
-# Via config.toml
-[telemetry]
-enabled = false
+rtk telemetry status     # Voir l'etat du consentement
+rtk telemetry enable     # Donner son consentement (prompt interactif)
+rtk telemetry disable    # Retirer son consentement
+rtk telemetry forget     # Retirer + supprimer donnees locales + demande d'effacement serveur
 ```
 
-Aucune donnee personnelle, aucun contenu de commande, aucun chemin de fichier n'est transmis.
+**Desactiver via variable d'environnement :**
+```bash
+export RTK_TELEMETRY_DISABLED=1
+```
+
+Aucune donnee personnelle, aucun contenu de commande, aucun chemin de fichier n'est transmis. Conservation serveur : 12 mois max. Details : [docs/TELEMETRY.md](../TELEMETRY.md)
 
 ---
 
