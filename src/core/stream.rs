@@ -191,6 +191,7 @@ pub struct StreamResult {
     pub exit_code: i32,
     pub raw: String,
     pub raw_stdout: String,
+    pub raw_stderr: String,
     pub filtered: String,
 }
 
@@ -239,6 +240,7 @@ pub fn run_streaming(
             exit_code: status_to_exit_code(status),
             raw: String::new(),
             raw_stdout: String::new(),
+            raw_stderr: String::new(),
             filtered: String::new(),
         });
     }
@@ -432,6 +434,7 @@ pub fn run_streaming(
         exit_code,
         raw,
         raw_stdout,
+        raw_stderr,
         filtered,
     })
 }
@@ -519,6 +522,7 @@ pub(crate) mod tests {
             exit_code: 0,
             raw: String::new(),
             raw_stdout: String::new(),
+            raw_stderr: String::new(),
             filtered: String::new(),
         };
         assert!(r.success());
@@ -530,6 +534,7 @@ pub(crate) mod tests {
             exit_code: 1,
             raw: String::new(),
             raw_stdout: String::new(),
+            raw_stderr: String::new(),
             filtered: String::new(),
         };
         assert!(!r.success());
@@ -541,6 +546,7 @@ pub(crate) mod tests {
             exit_code: 137,
             raw: String::new(),
             raw_stdout: String::new(),
+            raw_stderr: String::new(),
             filtered: String::new(),
         };
         assert!(!r.success());

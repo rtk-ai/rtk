@@ -495,7 +495,7 @@ mod tests {
         let output = grep_wrapper(&input);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
-            savings >= 40.0,
+            savings >= 40.0, // TODO: grep pipe filter below 60% target — improve grouping
             "grep filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
             savings, count_tokens(&input), count_tokens(&output)
         );
@@ -516,7 +516,7 @@ mod tests {
         let output = find_wrapper(&input);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
-            savings >= 40.0,
+            savings >= 40.0, // TODO: find pipe filter below 60% target — improve grouping
             "find filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
             savings, count_tokens(&input), count_tokens(&output)
         );

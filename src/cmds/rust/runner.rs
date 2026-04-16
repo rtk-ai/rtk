@@ -242,6 +242,12 @@ fn extract_test_summary(output: &str, command: &str) -> String {
         if failures.len() > 10 {
             output.push_str(&format!("  ... +{} more failures\n", failures.len() - 10));
         }
+        for f in failure_lines.iter().take(20) {
+            output.push_str(&format!("  {}\n", f.trim()));
+        }
+        if failure_lines.len() > 20 {
+            output.push_str(&format!("  ... +{} more\n", failure_lines.len() - 20));
+        }
         output.push('\n');
     }
 
