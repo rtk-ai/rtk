@@ -29,6 +29,17 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
+
+### Environment Variable Overrides
+
+RTK honors the same config directory environment variables used by the AI tools themselves:
+
+| Variable | Tool | Default | Effect |
+|----------|------|---------|--------|
+| `CLAUDE_CONFIG_DIR` | Claude Code | `~/.claude` | All Claude hook paths use this dir instead |
+| `CODEX_HOME` | Codex CLI | `~/.codex` | All Codex hook paths use this dir instead |
+
+When set, all operations (install, verify, permissions, session discovery) use the overridden path. When unset or empty, the default is used. This is handled by `claude_path::resolve_claude_dir()` and the corresponding codex resolver.
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 
 

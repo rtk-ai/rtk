@@ -6,9 +6,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
+use super::claude_path::resolve_claude_dir;
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE,
+    HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -969,11 +970,8 @@ fn run_default_mode(
 /// and removes the stale settings.json entry so the new `rtk hook claude` entry
 /// can be registered.
 fn migrate_old_hook_script(verbose: u8) {
-    if let Some(home) = dirs::home_dir() {
-        let old_hook = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
+    if let Ok(claude_dir) = resolve_claude_dir() {
+        let old_hook = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
         if old_hook.exists() {
             if let Err(e) = std::fs::remove_file(&old_hook) {
                 if verbose > 0 {
@@ -992,15 +990,16 @@ fn migrate_old_hook_script(verbose: u8) {
             }
         }
         // Remove legacy hash file
-        let hash_file = home
-            .join(CLAUDE_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(".rtk-hook.sha256");
+        let hash_file = claude_dir.join(HOOKS_SUBDIR).join(".rtk-hook.sha256");
         if hash_file.exists() {
             let _ = std::fs::remove_file(&hash_file);
         }
         // Remove Cursor legacy hook
-        let cursor_hook = home.join(".cursor").join("hooks").join(REWRITE_HOOK_FILE);
+        let cursor_hook = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".cursor")
+            .join("hooks")
+            .join(REWRITE_HOOK_FILE);
         if cursor_hook.exists() {
             let _ = std::fs::remove_file(&cursor_hook);
         }
@@ -1749,10 +1748,6 @@ fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
     dirs::home_dir()
         .map(|h| h.join(subdir))
         .context("Cannot determine home directory. Is $HOME set?")
-}
-
-fn resolve_claude_dir() -> Result<PathBuf> {
-    resolve_home_subdir(CLAUDE_DIR)
 }
 
 fn resolve_codex_dir() -> Result<PathBuf> {

@@ -1,3 +1,4 @@
+use super::claude_path::resolve_claude_dir;
 use super::constants::{CLAUDE_DIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON};
 use crate::core::stream::exec_capture;
 use crate::discover::lexer::split_on_operators;
@@ -150,9 +151,9 @@ fn get_settings_paths() -> Vec<PathBuf> {
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_JSON));
         paths.push(root.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
     }
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_JSON));
-        paths.push(home.join(CLAUDE_DIR).join(SETTINGS_LOCAL_JSON));
+    if let Ok(claude_dir) = resolve_claude_dir() {
+        paths.push(claude_dir.join(SETTINGS_JSON));
+        paths.push(claude_dir.join(SETTINGS_LOCAL_JSON));
     }
 
     paths

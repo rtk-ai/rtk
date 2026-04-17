@@ -39,6 +39,8 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
+
+**Config directory overrides**: RTK honors `CLAUDE_CONFIG_DIR` (for Claude Code) and `CODEX_HOME` (for Codex CLI) environment variables. When set, all hook paths use the overridden directory instead of the default.
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 
 ## Supported Agents

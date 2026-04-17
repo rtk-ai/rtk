@@ -1,8 +1,8 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
+use super::claude_path::resolve_claude_dir;
 use super::constants::{
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON,
+    CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 #[cfg(test)]
 use super::constants::{CODEX_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, OPENCODE_PLUGIN_PATH};
@@ -27,11 +27,10 @@ pub enum HookStatus {
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
     // Don't warn users who don't have Claude Code installed
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => return HookStatus::Ok,
+    let claude_dir = match resolve_claude_dir() {
+        Ok(d) => d,
+        Err(_) => return HookStatus::Ok,
     };
-    let claude_dir = home.join(CLAUDE_DIR);
     if !claude_dir.exists() {
         return HookStatus::Ok;
     }
@@ -151,9 +150,8 @@ fn other_integration_installed(home: &std::path::Path) -> bool {
 }
 
 fn hook_installed_path() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let path = home
-        .join(CLAUDE_DIR)
+    let path = resolve_claude_dir()
+        .ok()?
         .join(HOOKS_SUBDIR)
         .join(REWRITE_HOOK_FILE);
     if path.exists() {
