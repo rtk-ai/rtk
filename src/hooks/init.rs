@@ -447,6 +447,17 @@ pub fn save_telemetry_consent(accepted: bool) -> Result<()> {
         .context("Failed to save telemetry consent to config.toml")
 }
 
+/// Returns true when telemetry is explicitly disabled through the
+/// `RTK_TELEMETRY_DISABLED` env var (value `"1"`).
+///
+/// Kept as a small pure function so the consent prompt short-circuits before
+/// touching stdin, and so tests can cover the opt-out path without a TTY.
+/// Mirrors the check in `telemetry::maybe_ping` so both the prompt and the
+/// ping honour the same env toggle.
+fn telemetry_disabled_by_env() -> bool {
+    std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1"
+}
+
 fn prompt_telemetry_consent() -> Result<()> {
     use std::io::{self, BufRead, IsTerminal};
 
@@ -455,6 +466,16 @@ fn prompt_telemetry_consent() -> Result<()> {
         Some(true) => return Ok(()),
         Some(false) => return Ok(()),
         None => {}
+    }
+
+    // Explicit opt-out must short-circuit before the TTY heuristic: some
+    // non-interactive environments (devcontainer `postCreateCommand`, certain
+    // CI agents) hand rtk a pseudo-TTY, so `is_terminal()` returns true even
+    // though no human is available to answer — the prompt then hangs forever.
+    // Setting `RTK_TELEMETRY_DISABLED=1` is the documented workaround, so the
+    // init prompt has to honour it too, not only `telemetry::maybe_ping`.
+    if telemetry_disabled_by_env() {
+        return Ok(());
     }
 
     if !io::stdin().is_terminal() {
@@ -3980,6 +4001,42 @@ mod tests {
             RTK_INSTRUCTIONS.contains(RTK_BLOCK_END),
             "RTK_INSTRUCTIONS must end with RTK_BLOCK_END marker"
         );
+    }
+
+    /// Regression for #1307: `RTK_TELEMETRY_DISABLED=1` must short-circuit the
+    /// consent prompt so `rtk init` cannot hang in non-interactive environments.
+    /// All cases are bundled in one test to serialize env-var mutations (env is
+    /// process-global and cargo runs tests in parallel).
+    #[test]
+    fn test_telemetry_disabled_by_env_honors_opt_out() {
+        const VAR: &str = "RTK_TELEMETRY_DISABLED";
+
+        #[allow(deprecated)]
+        std::env::remove_var(VAR);
+        assert!(
+            !telemetry_disabled_by_env(),
+            "unset env must not count as disabled"
+        );
+
+        #[allow(deprecated)]
+        std::env::set_var(VAR, "1");
+        assert!(
+            telemetry_disabled_by_env(),
+            "RTK_TELEMETRY_DISABLED=1 must disable the consent prompt (issue #1307)"
+        );
+
+        // Only the exact value "1" is the opt-out, matching telemetry::maybe_ping.
+        for other in ["0", "true", "false", "yes", "no", ""] {
+            #[allow(deprecated)]
+            std::env::set_var(VAR, other);
+            assert!(
+                !telemetry_disabled_by_env(),
+                "value {other:?} must not be treated as disabled"
+            );
+        }
+
+        #[allow(deprecated)]
+        std::env::remove_var(VAR);
     }
 
     #[test]
