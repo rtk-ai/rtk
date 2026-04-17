@@ -131,6 +131,11 @@ fn human_size(bytes: u64) -> String {
 /// filename (everything after the date). This handles owner/group names that
 /// contain spaces, which break the old fixed-column approach.
 fn parse_ls_line(line: &str) -> Option<(char, u64, String)> {
+    // Skip . and .. entries before date parsing (works for non-English locales too)
+    if is_dotdir(line) {
+        return None;
+    }
+
     let date_match = LS_DATE_RE.find(line)?;
     let name = line[date_match.end()..].to_string();
 
@@ -157,6 +162,16 @@ fn parse_ls_line(line: &str) -> Option<(char, u64, String)> {
     Some((file_type, size, name))
 }
 
+/// Returns true if the line represents a . or .. directory entry.
+///
+/// POSIX.1-2017 (IEEE Std 1003.1) specifies that each directory contains
+/// entries for "." (the directory itself) and ".." (its parent). These entries
+/// always appear in `ls -la` output and are skipped during parsing since they
+/// carry no meaningful content for token reduction.
+fn is_dotdir(line: &str) -> bool {
+    line.trim().ends_with('.') || line.trim().ends_with("..")
+}
+
 /// Parse ls -la output into compact format:
 ///   name/  (dirs)
 ///   name  size  (files)
@@ -171,6 +186,8 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
     let mut by_ext: HashMap<String, usize> = HashMap::new();
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
+    let mut dotdirs: usize = 0;
+    let mut parse_failed: usize = 0;
 
     for line in raw.lines() {
         if line.starts_with("total ") || line.is_empty() {
@@ -179,14 +196,14 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
         lines_seen += 1;
 
         let Some((file_type, size, name)) = parse_ls_line(line) else {
+            if is_dotdir(line) {
+                dotdirs += 1;
+            } else {
+                parse_failed += 1;
+            }
             continue;
         };
         parsed_count += 1;
-
-        // Skip . and ..
-        if name == "." || name == ".." {
-            continue;
-        }
 
         // Filter noise dirs unless -a
         if !show_all && NOISE_DIRS.iter().any(|noise| name == *noise) {
@@ -208,6 +225,11 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
 
     if dirs.is_empty() && files.is_empty() {
         if lines_seen > 0 && parsed_count == 0 {
+            if dotdirs == lines_seen {
+                // Only . and .. entries (empty directory)
+                return ("(empty)\n".to_string(), String::new(), 0);
+            }
+            // Real content that couldn't be parsed (e.g., non-English locale)
             return (String::new(), String::new(), 0);
         }
         return ("(empty)\n".to_string(), String::new(), 0);
@@ -306,6 +328,17 @@ mod tests {
     fn test_compact_empty() {
         let input = "total 0\n";
         let (entries, summary, _) = compact_ls(input, false);
+        assert_eq!(entries, "(empty)\n");
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn test_compact_empty_chinese_locale() {
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user user  4096  1月  1 12:00 .\n\
+                     drwxr-xr-x 16 user user 20480  1月  1 12:00 ..\n";
+        let (entries, summary, parsed_count) = compact_ls(input, false);
+        assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
     }
