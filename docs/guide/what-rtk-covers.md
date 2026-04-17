@@ -122,6 +122,7 @@ Once RTK is installed with a hook, these commands are automatically intercepted 
 | Command | Savings | What changes |
 |---------|---------|--------------|
 | `aws` | 70% | JSON condensed, relevant fields only |
+| `scp` | 65% | Transfer progress stripped, final bytes and errors preserved |
 | `psql` | 65% | Query results without decoration |
 | `curl` | 60% | Response body only, headers stripped |
 
