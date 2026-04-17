@@ -5,6 +5,25 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0](https://github.com/rtk-ai/rtk/compare/v0.36.0...v0.37.0) (2026-04-17)
+
+
+### Features
+
+* **discover:** handle more npm/npx/pnpm/pnpx patterns ([9e96caa](https://github.com/rtk-ai/rtk/commit/9e96caa0a18a95c84da82ba57716a9d3ef86d0c8))
+* **refacto-core:** binary hook w/ native cmd exec + streaming ([e7b7f9a](https://github.com/rtk-ai/rtk/commit/e7b7f9ab665a0f7303d41d23ad156d24e5e8964e))
+
+
+### Bug Fixes
+
+* **docs:** use release please changelog no manual ([7591a14](https://github.com/rtk-ai/rtk/commit/7591a14e4ceb732ab7ca160ac01a852926abe77a))
+* isolate cursor hook tests from local settings (determinist) ([d8ddefe](https://github.com/rtk-ai/rtk/commit/d8ddefe78efe25c35bb2a2f9083f2eacb9dd7274))
+* P0+P1 fixes from pre-merge review of hook engine ([df8e035](https://github.com/rtk-ai/rtk/commit/df8e03558d4d6cc2f5cbac91c63ab1b3b51d3bcd))
+* P0+P1 fixes from pre-merge review of hook engine ([d34389c](https://github.com/rtk-ai/rtk/commit/d34389c3d0936c2b0790e14f450bb50a28a7edf7))
+* rename ship.md to ship/SKILL.md to match develop ([5916ecd](https://github.com/rtk-ai/rtk/commit/5916ecd86fb319c2519a0b4fb2891309833a3bb4))
+* **runner:** preserve fd separation on command failure ([e92d099](https://github.com/rtk-ai/rtk/commit/e92d0993c93f0b732316dfa932d265aeca7488d6))
+* **stream:** missing stderr fields ([a1d46f3](https://github.com/rtk-ai/rtk/commit/a1d46f39c291e3356b9c26a062bde05ba1de591a))
+
 ## [0.36.0](https://github.com/rtk-ai/rtk/compare/v0.35.0...v0.36.0) (2026-04-13)
 
 
