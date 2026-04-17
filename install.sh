@@ -83,6 +83,13 @@ install() {
         error "Failed to download binary"
     fi
 
+    # Verify archive contents before extraction (CWE-22 path traversal).
+    # Reject any entry with an absolute path or a ".." component.
+    info "Verifying archive..."
+    if tar -tzf "$ARCHIVE" | grep -qE '^/|(^|/)\.\.(/|$)'; then
+        error "Archive contains unsafe paths (absolute or directory traversal) — refusing to extract"
+    fi
+
     info "Extracting..."
     tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
 
