@@ -187,7 +187,6 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
     let mut lines_seen: usize = 0;
     let mut parsed_count: usize = 0;
     let mut dotdirs: usize = 0;
-    let mut parse_failed: usize = 0;
 
     for line in raw.lines() {
         if line.starts_with("total ") || line.is_empty() {
@@ -198,8 +197,6 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String, usize) {
         let Some((file_type, size, name)) = parse_ls_line(line) else {
             if is_dotdir(line) {
                 dotdirs += 1;
-            } else {
-                parse_failed += 1;
             }
             continue;
         };
