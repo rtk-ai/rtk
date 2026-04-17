@@ -283,7 +283,8 @@ fn test_shutdown_cleanly_closes_server() {
     proc.send_recv(r#"{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}"#);
 
     let resp = proc.send_recv(r#"{"jsonrpc":"2.0","method":"shutdown","params":{},"id":99}"#);
-    assert!(resp["result"].is_object());
+    // shutdown returns null result (not an object) — just verify no error
+    assert!(resp.get("error").is_none(), "shutdown returned error: {}", resp);
 
     // After shutdown, reading from stdout should yield EOF
     let mut line = String::new();

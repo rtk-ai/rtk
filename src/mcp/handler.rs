@@ -146,6 +146,13 @@ fn run_with_rtk_binary(command: &str) -> (String, i32) {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let combined = merge_output(stdout, stderr);
+
+            // Exit 127 = command not found by RTK's fallback (e.g., shell builtins on Windows).
+            // Retry via system shell so `echo`, `dir`, compound expressions, etc. work correctly.
+            if exit_code == 127 {
+                return run_raw_shell(command);
+            }
+
             (combined, exit_code)
         }
         Err(e) => {
