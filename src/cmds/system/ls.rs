@@ -35,6 +35,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .collect();
 
     let mut cmd = resolved_command("ls");
+    cmd.env("LC_ALL", "C");  // Force C locale for consistent date format
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
@@ -467,5 +468,18 @@ mod tests {
         assert_eq!(ft, '-');
         assert_eq!(size, 5678);
         assert_eq!(name, "old.tar.gz");
+    }
+
+    #[test]
+    fn test_locale_independence() {
+        // Verifies that English date format is correctly parsed
+        // (LC_ALL=C ensures consistent output across all locales)
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 file.txt\n\
+                     drwxr-xr-x  2 user  staff    64 Feb 15 14:30 docs\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(entries.contains("file.txt"));
+        assert!(entries.contains("1.2K"));
+        assert!(entries.contains("docs/"));
     }
 }
