@@ -368,6 +368,33 @@ pub fn tool_exists(name: &str) -> bool {
     which::which(name).is_ok()
 }
 
+/// Build a `Command` honoring the `RTK_BIN_PATH` env var set by the rewrite
+/// engine when a path-prefixed command (e.g. `.venv/bin/pytest`) was normalized.
+///
+/// If `RTK_BIN_PATH` is set and its basename starts with "python", the command
+/// is constructed as `<bin> -m <tool_name>` (module invocation). Otherwise the
+/// binary is invoked directly.
+///
+/// Returns `None` when `RTK_BIN_PATH` is unset or empty, so callers fall back
+/// to their normal resolution logic.
+pub fn override_command(tool_name: &str) -> Option<Command> {
+    let bin_path = std::env::var("RTK_BIN_PATH").ok()?;
+    if bin_path.is_empty() {
+        return None;
+    }
+    let basename = std::path::Path::new(&bin_path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+    if basename.starts_with("python") {
+        let mut cmd = Command::new(&bin_path);
+        cmd.arg("-m").arg(tool_name);
+        Some(cmd)
+    } else {
+        Some(Command::new(&bin_path))
+    }
+}
+
 /// Extract short name from AWS ARN.
 /// Example: `arn:aws:ecs:region:acct:service/cluster/name` -> `name`
 /// For simple ARNs like `arn:aws:iam::123:user/alice`, returns `alice`.

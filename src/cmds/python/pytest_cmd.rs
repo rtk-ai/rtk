@@ -1,7 +1,7 @@
 //! Filters pytest output to show only failures and the summary line.
 
 use crate::core::runner;
-use crate::core::utils::{resolved_command, tool_exists, truncate};
+use crate::core::utils::{override_command, resolved_command, tool_exists, truncate};
 use anyhow::Result;
 
 #[derive(Debug, PartialEq)]
@@ -13,13 +13,15 @@ enum ParseState {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = if tool_exists("pytest") {
-        resolved_command("pytest")
-    } else {
-        let mut c = resolved_command("python");
-        c.arg("-m").arg("pytest");
-        c
-    };
+    let mut cmd = override_command("pytest").unwrap_or_else(|| {
+        if tool_exists("pytest") {
+            resolved_command("pytest")
+        } else {
+            let mut c = resolved_command("python");
+            c.arg("-m").arg("pytest");
+            c
+        }
+    });
 
     let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
     let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
