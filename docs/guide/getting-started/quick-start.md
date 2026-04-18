@@ -38,7 +38,7 @@ Once the hook is installed, nothing changes in how you work. Your AI assistant r
 
 For example, when Claude Code runs `cargo test`, the hook rewrites it to `rtk cargo test` before it executes. The LLM receives filtered output with only the failures — not 500 lines of passing tests. You never see or type `rtk`.
 
-Supported ecosystems: Git, Cargo/Rust, JavaScript (vitest, tsc, eslint, pnpm, Next.js, Prisma), Python, Go, Ruby, .NET, Docker/Kubernetes, GitHub CLI, and more. See [What RTK Optimizes](../what-rtk-covers.md) for the full list.
+RTK covers all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What RTK Optimizes](../resources/what-rtk-covers.md) for the full list.
 
 ## Step 3: Check your savings
 
@@ -65,6 +65,6 @@ rtk proxy make install
 
 ## Next steps
 
-- [What RTK Optimizes](../what-rtk-covers.md) — all supported commands and savings by ecosystem
+- [What RTK Optimizes](../resources/what-rtk-covers.md) — all supported commands and savings by ecosystem
 - [Supported agents](./supported-agents.md) — Claude Code, Cursor, Copilot, and more
 - [Configuration](./configuration.md) — customize RTK behavior
