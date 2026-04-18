@@ -498,9 +498,9 @@ fn build_effective_dotnet_args(
         TestRunnerMode::Classic
     };
 
-    // --nologo: skip for MtpNative — args pass directly to the MTP runtime which
-    // does not understand MSBuild/VSTest flags.
-    if runner_mode != TestRunnerMode::MtpNative && !has_nologo_arg(args) {
+    // --nologo: skip for MTP mode — when global.json enables MTP, args may
+    // pass directly to the MTP runtime which does not understand MSBuild/VSTest flags.
+    if runner_mode != TestRunnerMode::MtpVsTestBridge && !has_nologo_arg(args) {
         effective.push("-nologo".to_string());
     }
 
@@ -519,18 +519,11 @@ fn build_effective_dotnet_args(
                 }
                 effective.extend(args.iter().cloned());
             }
-            TestRunnerMode::MtpNative => {
-                // In .NET 10 native MTP mode, --report-trx is a direct dotnet test flag.
-                // Modern MTP frameworks (TUnit 1.19.74+, MSTest, xUnit with MTP runner)
-                // include Microsoft.Testing.Extensions.TrxReport natively.
-                if !has_report_trx_arg(args) {
-                    effective.push("--report-trx".to_string());
-                }
-                effective.extend(args.iter().cloned());
-            }
             TestRunnerMode::MtpVsTestBridge => {
-                // In VsTestBridge mode (supported on .NET 9 SDK and earlier), --report-trx
-                // goes after the -- separator so it reaches the MTP runtime.
+                // MTP mode (global.json or project-file properties): inject --report-trx
+                // after the -- separator. Works for MSTest/TUnit which bundle TrxReport.
+                // For xUnit v3 without Microsoft.Testing.Extensions.TrxReport, this causes
+                // an "Unknown option" error — informative, tells user to add the package.
                 if !has_report_trx_arg(args) {
                     effective.extend(inject_report_trx_into_args(args));
                 } else {
@@ -569,11 +562,10 @@ fn has_verbosity_arg(args: &[String]) -> bool {
 enum TestRunnerMode {
     /// Classic VSTest runner. Inject `--logger trx --results-directory`.
     Classic,
-    /// Native MTP runner (`UseMicrosoftTestingPlatformRunner`, `UseTestingPlatformRunner`, or
-    /// global.json MTP mode). `--logger trx` breaks the run; inject `--report-trx` directly.
-    MtpNative,
-    /// VSTest bridge for MTP (`TestingPlatformDotnetTestSupport=true`). `--logger trx` is
-    /// silently ignored; MTP args must come after `--`. Inject `-- --report-trx`.
+    /// MTP mode (from global.json or project-file properties like
+    /// `UseMicrosoftTestingPlatformRunner`, `TestingPlatformDotnetTestSupport`).
+    /// `--logger trx` is silently ignored or breaks the run; inject `-- --report-trx`
+    /// after the separator so it reaches the MTP runtime.
     MtpVsTestBridge,
 }
 
@@ -601,8 +593,8 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name_lower = e.local_name().as_ref().to_ascii_lowercase();
-                // All project-file MTP properties run in VSTest bridge mode and require
-                // MTP-specific args to come after `--`. Only global.json MTP mode is native.
+                // All project-file MTP properties lead to VsTestBridge mode —
+                // `--report-trx` must come after `--` separator.
                 inside_mtp_element = matches!(
                     name_lower.as_slice(),
                     b"usemicrosofttestingplatformrunner"
@@ -662,15 +654,28 @@ fn is_global_json_mtp_mode() -> bool {
 
 /// Detects which test runner mode the targeted project(s) use.
 ///
-/// Priority order: global.json (MtpNative) > project-file/Directory.Build.props (MtpVsTestBridge) > Classic.
-/// `global.json` MTP mode is checked first because it overrides all project-level properties.
+/// Priority: global.json MTP > project-file/Directory.Build.props (MtpVsTestBridge) > Classic.
+/// Both global.json MTP and project-file MTP properties use VsTestBridge mode — inject
+/// `-- --report-trx`. This works for MSTest/TUnit which bundle TrxReport, and for xUnit v3
+/// users who add `Microsoft.Testing.Extensions.TrxReport`. For xUnit v3 without the extension,
+/// `--report-trx` causes an "Unknown option" error which is informative (tells user to add the
+/// package). Parsing NuGet references to detect TrxReport availability is impractical due to
+/// central package management and MSBuild inheritance.
 fn detect_test_runner_mode(args: &[String]) -> TestRunnerMode {
-    // global.json MTP mode takes overall precedence — when set, dotnet test runs MTP
-    // natively regardless of project file properties.
     if is_global_json_mtp_mode() {
-        return TestRunnerMode::MtpNative;
+        return TestRunnerMode::MtpVsTestBridge;
     }
 
+    let found = scan_project_files_for_mtp(args);
+
+    if found == MtpProjectKind::VsTestBridge {
+        TestRunnerMode::MtpVsTestBridge
+    } else {
+        TestRunnerMode::Classic
+    }
+}
+
+fn scan_project_files_for_mtp(args: &[String]) -> MtpProjectKind {
     let project_extensions = ["csproj", "fsproj", "vbproj"];
 
     let explicit_projects: Vec<&str> = args
@@ -684,16 +689,13 @@ fn detect_test_runner_mode(args: &[String]) -> TestRunnerMode {
         })
         .collect();
 
-    let mut found = MtpProjectKind::None;
-
     if !explicit_projects.is_empty() {
         for p in &explicit_projects {
             if scan_mtp_kind_in_file(Path::new(p)) == MtpProjectKind::VsTestBridge {
-                found = MtpProjectKind::VsTestBridge;
+                return MtpProjectKind::VsTestBridge;
             }
         }
     } else {
-        // No explicit project — scan current directory.
         if let Ok(entries) = std::fs::read_dir(".") {
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -703,14 +705,10 @@ fn detect_test_runner_mode(args: &[String]) -> TestRunnerMode {
                     .any(|ext| name_str.ends_with(&format!(".{ext}")))
                     && scan_mtp_kind_in_file(&entry.path()) == MtpProjectKind::VsTestBridge
                 {
-                    found = MtpProjectKind::VsTestBridge;
+                    return MtpProjectKind::VsTestBridge;
                 }
             }
         }
-    }
-
-    if found == MtpProjectKind::VsTestBridge {
-        return TestRunnerMode::MtpVsTestBridge;
     }
 
     // Walk up from current directory looking for Directory.Build.props.
@@ -719,9 +717,9 @@ fn detect_test_runner_mode(args: &[String]) -> TestRunnerMode {
             let props = dir.join("Directory.Build.props");
             if props.exists() {
                 if scan_mtp_kind_in_file(&props) == MtpProjectKind::VsTestBridge {
-                    return TestRunnerMode::MtpVsTestBridge;
+                    return MtpProjectKind::VsTestBridge;
                 }
-                break; // only read the first (closest) Directory.Build.props
+                break;
             }
             if !dir.pop() {
                 break;
@@ -729,7 +727,7 @@ fn detect_test_runner_mode(args: &[String]) -> TestRunnerMode {
         }
     }
 
-    TestRunnerMode::Classic
+    MtpProjectKind::None
 }
 
 fn has_nologo_arg(args: &[String]) -> bool {
@@ -2060,7 +2058,7 @@ mod tests {
         )
         .expect("write csproj");
 
-        // All project-file properties → VsTestBridge; only global.json gives MtpNative
+        // All project-file properties → VsTestBridge; global.json → VsTestBridge
         assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
     }
 
@@ -2116,15 +2114,15 @@ mod tests {
         let binlog_path = Path::new("/tmp/test.binlog");
         let injected = build_effective_dotnet_args("test", &args, binlog_path, None);
 
-        // --report-trx injected after --, --nologo supported in bridge mode
+        // --report-trx injected after --; -nologo is skipped for MTP mode
         assert!(!injected.contains(&"--logger".to_string()));
         assert!(injected.contains(&"--report-trx".to_string()));
         assert!(injected.contains(&"--".to_string()));
-        assert!(injected.contains(&"-nologo".to_string()));
+        assert!(!injected.contains(&"-nologo".to_string()));
     }
 
     #[test]
-    fn test_parse_global_json_mtp_mode_detects_mtp_native() {
+    fn test_parse_global_json_mtp_mode_detects_mtp_runner() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let global_json = temp_dir.path().join("global.json");
         fs::write(
@@ -2579,5 +2577,98 @@ mod tests {
         cleanup_temp_file(&missing_file);
 
         assert!(!missing_file.exists());
+    }
+
+    #[test]
+    fn test_global_json_mtp_without_project_properties_detection() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let global_json = temp_dir.path().join("global.json");
+        fs::write(
+            &global_json,
+            r#"{"test":{"runner":"Microsoft.Testing.Platform"}}"#,
+        )
+        .expect("write global.json");
+
+        let classic_csproj = temp_dir.path().join("Classic.Tests.csproj");
+        fs::write(
+            &classic_csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        // Verify global.json MTP detection works
+        assert!(parse_global_json_mtp_mode(&global_json));
+        // Verify classic csproj has no MTP properties
+        assert_eq!(scan_mtp_kind_in_file(&classic_csproj), MtpProjectKind::None);
+    }
+
+    #[test]
+    fn test_global_json_mtp_with_project_properties_detects_vstest_bridge() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let csproj = temp_dir.path().join("MTP.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        let args = vec![csproj.display().to_string()];
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+        assert!(
+            scan_project_files_for_mtp(&args) == MtpProjectKind::VsTestBridge,
+            "Project with UseMicrosoftTestingPlatformRunner should have MTP properties"
+        );
+    }
+
+    #[test]
+    fn test_altinn_scenario_global_json_mtp_no_project_properties() {
+        // Simulates the Altinn/altinn-register scenario:
+        // global.json has MTP mode, but no project-file MTP properties.
+        // With MtpVsTestBridge, -- --report-trx is injected. Projects without
+        // Microsoft.Testing.Extensions.TrxReport will get "Unknown option" error,
+        // which is informative — tells user to add the package.
+
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let global_json = temp_dir.path().join("global.json");
+        fs::write(
+            &global_json,
+            r#"{"test":{"runner":"Microsoft.Testing.Platform"}}"#,
+        )
+        .expect("write global.json");
+
+        // xUnit v3 project without UseMicrosoftTestingPlatformRunner
+        let xunit_csproj = temp_dir.path().join("Xunit.Tests.csproj");
+        fs::write(
+            &xunit_csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .expect("write csproj");
+
+        assert!(parse_global_json_mtp_mode(&global_json));
+        assert_eq!(scan_mtp_kind_in_file(&xunit_csproj), MtpProjectKind::None);
+
+        let args = vec![xunit_csproj.display().to_string()];
+        assert!(
+            scan_project_files_for_mtp(&args) == MtpProjectKind::None,
+            "xUnit project without MTP properties should not be detected as MTP"
+        );
     }
 }
