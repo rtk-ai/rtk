@@ -964,13 +964,13 @@ Les lignes repetees sont fusionnees : `[ERROR] Connection refused (x42)`.
 
 ---
 
-### `rtk curl` -- HTTP avec detection JSON
+### `rtk curl` -- HTTP avec troncature
 
 ```bash
 rtk curl [args...]
 ```
 
-Auto-detecte les reponses JSON et affiche le schema au lieu du contenu complet.
+Tronque les reponses longues et sauvegarde la sortie complete dans un fichier pour recuperation.
 
 ---
 
