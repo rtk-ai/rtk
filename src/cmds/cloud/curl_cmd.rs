@@ -1,9 +1,11 @@
-//! Runs curl and auto-compresses JSON responses.
+//! Runs curl and applies a simple truncation with tee hint if the output is too long.
 
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
 use crate::core::{stream::exec_capture, utils::resolved_command};
 use anyhow::{Context, Result};
+
+const MAX_RESPONSE_SIZE: usize = 500;
 
 /// Not using run_filtered: on failure, curl can return HTML error pages (404, 500)
 /// that the JSON schema filter would mangle. The early exit skips filtering entirely.
@@ -56,8 +58,11 @@ fn filter_curl_output(raw: &str) -> FilterResult {
     let trimmed = raw.trim();
     let tee_hint = force_tee_hint(raw, "curl");
 
-    let content = if trimmed.len() >= 500 {
-        let mut end = 500;
+    // If the output is too long and we have a tee hint, truncate the output.
+    let content = if trimmed.len() >= MAX_RESPONSE_SIZE && tee_hint.is_some() {
+        let mut end = MAX_RESPONSE_SIZE;
+        // Ensure we don't cut in the middle of a UTF-8 character.
+        // .len() counts bytes, not chars.
         while !trimmed.is_char_boundary(end) {
             end -= 1;
         }
