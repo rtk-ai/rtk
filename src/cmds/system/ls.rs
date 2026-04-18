@@ -35,6 +35,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .collect();
 
     let mut cmd = resolved_command("ls");
+    // Force C locale so month names match LS_DATE_RE, which is English-only.
+    // Without this, non-English locales (e.g. LC_TIME=pt_BR.UTF-8 → "abr"/"mar")
+    // cause every line to fail the regex, and compact_ls returns "(empty)"
+    // even for non-empty directories.
+    cmd.env("LC_ALL", "C");
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
