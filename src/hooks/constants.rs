@@ -17,3 +17,7 @@ pub const OPENCODE_PLUGIN_PATH: &str = ".config/opencode/plugins/rtk.ts";
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+pub const KIMI_DIR: &str = ".kimi";
+
+/// Native Rust hook command for Kimi Code CLI.
+pub const KIMI_HOOK_COMMAND: &str = "rtk hook kimi";

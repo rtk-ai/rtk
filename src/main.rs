@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Kimi Code CLI
+    Kimi,
 }
 
 #[derive(Parser)]
@@ -356,6 +358,10 @@ enum Commands {
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
+
+        /// Initialize for Kimi Code CLI instead of Claude Code
+        #[arg(long)]
+        kimi: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -738,6 +744,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Kimi Code CLI PreToolUse hook (reads JSON from stdin)
+    Kimi,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1716,12 +1724,13 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            kimi,
         } => {
             if show {
-                hooks::init::show_config(codex)?;
+                hooks::init::show_config(codex, kimi)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                hooks::init::uninstall(global, gemini, codex, cursor, kimi, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1733,6 +1742,18 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
             } else if copilot {
                 hooks::init::run_copilot(cli.verbose)?;
+            } else if kimi || agent == Some(AgentTarget::Kimi) {
+                if !global {
+                    anyhow::bail!("Kimi support is global-only. Use: rtk init -g --kimi");
+                }
+                let patch_mode = if auto_patch {
+                    hooks::init::PatchMode::Auto
+                } else if no_patch {
+                    hooks::init::PatchMode::Skip
+                } else {
+                    hooks::init::PatchMode::Ask
+                };
+                hooks::init::run_kimi(hook_only, patch_mode, cli.verbose)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
@@ -2073,6 +2094,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Kimi => {
+                hooks::hook_cmd::run_kimi()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {

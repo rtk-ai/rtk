@@ -282,6 +282,52 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
     .ok()
 }
 
+// ── Kimi Code CLI native hook ─────────────────────────────────
+
+/// Run the Kimi Code CLI PreToolUse hook natively.
+pub fn run_kimi() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_kimi_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 // ── Claude Code native hook ────────────────────────────────────
 
 enum PayloadAction {
@@ -904,5 +950,53 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // --- Kimi handler ---
+
+    fn kimi_input(cmd: &str) -> String {
+        json!({
+            "tool_name": "Shell",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_kimi_rewrite_git_status() {
+        let result = run_kimi_inner(&kimi_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_kimi_passthrough_no_output() {
+        assert!(run_kimi_inner(&kimi_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_kimi_heredoc_passthrough() {
+        assert!(run_kimi_inner(&kimi_input("cat <<EOF\nhello\nEOF")).is_none());
+    }
+
+    #[test]
+    fn test_kimi_already_rtk_passthrough() {
+        assert!(run_kimi_inner(&kimi_input("rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_kimi_json_output_structure() {
+        let result = run_kimi_inner(&kimi_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert!(hook["updatedInput"].is_object());
+        assert!(hook["updatedInput"]["command"].is_string());
     }
 }

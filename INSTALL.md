@@ -210,6 +210,29 @@ rtk init -g --no-patch
 # Restart Claude Code
 ```
 
+### Kimi Code CLI User
+```bash
+# 1. Install RTK
+cargo install --git https://github.com/rtk-ai/rtk
+rtk gain  # Verify
+
+# 2. Setup for Kimi
+rtk init -g --kimi
+# → Answer 'y' when prompted to patch config.toml
+
+# 3. Restart Kimi CLI
+# 4. Test: git status (should use rtk)
+```
+
+### CI/CD or Automation (Kimi)
+```bash
+# Non-interactive setup
+rtk init -g --kimi --auto-patch
+
+# Verify in scripts
+rtk init --show --kimi | grep "config.toml"
+```
+
 ### Temporary Trial
 ```bash
 # Install hook
@@ -253,6 +276,17 @@ rtk init -g --uninstall
 #   - Registration: RTK hook entry from settings.json
 
 # Restart Claude Code after uninstall
+```
+
+### Kimi Code CLI Uninstall
+```bash
+rtk init -g --kimi --uninstall
+
+# What gets removed:
+#   - Hook entry from ~/.kimi/config.toml
+#   - Context: ~/.kimi/KIMI.md
+
+# Restart Kimi CLI after uninstall
 ```
 
 **For Local Projects**: Manually remove RTK block from `./CLAUDE.md`
@@ -391,6 +425,7 @@ Before each session:
 - [ ] Verify RTK is installed: `rtk --version`
 - [ ] If not installed → follow "Install from fork"
 - [ ] If project not initialized → `rtk init`
+- [ ] For Kimi users → `rtk init -g --kimi`
 - [ ] Use `rtk` for ALL git/pnpm/test/vitest commands
 - [ ] Check savings: `rtk gain`
 

@@ -8,7 +8,8 @@ use tempfile::NamedTempFile;
 
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, KIMI_DIR, KIMI_HOOK_COMMAND, PRE_TOOL_USE_KEY,
+    REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -55,6 +56,7 @@ const CLAUDE_MD: &str = "CLAUDE.md";
 const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
+const KIMI_MD: &str = "KIMI.md";
 
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -534,8 +536,15 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
-pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
+/// Full uninstall for Claude, Gemini, Codex, Cursor, or Kimi artifacts.
+pub fn uninstall(
+    global: bool,
+    gemini: bool,
+    codex: bool,
+    cursor: bool,
+    kimi: bool,
+    verbose: u8,
+) -> Result<()> {
     if codex {
         return uninstall_codex(global, verbose);
     }
@@ -554,6 +563,23 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
             println!("\nRestart Cursor to apply changes.");
         } else {
             println!("RTK Cursor support was not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    if kimi {
+        if !global {
+            anyhow::bail!("Kimi uninstall only works with --global flag");
+        }
+        let kimi_removed = uninstall_kimi(verbose)?;
+        if !kimi_removed.is_empty() {
+            println!("RTK uninstalled (Kimi):");
+            for item in &kimi_removed {
+                println!("  - {}", item);
+            }
+            println!("\nRestart Kimi CLI to apply changes.");
+        } else {
+            println!("RTK Kimi support was not installed (nothing to remove)");
         }
         return Ok(());
     }
@@ -2091,9 +2117,13 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool) -> Result<()> {
+pub fn show_config(codex: bool, kimi: bool) -> Result<()> {
     if codex {
         return show_codex_config();
+    }
+
+    if kimi {
+        return show_kimi_config();
     }
 
     show_claude_config()
@@ -2386,6 +2416,55 @@ fn show_codex_config() -> Result<()> {
     Ok(())
 }
 
+fn show_kimi_config() -> Result<()> {
+    let kimi_dir = resolve_kimi_dir()?;
+    let kimi_md_path = kimi_dir.join(KIMI_MD);
+    let config_path = kimi_dir.join("config.toml");
+
+    println!("rtk Configuration (Kimi Code CLI):\n");
+
+    // Check KIMI.md
+    if kimi_md_path.exists() {
+        println!("[ok] KIMI.md: {} (slim mode)", kimi_md_path.display());
+    } else {
+        println!("[--] KIMI.md: not found");
+    }
+
+    // Check config.toml
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path)?;
+        if let Ok(config) = content.parse::<toml::Value>() {
+            if let Some(hooks) = config.get("hooks").and_then(|v| v.as_array()) {
+                if hooks.iter().any(|h| {
+                    h.get("command")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|c| c.contains("rtk hook kimi"))
+                }) {
+                    println!("[ok] config.toml: RTK hook configured");
+                } else {
+                    println!("[warn] config.toml: exists but RTK hook not configured");
+                    println!("    Run: rtk init -g --kimi --auto-patch");
+                }
+            } else {
+                println!("[--] config.toml: exists but no hooks array");
+            }
+        } else {
+            println!("[warn] config.toml: exists but invalid TOML");
+        }
+    } else {
+        println!("[--] config.toml: not found");
+    }
+
+    println!("\nUsage:");
+    println!("  rtk init -g --kimi           # Hook + KIMI.md (recommended)");
+    println!("  rtk init -g --kimi --auto-patch   # Same as above but no prompt");
+    println!("  rtk init -g --kimi --no-patch     # Skip config.toml (manual setup)");
+    println!("  rtk init -g --kimi --uninstall    # Remove all Kimi RTK artifacts");
+    println!("  rtk init -g --kimi --hook-only    # Hook only, no KIMI.md");
+
+    Ok(())
+}
+
 fn run_opencode_only_mode(verbose: u8) -> Result<()> {
     let opencode_plugin_path = prepare_opencode_plugin_path()?;
     ensure_opencode_plugin_installed(&opencode_plugin_path, verbose)?;
@@ -2605,6 +2684,176 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
 
     if verbose > 0 && !removed.is_empty() {
         eprintln!("Gemini artifacts removed");
+    }
+
+    Ok(removed)
+}
+
+// ── Kimi Code CLI support ────────────────────────────────────
+
+fn resolve_kimi_dir() -> Result<PathBuf> {
+    resolve_home_subdir(KIMI_DIR)
+}
+
+/// Entry point for `rtk init -g --kimi`
+pub fn run_kimi(hook_only: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    let kimi_dir = resolve_kimi_dir()?;
+    fs::create_dir_all(&kimi_dir)
+        .with_context(|| format!("Failed to create Kimi config dir: {}", kimi_dir.display()))?;
+
+    // 1. Install KIMI.md (RTK awareness for Kimi)
+    if !hook_only {
+        let kimi_md_path = kimi_dir.join(KIMI_MD);
+        write_if_changed(&kimi_md_path, RTK_SLIM, KIMI_MD, verbose)?;
+    }
+
+    // 2. Patch ~/.kimi/config.toml
+    patch_kimi_config(&kimi_dir, patch_mode, verbose)?;
+
+    println!("\nKimi Code CLI hook installed (global).\n");
+    println!("  Hook:      {}", KIMI_HOOK_COMMAND);
+    if !hook_only {
+        println!("  KIMI.md:   {}", kimi_dir.join(KIMI_MD).display());
+    }
+    println!("  Config:    {}", kimi_dir.join("config.toml").display());
+    println!("\n  Restart Kimi CLI. Test with: git status\n");
+    Ok(())
+}
+
+/// Patch ~/.kimi/config.toml with the PreToolUse hook
+fn patch_kimi_config(kimi_dir: &Path, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    let config_path = kimi_dir.join("config.toml");
+
+    // Read or create config.toml
+    let mut config: toml::Value = if config_path.exists() {
+        let content = fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        content
+            .parse()
+            .unwrap_or(toml::Value::Table(toml::map::Map::new()))
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+
+    // Check if RTK hook already present
+    if let Some(toml::Value::Array(hooks)) = config.get("hooks") {
+        if hooks.iter().any(|h| {
+            h.get("command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|c| c.contains("rtk hook kimi"))
+        }) {
+            if verbose > 0 {
+                eprintln!("Kimi config.toml already has RTK hook");
+            }
+            return Ok(());
+        }
+    }
+
+    // Ask user before patching
+    if patch_mode == PatchMode::Skip {
+        println!(
+            "\nManual setup needed: add RTK hook to {}\n\
+             See: https://github.com/rtk-ai/rtk#kimi-code-cli",
+            config_path.display()
+        );
+        return Ok(());
+    }
+
+    if patch_mode == PatchMode::Ask {
+        print!("Patch {} with RTK hook? [y/N] ", config_path.display());
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Skipped. Add hook manually later.");
+            return Ok(());
+        }
+    }
+
+    // Build hook entry
+    let hook_entry = toml::Value::Table({
+        let mut m = toml::map::Map::new();
+        m.insert(
+            "event".to_string(),
+            toml::Value::String("PreToolUse".to_string()),
+        );
+        m.insert(
+            "matcher".to_string(),
+            toml::Value::String("Shell".to_string()),
+        );
+        m.insert(
+            "command".to_string(),
+            toml::Value::String(KIMI_HOOK_COMMAND.to_string()),
+        );
+        m.insert("timeout".to_string(), toml::Value::Integer(5));
+        m
+    });
+
+    // Insert into config
+    let hooks = config
+        .as_table_mut()
+        .context("config.toml is not a table")?
+        .entry("hooks")
+        .or_insert(toml::Value::Array(Vec::new()));
+
+    hooks
+        .as_array_mut()
+        .context("hooks is not an array")?
+        .push(hook_entry);
+
+    // Write atomically
+    let content = toml::to_string_pretty(&config)?;
+    let tmp = NamedTempFile::new_in(kimi_dir)?;
+    fs::write(tmp.path(), &content)?;
+    tmp.persist(&config_path)
+        .with_context(|| format!("Failed to write {}", config_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Patched {}", config_path.display());
+    }
+
+    Ok(())
+}
+
+/// Remove Kimi artifacts during uninstall
+fn uninstall_kimi(verbose: u8) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    let kimi_dir = match resolve_kimi_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(removed),
+    };
+
+    // Remove KIMI.md
+    let kimi_md = kimi_dir.join(KIMI_MD);
+    if kimi_md.exists() {
+        fs::remove_file(&kimi_md)
+            .with_context(|| format!("Failed to remove {}", kimi_md.display()))?;
+        removed.push(format!("KIMI.md: {}", kimi_md.display()));
+    }
+
+    // Remove hook from config.toml
+    let config_path = kimi_dir.join("config.toml");
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path)?;
+        if let Ok(mut config) = content.parse::<toml::Value>() {
+            if let Some(arr) = config.get_mut("hooks").and_then(|v| v.as_array_mut()) {
+                let before = arr.len();
+                arr.retain(|h| {
+                    !h.get("command")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|c| c.contains("rtk hook kimi"))
+                });
+                if arr.len() < before {
+                    let new_content = toml::to_string_pretty(&config)?;
+                    fs::write(&config_path, new_content)?;
+                    removed.push("Kimi config.toml: removed RTK hook entry".to_string());
+                }
+            }
+        }
+    }
+
+    if verbose > 0 && !removed.is_empty() {
+        eprintln!("Kimi artifacts removed");
     }
 
     Ok(removed)
@@ -3667,5 +3916,140 @@ More notes
         let arr = root["hooks"]["preToolUse"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["command"].as_str().unwrap(), CURSOR_HOOK_COMMAND);
+    }
+
+    // --- Kimi init tests ---
+
+    #[test]
+    fn test_patch_kimi_config_creates_new_file() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path();
+
+        patch_kimi_config(kimi_dir, PatchMode::Auto, 0).unwrap();
+
+        let config_path = kimi_dir.join("config.toml");
+        assert!(config_path.exists());
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("rtk hook kimi"));
+        assert!(content.contains("PreToolUse"));
+        assert!(content.contains("Shell"));
+    }
+
+    #[test]
+    fn test_patch_kimi_config_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path();
+
+        patch_kimi_config(kimi_dir, PatchMode::Auto, 0).unwrap();
+        let first = fs::read_to_string(kimi_dir.join("config.toml")).unwrap();
+
+        patch_kimi_config(kimi_dir, PatchMode::Auto, 0).unwrap();
+        let second = fs::read_to_string(kimi_dir.join("config.toml")).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_patch_kimi_config_preserves_existing_hooks() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path();
+        let config_path = kimi_dir.join("config.toml");
+
+        fs::write(
+            &config_path,
+            r#"[[hooks]]
+event = "PostToolUse"
+matcher = "WriteFile"
+command = "prettier --write"
+"#,
+        )
+        .unwrap();
+
+        patch_kimi_config(kimi_dir, PatchMode::Auto, 0).unwrap();
+
+        let content = fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("prettier --write"));
+        assert!(content.contains("rtk hook kimi"));
+    }
+
+    #[test]
+    fn test_uninstall_kimi_removes_artifacts() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path();
+        let config_path = kimi_dir.join("config.toml");
+        let kimi_md = kimi_dir.join(KIMI_MD);
+
+        fs::write(
+            &config_path,
+            r#"[[hooks]]
+event = "PreToolUse"
+matcher = "Shell"
+command = "rtk hook kimi"
+timeout = 5
+
+[[hooks]]
+event = "PostToolUse"
+matcher = "WriteFile"
+command = "prettier --write"
+"#,
+        )
+        .unwrap();
+        fs::write(&kimi_md, RTK_SLIM).unwrap();
+
+        let removed = uninstall_kimi_at(kimi_dir, 0).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(!kimi_md.exists());
+
+        let config_content = fs::read_to_string(&config_path).unwrap();
+        assert!(!config_content.contains("rtk hook kimi"));
+        assert!(config_content.contains("prettier --write"));
+    }
+
+    #[test]
+    fn test_uninstall_kimi_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let kimi_dir = temp.path();
+
+        let first = uninstall_kimi_at(kimi_dir, 0).unwrap();
+        let second = uninstall_kimi_at(kimi_dir, 0).unwrap();
+
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+    }
+
+    // Helper to run uninstall_kimi at a specific path
+    fn uninstall_kimi_at(kimi_dir: &Path, _verbose: u8) -> Result<Vec<String>> {
+        let mut removed = Vec::new();
+
+        // Remove KIMI.md
+        let kimi_md = kimi_dir.join(KIMI_MD);
+        if kimi_md.exists() {
+            fs::remove_file(&kimi_md)?;
+            removed.push(format!("KIMI.md: {}", kimi_md.display()));
+        }
+
+        // Remove hook from config.toml
+        let config_path = kimi_dir.join("config.toml");
+        if config_path.exists() {
+            let content = fs::read_to_string(&config_path)?;
+            if let Ok(mut config) = content.parse::<toml::Value>() {
+                if let Some(arr) = config.get_mut("hooks").and_then(|v| v.as_array_mut()) {
+                    let before = arr.len();
+                    arr.retain(|h| {
+                        !h.get("command")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|c| c.contains("rtk hook kimi"))
+                    });
+                    if arr.len() < before {
+                        let new_content = toml::to_string_pretty(&config)?;
+                        fs::write(&config_path, new_content)?;
+                        removed.push("Kimi config.toml: removed RTK hook entry".to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(removed)
     }
 }
