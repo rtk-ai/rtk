@@ -3278,4 +3278,33 @@ mod tests {
             Some("rtk git log | head | tail && rtk git status".into())
         );
     }
+
+    // Regression tests for #1055: supported commands must be rewriteable by the hook.
+    // When the PreToolUse hook is active, `rewrite_command` returning Some means the
+    // command is already handled — the discover report should not count it as missed.
+    #[test]
+    fn test_supported_git_commands_are_rewriteable_by_hook() {
+        let cmds = ["git status", "git log -10", "git diff", "git show HEAD"];
+        for cmd in &cmds {
+            assert!(
+                classify_command(cmd) != Classification::Ignored,
+                "{cmd} should be Supported, not Ignored"
+            );
+            assert!(
+                rewrite_command(cmd, &[]).is_some(),
+                "hook must rewrite '{cmd}' (needed for #1055 hook-aware discover)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_supported_cargo_commands_are_rewriteable_by_hook() {
+        let cmds = ["cargo test", "cargo build", "cargo clippy"];
+        for cmd in &cmds {
+            assert!(
+                rewrite_command(cmd, &[]).is_some(),
+                "hook must rewrite '{cmd}' (needed for #1055 hook-aware discover)"
+            );
+        }
+    }
 }

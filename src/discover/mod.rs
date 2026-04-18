@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
-    strip_disabled_prefix, Classification,
+    category_avg_tokens, classify_command, has_rtk_disabled_prefix, rewrite_command,
+    split_command_chain, strip_disabled_prefix, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -65,8 +65,17 @@ pub fn run(
         }
     }
 
+    // Detect whether the Claude Code hook is active so we can exclude hook-rewritten
+    // commands from the "missed savings" list — they're already being handled (#1055).
+    let hook_active = matches!(
+        crate::hooks::hook_check::status(),
+        crate::hooks::hook_check::HookStatus::Ok | crate::hooks::hook_check::HookStatus::Outdated
+    );
+
     let mut total_commands: usize = 0;
     let mut already_rtk: usize = 0;
+    let mut hook_rewritten_count: usize = 0;
+    let mut hook_rewritten_tokens: usize = 0;
     let mut parse_errors: usize = 0;
     let mut rtk_disabled_count: usize = 0;
     let mut rtk_disabled_cmds: HashMap<String, usize> = HashMap::new();
@@ -114,6 +123,21 @@ pub fn run(
                         estimated_savings_pct,
                         status,
                     } => {
+                        // If the Claude Code hook is active and would rewrite this command,
+                        // it is already being handled — do not count as a missed saving (#1055).
+                        if hook_active && rewrite_command(part, &[]).is_some() {
+                            let output_tokens = if let Some(len) = ext_cmd.output_len {
+                                len / 4
+                            } else {
+                                let subcmd = extract_subcmd(part);
+                                category_avg_tokens(category, subcmd)
+                            };
+                            hook_rewritten_count += 1;
+                            hook_rewritten_tokens +=
+                                (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
+                            continue;
+                        }
+
                         let bucket = supported_map.entry(rtk_equivalent).or_insert_with(|| {
                             SupportedBucket {
                                 rtk_equivalent,
@@ -238,6 +262,8 @@ pub fn run(
         sessions_scanned: sessions.len(),
         total_commands,
         already_rtk,
+        hook_rewritten_count,
+        hook_rewritten_tokens,
         since_days,
         supported,
         unsupported,

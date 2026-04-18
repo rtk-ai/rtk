@@ -50,6 +50,10 @@ pub struct DiscoverReport {
     pub sessions_scanned: usize,
     pub total_commands: usize,
     pub already_rtk: usize,
+    /// Commands that the Claude Code PreToolUse hook would rewrite — already handled (#1055).
+    pub hook_rewritten_count: usize,
+    /// Estimated tokens already saved by the hook (not double-counted as missed savings).
+    pub hook_rewritten_tokens: usize,
     pub since_days: u64,
     pub supported: Vec<SupportedEntry>,
     pub unsupported: Vec<UnsupportedEntry>,
@@ -91,6 +95,15 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
             0
         }
     ));
+
+    // Show hook-rewritten commands separately so they don't pollute "missed savings" (#1055).
+    if report.hook_rewritten_count > 0 {
+        out.push_str(&format!(
+            "Hook-handled:      {} commands — already rewritten by Claude Code hook (~{})\n",
+            report.hook_rewritten_count,
+            format_tokens(report.hook_rewritten_tokens),
+        ));
+    }
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
         out.push_str("\nNo missed savings found. RTK usage looks good!\n");
@@ -212,5 +225,55 @@ fn truncate_str(s: &str, max: usize) -> String {
             .map(|(_, c)| c)
             .collect();
         format!("{}..", truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_report() -> DiscoverReport {
+        DiscoverReport {
+            sessions_scanned: 1,
+            total_commands: 100,
+            already_rtk: 10,
+            hook_rewritten_count: 0,
+            hook_rewritten_tokens: 0,
+            since_days: 7,
+            supported: vec![],
+            unsupported: vec![],
+            parse_errors: 0,
+            rtk_disabled_count: 0,
+            rtk_disabled_examples: vec![],
+        }
+    }
+
+    // Regression test for #1055: hook_rewritten_count is shown in report text when non-zero.
+    #[test]
+    fn test_hook_rewritten_count_shown_when_nonzero() {
+        let mut report = empty_report();
+        report.hook_rewritten_count = 42;
+        report.hook_rewritten_tokens = 5000;
+
+        let text = format_text(&report, 20, false);
+        assert!(
+            text.contains("Hook-handled"),
+            "expected 'Hook-handled' line in report: {text}"
+        );
+        assert!(
+            text.contains("42"),
+            "expected hook count 42 in report: {text}"
+        );
+    }
+
+    // When hook count is zero (no hook installed), the line must be absent.
+    #[test]
+    fn test_hook_rewritten_count_hidden_when_zero() {
+        let report = empty_report();
+        let text = format_text(&report, 20, false);
+        assert!(
+            !text.contains("Hook-handled"),
+            "should not show Hook-handled when count is 0: {text}"
+        );
     }
 }
