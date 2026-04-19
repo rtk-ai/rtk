@@ -53,6 +53,11 @@ fn hash_path(hook_path: &Path) -> PathBuf {
         .join(HASH_FILENAME)
 }
 
+/// Public accessor for the hash sidecar path (used by dry-run existence checks).
+pub fn hash_path_for(hook_path: &Path) -> PathBuf {
+    hash_path(hook_path)
+}
+
 /// Store SHA-256 hash of the hook script after installation.
 ///
 /// Format is compatible with `sha256sum -c`:
