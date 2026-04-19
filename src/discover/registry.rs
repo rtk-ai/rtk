@@ -595,6 +595,27 @@ const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec",
 
 const MAX_PREFIX_DEPTH: usize = 10;
 
+/// Check whether a command should be excluded from rewriting based on a single
+/// `exclude_commands` entry.
+///
+/// - **Single-word entry** (no whitespace, e.g. `"curl"`): matches when the first
+///   whitespace-separated token of the command equals the entry.
+/// - **Multi-word entry** (contains whitespace, e.g. `"git diff"`): matches when
+///   the command's first N tokens equal the entry's tokens, where N is the
+///   entry's token count. This lets users exclude specific subcommands without
+///   blocking the entire parent command.
+///
+/// Word boundaries use whitespace, so `"git diff"` matches `"git diff HEAD"` and
+/// `"git diff"` exactly, but never `"git difference"` or `"git diffoo"`.
+fn is_command_excluded(cmd: &str, entry: &str) -> bool {
+    let entry_tokens: Vec<&str> = entry.split_whitespace().collect();
+    if entry_tokens.is_empty() {
+        return false;
+    }
+    let cmd_tokens = cmd.split_whitespace().take(entry_tokens.len());
+    cmd_tokens.eq(entry_tokens.iter().copied())
+}
+
 fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     rewrite_segment_inner(seg, excluded, 0)
 }
@@ -647,9 +668,13 @@ fn rewrite_segment_inner(seg: &str, excluded: &[String], depth: usize) -> Option
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
-            // Check if the base command is excluded from rewriting (#243)
-            let base = cmd_part.split_whitespace().next().unwrap_or("");
-            if excluded.iter().any(|e| e == base) {
+            // Check if the command is excluded from rewriting (#243).
+            // Single-word entries match the first whitespace-separated token of the command
+            // (existing behavior). Multi-word entries match as a whitespace-aware prefix,
+            // so e.g. "git diff" matches `git diff HEAD~1 HEAD` but not `git status` or
+            // `git difference`. This lets users exclude specific subcommands without
+            // blocking the entire parent command.
+            if excluded.iter().any(|e| is_command_excluded(cmd_part, e)) {
                 return None;
             }
             rtk_equivalent
@@ -2851,6 +2876,70 @@ mod tests {
             rewrite_command("git status && curl https://api.example.com", &excluded),
             Some("rtk git status && curl https://api.example.com".into())
         );
+    }
+
+    // --- Multi-word exclude_commands entries (subcommand-level exclusion) ---
+
+    #[test]
+    fn test_rewrite_multi_word_excludes_git_diff() {
+        // "git diff" entry excludes `git diff` with any args.
+        let excluded = vec!["git diff".to_string()];
+        assert_eq!(rewrite_command("git diff HEAD~1 HEAD", &excluded), None);
+        assert_eq!(rewrite_command("git diff", &excluded), None);
+    }
+
+    #[test]
+    fn test_rewrite_multi_word_allows_other_git_subcommands() {
+        // "git diff" does not block `git status`, `git log`, etc.
+        let excluded = vec!["git diff".to_string()];
+        assert_eq!(
+            rewrite_command("git status", &excluded),
+            Some("rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command("git log --oneline", &excluded),
+            Some("rtk git log --oneline".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_multi_word_no_partial_word_match() {
+        // "git diff" must not match `git diffoo` or `git difference`.
+        // Verified at the helper level since the git rewrite pattern only
+        // matches a fixed subcommand set (no partial matches reach the
+        // exclude check), but the helper's correctness still matters.
+        assert!(!is_command_excluded("git diffoo --foo", "git diff"));
+        assert!(!is_command_excluded("git difference", "git diff"));
+        assert!(is_command_excluded("git diff HEAD", "git diff"));
+        assert!(is_command_excluded("git diff", "git diff"));
+    }
+
+    #[test]
+    fn test_rewrite_multi_word_and_single_word_coexist() {
+        // Single-word and multi-word entries can be mixed freely.
+        let excluded = vec!["curl".to_string(), "git diff".to_string()];
+        // curl still fully excluded (single-word behavior)
+        assert_eq!(rewrite_command("curl https://example.com", &excluded), None);
+        // git diff excluded (multi-word)
+        assert_eq!(rewrite_command("git diff HEAD", &excluded), None);
+        // git status still rewrites
+        assert_eq!(
+            rewrite_command("git status", &excluded),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_is_command_excluded_whitespace_normalization() {
+        // Multiple spaces in either command or entry are normalized.
+        assert!(is_command_excluded("git  diff HEAD", "git diff"));
+        assert!(is_command_excluded("git diff HEAD", "git  diff"));
+    }
+
+    #[test]
+    fn test_is_command_excluded_empty_entry_never_matches() {
+        assert!(!is_command_excluded("git status", ""));
+        assert!(!is_command_excluded("git status", "   "));
     }
 
     #[test]
