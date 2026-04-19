@@ -338,9 +338,10 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma",
+        pattern: r"^((bunx|p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma",
         rtk_cmd: "rtk prisma",
         rewrite_prefixes: &[
+            "bunx prisma",
             "npm exec prisma",
             "npm prisma",
             "npm rum prisma",

@@ -117,6 +117,10 @@ test_rewrite "npx prisma migrate" \
   "npx prisma migrate" \
   "rtk prisma migrate"
 
+test_rewrite "bunx prisma migrate" \
+  "bunx prisma migrate" \
+  "rtk prisma migrate"
+
 test_rewrite "rtk git status" \
   "rtk git status" \
   "rtk git status"

@@ -2584,6 +2584,7 @@ mod tests {
     #[test]
     fn test_classify_prisma() {
         let commands = vec![
+            "bunx prisma",
             "npm exec prisma",
             "npm rum prisma",
             "npm run prisma",
@@ -2618,6 +2619,7 @@ mod tests {
     #[test]
     fn test_rewrite_prisma() {
         let commands = vec![
+            "bunx prisma",
             "npm exec prisma",
             "npm rum prisma",
             "npm run prisma",
