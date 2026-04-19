@@ -700,6 +700,13 @@ fn rewrite_segment_inner(seg: &str, excluded: &[String], depth: usize) -> Option
         }
     }
 
+    // rtk grep expects `pattern path [extra_args...]`, while rg/grep commonly receive
+    // leading flags before the pattern. Reorder simple flag prefixes so the rewritten
+    // command still parses correctly. If we can't do that safely, prefer no rewrite.
+    if rule.rtk_cmd == "rtk grep" {
+        return rewrite_grep_like(env_prefix, cmd_clean, redirect_suffix);
+    }
+
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
@@ -713,6 +720,95 @@ fn rewrite_segment_inner(seg: &str, excluded: &[String], depth: usize) -> Option
     }
 
     None
+}
+
+fn rewrite_grep_like(env_prefix: &str, cmd_clean: &str, redirect_suffix: &str) -> Option<String> {
+    let args: Vec<String> = tokenize(cmd_clean)
+        .into_iter()
+        .filter(|t| t.kind == TokenKind::Arg)
+        .map(|t| t.value)
+        .collect();
+
+    let base = args.first()?;
+    if base != "rg" && base != "grep" {
+        return None;
+    }
+
+    let mut leading_flags = Vec::new();
+    let mut idx = 1;
+    while idx < args.len() {
+        let arg = &args[idx];
+        if arg == "-" || !arg.starts_with('-') {
+            break;
+        }
+
+        if arg == "--" {
+            return None;
+        }
+
+        if grep_flag_requires_separate_value(arg) {
+            return None;
+        }
+
+        leading_flags.push(arg.clone());
+        idx += 1;
+    }
+
+    let pattern = args.get(idx)?.clone();
+    idx += 1;
+
+    let (path, has_explicit_path) = match args.get(idx) {
+        Some(arg) if arg != "-" && !arg.starts_with('-') => {
+            idx += 1;
+            (arg.clone(), true)
+        }
+        _ => (".".to_string(), false),
+    };
+
+    let mut parts = vec![format!("{}rtk grep", env_prefix), pattern];
+    if has_explicit_path || !leading_flags.is_empty() || idx < args.len() {
+        parts.push(path);
+    }
+    parts.extend(args[idx..].iter().cloned());
+    parts.extend(leading_flags);
+    Some(format!("{}{}", parts.join(" "), redirect_suffix))
+}
+
+fn grep_flag_requires_separate_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-A" | "-B"
+            | "-C"
+            | "-e"
+            | "-f"
+            | "-g"
+            | "-m"
+            | "-M"
+            | "-t"
+            | "-T"
+            | "--after-context"
+            | "--before-context"
+            | "--context"
+            | "--encoding"
+            | "--engine"
+            | "--file"
+            | "--glob"
+            | "--iglob"
+            | "--ignore-file"
+            | "--max-columns"
+            | "--max-count"
+            | "--path-separator"
+            | "--pre"
+            | "--pre-glob"
+            | "--regexp"
+            | "--replace"
+            | "--sort"
+            | "--sortr"
+            | "--threads"
+            | "--type"
+            | "--type-add"
+            | "--type-not"
+    )
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -1275,6 +1371,30 @@ mod tests {
             rewrite_command("rg \"fn main\"", &[]),
             Some("rtk grep \"fn main\"".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_rg_with_leading_flags_reorders_for_rtk_grep() {
+        assert_eq!(
+            rewrite_command(
+                r#"rg -n -U "document:\s*\{\s*create:" api/src scripts"#,
+                &[]
+            ),
+            Some(r#"rtk grep "document:\s*\{\s*create:" api/src scripts -n -U"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_with_leading_flags_and_default_path() {
+        assert_eq!(
+            rewrite_command(r#"rg -n "fn main""#, &[]),
+            Some(r#"rtk grep "fn main" . -n"#.into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_with_value_flags_skips_rewrite() {
+        assert_eq!(rewrite_command(r#"rg -g "*.rs" "fn main" src"#, &[]), None);
     }
 
     #[test]
