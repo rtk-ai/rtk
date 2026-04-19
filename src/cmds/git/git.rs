@@ -63,9 +63,50 @@ pub fn run(
 /// Returns true if `arg` looks like a file-system path rather than a git revision.
 ///
 /// Used by `normalize_diff_args` to decide where to inject `--`.
-fn looks_like_path(arg: &str) -> bool {
-    // Path separators are the strongest signal
-    arg.contains('/') || arg.contains('\\') || arg.starts_with('.') || arg.starts_with('~')
+///
+/// Strategy: use cheap syntactic signals first to handle the common cases without
+/// forking a child process. For ambiguous args that contain `/` or `@` (e.g.
+/// `origin/main` vs `src/main.rs`, `HEAD@{1}`), delegate to `git rev-parse
+/// --verify --quiet` — if git recognises it as a valid ref it is not a path.
+fn looks_like_path(arg: &str, global_args: &[String]) -> bool {
+    // 1. Explicit relative/home path prefixes — unambiguously paths.
+    if arg.starts_with("./")
+        || arg.starts_with("../")
+        || arg.starts_with("~/")
+        || arg == "~"
+        || arg.contains('\\')
+    {
+        return true;
+    }
+
+    // 2. Obvious git revision syntax — no need to call git.
+    //    `..` / `...` = range (A..B, A...B); `^` = parent/exclude (HEAD^, ^bad).
+    if arg.contains("..") || arg.contains('^') {
+        return false;
+    }
+
+    // 3. Dotfile at repo root (.gitignore, .env, .eslintrc).
+    if arg.starts_with('.') {
+        return true;
+    }
+
+    // 4. Bare word without `/` or `@` — almost certainly a branch/tag name
+    //    (HEAD, main, develop, v1.2.3).  No injection needed; git handles it.
+    if !arg.contains('/') && !arg.contains('@') {
+        return false;
+    }
+
+    // 5. Ambiguous: slash-containing (`origin/main`, `src/main.rs`) or reflog
+    //    (`HEAD@{1}`).  Ask git whether this is a known ref; if yes, not a path.
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("rev-parse")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg(arg);
+    match cmd.output() {
+        Ok(out) if out.status.success() => false, // valid ref — do not inject `--`
+        _ => true,                                 // not a ref — treat as path
+    }
 }
 
 /// Re-insert `--` before the first path-like argument when clap has consumed it.
@@ -78,7 +119,7 @@ fn looks_like_path(arg: &str) -> bool {
 /// Without the `--` separator git may treat an unambiguous path as a revision and
 /// emit "fatal: ambiguous argument".  We re-insert `--` before the first
 /// path-like argument when `--` is absent so git always gets the correct intent.
-fn normalize_diff_args(args: &[String]) -> Vec<String> {
+fn normalize_diff_args(args: &[String], global_args: &[String]) -> Vec<String> {
     // Already has `--` — nothing to do
     if args.iter().any(|a| a == "--") {
         return args.to_vec();
@@ -86,7 +127,7 @@ fn normalize_diff_args(args: &[String]) -> Vec<String> {
     // Find the first non-flag arg that looks like a path
     let path_start = args
         .iter()
-        .position(|arg| !arg.starts_with('-') && looks_like_path(arg));
+        .position(|arg| !arg.starts_with('-') && looks_like_path(arg, global_args));
     match path_start {
         Some(idx) => {
             let mut out = args[..idx].to_vec();
@@ -107,7 +148,7 @@ fn run_diff(
     let timer = tracking::TimedExecution::start();
 
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
-    let args = &normalize_diff_args(args);
+    let args = &normalize_diff_args(args, global_args);
 
     // Check if user wants stat output
     let wants_stat = args
@@ -1809,7 +1850,7 @@ mod tests {
             "--".to_string(),
             "src/main.rs".to_string(),
         ];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args(&args, &[]), args);
     }
 
     /// Core regression: clap ate `--` before a path with `/`.
@@ -1817,7 +1858,7 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_reinserts_separator_before_path_with_slash() {
         let args = vec!["apps/client/frontend/src/MyComponent.tsx".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args(&args, &[]);
         assert_eq!(
             normalized,
             vec!["--".to_string(), "apps/client/frontend/src/MyComponent.tsx".to_string()],
@@ -1829,7 +1870,7 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_reinserts_separator_after_ref() {
         let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args(&args, &[]);
         assert_eq!(
             normalized,
             vec!["HEAD".to_string(), "--".to_string(), "src/foo.rs".to_string()]
@@ -1840,7 +1881,7 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_reinserts_separator_after_flag() {
         let args = vec!["--cached".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args(&args, &[]);
         assert_eq!(
             normalized,
             vec!["--cached".to_string(), "--".to_string(), "src/foo.rs".to_string()]
@@ -1851,14 +1892,14 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_no_injection_for_pure_flags() {
         let args = vec!["--stat".to_string(), "--cached".to_string()];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args(&args, &[]), args);
     }
 
     /// Dotfile / relative-path detection (starts with `.`).
     #[test]
     fn test_normalize_diff_args_dotfile_is_path() {
         let args = vec![".gitignore".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args(&args, &[]);
         assert_eq!(
             normalized,
             vec!["--".to_string(), ".gitignore".to_string()]
@@ -1869,7 +1910,71 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_no_injection_for_bare_ref() {
         let args = vec!["HEAD".to_string()];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args(&args, &[]), args);
+    }
+
+    /// Regression #1217: remote branch refs must not be treated as paths.
+    /// Skips gracefully when the remote ref is not available (shallow CI clones).
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_remote_ref() {
+        // Probe whether origin/master is reachable in this checkout.
+        // CI often uses shallow clones without all remote tracking refs.
+        let has_ref = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "origin/master"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !has_ref {
+            // Ref not available in this environment — skip rather than false-fail.
+            return;
+        }
+
+        let args = vec!["origin/master".to_string()];
+        let normalized = normalize_diff_args(&args, &[]);
+        assert_eq!(normalized, args, "origin/master is a ref, not a path");
+    }
+
+    /// Range syntax `A..B` is always a rev, never a path.
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_range() {
+        let args = vec!["HEAD..origin/master".to_string()];
+        assert_eq!(normalize_diff_args(&args, &[]), args);
+    }
+
+    /// Triple-dot range also not a path.
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_triple_dot_range() {
+        let args = vec!["main...develop".to_string()];
+        assert_eq!(normalize_diff_args(&args, &[]), args);
+    }
+
+    /// Parent syntax `HEAD^` is a rev, not a path.
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_parent_rev() {
+        let args = vec!["HEAD^".to_string()];
+        assert_eq!(normalize_diff_args(&args, &[]), args);
+    }
+
+    /// Feature branch with slash: if it's a valid ref, no injection.
+    /// If not a valid ref in this repo, it would be treated as a path (acceptable).
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_feature_branch_if_valid_ref() {
+        // develop is a known ref in this repo
+        let args = vec!["develop".to_string()];
+        assert_eq!(normalize_diff_args(&args, &[]), args);
+    }
+
+    /// Ref before a real path: injection happens after the ref.
+    #[test]
+    fn test_normalize_diff_args_remote_ref_then_path_injects_separator() {
+        // HEAD (bare ref, no /) + src/foo.rs (not a ref) → -- before the path
+        let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
+        let normalized = normalize_diff_args(&args, &[]);
+        assert_eq!(
+            normalized,
+            vec!["HEAD".to_string(), "--".to_string(), "src/foo.rs".to_string()]
+        );
     }
 
     #[test]
