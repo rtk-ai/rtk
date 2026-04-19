@@ -1073,6 +1073,7 @@ rtk gain --monthly              # Ventilation par mois
 rtk gain --all                  # Toutes les ventilations
 rtk gain --quota -t pro         # Estimation d'economies sur le quota mensuel
 rtk gain --failures             # Log des echecs de parsing (commandes en fallback)
+rtk gain --reset --confirm      # Effacer stats locales (-y / --yes)
 rtk gain --format json          # Export JSON (pour dashboards)
 rtk gain --format csv           # Export CSV
 ```

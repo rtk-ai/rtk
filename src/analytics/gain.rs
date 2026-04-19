@@ -24,10 +24,39 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    reset: bool,
+    confirm: bool,
     _verbose: u8,
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
+
+    if reset {
+        if !confirm {
+            anyhow::bail!(
+                "Refusing to reset tracking data without --confirm (-y).\n\
+                 Examples:\n\
+                   rtk gain --reset --confirm\n\
+                   rtk gain --project --reset --confirm"
+            );
+        }
+        if let Some(ref root) = project_scope {
+            let n = tracker
+                .reset_project_commands(root)
+                .context("Failed to delete project-scoped command rows")?;
+            println!("Deleted {} command row(s) for this project.", n);
+            println!("Note: parse failure rows are global and were not removed.");
+        } else {
+            let (n_cmd, n_pf) = tracker
+                .reset_all()
+                .context("Failed to reset tracking database")?;
+            println!(
+                "Deleted {} command row(s) and {} parse failure row(s).",
+                n_cmd, n_pf
+            );
+        }
+        return Ok(());
+    }
 
     if failures {
         return show_failures(&tracker);

@@ -318,9 +318,13 @@ sqlite3 ~/.local/share/rtk/history.db .dump > rtk-backup.sql
 sqlite3 ~/.local/share/rtk/history.db \
   "DELETE FROM commands WHERE timestamp < datetime('now', '-90 days')"
 
-# Reset all data
+# Reset via CLI (preferred)
+rtk gain --reset --confirm
+# Project-scoped command history only:
+# rtk gain --project --reset --confirm
+
+# Reset all data (delete DB file; next rtk run recreates it)
 rm ~/.local/share/rtk/history.db
-# Next rtk command will recreate database
 ```
 
 ## Integration Examples
