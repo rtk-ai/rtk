@@ -184,7 +184,7 @@ Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk car
 ### Override Controls
 
 - **`RTK_DISABLED=1`**: Per-command override (`RTK_DISABLED=1 git status` runs raw)
-- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite
+- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite. Matches against the full command after stripping env prefixes. Subcommand patterns work (`"git push"` excludes `git push origin main`). Patterns starting with `^` are treated as regex.
 - **Already-RTK**: `rtk git status` passes through unchanged (no `rtk rtk git`)
 
 ## Exit Code Contract

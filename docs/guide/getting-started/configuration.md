@@ -91,6 +91,19 @@ Prevent specific commands from being rewritten by the hook:
 exclude_commands = ["git rebase", "git cherry-pick", "docker exec"]
 ```
 
+Patterns match against the full command after stripping env prefixes (`sudo`, `VAR=val`), so `"psql"` excludes both `psql -h localhost` and `PGPASSWORD=x psql -h localhost`.
+
+Subcommand patterns work too: `"git push"` excludes `git push origin main` but not `git status`.
+
+Patterns starting with `^` are treated as regex:
+
+```toml
+[hooks]
+exclude_commands = ["^curl", "^wget", "git rebase"]
+```
+
+Invalid regex patterns fall back to prefix matching.
+
 Or for a single invocation:
 
 ```bash
