@@ -54,6 +54,14 @@ rtk는 명령 출력이 LLM 컨텍스트에 도달하기 전에 필터링하고 
 brew install rtk
 ```
 
+### winget (Windows — 가장 쉬운 방법)
+
+Windows에서 가장 쉬운 설치 방법 — 명령어 하나로 끝, PATH 설정 불필요:
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### 빠른 설치 (Linux/macOS)
 
 ```bash

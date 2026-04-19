@@ -63,7 +63,9 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 brew install rtk
 ```
 
-### winget (Windows)
+### winget (Windows — easiest)
+
+Easiest way to install on Windows — one command, no PATH setup needed:
 
 ```powershell
 winget install rtk-ai.rtk
@@ -336,6 +338,7 @@ rtk init -g
 On native Windows (cmd.exe / PowerShell), RTK filters work but the hook does not auto-rewrite commands:
 
 ```powershell
+# Install via winget (see Installation above), or manually:
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
 # 2. Add rtk.exe to your PATH
 # 3. Initialize (falls back to CLAUDE.md injection)

@@ -54,6 +54,14 @@ rtk filtra y comprime las salidas de comandos antes de que lleguen al contexto d
 brew install rtk
 ```
 
+### winget (Windows — la mas facil)
+
+La forma mas facil de instalar en Windows — un solo comando, sin configuracion de PATH:
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### Instalacion rapida (Linux/macOS)
 
 ```bash

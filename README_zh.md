@@ -55,6 +55,14 @@ rtk 在命令输出到达 LLM 上下文之前进行过滤和压缩。单一 Rust
 brew install rtk
 ```
 
+### winget（Windows — 最简单）
+
+Windows 上最简单的安装方式 — 一条命令，无需配置 PATH：
+
+```powershell
+winget install rtk-ai.rtk
+```
+
 ### 快速安装（Linux/macOS）
 
 ```bash
