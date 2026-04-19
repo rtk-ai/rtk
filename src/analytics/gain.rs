@@ -24,10 +24,65 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    watch_interval: Option<u64>,
     _verbose: u8,
 ) -> Result<()> {
-    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
+
+    if let Some(interval) = watch_interval {
+        if format != "text" {
+            anyhow::bail!("--watch is only supported with text format");
+        }
+        if failures {
+            anyhow::bail!("--watch is not supported with --failures");
+        }
+        if interval == 0 {
+            anyhow::bail!("--watch interval must be ≥1ms");
+        }
+
+        // Resolve DB path once for mtime polling
+        let db_path =
+            crate::core::tracking::db_path().context("Failed to resolve tracking database path")?;
+        let mut last_modified = std::fs::metadata(&db_path).and_then(|m| m.modified()).ok();
+
+        // Initial render
+        render_watch_frame(
+            project_scope.as_deref(),
+            graph,
+            history,
+            quota,
+            tier,
+            daily,
+            weekly,
+            monthly,
+            all,
+        )?;
+        print_watch_hint(interval);
+
+        // Poll: check DB mtime, re-render only on change
+        let poll_interval = std::time::Duration::from_millis(interval);
+        loop {
+            std::thread::sleep(poll_interval);
+            let current_modified = std::fs::metadata(&db_path).and_then(|m| m.modified()).ok();
+            if current_modified != last_modified {
+                last_modified = current_modified;
+                render_watch_frame(
+                    project_scope.as_deref(),
+                    graph,
+                    history,
+                    quota,
+                    tier,
+                    daily,
+                    weekly,
+                    monthly,
+                    all,
+                )?;
+                print_watch_hint(interval);
+            }
+        }
+    }
+
+    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
 
     if failures {
         return show_failures(&tracker);
@@ -58,8 +113,36 @@ pub fn run(
         _ => {} // Continue with text format
     }
 
+    render_text(
+        &tracker,
+        project_scope.as_deref(),
+        graph,
+        history,
+        quota,
+        tier,
+        daily,
+        weekly,
+        monthly,
+        all,
+    )
+}
+
+/// Render all text-format output (summary, breakdowns, graph, history, quota).
+#[allow(clippy::too_many_arguments)]
+fn render_text(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    graph: bool,
+    history: bool,
+    quota: bool,
+    tier: &str,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    all: bool,
+) -> Result<()> {
     let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
+        .get_summary_filtered(project_scope) // changed: use filtered variant
         .context("Failed to load token savings summary from database")?;
 
     if summary.total_commands == 0 {
@@ -79,7 +162,7 @@ pub fn run(
         println!("{}", styled(title, true));
         println!("{}", "═".repeat(60));
         // added: show project path when scoped
-        if let Some(ref scope) = project_scope {
+        if let Some(scope) = project_scope {
             println!("Scope: {}", shorten_path(scope));
         }
         println!();
@@ -226,7 +309,7 @@ pub fn run(
         }
 
         if history {
-            let recent = tracker.get_recent_filtered(10, project_scope.as_deref())?; // changed: filtered
+            let recent = tracker.get_recent_filtered(10, project_scope)?; // changed: filtered
             if !recent.is_empty() {
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
@@ -289,18 +372,67 @@ pub fn run(
 
     // Time breakdown views
     if all || daily {
-        print_daily_full(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_daily_full(tracker, project_scope)?; // changed: pass project scope
     }
 
     if all || weekly {
-        print_weekly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_weekly(tracker, project_scope)?; // changed: pass project scope
     }
 
     if all || monthly {
-        print_monthly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_monthly(tracker, project_scope)?; // changed: pass project scope
     }
 
     Ok(())
+}
+
+// ── Watch mode helpers ──
+
+/// Render a single watch frame: cursor home → render → clear tail.
+#[allow(clippy::too_many_arguments)]
+fn render_watch_frame(
+    project_scope: Option<&str>,
+    graph: bool,
+    history: bool,
+    quota: bool,
+    tier: &str,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    all: bool,
+) -> Result<()> {
+    if std::io::stdout().is_terminal() {
+        use std::io::Write;
+        print!("\x1B[H");
+        std::io::stdout().flush()?;
+    }
+    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+    render_text(
+        &tracker,
+        project_scope,
+        graph,
+        history,
+        quota,
+        tier,
+        daily,
+        weekly,
+        monthly,
+        all,
+    )?;
+    Ok(())
+}
+
+/// Print the watch hint line and clear any leftover lines below.
+fn print_watch_hint(interval: u64) {
+    let hint = format!("↻ Watching DB · poll {}ms · Ctrl+C to stop", interval);
+    if std::io::stdout().is_terminal() {
+        use std::io::Write;
+        println!("\n{}", hint.dimmed());
+        print!("\x1B[J");
+        let _ = std::io::stdout().flush();
+    } else {
+        println!("\n{}", hint);
+    }
 }
 
 // ── Display helpers (TTY-aware) ── // added: entire section
@@ -724,4 +856,138 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_watch_interval_default() {
+        // Clap: --watch with no value → Some(None) → resolved to 500ms
+        let parsed: Option<Option<u64>> = Some(None);
+        let interval = parsed.map(|opt| opt.unwrap_or(500));
+        assert_eq!(interval, Some(500));
+    }
+
+    #[test]
+    fn test_watch_interval_explicit() {
+        // Clap: --watch 100 → Some(Some(100)) → resolved to 100ms
+        let parsed: Option<Option<u64>> = Some(Some(100));
+        let interval = parsed.map(|opt| opt.unwrap_or(500));
+        assert_eq!(interval, Some(100));
+    }
+
+    #[test]
+    fn test_watch_not_specified() {
+        // Clap: no --watch → None
+        let parsed: Option<Option<u64>> = None;
+        let interval = parsed.map(|opt| opt.unwrap_or(500));
+        assert_eq!(interval, None);
+    }
+
+    #[test]
+    fn test_watch_rejects_zero_interval() {
+        let result = run(
+            false,
+            false,
+            false,
+            false,
+            "20x",
+            false,
+            false,
+            false,
+            false,
+            "text",
+            false,
+            Some(0),
+            0,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("≥1ms"), "unexpected error: {}", msg);
+    }
+
+    #[test]
+    fn test_watch_rejects_json_format() {
+        let result = run(
+            false,
+            false,
+            false,
+            false,
+            "20x",
+            false,
+            false,
+            false,
+            false,
+            "json",
+            false,
+            Some(3),
+            0,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("text format"), "unexpected error: {}", msg);
+    }
+
+    #[test]
+    fn test_watch_rejects_failures_flag() {
+        let result = run(
+            false,
+            false,
+            false,
+            false,
+            "20x",
+            false,
+            false,
+            false,
+            false,
+            "text",
+            true,
+            Some(3),
+            0,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("--failures"), "unexpected error: {}", msg);
+    }
+
+    #[test]
+    fn test_truncate_for_column_short() {
+        assert_eq!(truncate_for_column("abc", 10), "abc       ");
+    }
+
+    #[test]
+    fn test_truncate_for_column_overflow() {
+        assert_eq!(truncate_for_column("abcdefghij", 6), "abc...");
+    }
+
+    #[test]
+    fn test_truncate_for_column_zero_width() {
+        assert_eq!(truncate_for_column("anything", 0), "");
+    }
+
+    #[test]
+    fn test_shorten_path_short() {
+        assert_eq!(shorten_path("/a/b"), "/a/b");
+    }
+
+    #[test]
+    fn test_shorten_path_long() {
+        let shortened = shorten_path("/home/user/projects/my-app/src");
+        assert!(shortened.contains("..."));
+        assert!(shortened.ends_with("my-app/src"));
+    }
+
+    #[test]
+    fn test_mini_bar_full() {
+        // Non-TTY: no ANSI codes
+        let bar = mini_bar(100, 100, 10);
+        assert!(bar.contains("█"));
+    }
+
+    #[test]
+    fn test_mini_bar_zero_max() {
+        assert_eq!(mini_bar(50, 0, 10), "");
+    }
 }
