@@ -605,13 +605,21 @@ enum ExcludePattern {
 fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
     patterns
         .iter()
-        .map(|pattern| {
-            let anchored = if pattern.starts_with('^') {
-                pattern.clone()
+        .filter_map(|pattern| {
+            let trimmed = pattern.trim();
+            if trimmed.is_empty() || trimmed == "^" {
+                eprintln!(
+                    "rtk: warning: ignoring trivial exclude_commands pattern '{}'",
+                    pattern
+                );
+                return None;
+            }
+            let anchored = if trimmed.starts_with('^') {
+                trimmed.to_string()
             } else {
-                format!(r"^{}\b", regex::escape(pattern))
+                format!(r"^{}($|\s)", regex::escape(trimmed))
             };
-            match Regex::new(&anchored) {
+            Some(match Regex::new(&anchored) {
                 Ok(re) => ExcludePattern::Regex(re),
                 Err(e) => {
                     eprintln!(
@@ -620,7 +628,7 @@ fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
                     );
                     ExcludePattern::Prefix(pattern.clone())
                 }
-            }
+            })
         })
         .collect()
 }
@@ -2921,6 +2929,24 @@ mod tests {
     fn test_exclude_does_not_substring_match() {
         let excluded = vec!["go".to_string()];
         assert!(rewrite_command("golangci-lint run ./...", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_does_not_match_hyphenated_command() {
+        let excluded = vec!["golangci".to_string()];
+        assert!(rewrite_command("golangci-lint run ./...", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_empty_pattern_ignored() {
+        let excluded = vec!["".to_string()];
+        assert!(rewrite_command("git status", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_bare_anchor_ignored() {
+        let excluded = vec!["^".to_string()];
+        assert!(rewrite_command("git status", &excluded).is_some());
     }
 
     #[test]
