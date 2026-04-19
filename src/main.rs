@@ -412,6 +412,12 @@ enum Commands {
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
+        /// Continuously refresh the display (like watch(1))
+        #[arg(short = 'W', long)]
+        watch: bool,
+        /// Refresh interval in seconds (requires --watch)
+        #[arg(short = 'n', long, default_value = "2", requires = "watch", value_parser = clap::value_parser!(u64).range(1..=3600))]
+        interval: u64,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -1805,6 +1811,8 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             failures,
+            watch,
+            interval,
         } => {
             analytics::gain::run(
                 project, // added: pass project flag
@@ -1818,6 +1826,8 @@ fn run_cli() -> Result<i32> {
                 all,
                 &format,
                 failures,
+                watch,
+                interval,
                 cli.verbose,
             )?;
             0

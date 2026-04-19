@@ -58,6 +58,57 @@ pub trait PeriodStats {
     fn separator_width() -> usize;
 }
 
+// ── Output capture for flicker-free watch mode ──
+//
+// When capture is active, `println!` writes to an in-memory buffer instead of
+// stdout.  The watch loop flushes the whole buffer in a single write, which
+// the terminal processes atomically — no visible blank frame between clear and
+// content.
+//
+// IMPORTANT: `captured_println` is defined BEFORE the `println!` shadow macro
+// so it still calls `std::println!` internally.
+
+use std::cell::RefCell;
+
+thread_local! {
+    static OUTPUT_BUF: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Activate stdout capture.
+pub fn start_output_capture() {
+    OUTPUT_BUF.with(|buf| {
+        *buf.borrow_mut() = Some(String::with_capacity(4096));
+    });
+}
+
+/// Stop capturing and return the buffered content.
+pub fn take_output_capture() -> Option<String> {
+    OUTPUT_BUF.with(|buf| buf.borrow_mut().take())
+}
+
+/// Write a formatted line to the capture buffer, or stdout if capture is off.
+/// When capturing, each line is terminated with `\x1b[K\n` (clear to end of line)
+/// so the watch loop can render without a separate post-processing pass.
+pub fn captured_println(args: std::fmt::Arguments) {
+    OUTPUT_BUF.with(|buf| {
+        let mut borrow = buf.borrow_mut();
+        if let Some(ref mut s) = *borrow {
+            use std::fmt::Write;
+            let _ = s.write_fmt(args);
+            s.push_str("\x1b[K\n");
+        } else {
+            std::println!("{}", args);
+        }
+    });
+}
+
+// Shadow `println!` for all code below this point in this module.
+// When capture is active → buffer; when inactive → regular stdout.
+macro_rules! println {
+    () => { crate::core::display_helpers::captured_println(format_args!("")) };
+    ($($arg:tt)*) => { crate::core::display_helpers::captured_println(format_args!($($arg)*)) };
+}
+
 /// Generic table printer for any period statistics
 pub fn print_period_table<T: PeriodStats>(data: &[T]) {
     if data.is_empty() {

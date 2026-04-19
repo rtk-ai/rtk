@@ -1,15 +1,26 @@
 //! Shows users how many tokens RTK has saved them over time.
 
-use crate::core::display_helpers::{format_duration, print_period_table};
+use crate::core::display_helpers::{
+    format_duration, print_period_table, start_output_capture, take_output_capture,
+};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::Local;
 use colored::Colorize;
 use serde::Serialize;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+// Shadow `println!` to route through the capture system.
+// When capture is active (watch mode) → buffer; when inactive → regular stdout.
+macro_rules! println {
+    () => { crate::core::display_helpers::captured_println(format_args!("")) };
+    ($($arg:tt)*) => { crate::core::display_helpers::captured_println(format_args!($($arg)*)) };
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -24,10 +35,175 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    watch: bool,
+    interval: u64,
     _verbose: u8,
 ) -> Result<()> {
+    if watch && (format == "json" || format == "csv") {
+        bail!("--watch is not compatible with --format {format} (only text format is supported)");
+    }
+
+    if watch && !std::io::stdout().is_terminal() {
+        bail!("--watch requires an interactive terminal (stdout is not a TTY)");
+    }
+
+    if watch {
+        return run_watch_loop(
+            project, graph, history, quota, tier, daily, weekly, monthly, all, failures, interval,
+        );
+    }
+
+    run_once(
+        project, graph, history, quota, tier, daily, weekly, monthly, all, format, failures,
+    )
+}
+
+/// RAII guard that switches to the alternate screen buffer, hides the cursor,
+/// and restores everything on drop (including panic).
+struct CursorGuard;
+
+impl CursorGuard {
+    fn new() -> Self {
+        // Alternate screen buffer + hide cursor + disable line wrapping
+        print!("\x1b[?1049h\x1b[?25l\x1b[?7l");
+        let _ = std::io::stdout().flush();
+        Self
+    }
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        // Re-enable line wrapping + show cursor + leave alternate screen buffer
+        let _ = write!(std::io::stdout(), "\x1b[?7h\x1b[?25h\x1b[?1049l");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// Returns (width, height) of the terminal, with sensible defaults.
+fn terminal_dimensions() -> (usize, usize) {
+    terminal_size::terminal_size()
+        .map(|(w, h)| (w.0 as usize, h.0 as usize))
+        .unwrap_or((80, 24))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_watch_loop(
+    project: bool,
+    graph: bool,
+    history: bool,
+    quota: bool,
+    tier: &str,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    all: bool,
+    failures: bool,
+    interval: u64,
+) -> Result<()> {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .context("Failed to set Ctrl+C handler")?;
+
+    // Build the command description for the watch header
+    let mut flag_parts: Vec<String> = vec!["rtk gain".into()];
+    for (on, name) in [
+        (project, "--project"),
+        (graph, "--graph"),
+        (history, "--history"),
+        (quota, "--quota"),
+        (daily, "--daily"),
+        (weekly, "--weekly"),
+        (monthly, "--monthly"),
+        (all, "--all"),
+        (failures, "--failures"),
+    ] {
+        if on {
+            flag_parts.push(name.into());
+        }
+    }
+    if quota && tier != "20x" {
+        flag_parts.push(format!("--tier {tier}"));
+    }
+    if interval != 2 {
+        flag_parts.push(format!("-n {interval}"));
+    }
+    let flags = flag_parts.join(" ");
+
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
-    let project_scope = resolve_project_scope(project)?; // added: resolve project path
+    let project_scope = resolve_project_scope(project)?;
+    let _cursor_guard = CursorGuard::new();
+
+    while running.load(Ordering::SeqCst) {
+        let (term_w, term_h) = terminal_dimensions();
+
+        // Capture all println! output to a buffer (via the shadow macro).
+        start_output_capture();
+
+        let now = Local::now().format("%Y-%m-%d %H:%M:%S");
+        println!("Every {}s: {:<40} {}", interval, flags, now);
+        println!();
+
+        // Reserve lines for: watch header(2) + title(1) + sep(1) + blank(1) +
+        // KPIs(6) + blank(1) + section header(1) + table header(3) + table footer(2)
+        // = ~18 lines of overhead before command rows
+        let overhead = 18;
+        let max_cmd_rows = term_h.saturating_sub(overhead).max(3);
+
+        let _ = run_display(
+            &tracker,
+            project_scope.as_deref(),
+            graph,
+            history,
+            quota,
+            tier,
+            daily,
+            weekly,
+            monthly,
+            all,
+            failures,
+            Some(max_cmd_rows),
+            Some(term_w),
+        );
+
+        // Flush the entire frame in a single write: home + content + clear-to-end.
+        // The terminal processes this atomically — no visible blank frame.
+        // \x1b[K (clear to end of line) is already embedded in each line by captured_println.
+        if let Some(content) = take_output_capture() {
+            print!("\x1b[H{}\x1b[J", content);
+        }
+        let _ = std::io::stdout().flush();
+
+        for _ in 0..(interval * 10) {
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_once(
+    project: bool,
+    graph: bool,
+    history: bool,
+    quota: bool,
+    tier: &str,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    all: bool,
+    format: &str,
+    failures: bool,
+) -> Result<()> {
+    let tracker = Tracker::new().context("Failed to initialize tracking database")?;
+    let project_scope = resolve_project_scope(project)?;
 
     if failures {
         return show_failures(&tracker);
@@ -42,7 +218,7 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
-                project_scope.as_deref(), // added: pass project scope
+                project_scope.as_deref(),
             );
         }
         "csv" => {
@@ -52,14 +228,52 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
-                project_scope.as_deref(), // added: pass project scope
+                project_scope.as_deref(),
             );
         }
-        _ => {} // Continue with text format
+        _ => {}
+    }
+
+    run_display(
+        &tracker,
+        project_scope.as_deref(),
+        graph,
+        history,
+        quota,
+        tier,
+        daily,
+        weekly,
+        monthly,
+        all,
+        failures,
+        None,
+        None,
+    )
+}
+
+/// Core display logic, separated to allow Tracker reuse in watch mode.
+#[allow(clippy::too_many_arguments)]
+fn run_display(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    graph: bool,
+    history: bool,
+    quota: bool,
+    tier: &str,
+    daily: bool,
+    weekly: bool,
+    monthly: bool,
+    all: bool,
+    failures: bool,
+    max_cmd_rows: Option<usize>,
+    term_width: Option<usize>,
+) -> Result<()> {
+    if failures {
+        return show_failures(tracker);
     }
 
     let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
+        .get_summary_filtered(project_scope)
         .context("Failed to load token savings summary from database")?;
 
     if summary.total_commands == 0 {
@@ -76,10 +290,11 @@ pub fn run(
         } else {
             "RTK Token Savings (Global Scope)"
         };
+        let sep_width = term_width.unwrap_or(80).min(60);
         println!("{}", styled(title, true));
-        println!("{}", "═".repeat(60));
+        println!("{}", "═".repeat(sep_width));
         // added: show project path when scoped
-        if let Some(ref scope) = project_scope {
+        if let Some(scope) = project_scope {
             println!("Scope: {}", shorten_path(scope));
         }
         println!();
@@ -137,9 +352,7 @@ pub fn run(
             // added: styled section header
             println!("{}", styled("By Command", true));
 
-            // added: dynamic column widths for clean alignment
-            let cmd_width = 24usize;
-            let impact_width = 10usize;
+            // Dynamic column widths for clean alignment
             let count_width = summary
                 .by_command
                 .iter()
@@ -161,6 +374,14 @@ pub fn run(
                 .max()
                 .unwrap_or(6)
                 .max(6);
+
+            // Adapt cmd_width and impact_width to fit terminal width
+            // Fixed overhead: "#"(3) + 6×gap(12) + count + saved + "%"(6) + time
+            let fixed_cols = 3 + 12 + count_width + saved_width + 6 + time_width;
+            let available = term_width.unwrap_or(120).saturating_sub(fixed_cols);
+            // Split available space: ~70% command, ~30% impact bar
+            let cmd_width = (available * 7 / 10).clamp(10, 30);
+            let impact_width = available.saturating_sub(cmd_width).clamp(4, 14);
 
             let table_width = 3
                 + 2
@@ -192,9 +413,15 @@ pub fn run(
                 .max()
                 .unwrap_or(1);
 
-            for (idx, (cmd, count, saved, pct, avg_time)) in summary.by_command.iter().enumerate() {
+            let display_rows = max_cmd_rows.unwrap_or(summary.by_command.len());
+            let total_cmds = summary.by_command.len();
+            let visible = display_rows.min(total_cmds);
+
+            for (idx, (cmd, count, saved, pct, avg_time)) in
+                summary.by_command.iter().take(visible).enumerate()
+            {
                 let row_idx = format!("{:>2}.", idx + 1);
-                let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width)); // added: colored command
+                let cmd_cell = style_command_cell(&truncate_for_column(cmd, cmd_width));
                 let count_cell = format!("{:>count_width$}", count, count_width = count_width);
                 let saved_cell = format!(
                     "{:>saved_width$}",
@@ -202,16 +429,22 @@ pub fn run(
                     saved_width = saved_width
                 );
                 let pct_plain = format!("{:>6}", format!("{pct:.1}%"));
-                let pct_cell = colorize_pct_cell(*pct, &pct_plain); // added: color-coded percentage
+                let pct_cell = colorize_pct_cell(*pct, &pct_plain);
                 let time_cell = format!(
                     "{:>time_width$}",
                     format_duration(*avg_time),
                     time_width = time_width
                 );
-                let impact = mini_bar(*saved, max_saved, impact_width); // added: impact bar
+                let impact = mini_bar(*saved, max_saved, impact_width);
                 println!(
                     "{}  {}  {}  {}  {}  {}  {}",
                     row_idx, cmd_cell, count_cell, saved_cell, pct_cell, time_cell, impact
+                );
+            }
+            if visible < total_cmds {
+                println!(
+                    "     ... +{} more (enlarge terminal to see all)",
+                    total_cmds - visible
                 );
             }
             println!("{}", "─".repeat(table_width));
@@ -226,7 +459,7 @@ pub fn run(
         }
 
         if history {
-            let recent = tracker.get_recent_filtered(10, project_scope.as_deref())?; // changed: filtered
+            let recent = tracker.get_recent_filtered(10, project_scope)?;
             if !recent.is_empty() {
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
@@ -289,15 +522,15 @@ pub fn run(
 
     // Time breakdown views
     if all || daily {
-        print_daily_full(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_daily_full(tracker, project_scope)?;
     }
 
     if all || weekly {
-        print_weekly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_weekly(tracker, project_scope)?;
     }
 
     if all || monthly {
-        print_monthly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_monthly(tracker, project_scope)?;
     }
 
     Ok(())
@@ -724,4 +957,158 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    #[derive(Parser)]
+    #[command()]
+    struct TestCli {
+        #[command(subcommand)]
+        command: TestCommands,
+    }
+
+    #[derive(clap::Subcommand)]
+    enum TestCommands {
+        Gain {
+            #[arg(short, long)]
+            project: bool,
+            #[arg(short, long)]
+            graph: bool,
+            #[arg(short = 'H', long)]
+            history: bool,
+            #[arg(short, long)]
+            quota: bool,
+            #[arg(short, long, default_value = "20x", requires = "quota")]
+            tier: String,
+            #[arg(short, long)]
+            daily: bool,
+            #[arg(short, long)]
+            weekly: bool,
+            #[arg(short, long)]
+            monthly: bool,
+            #[arg(short, long)]
+            all: bool,
+            #[arg(short, long, default_value = "text")]
+            format: String,
+            #[arg(short = 'F', long)]
+            failures: bool,
+            #[arg(short = 'W', long)]
+            watch: bool,
+            #[arg(short = 'n', long, default_value = "2", requires = "watch", value_parser = clap::value_parser!(u64).range(1..=3600))]
+            interval: u64,
+        },
+    }
+
+    #[test]
+    fn test_watch_rejects_json_format() {
+        let result = super::run(
+            false, false, false, false, "20x", false, false, false, false, "json", false, true, 2,
+            0,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not compatible"),
+            "Expected format incompatibility error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_watch_rejects_csv_format() {
+        let result = super::run(
+            false, false, false, false, "20x", false, false, false, false, "csv", false, true, 2, 0,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not compatible"),
+            "Expected format incompatibility error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_watch_flag_requires_watch_for_interval() {
+        let result = TestCli::try_parse_from(["test", "gain", "--interval", "5"]);
+        assert!(result.is_err(), "--interval without --watch should fail");
+    }
+
+    #[test]
+    fn test_watch_interval_bounds() {
+        let result = TestCli::try_parse_from(["test", "gain", "--watch", "--interval", "0"]);
+        assert!(result.is_err(), "interval=0 should be rejected");
+
+        let result = TestCli::try_parse_from(["test", "gain", "--watch", "--interval", "3601"]);
+        assert!(result.is_err(), "interval=3601 should be rejected");
+
+        let result = TestCli::try_parse_from(["test", "gain", "--watch", "--interval", "1"]);
+        assert!(result.is_ok(), "interval=1 should be accepted");
+
+        let result = TestCli::try_parse_from(["test", "gain", "--watch", "--interval", "3600"]);
+        assert!(result.is_ok(), "interval=3600 should be accepted");
+    }
+
+    #[test]
+    fn test_watch_parses_with_default_interval() {
+        let result = TestCli::try_parse_from(["test", "gain", "--watch"]);
+        assert!(result.is_ok());
+        if let Ok(cli) = result {
+            match cli.command {
+                TestCommands::Gain {
+                    watch, interval, ..
+                } => {
+                    assert!(watch);
+                    assert_eq!(interval, 2, "default interval should be 2s");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_watch_flag_header_reconstruction() {
+        let bool_flags = [
+            (true, "--project"),
+            (true, "--graph"),
+            (false, "--history"),
+            (false, "--quota"),
+            (true, "--daily"),
+            (false, "--weekly"),
+            (false, "--monthly"),
+            (false, "--all"),
+            (false, "--failures"),
+        ];
+        let mut parts: Vec<&str> = vec!["rtk gain"];
+        for (on, name) in &bool_flags {
+            if *on {
+                parts.push(name);
+            }
+        }
+        let flags = parts.join(" ");
+        assert_eq!(flags, "rtk gain --project --graph --daily");
+    }
+
+    #[test]
+    fn test_watch_flag_header_with_non_default_tier_and_interval() {
+        let mut parts: Vec<&str> = vec!["rtk gain"];
+        let bool_flags = [(true, "--quota"), (false, "--daily")];
+        for (on, name) in &bool_flags {
+            if *on {
+                parts.push(name);
+            }
+        }
+        let tier = "pro";
+        let tier_flag = format!("--tier {tier}");
+        if tier != "20x" {
+            parts.push(&tier_flag);
+        }
+        let interval = 5u64;
+        let interval_flag = format!("-n {interval}");
+        if interval != 2 {
+            parts.push(&interval_flag);
+        }
+        let flags = parts.join(" ");
+        assert_eq!(flags, "rtk gain --quota --tier pro -n 5");
+    }
 }
