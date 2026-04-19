@@ -872,20 +872,6 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
-#[cfg(not(unix))]
-fn run_default_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    eprintln!("[warn] Hook-based mode requires Unix (macOS/Linux).");
-    eprintln!("    Windows: use --claude-md mode for full injection.");
-    eprintln!("    Falling back to --claude-md mode.");
-    run_claude_md_mode(_global, _verbose, _install_opencode)
-}
-
-#[cfg(unix)]
 fn run_default_mode(
     global: bool,
     patch_mode: PatchMode,
@@ -1127,17 +1113,6 @@ fn generate_global_filters_template(verbose: u8) -> Result<()> {
 }
 
 /// Hook-only mode: just the hook, no RTK.md
-#[cfg(not(unix))]
-fn run_hook_only_mode(
-    _global: bool,
-    _patch_mode: PatchMode,
-    _verbose: u8,
-    _install_opencode: bool,
-) -> Result<()> {
-    anyhow::bail!("Hook install requires Unix (macOS/Linux). Use WSL or --claude-md mode.")
-}
-
-#[cfg(unix)]
 fn run_hook_only_mode(
     global: bool,
     patch_mode: PatchMode,
@@ -1752,6 +1727,9 @@ fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
 }
 
 fn resolve_claude_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("RTK_CLAUDE_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     resolve_home_subdir(CLAUDE_DIR)
 }
 
@@ -3667,5 +3645,134 @@ More notes
         let arr = root["hooks"]["preToolUse"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["command"].as_str().unwrap(), CURSOR_HOOK_COMMAND);
+    }
+
+    use std::sync::Mutex;
+    static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
+        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let claude_dir = tmp.path().join(CLAUDE_DIR);
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let orig = std::env::var_os("RTK_CLAUDE_DIR");
+        std::env::set_var("RTK_CLAUDE_DIR", &claude_dir);
+        f(&claude_dir);
+        match orig {
+            Some(v) => std::env::set_var("RTK_CLAUDE_DIR", v),
+            None => std::env::remove_var("RTK_CLAUDE_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_global_default_mode_creates_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+
+            assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
+            assert!(
+                claude_dir.join(CLAUDE_MD).exists(),
+                "CLAUDE.md must be created"
+            );
+
+            let settings = claude_dir.join(SETTINGS_JSON);
+            assert!(settings.exists(), "settings.json must be created");
+            let content = fs::read_to_string(&settings).unwrap();
+            assert!(
+                content.contains(CLAUDE_HOOK_COMMAND),
+                "settings.json must contain hook command"
+            );
+        });
+    }
+
+    #[test]
+    fn test_global_uninstall_removes_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+            uninstall(true, false, false, false, 0).unwrap();
+
+            assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
+            let settings_content =
+                fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap_or_default();
+            assert!(
+                !settings_content.contains(CLAUDE_HOOK_COMMAND),
+                "hook entry must be removed from settings.json"
+            );
+        });
+    }
+
+    #[test]
+    fn test_global_default_mode_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
+            assert_eq!(count, 1, "hook command must appear exactly once");
+        });
+    }
+
+    #[test]
+    fn test_upgrade_from_claude_md_to_hook_mode() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            run_claude_md_mode(true, 0, false).unwrap();
+            let claude_md_content = fs::read_to_string(claude_dir.join(CLAUDE_MD)).unwrap();
+            assert!(
+                claude_md_content.contains("<!-- rtk-instructions"),
+                "pre-condition: old block must exist"
+            );
+
+            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+
+            assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            assert!(
+                settings.contains(CLAUDE_HOOK_COMMAND),
+                "hook must be in settings.json after upgrade"
+            );
+        });
+    }
+
+    #[test]
+    fn test_local_init_no_hook() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let result = run_default_mode(false, PatchMode::Auto, 0, false);
+        std::env::set_current_dir(&cwd).unwrap();
+
+        result.unwrap();
+        assert!(
+            tmp.path().join(CLAUDE_MD).exists(),
+            "local CLAUDE.md must be created"
+        );
+        assert!(
+            !tmp.path().join(SETTINGS_JSON).exists(),
+            "settings.json must not be created for local init"
+        );
+    }
+
+    #[test]
+    fn test_global_hook_only_mode_creates_settings() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_dir_override(&tmp, |claude_dir| {
+            run_hook_only_mode(true, PatchMode::Auto, 0, false).unwrap();
+
+            assert!(
+                !claude_dir.join(RTK_MD).exists(),
+                "RTK.md must NOT be created in hook-only mode"
+            );
+            let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
+            assert!(
+                settings.contains(CLAUDE_HOOK_COMMAND),
+                "settings.json must contain hook command"
+            );
+        });
     }
 }
