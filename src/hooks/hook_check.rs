@@ -26,6 +26,11 @@ pub enum HookStatus {
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
+    // Hooks are Unix-only; on Windows, users run `rtk init --claude-md` instead.
+    // Showing a "No hook installed" warning they can't resolve is not helpful.
+    #[cfg(windows)]
+    return HookStatus::Ok;
+
     // Don't warn users who don't have Claude Code installed
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -263,6 +268,14 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(CODEX_DIR)).unwrap();
         std::fs::create_dir_all(tmp.path().join(GEMINI_DIR)).unwrap();
         assert!(!other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_status_always_ok_on_windows() {
+        // Hooks are not supported on Windows; status() must never trigger the
+        // "No hook installed" warning path, even when .claude exists.
+        assert_eq!(status(), HookStatus::Ok);
     }
 
     #[test]
