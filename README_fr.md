@@ -61,7 +61,7 @@ brew install rtk
 
 ### winget (Windows — le plus simple)
 
-La facon la plus simple d'installer sur Windows — une seule commande, aucune configuration de PATH requise :
+La manière la plus simple d'installer sur Windows — une seule commande, aucune modification de PATH requise :
 
 ```powershell
 winget install rtk-ai.rtk

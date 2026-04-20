@@ -63,7 +63,7 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 brew install rtk
 ```
 
-### winget (Windows — easiest)
+### winget (Windows)
 
 Easiest way to install on Windows — one command, no PATH setup needed:
 
