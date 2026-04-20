@@ -46,10 +46,25 @@ detect_arch() {
 }
 
 # Get latest release version
+# Primary: parse the 302 redirect on /releases/latest (no API call, no rate limit).
+# Fallback: the GitHub REST API (subject to 60 req/hour anonymous limit).
 get_latest_version() {
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    # Try the web redirect first — does not count against the API rate limit.
+    VERSION=$(curl -sI "https://github.com/${REPO}/releases/latest" \
+        | grep -i '^location:' \
+        | sed -E 's|.*/tag/([^[:space:]]+).*|\1|' \
+        | tr -d '\r')
+
+    # Fallback to the REST API if the redirect didn't yield a tag.
     if [ -z "$VERSION" ]; then
-        error "Failed to get latest version"
+        warn "Redirect lookup failed, falling back to GitHub API..."
+        VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep '"tag_name":' \
+            | sed -E 's/.*"([^"]+)".*/\1/')
+    fi
+
+    if [ -z "$VERSION" ]; then
+        error "Failed to get latest version (GitHub API may be rate-limited; set RTK_VERSION=vX.Y.Z to pin)"
     fi
 }
 
@@ -113,7 +128,12 @@ main() {
     detect_os
     detect_arch
     get_target
-    get_latest_version
+    if [ -n "$RTK_VERSION" ]; then
+        VERSION="$RTK_VERSION"
+        info "Using pinned version from RTK_VERSION: $VERSION"
+    else
+        get_latest_version
+    fi
     install
     verify
 
