@@ -47,7 +47,8 @@ rtk gain    # should now show token savings stats
    ```bash
    rtk init --global    # Claude Code
    rtk init --global --cursor    # Cursor
-   rtk init --global --opencode  # OpenCode
+   rtk init --opencode           # OpenCode (project)
+   rtk init --global --opencode  # OpenCode (global)
    ```
 
 3. Restart your AI assistant.
@@ -149,7 +150,7 @@ Minimum required Rust version: 1.70+.
 ## OpenCode not using RTK
 
 ```bash
-rtk init --global --opencode
+rtk init --opencode
 # restart OpenCode
 rtk init --show    # should show "OpenCode: plugin installed"
 ```

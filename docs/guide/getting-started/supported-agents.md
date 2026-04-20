@@ -79,10 +79,10 @@ rtk init --global --gemini
 ### OpenCode
 
 ```bash
-rtk init --global --opencode
+rtk init --opencode
 ```
 
-Creates `~/.config/opencode/plugins/rtk.ts`. Uses the `tool.execute.before` hook.
+Creates `.opencode/plugins/rtk.ts` in the current project. Add `--global` to install `~/.config/opencode/plugins/rtk.ts` instead. Uses the `tool.execute.before` hook.
 
 ### OpenClaw
 

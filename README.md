@@ -303,7 +303,8 @@ The most effective way to use rtk. The hook transparently intercepts Bash comman
 
 ```bash
 rtk init -g                 # Install hook + RTK.md (recommended)
-rtk init -g --opencode      # OpenCode plugin (instead of Claude Code)
+rtk init --opencode         # OpenCode plugin in the current project
+rtk init -g --opencode      # OpenCode plugin in global config
 rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
@@ -362,7 +363,7 @@ RTK supports 12 AI coding tools. Each integration transparently rewrites shell c
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
-| **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
+| **OpenCode** | `rtk init --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
