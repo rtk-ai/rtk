@@ -307,6 +307,13 @@ impl Tracker {
             "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
             [],
         );
+        // Migration: add agent column for per-agent tracking
+        let _ = conn.execute("ALTER TABLE commands ADD COLUMN agent TEXT DEFAULT ''", []);
+        // Index for fast agent-scoped gain queries
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_timestamp ON commands(agent, timestamp)",
+            [],
+        );
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS parse_failures (
@@ -364,15 +371,17 @@ impl Tracker {
         };
 
         let project_path = current_project_path_string(); // added: record cwd
+        let agent = std::env::var("RTK_AGENT").unwrap_or_default();
 
         self.conn.execute(
-            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
+            "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, agent, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Utc::now().to_rfc3339(),
                 original_cmd,
                 rtk_cmd,
-                project_path, // added
+                project_path,
+                agent,
                 input_tokens as i64,
                 output_tokens as i64,
                 saved as i64,
@@ -498,15 +507,20 @@ impl Tracker {
     /// ```
     #[allow(dead_code)]
     pub fn get_summary(&self) -> Result<GainSummary> {
-        self.get_summary_filtered(None) // delegate to filtered variant
+        self.get_summary_filtered(None, None)
     }
 
-    /// Get summary statistics filtered by project path. // added
+    /// Get summary statistics filtered by project path and/or agent.
     ///
     /// When `project_path` is `Some`, matches the exact working directory
     /// or any subdirectory (prefix match with path separator).
-    pub fn get_summary_filtered(&self, project_path: Option<&str>) -> Result<GainSummary> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
+    /// When `agent_filter` is `Some`, restricts to commands from that agent.
+    pub fn get_summary_filtered(
+        &self,
+        project_path: Option<&str>,
+        agent_filter: Option<&str>,
+    ) -> Result<GainSummary> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
@@ -516,11 +530,11 @@ impl Tracker {
         let mut stmt = self.conn.prepare(
             "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
              FROM commands
-             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
+             WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR agent = ?3)",
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
+        let rows = stmt.query_map(params![project_exact, project_glob, agent_filter], |row| {
             Ok((
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
@@ -550,8 +564,8 @@ impl Tracker {
             0
         };
 
-        let by_command = self.get_by_command(project_path)?; // added: pass project filter
-        let by_day = self.get_by_day(project_path)?; // added: pass project filter
+        let by_command = self.get_by_command(project_path, agent_filter)?;
+        let by_day = self.get_by_day(project_path, agent_filter)?;
 
         Ok(GainSummary {
             total_commands,
@@ -568,20 +582,21 @@ impl Tracker {
 
     fn get_by_command(
         &self,
-        project_path: Option<&str>, // added
+        project_path: Option<&str>,
+        agent_filter: Option<&str>,
     ) -> Result<Vec<CommandStats>> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let (project_exact, project_glob) = project_filter_params(project_path);
         let mut stmt = self.conn.prepare(
             "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens), AVG(savings_pct), AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR agent = ?3)
              GROUP BY rtk_cmd
              ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
+             LIMIT 10",
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
+        let rows = stmt.query_map(params![project_exact, project_glob, agent_filter], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
@@ -596,20 +611,21 @@ impl Tracker {
 
     fn get_by_day(
         &self,
-        project_path: Option<&str>, // added
+        project_path: Option<&str>,
+        agent_filter: Option<&str>,
     ) -> Result<Vec<(String, usize)>> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let (project_exact, project_glob) = project_filter_params(project_path);
         let mut stmt = self.conn.prepare(
             "SELECT DATE(timestamp), SUM(saved_tokens)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR agent = ?3)
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
-             LIMIT 30", // added: project filter in WHERE
+             LIMIT 30",
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
+        let rows = stmt.query_map(params![project_exact, project_glob, agent_filter], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })?;
 
@@ -637,12 +653,16 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_all_days(&self) -> Result<Vec<DayStats>> {
-        self.get_all_days_filtered(None) // delegate to filtered variant
+        self.get_all_days_filtered(None, None)
     }
 
-    /// Get daily statistics filtered by project path. // added
-    pub fn get_all_days_filtered(&self, project_path: Option<&str>) -> Result<Vec<DayStats>> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
+    /// Get daily statistics filtered by project path and/or agent.
+    pub fn get_all_days_filtered(
+        &self,
+        project_path: Option<&str>,
+        agent_filter: Option<&str>,
+    ) -> Result<Vec<DayStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
         let mut stmt = self.conn.prepare(
             "SELECT
                 DATE(timestamp) as date,
@@ -653,12 +673,12 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR agent = ?3)
              GROUP BY DATE(timestamp)
-             ORDER BY DATE(timestamp) DESC", // added: project filter
+             ORDER BY DATE(timestamp) DESC",
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
+        let rows = stmt.query_map(params![project_exact, project_glob, agent_filter], |row| {
             let input = row.get::<_, i64>(2)? as usize;
             let saved = row.get::<_, i64>(4)? as usize;
             let commands = row.get::<_, i64>(1)? as usize;
@@ -710,12 +730,16 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_by_week(&self) -> Result<Vec<WeekStats>> {
-        self.get_by_week_filtered(None) // delegate to filtered variant
+        self.get_by_week_filtered(None, None)
     }
 
-    /// Get weekly statistics filtered by project path. // added
-    pub fn get_by_week_filtered(&self, project_path: Option<&str>) -> Result<Vec<WeekStats>> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
+    /// Get weekly statistics filtered by project path and/or agent.
+    pub fn get_by_week_filtered(
+        &self,
+        project_path: Option<&str>,
+        agent_filter: Option<&str>,
+    ) -> Result<Vec<WeekStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
         let mut stmt = self.conn.prepare(
             "SELECT
                 DATE(timestamp, 'weekday 0', '-6 days') as week_start,
@@ -727,12 +751,12 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR agent = ?3)
              GROUP BY week_start
-             ORDER BY week_start DESC", // added: project filter
+             ORDER BY week_start DESC",
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
+        let rows = stmt.query_map(params![project_exact, project_glob, agent_filter], |row| {
             let input = row.get::<_, i64>(3)? as usize;
             let saved = row.get::<_, i64>(5)? as usize;
             let commands = row.get::<_, i64>(2)? as usize;
@@ -785,12 +809,16 @@ impl Tracker {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn get_by_month(&self) -> Result<Vec<MonthStats>> {
-        self.get_by_month_filtered(None) // delegate to filtered variant
+        self.get_by_month_filtered(None, None)
     }
 
-    /// Get monthly statistics filtered by project path. // added
-    pub fn get_by_month_filtered(&self, project_path: Option<&str>) -> Result<Vec<MonthStats>> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
+    /// Get monthly statistics filtered by project path and/or agent.
+    pub fn get_by_month_filtered(
+        &self,
+        project_path: Option<&str>,
+        agent_filter: Option<&str>,
+    ) -> Result<Vec<MonthStats>> {
+        let (project_exact, project_glob) = project_filter_params(project_path);
         let mut stmt = self.conn.prepare(
             "SELECT
                 strftime('%Y-%m', timestamp) as month,
@@ -801,12 +829,12 @@ impl Tracker {
                 SUM(exec_time_ms) as total_time
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR agent = ?3)
              GROUP BY month
-             ORDER BY month DESC", // added: project filter
+             ORDER BY month DESC",
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
+        let rows = stmt.query_map(params![project_exact, project_glob, agent_filter], |row| {
             let input = row.get::<_, i64>(2)? as usize;
             let saved = row.get::<_, i64>(4)? as usize;
             let commands = row.get::<_, i64>(1)? as usize;
@@ -862,26 +890,28 @@ impl Tracker {
     /// ```
     #[allow(dead_code)]
     pub fn get_recent(&self, limit: usize) -> Result<Vec<CommandRecord>> {
-        self.get_recent_filtered(limit, None) // delegate to filtered variant
+        self.get_recent_filtered(limit, None, None)
     }
 
-    /// Get recent command history filtered by project path. // added
+    /// Get recent command history filtered by project path and/or agent.
     pub fn get_recent_filtered(
         &self,
         limit: usize,
         project_path: Option<&str>,
+        agent_filter: Option<&str>,
     ) -> Result<Vec<CommandRecord>> {
-        let (project_exact, project_glob) = project_filter_params(project_path); // added
+        let (project_exact, project_glob) = project_filter_params(project_path);
         let mut stmt = self.conn.prepare(
             "SELECT timestamp, rtk_cmd, saved_tokens, savings_pct
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
+               AND (?3 IS NULL OR agent = ?3)
              ORDER BY timestamp DESC
-             LIMIT ?3", // added: project filter
+             LIMIT ?4",
         )?;
 
         let rows = stmt.query_map(
-            params![project_exact, project_glob, limit as i64], // added: project params
+            params![project_exact, project_glob, agent_filter, limit as i64],
             |row| {
                 Ok(CommandRecord {
                     timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(0)?)

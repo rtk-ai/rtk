@@ -56,7 +56,7 @@ pub fn run_copilot() -> Result<()> {
     };
 
     match detect_format(&v) {
-        HookFormat::VsCode { command } => handle_vscode(&command),
+        HookFormat::VsCode { command } => handle_vscode(&command, "copilot"),
         HookFormat::CopilotCli { command } => handle_copilot_cli(&command),
         HookFormat::PassThrough => Ok(()),
     }
@@ -120,7 +120,17 @@ fn get_rewritten(cmd: &str) -> Option<String> {
     Some(rewritten)
 }
 
-fn handle_vscode(cmd: &str) -> Result<()> {
+/// Prepend `RTK_AGENT=<agent>` to a rewritten command so the proxy binary
+/// can record which AI agent triggered the execution.
+/// Skips injection if `agent` is empty or the prefix is already present.
+fn prepend_agent_env(agent: &str, cmd: &str) -> String {
+    if agent.is_empty() || cmd.starts_with("RTK_AGENT=") {
+        return cmd.to_string();
+    }
+    format!("RTK_AGENT={agent} {cmd}")
+}
+
+fn handle_vscode(cmd: &str, agent: &str) -> Result<()> {
     let verdict = permissions::check_command(cmd);
     if verdict == PermissionVerdict::Deny {
         audit_log("deny", cmd, "");
@@ -131,6 +141,7 @@ fn handle_vscode(cmd: &str) -> Result<()> {
         Some(r) => r,
         None => return Ok(()),
     };
+    let rewritten = prepend_agent_env(agent, &rewritten);
 
     // Allow (explicit rule matched): auto-allow the rewritten command.
     // Ask/Default (no allow rule matched): rewrite but let the host tool prompt.
@@ -217,8 +228,9 @@ pub fn run_gemini() -> Result<()> {
 
     match rewrite_command(cmd, &excluded) {
         Some(ref rewritten) => {
-            audit_log("rewrite", cmd, rewritten);
-            print_rewrite(rewritten);
+            let rewritten = prepend_agent_env("gemini", rewritten);
+            audit_log("rewrite", cmd, &rewritten);
+            print_rewrite(&rewritten);
         }
         None => print_allow(),
     }
@@ -297,7 +309,7 @@ enum PayloadAction {
     Ignore,
 }
 
-fn process_claude_payload(v: &Value) -> PayloadAction {
+fn process_claude_payload(v: &Value, agent: &str) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -324,6 +336,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
             }
         }
     };
+    let rewritten = prepend_agent_env(agent, &rewritten);
 
     let updated_input = {
         let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
@@ -370,7 +383,7 @@ pub fn run_claude() -> Result<()> {
         }
     };
 
-    match process_claude_payload(&v) {
+    match process_claude_payload(&v, "claude") {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -391,7 +404,7 @@ pub fn run_claude() -> Result<()> {
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    match process_claude_payload(&v) {
+    match process_claude_payload(&v, "") {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -443,6 +456,7 @@ pub fn run_cursor() -> Result<()> {
             return Ok(());
         }
     };
+    let rewritten = prepend_agent_env("cursor", &rewritten);
 
     let decision = match verdict {
         PermissionVerdict::Allow => "allow",
