@@ -104,7 +104,7 @@ rtk gain        # Should show token savings stats
 # 1. Install for your AI tool
 rtk init -g                     # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
-rtk init -g --codex             # Codex (OpenAI)
+rtk init -g --codex             # Codex (OpenAI, instruction mode)
 rtk init -g --agent cursor      # Cursor
 rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
@@ -112,7 +112,8 @@ rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
 
 # 2. Restart your AI tool, then test
-git status  # Automatically rewritten to rtk git status
+git status      # Hook-based integrations: automatically rewritten to rtk git status
+rtk git status  # Codex: use explicitly, or rely on AGENTS.md / RTK.md instructions
 ```
 
 The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
@@ -350,7 +351,7 @@ rtk git status
 
 ## Supported AI Tools
 
-RTK supports 12 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports 12 AI coding tools. Hook-based integrations transparently rewrite shell commands to `rtk` equivalents for 60-90% token savings; instruction-based integrations guide the agent to use `rtk` explicitly.
 
 | Tool | Install | Method |
 |------|---------|--------|
