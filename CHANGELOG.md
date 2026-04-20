@@ -5,6 +5,20 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.2](https://github.com/rtk-ai/rtk/compare/v0.37.1...v0.37.2) (2026-04-20)
+
+
+### Bug Fixes
+
+* **discover:** exclude_commands bypass for env-prefix, sub cmd + regex ([ca4c59c](https://github.com/rtk-ai/rtk/commit/ca4c59c230306d310069bed3c0ba930068dc4dc4))
+* **discover:** exclude_commands bypass for env-prefix, sub cmd + regex ([42d3161](https://github.com/rtk-ai/rtk/commit/42d3161872713bc0b20ef49b0714add40c40d5e3))
+* **discover:** word boundary in exclude_commands ([0ea115b](https://github.com/rtk-ai/rtk/commit/0ea115bca5fa66daa69fda2f0eeaaf103346b3a4))
+* **docs:** add missing docs for exclude commands patterns ([2e401ac](https://github.com/rtk-ai/rtk/commit/2e401ac38feec88de8d5e46f0301c8a532b95614))
+* **hooks:** add regression test for windows native ([115e448](https://github.com/rtk-ai/rtk/commit/115e44853b8cdd2d7af3af2b52c9c31e924a45d3))
+* **hooks:** windows use 'rtk hook claude' no fallback ([da3c432](https://github.com/rtk-ai/rtk/commit/da3c432201240f0da9627d8cc6bc70e5b7f8bdfe))
+* **hooks:** windows use 'rtk hook claude' no fallback ([0e29650](https://github.com/rtk-ai/rtk/commit/0e29650e11959730f4c4a2e6d6c0519e14dc8595))
+* **tests:** windows regression test fix path ([13a73dd](https://github.com/rtk-ai/rtk/commit/13a73ddfd78460560a1f5fde94b54b1f848b41b5))
+
 ## [0.37.1](https://github.com/rtk-ai/rtk/compare/v0.37.0...v0.37.1) (2026-04-18)
 
 
