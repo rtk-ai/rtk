@@ -969,6 +969,43 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     Ok(0)
 }
 
+fn compact_push_output(stderr: &str, stdout: &str, has_set_upstream: bool) -> String {
+    if stderr.contains("Everything up-to-date") {
+        return "ok (up-to-date)".to_string();
+    }
+
+    let mut push_info = String::new();
+    for line in stderr.lines() {
+        if line.contains("->") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                push_info = format!("ok {}", parts[parts.len() - 1]);
+                break;
+            }
+        }
+    }
+
+    if has_set_upstream {
+        // git outputs the tracking confirmation to stdout (not stderr)
+        for line in stdout.lines().chain(stderr.lines()) {
+            let trimmed = line.trim();
+            if trimmed.starts_with("branch '") || trimmed.starts_with("Branch '") {
+                if !push_info.is_empty() {
+                    push_info.push('\n');
+                }
+                push_info.push_str(trimmed);
+                break;
+            }
+        }
+    }
+
+    if !push_info.is_empty() {
+        push_info
+    } else {
+        "ok".to_string()
+    }
+}
+
 fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -989,25 +1026,8 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
     let raw = format!("{}{}", stdout, stderr);
 
     if output.status.success() {
-        let compact = if stderr.contains("Everything up-to-date") {
-            "ok (up-to-date)".to_string()
-        } else {
-            let mut push_info = String::new();
-            for line in stderr.lines() {
-                if line.contains("->") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 {
-                        push_info = format!("ok {}", parts[parts.len() - 1]);
-                        break;
-                    }
-                }
-            }
-            if !push_info.is_empty() {
-                push_info
-            } else {
-                "ok".to_string()
-            }
-        };
+        let has_set_upstream = args.iter().any(|a| a == "-u" || a == "--set-upstream");
+        let compact = compact_push_output(&stderr, &stdout, has_set_upstream);
 
         println!("{}", compact);
 
@@ -2530,5 +2550,83 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_compact_push_output_up_to_date() {
+        let stderr = "Everything up-to-date\n";
+        assert_eq!(compact_push_output(stderr, "", false), "ok (up-to-date)");
+        assert_eq!(compact_push_output(stderr, "", true), "ok (up-to-date)");
+    }
+
+    #[test]
+    fn test_compact_push_output_new_branch() {
+        let stderr = "\
+To git@github.com:user/repo.git
+ * [new branch]      my-feature -> my-feature
+";
+        assert_eq!(compact_push_output(stderr, "", false), "ok my-feature");
+    }
+
+    #[test]
+    fn test_compact_push_output_with_set_upstream_on_stdout() {
+        let stderr = "\
+To git@github.com:user/repo.git
+ * [new branch]      my-feature -> my-feature
+";
+        let stdout = "branch 'my-feature' set up to track 'origin/my-feature'.\n";
+        let result = compact_push_output(stderr, stdout, true);
+        assert!(
+            result.contains("ok my-feature"),
+            "should contain push confirmation, got: {result}"
+        );
+        assert!(
+            result.contains("branch 'my-feature' set up to track"),
+            "should preserve upstream tracking message from stdout, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_compact_push_output_with_set_upstream_on_stderr() {
+        let stderr = "\
+To git@github.com:user/repo.git
+ * [new branch]      my-feature -> my-feature
+Branch 'my-feature' set up to track remote branch 'my-feature' from 'origin'.
+";
+        let result = compact_push_output(stderr, "", true);
+        assert!(
+            result.contains("ok my-feature"),
+            "should contain push confirmation, got: {result}"
+        );
+        assert!(
+            result.contains("Branch 'my-feature' set up to track"),
+            "should preserve upstream tracking message from stderr, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_compact_push_output_set_upstream_not_leaked_without_flag() {
+        let stderr = "\
+To git@github.com:user/repo.git
+ * [new branch]      my-feature -> my-feature
+";
+        let stdout = "branch 'my-feature' set up to track 'origin/my-feature'.\n";
+        let result = compact_push_output(stderr, stdout, false);
+        assert_eq!(result, "ok my-feature");
+    }
+
+    #[test]
+    fn test_compact_push_output_update_existing() {
+        let stderr = "\
+To git@github.com:user/repo.git
+   abc1234..def5678  my-feature -> my-feature
+";
+        assert_eq!(compact_push_output(stderr, "", false), "ok my-feature");
+    }
+
+    #[test]
+    fn test_compact_push_output_fallback() {
+        let stderr = "remote: some unknown output\n";
+        assert_eq!(compact_push_output(stderr, "", false), "ok");
     }
 }
