@@ -29,7 +29,7 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -326,6 +326,56 @@ impl Tracker {
         Ok(Self { conn })
     }
 
+    /// Create an isolated in-memory tracker for tests.
+    #[cfg(test)]
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
+        let tracker = Self { conn };
+        tracker.init_schema()?;
+        Ok(tracker)
+    }
+
+    fn init_schema(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS commands (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                original_cmd TEXT NOT NULL,
+                rtk_cmd TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                saved_tokens INTEGER NOT NULL,
+                savings_pct REAL NOT NULL,
+                exec_time_ms INTEGER DEFAULT 0,
+                project_path TEXT DEFAULT ''
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_timestamp ON commands(timestamp)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS parse_failures (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                raw_command TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                fallback_succeeded INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Record a command execution with token counts and timing.
     ///
     /// Calculates savings metrics and stores the record in the database.
@@ -395,6 +445,19 @@ impl Tracker {
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        Ok(())
+    }
+
+    /// Delete all tracked data (commands + parse_failures), resetting all stats to zero.
+    pub fn reset_all(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "BEGIN;
+                 DELETE FROM commands;
+                 DELETE FROM parse_failures;
+                 COMMIT;",
+            )
+            .context("Failed to reset tracking database")?;
         Ok(())
     }
 
@@ -1583,5 +1646,45 @@ mod tests {
         // We can't assert exact rate because other tests may have added records,
         // but we can verify recovery_rate is between 0 and 100
         assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
+    }
+
+    #[test]
+    fn test_reset_all_clears_both_tables() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+        let pid = std::process::id();
+
+        // Insert into commands
+        tracker
+            .record(
+                "git status",
+                &format!("rtk git status reset_test_{}", pid),
+                100,
+                20,
+                50,
+            )
+            .expect("Failed to record command");
+
+        // Insert into parse_failures
+        tracker
+            .record_parse_failure(&format!("bad_cmd_reset_test_{}", pid), "parse error", false)
+            .expect("Failed to record parse failure");
+
+        // Reset everything
+        tracker.reset_all().expect("Failed to reset");
+
+        // Both tables should be empty
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(
+            summary.total_commands, 0,
+            "commands table should be empty after reset"
+        );
+
+        let failures = tracker
+            .get_parse_failure_summary()
+            .expect("Failed to get failure summary");
+        assert_eq!(
+            failures.total, 0,
+            "parse_failures table should be empty after reset"
+        );
     }
 }
