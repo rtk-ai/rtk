@@ -1839,6 +1839,25 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_glab_mr() {
+        assert!(matches!(
+            classify_command("glab mr list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk glab",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_glab_mr() {
+        assert_eq!(
+            rewrite_command("glab mr list", &[]),
+            Some("rtk glab mr list".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_cargo_install() {
         assert_eq!(
             rewrite_command("cargo install rtk", &[]),

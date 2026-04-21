@@ -35,6 +35,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^glab\s+(mr|issue|ci|repo|api|release)",
+        rtk_cmd: "rtk glab",
+        rewrite_prefixes: &["glab"],
+        category: "GitHub",
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[("mr", RtkStatus::Passthrough)],
+    },
+    RtkRule {
         pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
         rtk_cmd: "rtk cargo",
         rewrite_prefixes: &["cargo"],
