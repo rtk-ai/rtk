@@ -147,6 +147,8 @@ rtk discover                    # Descobrir economias perdidas
 
 ## Documentação
 
+- **[rtk-ai.app/guide](https://www.rtk-ai.app/guide)** — full user guide (installation, supported agents, what gets optimized, analytics, configuration, troubleshooting)
+- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resolver problemas comuns
 - **[INSTALL.md](INSTALL.md)** - Guia detalhado de instalação
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Arquitetura técnica
 
