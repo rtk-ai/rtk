@@ -29,7 +29,7 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -61,7 +61,7 @@ fn project_filter_params(project_path: Option<&str>) -> (Option<String>, Option<
     }
 }
 
-use super::constants::{DEFAULT_HISTORY_DAYS, HISTORY_DB, RTK_DATA_DIR};
+use super::constants::{DEFAULT_HISTORY_DAYS, RTK_DATA_DIR, TRACKING_DB};
 
 /// Main tracking interface for recording and querying command history.
 ///
@@ -250,6 +250,21 @@ impl Tracker {
         let db_path = get_db_path()?;
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
+        }
+
+        // Migration: rename history.db to tracking.db if it exists
+        let history_db_path = db_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("history.db");
+        if !db_path.exists() && history_db_path.exists() {
+            std::fs::rename(&history_db_path, &db_path).with_context(|| {
+                format!(
+                    "Failed to migrate {} to {}",
+                    history_db_path.display(),
+                    db_path.display()
+                )
+            })?;
         }
 
         let conn = Connection::open(&db_path)?;
@@ -1168,7 +1183,7 @@ fn get_db_path() -> Result<PathBuf> {
 
     // Priority 3: Default platform-specific location
     let data_dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(data_dir.join(RTK_DATA_DIR).join(HISTORY_DB))
+    Ok(data_dir.join(RTK_DATA_DIR).join(TRACKING_DB))
 }
 
 /// Individual parse failure record.
@@ -1503,7 +1518,7 @@ mod tests {
         env::remove_var("RTK_DB_PATH");
 
         let db_path = get_db_path().expect("Failed to get db path");
-        assert!(db_path.ends_with("rtk/history.db"));
+        assert!(db_path.ends_with("rtk/tracking.db"));
     }
 
     // 9. project_filter_params uses GLOB pattern with * wildcard // added
