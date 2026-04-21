@@ -4230,7 +4230,7 @@ More notes
     fn test_global_default_mode_creates_artifacts() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+            run_default_mode(true, PatchMode::Auto, 0, false, false).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
             assert!(
@@ -4252,8 +4252,8 @@ More notes
     fn test_global_uninstall_removes_artifacts() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
-            uninstall(true, false, false, false, 0).unwrap();
+            run_default_mode(true, PatchMode::Auto, 0, false, false).unwrap();
+            uninstall(true, false, false, false, 0, false).unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -4269,8 +4269,8 @@ More notes
     fn test_global_default_mode_idempotent() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
-            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+            run_default_mode(true, PatchMode::Auto, 0, false, false).unwrap();
+            run_default_mode(true, PatchMode::Auto, 0, false, false).unwrap();
 
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
             let count = settings.matches(CLAUDE_HOOK_COMMAND).count();
@@ -4282,14 +4282,14 @@ More notes
     fn test_upgrade_from_claude_md_to_hook_mode() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_claude_md_mode(true, 0, false).unwrap();
+            run_claude_md_mode(true, 0, false, false).unwrap();
             let claude_md_content = fs::read_to_string(claude_dir.join(CLAUDE_MD)).unwrap();
             assert!(
                 claude_md_content.contains("<!-- rtk-instructions"),
                 "pre-condition: old block must exist"
             );
 
-            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+            run_default_mode(true, PatchMode::Auto, 0, false, false).unwrap();
 
             assert!(claude_dir.join(RTK_MD).exists(), "RTK.md must be created");
             let settings = fs::read_to_string(claude_dir.join(SETTINGS_JSON)).unwrap();
@@ -4306,7 +4306,7 @@ More notes
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
 
-        let result = run_default_mode(false, PatchMode::Auto, 0, false);
+        let result = run_default_mode(false, PatchMode::Auto, 0, false, false);
         std::env::set_current_dir(&cwd).unwrap();
 
         result.unwrap();
@@ -4324,7 +4324,7 @@ More notes
     fn test_global_hook_only_mode_creates_settings() {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
-            run_hook_only_mode(true, PatchMode::Auto, 0, false).unwrap();
+            run_hook_only_mode(true, PatchMode::Auto, 0, false, false).unwrap();
 
             assert!(
                 !claude_dir.join(RTK_MD).exists(),
