@@ -34,7 +34,7 @@
 
 ---
 
-rtk filtra e comprime as saídas de comandos antes que cheguem ao contexto do seu LLM. Binário único em Rust, zero dependências, <10ms de overhead.
+rtk filtra e comprime as saídas de comandos antes que cheguem ao contexto do seu LLM. Binário único em Rust, sem dependências, com menos de 10ms de overhead.
 
 ## Economia de tokens (sessão de 30 min no Claude Code)
 
@@ -75,7 +75,7 @@ rtk --version   # Deve mostrar "rtk 0.27.x"
 rtk gain        # Deve mostrar estatísticas de economia
 ```
 
-## Inicio rapido
+## Início rapido
 
 ```bash
 # 1. Instalar hook para Claude Code (recomendado)
@@ -88,7 +88,7 @@ git status  # Automaticamente reescrito para rtk git status
 ## Como funciona
 
 ```
-  Sin rtk:                                         Con rtk:
+  Sem rtk:                                         Com rtk:
 
   Claude  --git status-->  shell  -->  git          Claude  --git status-->  RTK  -->  git
     ^                                   |             ^                      |          |
@@ -121,7 +121,7 @@ rtk git diff                    # Diff condensado
 rtk git push                    # -> "ok main"
 ```
 
-### Tests
+### Testes
 ```bash
 rtk jest                        # Jest compacto
 rtk vitest                      # Vitest compacto
@@ -153,7 +153,7 @@ rtk discover                    # Descobrir economias perdidas
 - **[INSTALL.md](INSTALL.md)** - Guia detalhado de instalação
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Arquitetura técnica
 
-## Contribuir
+## Contribuindo
 
 Contribuições são bem-vindas. Abra uma issue ou PR no [GitHub](https://github.com/rtk-ai/rtk).
 
