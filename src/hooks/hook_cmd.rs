@@ -29,7 +29,7 @@ fn read_stdin_limited() -> Result<String> {
 
 /// Format detected from the preToolUse JSON input.
 enum HookFormat {
-    /// VS Code Copilot Chat / Claude Code: `tool_name` + `tool_input.command`, supports `updatedInput`.
+    /// VS Code Copilot Chat / Claude Code: `tool_name` + `tool_input.command`.
     VsCode { command: String },
     /// GitHub Copilot CLI: camelCase `toolName` + `toolArgs` (JSON string), supports `modifiedArgs` for transparent rewrite.
     /// Carries the full parsed `toolArgs` object so we can rewrite `command` while preserving
@@ -69,7 +69,10 @@ pub fn run_copilot() -> Result<()> {
 fn detect_format(v: &Value) -> HookFormat {
     // VS Code Copilot Chat / Claude Code: snake_case keys
     if let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) {
-        if matches!(tool_name, "runTerminalCommand" | "Bash" | "bash") {
+        if matches!(
+            tool_name,
+            "runTerminalCommand" | "Bash" | "bash" | "run_in_terminal"
+        ) {
             if let Some(cmd) = v
                 .pointer("/tool_input/command")
                 .and_then(|c| c.as_str())
@@ -1390,5 +1393,13 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(v["decision"], "deny");
+    }
+
+    #[test]
+    fn test_detect_vscode_run_in_terminal() {
+        assert!(matches!(
+            detect_format(&vscode_input("run_in_terminal", "git log --oneline -15")),
+            HookFormat::VsCode { .. }
+        ));
     }
 }
