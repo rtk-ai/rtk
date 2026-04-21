@@ -14,27 +14,29 @@ Trigger: pull_request to develop or master
                           └────────┬─────────┘
                                    │
                           ┌────────▼─────────┐
-                          │     clippy        │
-                          └──┬───┬───┬───┬───┘
-                             │   │   │   │
-              ┌──────────────┘   │   │   └──────────────┐
-              │          ┌───────┘   └───────┐          │
-              ▼          ▼                   ▼          ▼
-     ┌──────────────┐ ┌──────────────┐ ┌───────────┐ ┌──────────┐
-     │ test         │ │Security Scan │ │ benchmark │ │ validate │
-     │ ubuntu       │ │ cargo audit  │ │ >=80%     │ │ ai agent │
-     │ windows      │ │ (advisory)   │ │ savings   │ │ doc      │
-     │ macos        │ │              │ │           │ │          │
-     └──────┬───────┘ └──────┬───────┘ └─────┬─────┘ └────┬─────┘
-            │                │               │             │
-            └────────────────┴───────┬───────┴─────────────┘
-                                     │
-                          ┌──────────▼─────────┐
-                          │  All must pass     │
-                          │  to merge          │
-                          └────────────────────┘
+                          │ clippy            │
+                          │ -D unsafe_code    │
+                          └┬───┬───┬───┬───┬─┘
+                           │   │   │   │   │
+           ┌───────────────┘   │   │   │   └───────────────┐
+           │       ┌───────────┘   │   └──────────┐        │
+           ▼       ▼               ▼              ▼        ▼
+     ┌──────────┐ ┌──────────┐ ┌───────────┐ ┌─────────┐ ┌──────────┐
+     │ test     │ │ security │ │ semgrep   │ │benchmark│ │ doc      │
+     │ ubuntu   │ │ cargo    │ │ AST-aware │ │ >=80%   │ │ review   │
+     │ windows  │ │ audit    │ │ diff-only │ │ savings │ │ ai agent │
+     │ macos    │ │ patterns │ │           │ │         │ │          │
+     └────┬─────┘ └────┬─────┘ └─────┬─────┘ └────┬────┘ └────┬─────┘
+          │            │             │             │            │
+          └────────────┴─────────┬───┴─────────────┴────────────┘
+                                 │
+                      ┌──────────▼─────────┐
+                      │  All must pass     │
+                      │  to merge          │
+                      └────────────────────┘
 
      + DCO check (independent, develop PRs only)
+     + Dependabot (weekly: Cargo deps + GitHub Actions)
 ```
 
 ## Merge to develop — pre-release (cd.yml)
