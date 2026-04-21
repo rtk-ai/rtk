@@ -147,7 +147,6 @@ rtk discover                    # Descobrir economias perdidas
 
 ## Documentação
 
-- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resolver problemas comuns
 - **[INSTALL.md](INSTALL.md)** - Guia detalhado de instalação
 - **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Arquitetura técnica
 
