@@ -2,6 +2,7 @@
 name = "rtk"
 version = "0.34.3"
 edition = "2021"
+rust-version = "1.91"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
 license = "MIT"
