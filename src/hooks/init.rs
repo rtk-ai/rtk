@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
+    AMP_DIR, BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
@@ -18,6 +18,7 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const RTK_SLIM_AMP: &str = include_str!("../../hooks/amp/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -534,10 +535,21 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
-pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
+/// Full uninstall for Claude, Gemini, Codex, Cursor, or Amp artifacts.
+pub fn uninstall(
+    global: bool,
+    gemini: bool,
+    codex: bool,
+    cursor: bool,
+    amp: bool,
+    verbose: u8,
+) -> Result<()> {
     if codex {
         return uninstall_codex(global, verbose);
+    }
+
+    if amp {
+        return uninstall_amp(global, verbose);
     }
 
     if cursor {
@@ -691,6 +703,54 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
     }
 
     let agents_md_path = codex_dir.join(AGENTS_MD);
+    if remove_rtk_reference_from_agents(
+        &agents_md_path,
+        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
+        verbose,
+    )? {
+        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
+    }
+
+    Ok(removed)
+}
+
+fn uninstall_amp(global: bool, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!(
+            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
+        );
+    }
+
+    let amp_dir = resolve_amp_dir()?;
+    let removed = uninstall_amp_at(&amp_dir, verbose)?;
+
+    if removed.is_empty() {
+        println!("RTK was not installed for Amp Code CLI (nothing to remove)");
+    } else {
+        println!("RTK uninstalled for Amp Code CLI:");
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    Ok(())
+}
+
+fn uninstall_amp_at(amp_dir: &Path, verbose: u8) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    let absolute_rtk_md_ref = amp_rtk_md_ref(amp_dir);
+
+    let rtk_md_path = amp_dir.join(RTK_MD);
+    if rtk_md_path.exists() {
+        fs::remove_file(&rtk_md_path)
+            .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Removed RTK.md: {}", rtk_md_path.display());
+        }
+        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    }
+
+    let agents_md_path = amp_dir.join(AGENTS_MD);
     if remove_rtk_reference_from_agents(
         &agents_md_path,
         &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
@@ -1471,6 +1531,71 @@ fn run_codex_mode_with_paths(
     Ok(())
 }
 
+pub fn run_amp_mode(global: bool, verbose: u8) -> Result<()> {
+    let (agents_md_path, rtk_md_path) = if global {
+        let amp_dir = resolve_amp_dir()?;
+        (amp_dir.join(AGENTS_MD), amp_dir.join(RTK_MD))
+    } else {
+        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
+    };
+
+    run_amp_mode_with_paths(agents_md_path, rtk_md_path, global, verbose)
+}
+
+fn run_amp_mode_with_paths(
+    agents_md_path: PathBuf,
+    rtk_md_path: PathBuf,
+    global: bool,
+    verbose: u8,
+) -> Result<()> {
+    if global {
+        if let Some(parent) = agents_md_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Amp config directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    // In global mode use absolute path so @RTK.md resolves from any CWD
+    // (mirrors Codex behavior — see issue #892).
+    let rtk_md_ref = if global {
+        amp_rtk_md_ref(
+            rtk_md_path
+                .parent()
+                .context("RTK.md path missing parent directory")?,
+        )
+    } else {
+        RTK_MD_REF.to_string()
+    };
+
+    write_if_changed(&rtk_md_path, RTK_SLIM_AMP, RTK_MD, verbose)?;
+    let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, verbose)?;
+
+    println!("\nRTK configured for Amp Code CLI.\n");
+    println!("  RTK.md:    {}", rtk_md_path.display());
+    if added_ref {
+        println!("  AGENTS.md: {} reference added", rtk_md_ref);
+    } else {
+        println!("  AGENTS.md: {} reference already present", rtk_md_ref);
+    }
+    if global {
+        println!(
+            "\n  Amp global instructions path: {}",
+            agents_md_path.display()
+        );
+    } else {
+        println!(
+            "\n  Amp project instructions path: {}",
+            agents_md_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 // --- upsert_rtk_block: idempotent RTK block management ---
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1755,6 +1880,27 @@ fn resolve_codex_dir_from(
 
 fn codex_rtk_md_ref(codex_dir: &Path) -> String {
     format!("@{}", codex_dir.join(RTK_MD).display())
+}
+
+fn resolve_amp_dir() -> Result<PathBuf> {
+    resolve_amp_dir_from(
+        std::env::var_os("AMP_CONFIG_DIR").map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn resolve_amp_dir_from(amp_home: Option<PathBuf>, home_dir: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = amp_home.filter(|path| !path.as_os_str().is_empty()) {
+        return Ok(path);
+    }
+
+    home_dir
+        .map(|home| home.join(AMP_DIR))
+        .context("Cannot determine Amp config directory. Set $AMP_CONFIG_DIR or $HOME.")
+}
+
+fn amp_rtk_md_ref(amp_dir: &Path) -> String {
+    format!("@{}", amp_dir.join(RTK_MD).display())
 }
 
 fn resolve_opencode_dir() -> Result<PathBuf> {
@@ -3055,6 +3201,61 @@ More notes
         let removed = uninstall_codex_at(codex_dir, 0).unwrap();
 
         assert_eq!(removed.len(), 2);
+        let content = fs::read_to_string(&agents_md).unwrap();
+        assert!(!content.contains(&absolute_ref));
+        assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_run_amp_mode_global_writes_absolute_reference_to_amp_dir() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let rtk_md = temp.path().join("RTK.md");
+
+        run_amp_mode_with_paths(agents_md.clone(), rtk_md.clone(), true, 0).unwrap();
+
+        assert!(rtk_md.exists());
+        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_SLIM_AMP);
+        assert_eq!(
+            fs::read_to_string(&agents_md).unwrap(),
+            format!("{}\n", amp_rtk_md_ref(temp.path()))
+        );
+    }
+
+    #[test]
+    fn test_resolve_amp_dir_prefers_env_var_and_ignores_empty_value() {
+        let amp_home = PathBuf::from("/tmp/custom-amp-home");
+        let home_dir = PathBuf::from("/tmp/home");
+
+        let preferred =
+            resolve_amp_dir_from(Some(amp_home.clone()), Some(home_dir.clone())).unwrap();
+        let empty_falls_back =
+            resolve_amp_dir_from(Some(PathBuf::new()), Some(home_dir.clone())).unwrap();
+        let missing_falls_back = resolve_amp_dir_from(None, Some(home_dir.clone())).unwrap();
+
+        assert_eq!(preferred, amp_home);
+        assert_eq!(empty_falls_back, home_dir.join(".config/amp"));
+        assert_eq!(missing_falls_back, home_dir.join(".config/amp"));
+    }
+
+    #[test]
+    fn test_uninstall_amp_at_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let amp_dir = temp.path();
+        let agents_md = amp_dir.join("AGENTS.md");
+        let rtk_md = amp_dir.join("RTK.md");
+        let absolute_ref = amp_rtk_md_ref(amp_dir);
+
+        fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
+        fs::write(&rtk_md, "amp config").unwrap();
+
+        let removed_first = uninstall_amp_at(amp_dir, 0).unwrap();
+        let removed_second = uninstall_amp_at(amp_dir, 0).unwrap();
+
+        assert_eq!(removed_first.len(), 2);
+        assert!(removed_second.is_empty());
+        assert!(!rtk_md.exists());
+
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains(&absolute_ref));
         assert!(content.contains("# Team rules"));

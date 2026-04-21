@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Amp Code CLI (@sourcegraph/amp) — AGENTS.md-based integration
+    Amp,
 }
 
 #[derive(Parser)]
@@ -1721,7 +1723,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                let amp = agent == Some(AgentTarget::Amp);
+                hooks::init::uninstall(global, gemini, codex, cursor, amp, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1745,6 +1748,16 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Amp) {
+                if hook_only {
+                    anyhow::bail!("--hook-only is not applicable to Amp (AGENTS.md-based)");
+                }
+                if auto_patch || no_patch {
+                    anyhow::bail!(
+                        "--auto-patch/--no-patch are not applicable to Amp (no settings.json is patched)"
+                    );
+                }
+                hooks::init::run_amp_mode(global, cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
