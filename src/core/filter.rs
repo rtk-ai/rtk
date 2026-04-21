@@ -188,6 +188,12 @@ impl FilterStrategy for MinimalFilter {
 
             // Handle Python docstrings (keep them in minimal mode)
             if *lang == Language::Python && trimmed.starts_with("\"\"\"") {
+                if !in_docstring && trimmed[3..].contains("\"\"\"") {
+                    // Single-line docstring: opens and closes on same line
+                    result.push_str(line);
+                    result.push('\n');
+                    continue;
+                }
                 in_docstring = !in_docstring;
                 result.push_str(line);
                 result.push('\n');
@@ -522,6 +528,27 @@ fn main() {
             kept_count,
             reported_more,
             total_lines
+        );
+    }
+
+    #[test]
+    fn test_minimal_python_single_line_docstring() {
+        let filter = MinimalFilter;
+        let input = r#"def foo():
+    """Short docstring."""
+    # this comment should be stripped
+    x = 1
+    # another comment to strip
+    return x
+"#;
+        let result = filter.filter(input, &Language::Python);
+        assert!(
+            !result.contains("# this comment should be stripped"),
+            "single-line docstring should not leave in_docstring=true"
+        );
+        assert!(
+            !result.contains("# another comment to strip"),
+            "comment after single-line docstring should be stripped"
         );
     }
 }
