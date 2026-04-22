@@ -326,14 +326,15 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
         return content.to_string();
     }
 
-    let mut result = Vec::with_capacity(max_lines);
+    let mut result = Vec::with_capacity(max_lines + 1);
     let mut kept_lines = 0;
-    let mut skipped_section = false;
 
     for line in &lines {
         let trimmed = line.trim();
 
-        // Always keep signatures and important structural elements
+        // Prioritize structurally important lines so the visible window stays useful.
+        // The old approach interleaved "// ... N lines omitted" markers which AI agents
+        // treated as code, causing parsing confusion and extra retry loops.
         let is_important = FUNC_SIGNATURE.is_match(trimmed)
             || IMPORT_PATTERN.is_match(trimmed)
             || trimmed.starts_with("pub ")
@@ -342,31 +343,20 @@ pub fn smart_truncate(content: &str, max_lines: usize, _lang: &Language) -> Stri
             || trimmed == "{";
 
         if is_important || kept_lines < max_lines / 2 {
-            if skipped_section {
-                result.push(format!(
-                    "    // ... {} lines omitted",
-                    lines.len() - kept_lines
-                ));
-                skipped_section = false;
-            }
             result.push((*line).to_string());
             kept_lines += 1;
-        } else {
-            skipped_section = true;
         }
+        // Non-important lines beyond max_lines/2 are silently skipped —
+        // no inline markers that could be mistaken for file content.
 
         if kept_lines >= max_lines - 1 {
             break;
         }
     }
 
-    if skipped_section || kept_lines < lines.len() {
-        result.push(format!(
-            "// ... {} more lines (total: {})",
-            lines.len() - kept_lines,
-            lines.len()
-        ));
-    }
+    // Single end-of-output marker: not code syntax, unambiguous to AI agents.
+    // Invariant: kept_lines + N == lines.len() (N = lines not shown)
+    result.push(format!("[{} more lines]", lines.len() - kept_lines));
 
     result.join("\n")
 }
@@ -484,10 +474,10 @@ fn main() {
 
     #[test]
     fn test_smart_truncate_overflow_count_exact() {
-        // 200 plain-text lines with max_lines=20.
-        // smart_truncate keeps the first max_lines/2=10 lines, then skips the rest.
-        // The overflow message "// ... N more lines (total: T)" must satisfy:
-        //   kept_count + N == T
+        // 200 plain-text lines (no function signatures/imports) with max_lines=20.
+        // Smart selection keeps up to max_lines/2=10 non-important lines then stops.
+        // The overflow message "[N more lines]" must satisfy:
+        //   kept_count + N == total_lines
         let total_lines = 200usize;
         let max_lines = 20usize;
         let content: String = (0..total_lines)
@@ -503,11 +493,12 @@ fn main() {
             .find(|l| l.contains("more lines"))
             .unwrap_or_else(|| panic!("No overflow message found in:\n{}", output));
 
-        // Parse "// ... N more lines (total: T)"
+        // Parse "[N more lines]"
         let reported_more: usize = overflow_line
-            .split_whitespace()
-            .find(|w| w.parse::<usize>().is_ok())
-            .and_then(|w| w.parse().ok())
+            .trim()
+            .strip_prefix('[')
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
             .unwrap_or_else(|| panic!("Could not parse overflow count from: {}", overflow_line));
 
         let kept_count = output
@@ -523,5 +514,37 @@ fn main() {
             reported_more,
             total_lines
         );
+    }
+
+    #[test]
+    fn test_smart_truncate_no_annotations() {
+        // 10 plain-text lines, max_lines=3: smart logic keeps first max_lines/2=1 line.
+        // (None of the lines match FUNC_SIGNATURE or IMPORT_PATTERN patterns.)
+        let input = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n";
+        let output = smart_truncate(input, 3, &Language::Unknown);
+        // Must NOT contain old-style "// ... N lines omitted" annotations
+        assert!(
+            !output.contains("// ..."),
+            "smart_truncate must not insert synthetic comment annotations"
+        );
+        // Must contain clean end-of-output marker (1 kept + 9 omitted = 10 total)
+        assert!(output.contains("[9 more lines]"));
+        // Only the first line is kept (plain-text, no important signatures)
+        assert!(output.starts_with("line1\n"));
+    }
+
+    #[test]
+    fn test_smart_truncate_no_truncation_when_under_limit() {
+        let input = "a\nb\nc\n";
+        let output = smart_truncate(input, 10, &Language::Unknown);
+        assert_eq!(output, input);
+        assert!(!output.contains("more lines"));
+    }
+
+    #[test]
+    fn test_smart_truncate_exact_limit() {
+        let input = "a\nb\nc";
+        let output = smart_truncate(input, 3, &Language::Unknown);
+        assert_eq!(output, input);
     }
 }
