@@ -35,6 +35,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .collect();
 
     let mut cmd = resolved_command("ls");
+    // Force C locale so date output uses English month abbreviations (Jan, Feb, …)
+    // regardless of the user's locale — required for parse_ls_line regex matching.
+    // Fixes #844: non-English locales (e.g. French "avr." instead of "Apr") caused
+    // the date regex to miss every line, producing "(empty)" output.
+    cmd.env("LC_ALL", "C");
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
@@ -451,6 +456,37 @@ mod tests {
         assert_eq!(ft, 'l');
         assert_eq!(size, 10);
         assert_eq!(name, "link -> target");
+    }
+
+    #[test]
+    fn test_compact_file_glob_pattern() {
+        // Regression test for #844: `rtk ls /dev/ttyACM*` returned "(empty)"
+        // When ls is given file paths (not dirs), there's no "total" header,
+        // just raw file lines. compact_ls must still parse them.
+        let input = "-rw-r--r--  1 user  staff  0 Apr 22 09:46 /tmp/test_file1\n\
+                     -rw-r--r--  1 user  staff  0 Apr 22 09:46 /tmp/test_file2\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(
+            entries.contains("/tmp/test_file1"),
+            "should contain file1, got: {entries}"
+        );
+        assert!(
+            entries.contains("/tmp/test_file2"),
+            "should contain file2, got: {entries}"
+        );
+        assert!(!entries.contains("(empty)"), "should not be empty");
+    }
+
+    #[test]
+    fn test_compact_non_english_locale_would_fail_without_lc_all() {
+        // Demonstrates why LC_ALL=C is needed: non-English month abbreviations
+        // don't match the date regex, causing parse_ls_line to return None.
+        let french_input = "-rw-r--r--  1 user  staff  1234 22 avr.  09:46 file.txt\n";
+        let (entries, _summary) = compact_ls(french_input, false);
+        // Without LC_ALL=C, ls would produce this format and we'd get "(empty)".
+        // With LC_ALL=C on the subprocess, we never see this format, but this test
+        // documents the failure mode.
+        assert_eq!(entries, "(empty)\n");
     }
 
     #[test]
