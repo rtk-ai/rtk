@@ -2,14 +2,14 @@
 title: What RTK Optimizes
 description: Commands and ecosystems automatically optimized by RTK with typical token savings
 sidebar:
-  order: 2
+  order: 1
 ---
 
 # What RTK Optimizes
 
 Once RTK is installed with a hook, these commands are automatically intercepted and filtered. You run them normally — the hook rewrites them transparently before execution.
 
-60+ commands across 9 ecosystems. Typical savings: 60-99%.
+Typical savings: 60-99%.
 
 ## Git
 
@@ -131,17 +131,20 @@ These flags apply to all RTK commands and can push savings even higher:
 
 | Flag | Description |
 |------|-------------|
-| `-u` / `--ultra-compact` | ASCII icons, inline format — extra token reduction on top of normal filtering |
+| `--ultra-compact` | ASCII icons, inline format — extra token reduction on top of normal filtering |
 | `-v` / `--verbose` | Show filtering details on stderr (`-v`, `-vv`, `-vvv` for increasing detail) |
 
 ```bash
 # Ultra-compact: even smaller output
-git log          # → already filtered by RTK
-git log -u       # → ultra-compact variant (if using rtk directly)
+rtk git log --ultra-compact
 
 # Debug: see what RTK is doing
-RTK_DISABLED=0 git status -vvv
+rtk git status -vvv
 ```
+
+:::note
+Use `--ultra-compact` (long form) rather than `-u` when working with Git commands. Git's own `-u` flag means `--set-upstream` and the short form can cause confusion.
+:::
 
 ## Commands that are not rewritten
 

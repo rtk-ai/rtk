@@ -1,12 +1,12 @@
 //! Filters grep output by grouping matches by file.
 
 use crate::core::config;
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
-use std::process::Stdio;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -29,9 +29,7 @@ pub fn run(
     let rg_pattern = pattern.replace(r"\|", "|");
 
     let mut rg_cmd = resolved_command("rg");
-    rg_cmd
-        .args(["-n", "--no-heading", &rg_pattern, path])
-        .stdin(Stdio::null());
+    rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -45,27 +43,22 @@ pub fn run(
         rg_cmd.arg(arg);
     }
 
-    let output = rg_cmd
-        .output()
+    let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
-            resolved_command("grep")
-                .args(["-rn", pattern, path])
-                .stdin(Stdio::null())
-                .output()
+            let mut grep_cmd = resolved_command("grep");
+            grep_cmd.args(["-rn", pattern, path]);
+            exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let exit_code = exit_code_from_output(&output, "grep");
+    let exit_code = result.exit_code;
+    let raw_output = result.stdout.clone();
 
-    let raw_output = stdout.to_string();
-
-    if stdout.trim().is_empty() {
+    if result.stdout.trim().is_empty() {
         // Show stderr for errors (bad regex, missing file, etc.)
         if exit_code == 2 {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.trim().is_empty() {
-                eprintln!("{}", stderr.trim());
+            if !result.stderr.trim().is_empty() {
+                eprintln!("{}", result.stderr.trim());
             }
         }
         let msg = format!("0 matches for '{}'", pattern);
@@ -89,7 +82,7 @@ pub fn run(
         None
     };
 
-    for line in stdout.lines() {
+    for line in result.stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
 
         let (file, line_num, content) = if parts.len() == 3 {

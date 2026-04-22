@@ -30,13 +30,13 @@ Zero config changes to your workflow. The hook handles everything automatically.
 
 ## What RTK optimizes
 
-60+ commands across 9 ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What RTK Optimizes](./what-rtk-covers.md) for the full list with savings percentages.
+Dozens of commands across all major ecosystems — Git, Cargo/Rust, JavaScript, Python, Go, Ruby, .NET, Docker/Kubernetes, and more. See [What RTK Optimizes](./resources/what-rtk-covers.md) for the full list with savings percentages.
 
 ## Get started
 
 1. **[Installation](./getting-started/installation.md)** — Install RTK and verify you have the right package
 2. **[Quick Start](./getting-started/quick-start.md)** — Connect to your AI assistant in 5 minutes
-3. **[Supported Agents](./getting-started/supported-agents.md)** — Claude Code, Cursor, Copilot, Gemini, and 7 more
+3. **[Supported Agents](./getting-started/supported-agents.md)** — Claude Code, Cursor, Copilot, Gemini, and more
 
 ## Measure your savings
 
@@ -46,10 +46,20 @@ rtk gain --daily   # day-by-day breakdown
 rtk gain --weekly  # weekly aggregation
 ```
 
-See [Analytics](./analytics/gain.md) for export formats and analysis workflows.
+See [Token Savings Analytics](./analytics/gain.md) for export formats and analysis workflows.
+
+## Analyze your usage
+
+```bash
+rtk discover       # find commands that ran without RTK (missed savings)
+rtk session        # RTK adoption rate per Claude Code session
+```
+
+See [Discover and Session](./analytics/discover.md) for details.
 
 ## Further reading
 
 - [Configuration](./getting-started/configuration.md) — config.toml, global flags, env vars, tee recovery
-- [Troubleshooting](./troubleshooting.md) — common issues and fixes
+- [Troubleshooting](./resources/troubleshooting.md) — common issues and fixes
+- [Telemetry & Privacy](./resources/telemetry.md) — what RTK collects and how to opt out
 - [ARCHITECTURE.md](https://github.com/rtk-ai/rtk/blob/master/ARCHITECTURE.md) — system design for contributors

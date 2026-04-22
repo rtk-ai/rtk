@@ -83,12 +83,12 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
         report.sessions_scanned, report.since_days, report.total_commands
     ));
     out.push_str(&format!(
-        "Already using RTK: {} commands ({}%)\n",
+        "Already using RTK: {} commands ({:.1}%)\n",
         report.already_rtk,
         if report.total_commands > 0 {
-            report.already_rtk * 100 / report.total_commands
+            report.already_rtk as f64 * 100.0 / report.total_commands as f64
         } else {
-            0
+            0.0
         }
     ));
 
@@ -212,5 +212,59 @@ fn truncate_str(s: &str, max: usize) -> String {
             .map(|(_, c)| c)
             .collect();
         format!("{}..", truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_report(total_commands: usize, already_rtk: usize) -> DiscoverReport {
+        DiscoverReport {
+            sessions_scanned: 1,
+            total_commands,
+            already_rtk,
+            since_days: 30,
+            supported: vec![],
+            unsupported: vec![],
+            parse_errors: 0,
+            rtk_disabled_count: 0,
+            rtk_disabled_examples: vec![],
+        }
+    }
+
+    // B6 regression: integer division truncated small percentages to 0%.
+    // Example: 3/1000 = 0% (old bug), should be "0.3%".
+    #[test]
+    fn test_already_rtk_percent_shows_decimal() {
+        let report = make_report(1000, 3);
+        let output = format_text(&report, 10, false);
+        // "0.3%" must appear; old code would print "0%"
+        assert!(
+            output.contains("0.3%"),
+            "Expected '0.3%' in output but got:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("(0%)"),
+            "Output must not contain '(0%)' — integer division bug still present:\n{}",
+            output
+        );
+    }
+
+    // Edge case: 0/0 must not divide-by-zero.
+    #[test]
+    fn test_already_rtk_percent_zero_total() {
+        let report = make_report(0, 0);
+        let output = format_text(&report, 10, false);
+        assert!(output.contains("0 commands (0.0%)"));
+    }
+
+    // Full percent: 1000/1000 = 100.0%
+    #[test]
+    fn test_already_rtk_percent_full() {
+        let report = make_report(1000, 1000);
+        let output = format_text(&report, 10, false);
+        assert!(output.contains("100.0%"));
     }
 }

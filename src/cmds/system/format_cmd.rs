@@ -1,7 +1,8 @@
 //! Runs code formatters (Prettier, Ruff) and shows only files that changed.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, package_manager_exec, resolved_command};
+use crate::core::utils::{package_manager_exec, resolved_command};
 use crate::prettier_cmd;
 use crate::ruff_cmd;
 use anyhow::{Context, Result};
@@ -111,14 +112,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", formatter, user_args.join(" "));
     }
 
-    let output = cmd.output().context(format!(
+    let result = exec_capture(&mut cmd).context(format!(
         "Failed to run {}. Is it installed? Try: pip install {} (or npm/pnpm for JS formatters)",
         formatter, formatter
     ))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Dispatch to appropriate filter based on formatter
     let filtered = match formatter.as_str() {
@@ -137,7 +136,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         &filtered,
     );
 
-    Ok(exit_code_from_output(&output, "format"))
+    Ok(result.exit_code)
 }
 
 /// Filter black output - show files that need formatting

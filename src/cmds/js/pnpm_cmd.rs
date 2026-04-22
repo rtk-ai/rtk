@@ -1,5 +1,6 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
@@ -312,18 +313,15 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run pnpm list")?;
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm list")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprint!("{}", stderr);
-        return Ok(crate::core::utils::exit_code_from_output(&output, "pnpm"));
+    if !result.success() {
+        eprint!("{}", result.stderr);
+        return Ok(result.exit_code);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
     // Parse output using PnpmListParser
-    let parse_result = PnpmListParser::parse(&stdout);
+    let parse_result = PnpmListParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -350,7 +348,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
     timer.track(
         &format!("pnpm list --depth={}", depth),
         &format!("rtk pnpm list --depth={}", depth),
-        &stdout,
+        &result.stdout,
         &filtered,
     );
 
@@ -369,13 +367,11 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run pnpm outdated")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm outdated")?;
+    let combined = result.combined();
 
     // Parse output using PnpmOutdatedParser
-    let parse_result = PnpmOutdatedParser::parse(&stdout);
+    let parse_result = PnpmOutdatedParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -436,16 +432,14 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<i32>
         eprintln!("pnpm install running...");
     }
 
-    let output = cmd.output().context("Failed to run pnpm install")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm install")?;
 
-    if !output.status.success() {
-        eprint!("{}", stderr);
-        return Ok(crate::core::utils::exit_code_from_output(&output, "pnpm"));
+    if !result.success() {
+        eprint!("{}", result.stderr);
+        return Ok(result.exit_code);
     }
 
-    let combined = format!("{}{}", stdout, stderr);
+    let combined = result.combined();
     let filtered = filter_pnpm_install(&combined);
 
     println!("{}", filtered);

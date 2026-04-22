@@ -1,4 +1,6 @@
 use super::constants::{CLAUDE_DIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON};
+use crate::core::stream::exec_capture;
+use crate::discover::lexer::split_on_operators;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -106,6 +108,10 @@ fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
             continue;
         };
         let Ok(json) = serde_json::from_str::<Value>(&content) else {
+            eprintln!(
+                "[rtk] warning: failed to parse permissions from {}",
+                path.display()
+            );
             continue;
         };
         let Some(permissions) = json.get("permissions") else {
@@ -168,14 +174,12 @@ fn find_project_root() -> Option<PathBuf> {
     }
 
     // Fallback: git (spawns a subprocess, slower but handles monorepo layouts).
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "--show-toplevel"]);
+    let result = exec_capture(&mut cmd).ok()?;
 
-    if output.status.success() {
-        let path = String::from_utf8(output.stdout).ok()?;
-        return Some(PathBuf::from(path.trim()));
+    if result.success() {
+        return Some(PathBuf::from(result.stdout.trim()));
     }
 
     None
@@ -283,14 +287,8 @@ fn glob_matches(cmd: &str, pattern: &str) -> bool {
     true
 }
 
-/// Split a compound shell command into individual segments.
-///
-/// Splits on `&&`, `||`, `|`, and `;`. Not a full shell parser — handles common cases.
 fn split_compound_command(cmd: &str) -> Vec<&str> {
-    cmd.split("&&")
-        .flat_map(|s| s.split("||"))
-        .flat_map(|s| s.split(['|', ';']))
-        .collect()
+    split_on_operators(cmd, false)
 }
 
 #[cfg(test)]
@@ -403,6 +401,25 @@ mod tests {
         let ask = vec!["git status".to_string()];
         assert_eq!(
             check_command_with_rules("git status && git push --force", &deny, &ask, &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_quoted_operators_not_split() {
+        // "&&" inside quotes must NOT cause a split — old naive splitter got this wrong
+        let deny = vec!["git push --force".to_string()];
+        assert_eq!(
+            check_command_with_rules(r#"echo "git push --force && danger""#, &deny, &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_pipe_segments_checked() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("cat file | rm -rf /", &deny, &[], &[]),
             PermissionVerdict::Deny
         );
     }

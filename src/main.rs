@@ -9,7 +9,7 @@ mod parser;
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
-use cmds::git::{diff_cmd, gh_cmd, git, gt_cmd};
+use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
 use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
@@ -19,8 +19,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, read, summary,
-    tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -158,6 +158,21 @@ enum Commands {
     /// GitHub CLI (gh) commands with token-optimized output
     Gh {
         /// Subcommand: pr, issue, run, repo
+        subcommand: String,
+        /// Additional arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// GitLab CLI (glab) commands with token-optimized output
+    Glab {
+        /// Target repository (owner/repo), passed as glab -R flag
+        #[arg(short = 'R', long = "repo")]
+        repo: Option<String>,
+        /// Target group, passed as glab -g flag
+        #[arg(short = 'g', long = "group")]
+        group: Option<String>,
+        /// Subcommand: mr, issue, ci, pipeline, api
         subcommand: String,
         /// Additional arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -412,6 +427,12 @@ enum Commands {
         /// Show parse failure log (commands that fell back to raw execution)
         #[arg(short = 'F', long)]
         failures: bool,
+        /// Reset all token savings stats to zero
+        #[arg(long)]
+        reset: bool,
+        /// Skip confirmation prompt when resetting
+        #[arg(long, requires = "reset")]
+        yes: bool,
     },
 
     /// Claude Code economics: spending (ccusage) vs savings (rtk) analysis
@@ -582,11 +603,32 @@ enum Commands {
         min_occurrences: usize,
     },
 
+    /// Execute a shell command via sh -c (raw, no filtering or tracking)
+    Run {
+        /// Command string to execute (use -c for shell-like invocation)
+        #[arg(short = 'c', long = "command")]
+        command: Option<String>,
+        /// Positional command arguments (alternative to -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Execute command without filtering but track usage
     Proxy {
         /// Command and arguments to execute
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
+    },
+
+    /// Read stdin, apply filter, print filtered output (Unix pipe mode)
+    Pipe {
+        /// Filter name (cargo-test, pytest, grep, find, git-log, etc.)
+        #[arg(short, long)]
+        filter: Option<String>,
+
+        /// Pass stdin through without filtering
+        #[arg(long)]
+        passthrough: bool,
     },
 
     /// Trust project-local TOML filters in current directory
@@ -709,10 +751,23 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum HookCommands {
+    /// Process Claude Code PreToolUse hook (reads JSON from stdin)
+    Claude,
+    /// Process Cursor Agent hook (reads JSON from stdin)
+    Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Check how a command would be rewritten by the hook engine (dry-run)
+    Check {
+        /// Target agent
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        /// Command to check
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1048,7 +1103,10 @@ const RTK_META_COMMANDS: &[&str] = &[
     "init",
     "config",
     "proxy",
+    "run",
+    "hook",
     "hook-audit",
+    "pipe",
     "cc-economics",
     "verify",
     "trust",
@@ -1487,6 +1545,25 @@ fn run_cli() -> Result<i32> {
             gh_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
         }
 
+        Commands::Glab {
+            repo,
+            group,
+            subcommand,
+            mut args,
+        } => {
+            // Append -R / -g flags at end so they don't interfere with
+            // subcommand dispatch (args[0] must be the sub-subcommand like "list")
+            if let Some(r) = repo {
+                args.push("-R".to_string());
+                args.push(r);
+            }
+            if let Some(g) = group {
+                args.push("-g".to_string());
+                args.push(g);
+            }
+            glab_cmd::run(&subcommand, &args, cli.verbose, cli.ultra_compact)?
+        }
+
         Commands::Aws { subcommand, args } => aws_cmd::run(&subcommand, &args, cli.verbose)?,
 
         Commands::Psql { args } => psql_cmd::run(&args, cli.verbose)?,
@@ -1768,6 +1845,8 @@ fn run_cli() -> Result<i32> {
             all,
             format,
             failures,
+            reset,
+            yes,
         } => {
             analytics::gain::run(
                 project, // added: pass project flag
@@ -1781,6 +1860,8 @@ fn run_cli() -> Result<i32> {
                 all,
                 &format,
                 failures,
+                reset,
+                yes,
                 cli.verbose,
             )?;
             0
@@ -2021,18 +2102,75 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Hook { command } => {
-            match command {
-                HookCommands::Gemini => hooks::hook_cmd::run_gemini()?,
-                HookCommands::Copilot => hooks::hook_cmd::run_copilot()?,
+        Commands::Hook { command } => match command {
+            HookCommands::Claude => {
+                hooks::hook_cmd::run_claude()?;
+                0
             }
-            0
-        }
+            HookCommands::Cursor => {
+                hooks::hook_cmd::run_cursor()?;
+                0
+            }
+            HookCommands::Gemini => {
+                hooks::hook_cmd::run_gemini()?;
+                0
+            }
+            HookCommands::Copilot => {
+                hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Check { agent: _, command } => {
+                use crate::discover::registry::rewrite_command;
+                let raw = command.join(" ");
+                let excluded = crate::core::config::Config::load()
+                    .map(|c| c.hooks.exclude_commands)
+                    .unwrap_or_default();
+                match rewrite_command(&raw, &excluded) {
+                    Some(rewritten) => {
+                        println!("{}", rewritten);
+                        0
+                    }
+                    None => {
+                        eprintln!("No rewrite for: {}", raw);
+                        1
+                    }
+                }
+            }
+        },
 
         Commands::Rewrite { args } => {
             let cmd = args.join(" ");
             hooks::rewrite_cmd::run(&cmd)?;
             0
+        }
+
+        Commands::Pipe {
+            filter,
+            passthrough,
+        } => {
+            pipe_cmd::run(filter.as_deref(), passthrough)?;
+            0
+        }
+
+        Commands::Run { command, args } => {
+            let raw = match command {
+                Some(c) => c,
+                None if !args.is_empty() => args.join(" "),
+                None => String::new(),
+            };
+            if raw.trim().is_empty() {
+                0
+            } else {
+                use std::process::Command as ProcCommand;
+                let shell = if cfg!(windows) { "cmd" } else { "sh" };
+                let flag = if cfg!(windows) { "/C" } else { "-c" };
+                let status = ProcCommand::new(shell)
+                    .arg(flag)
+                    .arg(&raw)
+                    .status()
+                    .with_context(|| format!("Failed to execute: {}", raw))?;
+                status.code().unwrap_or(1)
+            }
         }
 
         Commands::Proxy { args } => {
@@ -2081,6 +2219,7 @@ fn run_cli() -> Result<i32> {
             static PROXY_CHILD_PID: AtomicU32 = AtomicU32::new(0);
 
             #[cfg(unix)]
+            #[allow(unsafe_code)]
             {
                 unsafe extern "C" fn handle_signal(sig: libc::c_int) {
                     let pid = PROXY_CHILD_PID.load(Ordering::SeqCst);
@@ -2088,7 +2227,6 @@ fn run_cli() -> Result<i32> {
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                         libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), 0);
                     }
-                    // Re-raise with default handler so parent sees correct exit status
                     libc::signal(sig, libc::SIG_DFL);
                     libc::raise(sig);
                 }
@@ -2256,6 +2394,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Smart { .. }
             | Commands::Git { .. }
             | Commands::Gh { .. }
+            | Commands::Glab { .. }
             | Commands::Pnpm { .. }
             | Commands::Err { .. }
             | Commands::Test { .. }
@@ -2505,7 +2644,7 @@ mod tests {
         // RTK meta-commands should produce parse errors (not fall through to raw execution).
         // Skip "proxy" because it uses trailing_var_arg (accepts any args by design).
         for cmd in RTK_META_COMMANDS {
-            if matches!(*cmd, "proxy" | "rewrite" | "session") {
+            if matches!(*cmd, "proxy" | "run" | "rewrite" | "session") {
                 continue; // these use trailing_var_arg (accept any args by design)
             }
             let result = Cli::try_parse_from(["rtk", cmd, "--nonexistent-flag-xyz"]);
@@ -2514,6 +2653,71 @@ mod tests {
                 "Meta-command '{}' with bad flag should fail to parse",
                 cmd
             );
+        }
+    }
+
+    #[test]
+    fn test_run_command_with_dash_c() {
+        let cli = Cli::try_parse_from(["rtk", "run", "-c", "git status && echo done"]).unwrap();
+        match cli.command {
+            Commands::Run { command, args } => {
+                assert_eq!(command, Some("git status && echo done".to_string()));
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_run_command_positional_args() {
+        let cli = Cli::try_parse_from(["rtk", "run", "echo", "hello"]).unwrap();
+        match cli.command {
+            Commands::Run { command, args } => {
+                assert!(command.is_none());
+                assert_eq!(args, vec!["echo", "hello"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_claude_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "claude"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_check_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "check", "git", "status"]).unwrap();
+        match cli.command {
+            Commands::Hook {
+                command: HookCommands::Check { agent, command },
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(command, vec!["git", "status"]);
+            }
+            _ => panic!("Expected Hook Check command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_check_with_agent() {
+        let cli =
+            Cli::try_parse_from(["rtk", "hook", "check", "--agent", "gemini", "cargo", "test"])
+                .unwrap();
+        match cli.command {
+            Commands::Hook {
+                command: HookCommands::Check { agent, command },
+            } => {
+                assert_eq!(agent, "gemini");
+                assert_eq!(command, vec!["cargo", "test"]);
+            }
+            _ => panic!("Expected Hook Check command"),
         }
     }
 
@@ -2527,6 +2731,7 @@ mod tests {
             vec!["rtk", "init"],
             vec!["rtk", "config"],
             vec!["rtk", "proxy", "echo", "hi"],
+            vec!["rtk", "run", "-c", "echo hi"],
             vec!["rtk", "hook-audit"],
             vec!["rtk", "cc-economics"],
         ];

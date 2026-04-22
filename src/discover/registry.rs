@@ -3,7 +3,7 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
-use super::lexer::{tokenize, TokenKind};
+use super::lexer::{split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
@@ -38,6 +38,7 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         "Infra" => 120,
         "Network" => 150,
         "GitHub" => 200,
+        "GitLab" => 200,
         "PackageManager" => 150,
         _ => 150,
     }
@@ -221,46 +222,25 @@ fn extract_base_command(cmd: &str) -> &str {
     }
 }
 
+/// Quote-aware heredoc detection — `<<` inside quotes is not a heredoc.
+pub fn has_heredoc(cmd: &str) -> bool {
+    tokenize(cmd)
+        .iter()
+        .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
+}
+
 pub fn split_command_chain(cmd: &str) -> Vec<&str> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return vec![];
     }
 
-    if trimmed.contains("<<") || trimmed.contains("$((") {
+    // Lexer-based for `<<`; string-based for `$((` (lexer splits it across tokens).
+    if has_heredoc(trimmed) || trimmed.contains("$((") {
         return vec![trimmed];
     }
 
-    let tokens = tokenize(trimmed);
-    let mut results = Vec::new();
-    let mut seg_start: usize = 0;
-
-    for tok in &tokens {
-        match tok.kind {
-            TokenKind::Operator => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                seg_start = tok.offset + tok.value.len();
-            }
-            TokenKind::Pipe => {
-                let segment = trimmed[seg_start..tok.offset].trim();
-                if !segment.is_empty() {
-                    results.push(segment);
-                }
-                return results;
-            }
-            _ => {}
-        }
-    }
-
-    let segment = trimmed[seg_start..].trim();
-    if !segment.is_empty() {
-        results.push(segment);
-    }
-
-    results
+    split_on_operators(trimmed, true)
 }
 
 /// Strip git global options before the subcommand (#163).
@@ -456,17 +436,19 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
-/// For pipes (`|`), only rewrites the first command (the filter stays raw).
+/// For pipes (`|`), only rewrites the left-hand command (pipe targets stay raw),
+/// but continues rewriting segments after subsequent `&&`/`||`/`;` operators.
 pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    // Heredoc or arithmetic expansion — unsafe to split/rewrite
-    if trimmed.contains("<<") || trimmed.contains("$((") {
+    if has_heredoc(trimmed) || trimmed.contains("$((") {
         return None;
     }
+
+    let compiled = compile_exclude_patterns(excluded);
 
     // Simple (non-compound) already-RTK command — return as-is.
     // For compound commands that start with "rtk" (e.g. "rtk git add . && cargo test"),
@@ -480,17 +462,20 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, excluded)
+    rewrite_compound(trimmed, &compiled)
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
-fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
+fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
     let tokens = tokenize(cmd);
     let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
     let mut seg_start: usize = 0;
 
     for tok in &tokens {
+        if tok.offset < seg_start {
+            continue;
+        }
         match tok.kind {
             TokenKind::Operator => {
                 let seg = cmd[seg_start..tok.offset].trim();
@@ -530,9 +515,25 @@ fn rewrite_compound(cmd: &str, excluded: &[String]) -> Option<String> {
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-                result.push(' ');
-                result.push_str(cmd[tok.offset..].trim_start());
-                return if any_changed { Some(result) } else { None };
+
+                let pipe_group_end = tokens.iter().find(|t| {
+                    t.offset > tok.offset
+                        && (t.kind == TokenKind::Operator
+                            || (t.kind == TokenKind::Shellism && t.value == "&"))
+                });
+
+                match pipe_group_end {
+                    Some(next_op) => {
+                        result.push(' ');
+                        result.push_str(cmd[tok.offset..next_op.offset].trim());
+                        seg_start = next_op.offset;
+                    }
+                    None => {
+                        result.push(' ');
+                        result.push_str(cmd[tok.offset..].trim_start());
+                        return if any_changed { Some(result) } else { None };
+                    }
+                }
             }
             TokenKind::Shellism if tok.value == "&" => {
                 let seg = cmd[seg_start..tok.offset].trim();
@@ -591,13 +592,79 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     None
 }
 
-/// Rewrite a single (non-compound) command segment.
-/// Returns `Some(rewritten)` if matched (including already-RTK pass-through).
-/// Returns `None` if no match (caller uses original segment).
-fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
+/// Shell prefix builtins that modify how the shell runs a command
+/// but don't change which command runs. Strip before routing, re-prepend after.
+const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+
+const MAX_PREFIX_DEPTH: usize = 10;
+
+enum ExcludePattern {
+    Regex(Regex),
+    Prefix(String),
+}
+
+fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
+    patterns
+        .iter()
+        .filter_map(|pattern| {
+            let trimmed = pattern.trim();
+            if trimmed.is_empty() || trimmed == "^" {
+                eprintln!(
+                    "rtk: warning: ignoring trivial exclude_commands pattern '{}'",
+                    pattern
+                );
+                return None;
+            }
+            let anchored = if trimmed.starts_with('^') {
+                trimmed.to_string()
+            } else {
+                format!(r"^{}($|\s)", regex::escape(trimmed))
+            };
+            Some(match Regex::new(&anchored) {
+                Ok(re) => ExcludePattern::Regex(re),
+                Err(e) => {
+                    eprintln!(
+                        "rtk: warning: invalid exclude_commands pattern '{}': {}",
+                        pattern, e
+                    );
+                    ExcludePattern::Prefix(pattern.clone())
+                }
+            })
+        })
+        .collect()
+}
+
+fn rewrite_segment(seg: &str, excluded: &[ExcludePattern]) -> Option<String> {
+    rewrite_segment_inner(seg, excluded, 0)
+}
+
+fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
+    excluded.iter().any(|pat| match pat {
+        ExcludePattern::Regex(re) => re.is_match(cmd),
+        ExcludePattern::Prefix(prefix) => cmd.starts_with(prefix.as_str()),
+    })
+}
+
+fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
         return None;
+    }
+
+    if depth >= MAX_PREFIX_DEPTH {
+        return None;
+    }
+
+    for &prefix in SHELL_PREFIX_BUILTINS {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            if rest.is_empty() {
+                return None;
+            }
+            return match rewrite_segment_inner(rest, excluded, depth + 1) {
+                Some(rewritten) => Some(format!("{} {}", prefix, rewritten)),
+                None => None,
+            };
+        }
     }
 
     // Strip trailing stderr/stdout redirects before matching (#530)
@@ -626,9 +693,9 @@ fn rewrite_segment(seg: &str, excluded: &[String]) -> Option<String> {
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
-            // Check if the base command is excluded from rewriting (#243)
-            let base = cmd_part.split_whitespace().next().unwrap_or("");
-            if excluded.iter().any(|e| e == base) {
+            let stripped = ENV_PREFIX.replace(cmd_part, "");
+            let cmd_clean = stripped.trim();
+            if is_excluded(cmd_clean, excluded) {
                 return None;
             }
             rtk_equivalent
@@ -1658,6 +1725,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_classify_glab_mr() {
+        assert!(matches!(
+            classify_command("glab mr list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk glab",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_glab_ci() {
+        assert!(matches!(
+            classify_command("glab ci list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk glab",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_glab_release() {
+        assert!(matches!(
+            classify_command("glab release list"),
+            Classification::Supported {
+                rtk_equivalent: "rtk glab",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_glab_mr_list() {
+        assert_eq!(
+            rewrite_command("glab mr list", &[]),
+            Some("rtk glab mr list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_glab_ci_status() {
+        assert_eq!(
+            rewrite_command("glab ci status", &[]),
+            Some("rtk glab ci status".into())
+        );
     }
 
     #[test]
@@ -2833,6 +2949,57 @@ mod tests {
     }
 
     #[test]
+    fn test_exclude_env_prefixed_command() {
+        let excluded = vec!["psql".to_string()];
+        assert_eq!(
+            rewrite_command("PGPASSWORD=postgres psql -h localhost", &excluded),
+            None
+        );
+    }
+
+    #[test]
+    fn test_exclude_subcommand_pattern() {
+        let excluded = vec!["git push".to_string()];
+        assert_eq!(rewrite_command("git push origin main", &excluded), None);
+    }
+
+    #[test]
+    fn test_exclude_regex_pattern() {
+        let excluded = vec!["^curl".to_string()];
+        assert_eq!(rewrite_command("curl http://example.com", &excluded), None);
+    }
+
+    #[test]
+    fn test_exclude_invalid_regex_fallback() {
+        let excluded = vec!["curl[".to_string()];
+        assert!(rewrite_command("curl http://example.com", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_does_not_substring_match() {
+        let excluded = vec!["go".to_string()];
+        assert!(rewrite_command("golangci-lint run ./...", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_does_not_match_hyphenated_command() {
+        let excluded = vec!["golangci".to_string()];
+        assert!(rewrite_command("golangci-lint run ./...", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_empty_pattern_ignored() {
+        let excluded = vec!["".to_string()];
+        assert!(rewrite_command("git status", &excluded).is_some());
+    }
+
+    #[test]
+    fn test_exclude_bare_anchor_ignored() {
+        let excluded = vec!["^".to_string()];
+        assert!(rewrite_command("git status", &excluded).is_some());
+    }
+
+    #[test]
     fn test_all_patterns_are_valid_regex() {
         use regex::Regex;
         for (i, rule) in RULES.iter().enumerate() {
@@ -3136,6 +3303,125 @@ mod tests {
         assert_eq!(
             split_command_chain("git log $(git rev-parse HEAD~1)"),
             vec!["git log $(git rev-parse HEAD~1)"]
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_noglob() {
+        assert_eq!(
+            rewrite_command("noglob git status", &[]),
+            Some("noglob rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_command() {
+        assert_eq!(
+            rewrite_command("command git status", &[]),
+            Some("command rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_builtin_exec_nocorrect() {
+        assert_eq!(
+            rewrite_command("builtin git status", &[]),
+            Some("builtin rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command("exec git status", &[]),
+            Some("exec rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command("nocorrect git status", &[]),
+            Some("nocorrect rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_shell_prefix_unknown_inner() {
+        assert_eq!(rewrite_command("noglob unknown_cmd --flag", &[]), None);
+    }
+
+    #[test]
+    fn test_python3_m_pytest() {
+        assert_eq!(
+            rewrite_command("python3 -m pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_pip_show() {
+        assert_eq!(
+            rewrite_command("pip show flask", &[]),
+            Some("rtk pip show flask".into())
+        );
+    }
+
+    #[test]
+    fn test_gt_graphite() {
+        assert_eq!(rewrite_command("gt log", &[]), Some("rtk gt log".into()));
+    }
+
+    #[test]
+    fn test_command_no_longer_ignored() {
+        assert_ne!(
+            classify_command("command git status"),
+            Classification::Ignored
+        );
+    }
+
+    // --- Pipe + operator rewrite ---
+
+    #[test]
+    fn test_rewrite_pipe_then_and() {
+        assert_eq!(
+            rewrite_command("git log | head -5 && git stash", &[]),
+            Some("rtk git log | head -5 && rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_then_semicolon() {
+        assert_eq!(
+            rewrite_command("cargo test | head; git status", &[]),
+            Some("rtk cargo test | head; rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_then_or() {
+        assert_eq!(
+            rewrite_command("cargo test | grep FAIL || git stash", &[]),
+            Some("rtk cargo test | grep FAIL || rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_pipe_then_and() {
+        assert_eq!(
+            rewrite_command(
+                "RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && git stash",
+                &[]
+            ),
+            Some("RUST_BACKTRACE=1 rtk cargo test 2>&1 | grep FAILED && rtk git stash".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_and_then_pipe() {
+        assert_eq!(
+            rewrite_command("git status && cargo test | grep FAIL", &[]),
+            Some("rtk git status && rtk cargo test | grep FAIL".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_multi_pipe_then_and() {
+        assert_eq!(
+            rewrite_command("git log | head | tail && git status", &[]),
+            Some("rtk git log | head | tail && rtk git status".into())
         );
     }
 }
