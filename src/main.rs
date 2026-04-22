@@ -2161,20 +2161,23 @@ fn run_cli() -> Result<i32> {
             }
         }
 
-        Commands::Wrangler { command } => match command {
-            WranglerCommands::Deploy { args } => {
-                wrangler_cmd::run_deploy(&args, cli.verbose)?;
+        Commands::Wrangler { command } => {
+            match command {
+                WranglerCommands::Deploy { args } => {
+                    wrangler_cmd::run_deploy(&args, cli.verbose)?;
+                }
+                WranglerCommands::Pages { args } => {
+                    wrangler_cmd::run_pages(&args, cli.verbose)?;
+                }
+                WranglerCommands::Dev { args } => {
+                    wrangler_cmd::run_dev(&args, cli.verbose)?;
+                }
+                WranglerCommands::Other(args) => {
+                    wrangler_cmd::run_passthrough(&args, cli.verbose)?;
+                }
             }
-            WranglerCommands::Pages { args } => {
-                wrangler_cmd::run_pages(&args, cli.verbose)?;
-            }
-            WranglerCommands::Dev { args } => {
-                wrangler_cmd::run_dev(&args, cli.verbose)?;
-            }
-            WranglerCommands::Other(args) => {
-                wrangler_cmd::run_passthrough(&args, cli.verbose)?;
-            }
-        },
+            0
+        }
 
         Commands::Proxy { args } => {
             use std::io::{Read, Write};

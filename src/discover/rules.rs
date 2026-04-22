@@ -419,16 +419,15 @@ pub const RULES: &[RtkRule] = &[
     RtkRule {
         pattern: r"^((npx|bunx|pnpm)\s+)?wrangler\s+(deploy|pages|dev)(\s|$)",
         rtk_cmd: "rtk wrangler",
-        rewrite_prefixes: &[
-            "bunx wrangler",
-            "npx wrangler",
-            "pnpm wrangler",
-            "wrangler",
-        ],
+        rewrite_prefixes: &["bunx wrangler", "npx wrangler", "pnpm wrangler", "wrangler"],
         category: "Infra",
         savings_pct: 70.0,
         subcmd_savings: &[("deploy", 75.0), ("pages", 70.0), ("dev", 30.0)],
-        subcmd_status: &[("deploy", RtkStatus::Existing), ("pages", RtkStatus::Existing), ("dev", RtkStatus::Passthrough)],
+        subcmd_status: &[
+            ("deploy", RtkStatus::Existing),
+            ("pages", RtkStatus::Existing),
+            ("dev", RtkStatus::Passthrough),
+        ],
     },
     RtkRule {
         pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",

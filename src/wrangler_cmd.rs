@@ -1,5 +1,5 @@
-use crate::tracking;
-use crate::utils::strip_ansi;
+use crate::core::tracking;
+use crate::core::utils::strip_ansi;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::process::Command;
@@ -705,13 +705,8 @@ Current Version ID: test789
     fn assert_savings(raw: &str, filtered: &str, min_pct: f64, label: &str) {
         let raw_tokens = estimate_tokens(raw);
         let filtered_tokens = estimate_tokens(filtered);
-        assert!(
-            raw_tokens > 0,
-            "{}: raw output should not be empty",
-            label
-        );
-        let savings_pct =
-            (raw_tokens as f64 - filtered_tokens as f64) / raw_tokens as f64 * 100.0;
+        assert!(raw_tokens > 0, "{}: raw output should not be empty", label);
+        let savings_pct = (raw_tokens as f64 - filtered_tokens as f64) / raw_tokens as f64 * 100.0;
         assert!(
             savings_pct >= min_pct,
             "{}: expected >= {:.0}% savings, got {:.1}% (raw {} tokens, filtered {} tokens)",
