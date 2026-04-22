@@ -2058,8 +2058,22 @@ fn run_cli() -> Result<i32> {
                 "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
                 "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
                 _ => {
-                    // Generic passthrough with npm boilerplate filter
-                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?
+                    // Generic npx passthrough: unknown tools run through npx, not npm
+                    let timer = core::tracking::TimedExecution::start();
+                    let mut cmd = core::utils::resolved_command("npx");
+                    for arg in &args {
+                        cmd.arg(arg);
+                    }
+                    if cli.skip_env {
+                        cmd.env("SKIP_ENV_VALIDATION", "1");
+                    }
+                    let status = cmd.status().context("Failed to run npx")?;
+                    let args_str = args.join(" ");
+                    timer.track_passthrough(
+                        &format!("npx {}", args_str),
+                        &format!("rtk npx {} (passthrough)", args_str),
+                    );
+                    core::utils::exit_code_from_status(&status, "npx")
                 }
             }
         }
@@ -2987,5 +3001,20 @@ mod tests {
             cli.ultra_compact,
             "--ultra-compact long form must still enable ultra-compact mode"
         );
+    }
+
+    #[test]
+    fn test_npx_unknown_tool_passthrough() {
+        // The bug (rtk-ai/rtk#815) was that unknown tools under `rtk npx`
+        // were dispatched to `npm` instead of `npx`. At the parse level, the
+        // Npx variant must carry all args through unchanged so the dispatch
+        // arm can forward them to npx.
+        let cli = Cli::try_parse_from(["rtk", "npx", "cowsay", "hello"]).unwrap();
+        match cli.command {
+            Commands::Npx { args } => {
+                assert_eq!(args, vec!["cowsay", "hello"]);
+            }
+            _ => panic!("Expected Commands::Npx for unknown tool"),
+        }
     }
 }
