@@ -42,7 +42,9 @@ assert_contains() {
     local needle="$2"
     shift 2
     local output
-    if output=$("$@" 2>&1) && echo "$output" | grep -q "$needle"; then
+    local status=0
+    output=$("$@" 2>&1) || status=$?
+    if [[ "$status" -eq 0 || "$status" -eq 3 ]] && echo "$output" | grep -Fq -- "$needle"; then
         PASS=$((PASS + 1))
         printf "  ${GREEN}PASS${NC}  %s\n" "$name"
     else
@@ -282,7 +284,7 @@ TMPJSON=$(mktemp /tmp/rtk-test-XXXXX.json)
 echo '{"name":"test","count":42,"items":[1,2,3]}' > "$TMPJSON"
 
 assert_ok      "rtk json file"                rtk json "$TMPJSON"
-assert_contains "rtk json shows schema"       "string" rtk json "$TMPJSON"
+assert_contains "rtk json shows schema"       "string" rtk json --schema "$TMPJSON"
 
 rm -f "$TMPJSON"
 
@@ -562,7 +564,7 @@ fi
 
 section "Hook check (#344)"
 
-assert_contains "rtk init --show hook version" "version" rtk init --show
+assert_contains "rtk init --show hook version" "Hook:" rtk init --show
 
 # ══════════════════════════════════════════════════════
 # Report

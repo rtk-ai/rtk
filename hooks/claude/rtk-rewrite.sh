@@ -43,6 +43,31 @@ if [ -z "$CMD" ]; then
   exit 0
 fi
 
+audit_log() {
+  [ "${RTK_HOOK_AUDIT:-}" = "1" ] || return 0
+
+  local action="$1"
+  local original="$2"
+  local rewritten="${3:--}"
+  local audit_dir="${RTK_AUDIT_DIR:-$HOME/.local/share/rtk}"
+  local audit_file="$audit_dir/hook-audit.log"
+  local ts
+
+  mkdir -p "$audit_dir"
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  printf "%s | %s | %s | %s\n" "$ts" "$action" "$original" "$rewritten" >> "$audit_file"
+}
+
+if [ "$CMD" = "rtk" ] || [[ "$CMD" == rtk\ * ]]; then
+  audit_log "skip:already_rtk" "$CMD" "-"
+  exit 0
+fi
+
+if [[ "$CMD" == *"<<"* ]]; then
+  audit_log "skip:heredoc" "$CMD" "-"
+  exit 0
+fi
+
 # Delegate all rewrite + permission logic to the Rust binary.
 REWRITTEN=$(rtk rewrite "$CMD" 2>/dev/null)
 EXIT_CODE=$?
@@ -51,21 +76,29 @@ case $EXIT_CODE in
   0)
     # Rewrite found, no permission rules matched — safe to auto-allow.
     # If the output is identical, the command was already using RTK.
-    [ "$CMD" = "$REWRITTEN" ] && exit 0
+    [ "$CMD" = "$REWRITTEN" ] && {
+      audit_log "skip:already_rtk" "$CMD" "-"
+      exit 0
+    }
+    audit_log "rewrite" "$CMD" "$REWRITTEN"
     ;;
   1)
     # No RTK equivalent — pass through unchanged.
+    audit_log "skip:no_match" "$CMD" "-"
     exit 0
     ;;
   2)
     # Deny rule matched — let Claude Code's native deny rule handle it.
+    audit_log "skip:deny" "$CMD" "-"
     exit 0
     ;;
   3)
     # Ask rule matched — rewrite the command but do NOT auto-allow so that
     # Claude Code prompts the user for confirmation.
+    audit_log "rewrite" "$CMD" "$REWRITTEN"
     ;;
   *)
+    audit_log "skip:error" "$CMD" "-"
     exit 0
     ;;
 esac
