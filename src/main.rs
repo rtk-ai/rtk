@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// ByteDance TRAE
+    Trae,
 }
 
 #[derive(Parser)]
@@ -1785,6 +1787,11 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Trae) {
+                if global {
+                    anyhow::bail!("TRAE is project-scoped. Use: rtk init --agent trae");
+                }
+                hooks::init::run_trae_mode(cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
