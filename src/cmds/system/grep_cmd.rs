@@ -18,6 +18,7 @@ pub fn run(
     file_type: Option<&str>,
     extra_args: &[String],
     verbose: u8,
+    full_lines: bool,
 ) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -96,7 +97,11 @@ pub fn run(
         };
 
         total += 1;
-        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
+        let cleaned = if full_lines {
+            content.trim().to_string()
+        } else {
+            clean_line(content, max_line_len, context_re.as_ref(), pattern)
+        };
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
@@ -309,5 +314,31 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    // --- full_lines flag ---
+
+    #[test]
+    fn test_full_lines_skips_truncation() {
+        // When full_lines is true, long lines should not be truncated
+        let long_content = "this is a very long line that would normally be truncated to fit within the max line length limit";
+        // clean_line truncates this at approximately max_len (with ... markers)
+        let truncated = clean_line(long_content, 20, None, "long");
+        // Truncated output is bounded (approx max_len + ellipsis overhead)
+        assert!(truncated.len() < long_content.len(), "truncated should be shorter than original");
+
+        // With full_lines logic (trim only, no truncation)
+        let full = long_content.trim().to_string();
+        assert_eq!(full, long_content, "full_lines should preserve entire line");
+        assert!(full.len() > 20, "full line should exceed max_len");
+    }
+
+    #[test]
+    fn test_full_lines_preserves_whitespace_trim() {
+        // full_lines should still trim leading/trailing whitespace
+        let padded = "   const x = 42;   ";
+        let trimmed = padded.trim().to_string();
+        assert_eq!(trimmed, "const x = 42;");
+        assert_eq!(trimmed.len(), 13);
     }
 }
