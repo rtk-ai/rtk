@@ -35,19 +35,19 @@ Each subdirectory has its own README with file descriptions, parsing strategies,
 - **[`system/`](system/README.md)** — ls, tree, read, grep, find, wc, env, json, log, deps, summary, format, smart — format_cmd routing, filter levels, language detection
 - **[`ruby/`](ruby/README.md)** — rake/rails test, rspec, rubocop — JSON injection pattern, `ruby_exec()` bundle exec auto-detection
 
-## Execution Flow: `runner::run_filtered()`
+## Execution Flow
 
-The shared wrapper in [`core/runner.rs`](../core/runner.rs) encapsulates the six-phase execution skeleton. Modules build the `Command` (custom arg logic), then delegate to `run_filtered()` for everything else.
+The shared wrappers in [`core/runner.rs`](../core/runner.rs) encapsulate the execution skeleton. Modules build the `Command` (custom arg logic), then delegate to a runner entry point. All runners handle tracking, tee recovery, and exit code propagation automatically.
 
 ```
- cmd.output()          Filter applied to         tee_and_hint()
-      |                stdout or combined              |
-      v                       |                        v
+ run_streaming()       Filter applied              tee_and_hint()
+      |                (per-line or post-hoc)            |
+      v                       |                          v
  +---------+  stdout  +-------+-------+  filtered  +-------+
- | Execute |--------->| filter_fn()   |----------->| Print |
+ | Spawn   |--------->| filter        |----------->| Print |
  +---------+  stderr  +---------------+            +-------+
-      |                                                |
-      v                                                v
+      |        (live)                                    |
+      v                                                  v
  +----------+                                    +---------+
  | raw =    |                                    | Track   |
  | stdout + |                                    | savings |
@@ -60,14 +60,33 @@ The shared wrapper in [`core/runner.rs`](../core/runner.rs) encapsulates the six
                                                  +-----------+
 ```
 
-**Six phases in order:**
+### Filter modes
 
-1. **Execute** — `cmd.output()` captures stdout + stderr
-2. **Filter** — `filter_fn` receives stdout-only or combined, returns compressed string
-3. **Print** — filtered output printed; if tee enabled, appends recovery hint on failure
-4. **Stderr passthrough** — when `filter_stdout_only`: stderr printed via `eprintln!()` unconditionally
-5. **Track** — `timer.track()` records raw vs filtered for token savings
-6. **Exit code** — returns `Ok(exit_code)` to caller; `main.rs` calls `process::exit(code)` once
+All execution goes through `core::stream::run_streaming()` with one of four `FilterMode` variants. The runner entry points (`run_filtered`, `run_streamed`, `run_passthrough`) select the appropriate mode automatically — module authors don't interact with `FilterMode` directly.
+
+| FilterMode | How it works | Used by |
+|------------|-------------|---------|
+| **`CaptureOnly`** | Buffers all stdout silently, then passes the full string to `filter_fn` post-hoc. Stderr streams to terminal in real time. | `run_filtered()` (default path) |
+| **`Buffered`** | Buffers all stdout, applies filter, then prints the result. Stderr streams live. Chosen automatically by `run_filtered()` when `filter_stdout_only` is set. | `run_filtered()` (stdout-only path) |
+| **`Streaming`** | Feeds each stdout line to a `StreamFilter::feed_line()` as it arrives. Emitted lines print immediately. Calls `flush()` after process exits for final output. | `run_streamed()` |
+| **`Passthrough`** | Inherits the parent TTY directly — no piping, no buffering. `raw`/`filtered` are empty. | `run_passthrough()` |
+
+### When to use which
+
+| Scenario | Runner | FilterMode | Why |
+|----------|--------|------------|-----|
+| Parse structured output (JSON, tables) | `run_filtered()` | CaptureOnly/Buffered | Filter needs full text to parse structure |
+| Long-running, line-parseable output | `run_streamed()` | Streaming | Low memory, real-time output |
+| No filtering, just track usage | `run_passthrough()` | Passthrough | Zero overhead, inherits TTY |
+| Custom logic (multi-command, file I/O) | Manual with `exec_capture()` | CaptureOnly | Full control over execution |
+
+### Phases
+
+1. **Spawn** — `run_streaming()` starts the child process with piped stdout/stderr (or inherited TTY for Passthrough)
+2. **Filter** — stdout is processed per the FilterMode; stderr is forwarded to the terminal in real time via a dedicated reader thread
+3. **Print** — filtered output is written to stdout (live for Streaming, post-hoc for CaptureOnly/Buffered); if tee enabled, appends recovery hint on failure
+4. **Track** — `timer.track()` records raw vs filtered for token savings
+5. **Exit code** — returns `Ok(exit_code)` to caller; `main.rs` calls `process::exit(code)` once
 
 **`RunOptions` builder:**
 
@@ -96,14 +115,85 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 Exit code handling is **fully automatic** when using `run_filtered()` — the wrapper extracts the exit code (including Unix signal handling via 128+signal), tracks savings, and returns `Ok(exit_code)`. Module authors just return the result.
 
+**Streaming filters (line-by-line):**
+
+Use `runner::run_streamed()` when the command is long-running or produces unbounded output that should be filtered line-by-line. Three levels of abstraction, from simplest to most flexible:
+
+**Level 1: `RegexBlockFilter`** — regex start pattern + indent continuation (3-5 lines)
+
+For block-based errors where blocks start with a regex match and continue on indented lines. Handles skip prefixes, block counting, and summary automatically.
+
+```rust
+use crate::core::stream::{BlockStreamFilter, RegexBlockFilter};
+
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command("mycmd");
+    for arg in args { cmd.arg(arg); }
+
+    let filter = RegexBlockFilter::new("mycmd", r"^error\[")
+        .skip_prefixes(&["warning:", "note:"]);
+
+    runner::run_streamed(
+        cmd, "mycmd", &args.join(" "),
+        Box::new(BlockStreamFilter::new(filter)),
+        runner::RunOptions::with_tee("mycmd"),
+    )
+}
+```
+
+`RegexBlockFilter` provides: regex-based block start detection, indent-based continuation (space/tab), configurable line skipping via prefixes, and automatic summary (`"mycmd: 3 blocks in output"` or `"mycmd: no errors found"`).
+
+**Level 2: `BlockHandler` trait** — custom block detection with state tracking
+
+When you need custom block start/continuation logic or stateful parsing beyond regex + indent. Implement the `BlockHandler` trait and wrap in `BlockStreamFilter`.
+
+```rust
+use crate::core::stream::{BlockHandler, BlockStreamFilter};
+
+struct MyHandler { error_count: usize }
+
+impl BlockHandler for MyHandler {
+    fn should_skip(&mut self, line: &str) -> bool { line.is_empty() }
+    fn is_block_start(&mut self, line: &str) -> bool {
+        if line.starts_with("FAIL") { self.error_count += 1; true } else { false }
+    }
+    fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+        line.starts_with("  ") || line.starts_with("at ")
+    }
+    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        Some(format!("{} failures\n", self.error_count))
+    }
+}
+```
+
+See `cmds/rust/cargo_cmd.rs::CargoBuildHandler` and `cmds/js/tsc_cmd.rs::TscHandler` for production examples.
+
+**Level 3: `StreamFilter` trait** — full line-by-line control
+
+When block-based parsing doesn't fit (e.g., state machines, multi-phase output, line transforms). Implement `StreamFilter` directly.
+
+```rust
+use crate::core::stream::StreamFilter;
+
+struct MyFilter { state: State }
+
+impl StreamFilter for MyFilter {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        // Return Some(text) to emit, None to suppress
+        if line.contains("error") { Some(format!("{}\n", line)) } else { None }
+    }
+    fn flush(&mut self) -> String { String::new() }
+    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> { None }
+}
+```
+
+See `cmds/rust/runner.rs::ErrorStreamFilter` for a complete reference implementation (state machine that tracks error blocks across lines).
+
 **Example — passthrough command (no filtering):**
 
 ```rust
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
-    let status = resolved_command("mycmd").args(args)
-        .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit())
-        .status().context("Failed to run mycmd")?;
-    Ok(exit_code_from_status(&status, "mycmd"))
+    runner::run_passthrough("mycmd", args, verbose)
 }
 ```
 

@@ -1,9 +1,11 @@
-//! Runs curl and auto-compresses JSON responses.
+//! Runs curl and applies a simple truncation with tee hint if the output is too long.
 
+use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
-use crate::json_cmd;
+use crate::core::{stream::exec_capture, utils::resolved_command};
 use anyhow::{Context, Result};
+
+const MAX_RESPONSE_SIZE: usize = 500;
 
 /// Not using run_filtered: on failure, curl can return HTML error pages (404, 500)
 /// that the JSON schema filter would mangle. The early exit skips filtering entirely.
@@ -20,85 +22,61 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: curl -s {}", args.join(" "));
     }
 
-    let output = cmd.output().context("Failed to run curl")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run curl")?;
 
     // Early exit: don't feed HTTP error bodies (HTML 404 etc.) through JSON schema filter
-    if !output.status.success() {
-        let msg = if stderr.trim().is_empty() {
-            stdout.trim().to_string()
+    if !result.success() {
+        let msg = if result.stderr.trim().is_empty() {
+            result.stdout.trim().to_string()
         } else {
-            stderr.trim().to_string()
+            result.stderr.trim().to_string()
         };
         eprintln!("FAILED: curl {}", msg);
-        return Ok(exit_code_from_output(&output, "curl"));
+        return Ok(result.exit_code);
     }
 
-    let raw = stdout.to_string();
+    let raw = result.stdout.clone();
 
-    // Auto-detect JSON and pipe through filter
-    let filtered = filter_curl_output(&stdout, args);
-    println!("{}", filtered);
+    let result = filter_curl_output(&result.stdout);
+
+    println!("{}", result.content);
+    if let Some(hint) = &result.tee_hint {
+        println!("{}", hint);
+    }
 
     timer.track(
         &format!("curl {}", args.join(" ")),
         &format!("rtk curl {}", args.join(" ")),
         &raw,
-        &filtered,
+        &result.content,
     );
 
     Ok(0)
 }
 
-fn filter_curl_output(output: &str, args: &[String]) -> String {
-    let trimmed = output.trim();
+fn filter_curl_output(raw: &str) -> FilterResult {
+    let trimmed = raw.trim();
+    let tee_hint = force_tee_hint(raw, "curl");
 
-    // Try JSON detection: starts with { or [
-    if (trimmed.starts_with('{') || trimmed.starts_with('['))
-        && (trimmed.ends_with('}') || trimmed.ends_with(']'))
-    {
-        // Skip schema conversion for internal/localhost URLs (issues #1152, #1157)
-        if !is_internal_url(args) {
-            if let Ok(schema) = json_cmd::filter_json_string(trimmed, 5) {
-                // Only use schema if it's actually shorter than the original (#297)
-                if schema.len() <= trimmed.len() {
-                    return schema;
-                }
-            }
+    // If the output is too long and we have a tee hint, truncate the output.
+    let content = if trimmed.len() >= MAX_RESPONSE_SIZE && tee_hint.is_some() {
+        let mut end = MAX_RESPONSE_SIZE;
+        // Ensure we don't cut in the middle of a UTF-8 character.
+        // .len() counts bytes, not chars.
+        while !trimmed.is_char_boundary(end) {
+            end -= 1;
         }
-    }
+        format!("{}... ({} bytes total)", &trimmed[..end], trimmed.len())
+    } else {
+        trimmed.to_string()
+    };
 
-    // Not JSON: truncate long output
-    let lines: Vec<&str> = trimmed.lines().collect();
-    if lines.len() > 30 {
-        let mut result: Vec<&str> = lines[..30].to_vec();
-        result.push("");
-        let msg = format!(
-            "... ({} more lines, {} bytes total)",
-            lines.len() - 30,
-            trimmed.len()
-        );
-        return format!("{}\n{}", result.join("\n"), msg);
-    }
-
-    // Short output: return as-is but truncate long lines
-    lines
-        .iter()
-        .map(|l| truncate(l, 200))
-        .collect::<Vec<_>>()
-        .join("\n")
+    FilterResult { content, tee_hint }
 }
 
-fn is_internal_url(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        let lower = a.to_lowercase();
-        lower.starts_with("http://localhost")
-            || lower.starts_with("http://127.0.0.1")
-            || lower.starts_with("http://[::1]")
-            || lower.starts_with("https://localhost")
-            || lower.starts_with("https://127.0.0.1")
-    })
+struct FilterResult {
+    content: String,
+    tee_hint: Option<String>,
 }
 
 #[cfg(test)]
@@ -106,56 +84,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_filter_curl_json() {
-        // Large JSON where schema is shorter than original — schema should be returned
-        let output = r#"{"name": "a very long user name here", "count": 42, "items": [1, 2, 3], "description": "a very long description that takes up many characters in the original JSON payload", "status": "active", "url": "https://example.com/api/v1/users/123"}"#;
-        let result = filter_curl_output(output, &[]);
-        assert!(result.contains("name"));
-        assert!(result.contains("string"));
-        assert!(result.contains("int"));
-    }
-
-    #[test]
-    fn test_filter_curl_json_array() {
-        let output = r#"[{"id": 1}, {"id": 2}]"#;
-        let result = filter_curl_output(output, &[]);
-        assert!(result.contains("id"));
+    fn test_filter_curl_json_small_no_tee_hint() {
+        let output = r#"{"r2Ready":true,"status":"ok"}"#;
+        let result = filter_curl_output(output);
+        assert_eq!(result.content, output);
+        assert!(result.tee_hint.is_none());
     }
 
     #[test]
     fn test_filter_curl_non_json() {
         let output = "Hello, World!\nThis is plain text.";
-        let result = filter_curl_output(output, &[]);
-        assert!(result.contains("Hello, World!"));
-        assert!(result.contains("plain text"));
+        let result = filter_curl_output(output);
+        assert_eq!(result.content, output);
     }
 
     #[test]
-    fn test_filter_curl_json_small_returns_original() {
-        // Small JSON where schema would be larger than original (issue #297)
-        let output = r#"{"r2Ready":true,"status":"ok"}"#;
-        let result = filter_curl_output(output, &[]);
-        // Schema would be "{\n  r2Ready: bool,\n  status: string\n}" which is longer
-        // Should return the original JSON unchanged
-        assert_eq!(result.trim(), output.trim());
+    fn test_filter_curl_long_output_truncated() {
+        let long: String = "x".repeat(1000);
+        let result = filter_curl_output(&long);
+        assert!(result.content.starts_with('x'));
+        assert!(result.content.contains("bytes total"));
+        assert!(result.content.contains("1000"));
+        assert!(result.content.len() < 600);
     }
 
     #[test]
-    fn test_filter_curl_long_output() {
-        let lines: Vec<String> = (0..50).map(|i| format!("Line {}", i)).collect();
-        let output = lines.join("\n");
-        let result = filter_curl_output(&output, &[]);
-        assert!(result.contains("Line 0"));
-        assert!(result.contains("Line 29"));
-        assert!(result.contains("more lines"));
+    fn test_filter_curl_multibyte_boundary() {
+        let content = "a".repeat(499) + "é";
+        let result = filter_curl_output(&content);
+        assert!(result.content.contains("bytes total"));
+        assert!(result.content.len() < 600);
     }
 
     #[test]
-    fn test_is_internal_url_localhost() {
-        assert!(is_internal_url(&["http://localhost:9222/json/version".to_string()]));
-        assert!(is_internal_url(&["http://127.0.0.1:8080/api".to_string()]));
-        assert!(is_internal_url(&["-s".to_string(), "http://localhost:3000".to_string()]));
-        assert!(!is_internal_url(&["https://api.example.com/data".to_string()]));
-        assert!(!is_internal_url(&["https://github.com".to_string()]));
+    fn test_filter_curl_exact_500_bytes() {
+        let content = "a".repeat(500);
+        let result = filter_curl_output(&content);
+        assert!(result.content.contains("bytes total"));
     }
 }

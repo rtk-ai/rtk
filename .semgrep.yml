@@ -1,0 +1,108 @@
+rules:
+  - id: dynamic-command-execution
+    patterns:
+      - pattern: Command::new($ARG)
+      - pattern-not: Command::new("...")
+    message: >
+      Dynamic shell invocation via Command::new($ARG).
+      RTK only executes known CLI tools — use string literals, not variables.
+    languages: [rust]
+    severity: ERROR
+
+  - id: unsafe-block
+    pattern: unsafe { ... }
+    message: >
+      Unsafe block detected. RTK has no legitimate need for unsafe code.
+    languages: [rust]
+    severity: ERROR
+
+  - id: ld-preload-manipulation
+    pattern-either:
+      - pattern: $CMD.env("LD_PRELOAD", ...)
+      - pattern: $CMD.env("LD_LIBRARY_PATH", ...)
+    message: >
+      LD_PRELOAD/LD_LIBRARY_PATH manipulation detected.
+      This can hijack shared library loading — forbidden in RTK.
+    languages: [rust]
+    severity: ERROR
+
+  - id: raw-socket-usage
+    pattern-either:
+      - pattern: TcpStream::$METHOD(...)
+      - pattern: UdpSocket::$METHOD(...)
+      - pattern: TcpListener::$METHOD(...)
+    message: >
+      Raw socket usage detected. RTK is a CLI proxy — it should not
+      open network connections directly. Use ureq in telemetry only.
+    languages: [rust]
+    severity: ERROR
+
+  - id: reqwest-forbidden
+    pattern: reqwest::$METHOD(...)
+    message: >
+      reqwest is forbidden in RTK. The project uses ureq for HTTP
+      (telemetry only). Adding reqwest increases binary size and attack surface.
+    languages: [rust]
+    severity: ERROR
+
+  - id: interpreter-execution
+    pattern-either:
+      - pattern: Command::new("curl")
+      - pattern: Command::new("wget")
+      - pattern: Command::new("python")
+      - pattern: Command::new("python3")
+      - pattern: Command::new("node")
+      - pattern: Command::new("bash")
+      - pattern: Command::new("sh")
+      - pattern: Command::new("perl")
+      - pattern: Command::new("ruby")
+    message: >
+      Direct interpreter/downloader execution detected.
+      RTK proxies user commands — it should never spawn interpreters
+      or download tools on its own.
+    languages: [rust]
+    severity: ERROR
+
+  - id: ureq-outside-telemetry
+    pattern: ureq::$METHOD(...)
+    paths:
+      exclude:
+        - /src/core/telemetry.rs
+    message: >
+      ureq usage outside of src/core/telemetry.rs.
+      HTTP calls are restricted to the telemetry module to prevent data exfiltration.
+    languages: [rust]
+    severity: ERROR
+
+  # ── WARNING rules (non-blocking, flag for review) ──
+
+  - id: path-env-manipulation
+    pattern-either:
+      - pattern: $CMD.env("PATH", ...)
+      - pattern: std::env::set_var("PATH", ...)
+      - pattern: env::set_var("PATH", ...)
+    message: >
+      PATH environment variable manipulation detected.
+      Hijacking PATH can redirect command resolution to attacker-controlled binaries.
+    languages: [rust]
+    severity: WARNING
+
+  - id: sensitive-path-reference
+    pattern-regex: \.(ssh|bashrc|zshrc|bash_profile|profile)|authorized_keys|/etc/passwd|/etc/shadow
+    message: >
+      Reference to sensitive system path detected.
+      RTK filters should not access dotfiles, SSH keys, or system credential files.
+    languages: [rust]
+    severity: WARNING
+
+  - id: filesystem-deletion
+    pattern-either:
+      - pattern: fs::remove_file(...)
+      - pattern: fs::remove_dir_all(...)
+      - pattern: std::fs::remove_file(...)
+      - pattern: std::fs::remove_dir_all(...)
+    message: >
+      File/directory deletion detected. Expected in hooks/init cleanup,
+      surprising in a filter module. Verify intent.
+    languages: [rust]
+    severity: WARNING

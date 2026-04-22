@@ -7,7 +7,7 @@ sidebar:
 
 # Supported Agents
 
-RTK supports 12 AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
+RTK supports all major AI coding agents across 3 integration tiers. Mistral Vibe support is planned.
 
 ## How it works
 

@@ -25,7 +25,7 @@ rtk config --create   # create config file with defaults
 [tracking]
 enabled = true              # enable/disable token tracking
 history_days = 90           # retention in days (auto-cleanup)
-database_path = "/custom/path/tracking.db"  # optional override
+database_path = "/custom/path/history.db"   # optional override
 
 [display]
 colors = true               # colored output
@@ -33,6 +33,8 @@ emoji = true                # use emojis in output
 max_width = 120             # maximum output width
 
 [filters]
+# These apply to file-reading commands (ls, find, grep, cat/rtk read).
+# Paths matching these patterns are excluded from output, keeping noise low.
 ignore_dirs = [".git", "node_modules", "target", "__pycache__", ".venv", "vendor"]
 ignore_files = ["*.lock", "*.min.js", "*.min.css"]
 
@@ -43,11 +45,13 @@ max_files = 20              # rotation: keep last N files
 # directory = "/custom/tee/path"  # optional override
 
 [telemetry]
-enabled = true              # anonymous daily ping (opt-out below)
+enabled = true              # anonymous daily ping — see Telemetry & Privacy for full details
 
 [hooks]
 exclude_commands = []       # commands to never auto-rewrite
 ```
+
+For full details on what is collected, opt-out options, and GDPR rights, see [Telemetry & Privacy](../resources/telemetry.md).
 
 ## Environment variables
 
@@ -86,6 +90,19 @@ Prevent specific commands from being rewritten by the hook:
 [hooks]
 exclude_commands = ["git rebase", "git cherry-pick", "docker exec"]
 ```
+
+Patterns match against the full command after stripping env prefixes (`sudo`, `VAR=val`), so `"psql"` excludes both `psql -h localhost` and `PGPASSWORD=x psql -h localhost`.
+
+Subcommand patterns work too: `"git push"` excludes `git push origin main` but not `git status`.
+
+Patterns starting with `^` are treated as regex:
+
+```toml
+[hooks]
+exclude_commands = ["^curl", "^wget", "git rebase"]
+```
+
+Invalid regex patterns fall back to prefix matching.
 
 Or for a single invocation:
 

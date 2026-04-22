@@ -21,8 +21,13 @@ struct SupportedBucket {
     rtk_equivalent: &'static str,
     category: &'static str,
     count: usize,
+    /// Total estimated tokens *saved* (post-filter). Used for the "Est. Savings" column.
     total_output_tokens: usize,
-    savings_pct: f64,
+    /// Total estimated tokens *before* filtering (raw output). Accumulated alongside
+    /// `total_output_tokens` so the bucket's effective savings rate can be derived as
+    /// `total_output_tokens / total_raw_output_tokens` — a weighted average across
+    /// all sub-commands, regardless of which sub-command was seen first.
+    total_raw_output_tokens: usize,
     // For display: the most common raw command
     command_counts: HashMap<String, usize>,
 }
@@ -120,7 +125,7 @@ pub fn run(
                                 category,
                                 count: 0,
                                 total_output_tokens: 0,
-                                savings_pct: estimated_savings_pct,
+                                total_raw_output_tokens: 0,
                                 command_counts: HashMap::new(),
                             }
                         });
@@ -140,6 +145,9 @@ pub fn run(
                         let savings =
                             (output_tokens as f64 * estimated_savings_pct / 100.0) as usize;
                         bucket.total_output_tokens += savings;
+                        // Accumulate pre-savings tokens so we can compute a weighted effective
+                        // savings rate across all sub-commands in this bucket later.
+                        bucket.total_raw_output_tokens += output_tokens;
 
                         // Track the display name with status
                         let display_name = truncate_command(part);
@@ -196,13 +204,22 @@ pub fn run(
                 })
                 .unwrap_or_else(|| (String::new(), report::RtkStatus::Existing));
 
+            // Derive the effective savings rate from accumulated totals rather than
+            // using the first-seen sub-command's rate. This gives a weighted average
+            // across all sub-commands that fell in this bucket.
+            let effective_savings_pct = if bucket.total_raw_output_tokens > 0 {
+                bucket.total_output_tokens as f64 * 100.0 / bucket.total_raw_output_tokens as f64
+            } else {
+                0.0
+            };
+
             SupportedEntry {
                 command: command_with_status,
                 count: bucket.count,
                 rtk_equivalent: bucket.rtk_equivalent,
                 category: bucket.category,
                 estimated_savings_tokens: bucket.total_output_tokens,
-                estimated_savings_pct: bucket.savings_pct,
+                estimated_savings_pct: effective_savings_pct,
                 rtk_status: status,
             }
         })
