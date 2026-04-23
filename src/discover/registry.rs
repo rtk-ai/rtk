@@ -442,7 +442,33 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
 /// For pipes (`|`), only rewrites the left-hand command (pipe targets stay raw),
 /// but continues rewriting segments after subsequent `&&`/`||`/`;` operators.
+/// Back-compat entry point preserved for call sites (including the ~150
+/// existing unit tests in this module) that never needed wrapper-prefix
+/// stripping. New production callers should prefer
+/// [`rewrite_command_with_prefixes`].
+#[allow(dead_code)]
 pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
+    rewrite_command_with_prefixes(cmd, excluded, &[])
+}
+
+/// Like [`rewrite_command`] but also strips user-configured transparent wrapper
+/// prefixes (`[hooks].transparent_prefixes` in `config.toml`) before routing.
+///
+/// A transparent prefix is a wrapper command that doesn't change *what* is
+/// being run, only *how* it's run — e.g. `direnv exec .`, `nix develop
+/// --command`, `docker exec <container>`, `poetry run`, or `bundle exec`.
+/// Stripping it lets the inner command match a filter; the prefix is then
+/// re-prepended to the rewrite. The built-in [`SHELL_PREFIX_BUILTINS`]
+/// (`noglob`, `command`, `builtin`, `exec`, `nocorrect`) are always applied
+/// in addition to user-configured prefixes.
+///
+/// Matching is whole-word: a prefix `"foo bar"` matches a command starting
+/// with `"foo bar "` (or equal to `"foo bar"`), not `"foobarbaz"`.
+pub fn rewrite_command_with_prefixes(
+    cmd: &str,
+    excluded: &[String],
+    transparent_prefixes: &[String],
+) -> Option<String> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return None;
@@ -466,11 +492,15 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, &compiled)
+    rewrite_compound(trimmed, &compiled, transparent_prefixes)
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
-fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
+fn rewrite_compound(
+    cmd: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
     let tokens = tokenize(cmd);
     let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
@@ -483,7 +513,8 @@ fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
         match tok.kind {
             TokenKind::Operator => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
+                    .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -513,7 +544,8 @@ fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
-                    rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string())
+                    rewrite_segment(seg, excluded, transparent_prefixes)
+                        .unwrap_or_else(|| seg.to_string())
                 };
                 if rewritten != seg {
                     any_changed = true;
@@ -541,7 +573,8 @@ fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
             }
             TokenKind::Shellism if tok.value == "&" => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
+                    .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -557,7 +590,8 @@ fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
     }
 
     let seg = cmd[seg_start..].trim();
-    let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+    let rewritten =
+        rewrite_segment(seg, excluded, transparent_prefixes).unwrap_or_else(|| seg.to_string());
     if rewritten != seg {
         any_changed = true;
     }
@@ -638,8 +672,12 @@ fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
         .collect()
 }
 
-fn rewrite_segment(seg: &str, excluded: &[ExcludePattern]) -> Option<String> {
-    rewrite_segment_inner(seg, excluded, 0)
+fn rewrite_segment(
+    seg: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    rewrite_segment_inner(seg, excluded, transparent_prefixes, 0)
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
@@ -649,7 +687,12 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     })
 }
 
-fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -> Option<String> {
+fn rewrite_segment_inner(
+    seg: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+    depth: usize,
+) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
         return None;
@@ -664,8 +707,24 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, depth + 1)
+            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
                 .map(|rewritten| format!("{} {}", prefix, rewritten));
+        }
+    }
+
+    // User-configured wrapper prefixes (e.g. `shadowenv exec --`). Same
+    // strip-recurse-reprepend contract as the builtin list above.
+    for prefix in transparent_prefixes {
+        let p = prefix.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if let Some(rest) = strip_word_prefix(trimmed, p) {
+            if rest.is_empty() {
+                return None;
+            }
+            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
+                .map(|rewritten| format!("{} {}", p, rewritten));
         }
     }
 
@@ -3502,6 +3561,134 @@ mod tests {
     #[test]
     fn test_shell_prefix_unknown_inner() {
         assert_eq!(rewrite_command("noglob unknown_cmd --flag", &[]), None);
+    }
+
+    // --- transparent_prefixes tests ---
+
+    #[test]
+    fn test_transparent_prefix_strips_and_reprepends() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("shadowenv exec -- git status", &[], &prefixes),
+            Some("shadowenv exec -- rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_with_test_runner() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("shadowenv exec -- cargo test", &[], &prefixes),
+            Some("shadowenv exec -- rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_unknown_inner_returns_none() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("shadowenv exec -- htop", &[], &prefixes),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_not_matched_is_passthrough() {
+        // Without the prefix configured, the wrapper breaks routing.
+        assert_eq!(
+            rewrite_command_with_prefixes("shadowenv exec -- git status", &[], &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_composed_with_builtin() {
+        // `noglob shadowenv exec -- git status` — builtin layer strips noglob,
+        // user layer strips shadowenv exec --, inner `git status` routes.
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("noglob shadowenv exec -- git status", &[], &prefixes),
+            Some("noglob shadowenv exec -- rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_multiple_configured() {
+        let prefixes = vec!["shadowenv exec --".to_string(), "direnv exec .".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("direnv exec . git status", &[], &prefixes),
+            Some("direnv exec . rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_whole_word_matching() {
+        // A prefix `"foo"` must NOT match `"foobar git status"`.
+        let prefixes = vec!["foo".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("foobar git status", &[], &prefixes),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_empty_rest_returns_none() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("shadowenv exec --", &[], &prefixes),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_empty_entry_is_skipped() {
+        // A blank entry in the config should not cause spurious matches or panics.
+        let prefixes = vec!["".to_string(), "   ".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("git status", &[], &prefixes),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_inside_compound() {
+        // Each segment of `&&` / `;` should independently get prefix-stripped.
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes(
+                "shadowenv exec -- git status && shadowenv exec -- cargo test",
+                &[],
+                &prefixes
+            ),
+            Some("shadowenv exec -- rtk git status && shadowenv exec -- rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_respects_excluded() {
+        // An excluded inner command should still produce no rewrite even behind
+        // a transparent prefix.
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        let excluded = vec!["git".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("shadowenv exec -- git status", &excluded, &prefixes),
+            None
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_recursion_bounded() {
+        // A prefix that could recurse forever (e.g. one that maps to itself)
+        // must terminate once MAX_PREFIX_DEPTH is reached.
+        let prefixes = vec!["wrap".to_string()];
+        let mut cmd = String::new();
+        for _ in 0..(MAX_PREFIX_DEPTH + 2) {
+            cmd.push_str("wrap ");
+        }
+        cmd.push_str("git status");
+        // Doesn't matter exactly what it returns — just that it doesn't stack-
+        // overflow or loop forever. Exercise the code path.
+        let _ = rewrite_command_with_prefixes(&cmd, &[], &prefixes);
     }
 
     #[test]
