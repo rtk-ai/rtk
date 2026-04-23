@@ -29,6 +29,25 @@ pub struct HooksConfig {
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
     #[serde(default)]
     pub exclude_commands: Vec<String>,
+
+    /// Wrapper prefixes that should be transparently stripped before routing
+    /// to a filter, then re-prepended on the rewrite. For example, with
+    /// `transparent_prefixes = ["shadowenv exec --"]`, the command
+    /// `shadowenv exec -- git status` rewrites to
+    /// `shadowenv exec -- rtk git status` instead of passing through unrewritten.
+    ///
+    /// Useful for any per-project env wrapper that sits in front of every
+    /// command — e.g. [shadowenv](https://github.com/Shopify/shadowenv),
+    /// `direnv exec`, `nix develop --command`, `docker exec <container>`,
+    /// `poetry run`, or `bundle exec`.
+    ///
+    /// Extends the built-in `SHELL_PREFIX_BUILTINS` list (`noglob`, `command`,
+    /// `builtin`, `exec`, `nocorrect`) with user- or organization-specific
+    /// wrappers. Matching is whole-word: a configured prefix `"foo bar"` matches
+    /// a command that starts with `"foo bar "` (or equals `"foo bar"`), not
+    /// `"foobarbaz"`.
+    #[serde(default)]
+    pub transparent_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -201,6 +220,32 @@ exclude_commands = ["curl", "gh"]
     fn test_hooks_config_default_empty() {
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(config.hooks.transparent_prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_hooks_config_transparent_prefixes_deserialize() {
+        let toml = r#"
+[hooks]
+transparent_prefixes = ["direnv exec .", "nix develop --command"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(
+            config.hooks.transparent_prefixes,
+            vec!["direnv exec .", "nix develop --command"]
+        );
+    }
+
+    #[test]
+    fn test_hooks_config_transparent_prefixes_missing_is_empty() {
+        // Older configs that predate this field must still parse.
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.hooks.exclude_commands, vec!["curl"]);
+        assert!(config.hooks.transparent_prefixes.is_empty());
     }
 
     #[test]

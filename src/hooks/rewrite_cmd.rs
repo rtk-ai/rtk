@@ -16,8 +16,8 @@ use std::io::Write;
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    let excluded = crate::core::config::Config::load()
-        .map(|c| c.hooks.exclude_commands)
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
 
     // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
@@ -27,7 +27,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
-    match registry::rewrite_command(cmd, &excluded) {
+    match registry::rewrite_command_with_prefixes(cmd, &excluded, &transparent_prefixes) {
         Some(rewritten) => match verdict {
             PermissionVerdict::Allow => {
                 print!("{}", rewritten);

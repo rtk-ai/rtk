@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
-use crate::discover::registry::{has_heredoc, rewrite_command};
+use crate::discover::registry::{has_heredoc, rewrite_command_with_prefixes};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
@@ -107,11 +107,11 @@ fn get_rewritten(cmd: &str) -> Option<String> {
         return None;
     }
 
-    let excluded = crate::core::config::Config::load()
-        .map(|c| c.hooks.exclude_commands)
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
 
-    let rewritten = rewrite_command(cmd, &excluded)?;
+    let rewritten = rewrite_command_with_prefixes(cmd, &excluded, &transparent_prefixes)?;
 
     if rewritten == cmd {
         return None;
@@ -211,11 +211,11 @@ pub fn run_gemini() -> Result<()> {
         return Ok(());
     }
 
-    let excluded = crate::core::config::Config::load()
-        .map(|c| c.hooks.exclude_commands)
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
 
-    match rewrite_command(cmd, &excluded) {
+    match rewrite_command_with_prefixes(cmd, &excluded, &transparent_prefixes) {
         Some(ref rewritten) => {
             audit_log("rewrite", cmd, rewritten);
             print_rewrite(rewritten);
@@ -509,6 +509,7 @@ fn run_cursor_inner_with_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discover::registry::rewrite_command;
 
     // --- Copilot format detection ---
 
