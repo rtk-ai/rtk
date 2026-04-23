@@ -57,8 +57,9 @@ impl ClaudeProvider {
 
     /// Encode a filesystem path to Claude Code's directory name format.
     /// `/Users/foo/bar` → `-Users-foo-bar`
+    /// `/Users/first.last/bar` → `-Users-first-last-bar`
     pub fn encode_project_path(path: &str) -> String {
-        path.replace('/', "-")
+        path.replace(['/', '.'], "-")
     }
 }
 
@@ -334,6 +335,26 @@ mod tests {
         assert_eq!(
             ClaudeProvider::encode_project_path("/Users/foo/bar/"),
             "-Users-foo-bar-"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_dot_in_username() {
+        // Claude Code replaces both '/' and '.' with '-'.
+        // A cwd like /Users/first.last must produce the same slug as
+        // Claude's projects directory (-Users-first-last), otherwise
+        // `rtk discover` finds zero sessions for that project.
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/first.last/my-project"),
+            "-Users-first-last-my-project"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_multiple_dots() {
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/a.b.c/proj"),
+            "-Users-a-b-c-proj"
         );
     }
 
