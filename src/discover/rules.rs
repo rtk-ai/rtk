@@ -53,7 +53,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[("fmt", RtkStatus::Passthrough)],
     },
     RtkRule {
-        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
+        pattern: r"^pnpm\s+(exec|i|install|list|lint|ls|outdated|run|run-script)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
@@ -175,7 +175,6 @@ pub const RULES: &[RtkRule] = &[
             "pnpm eslint",
             "pnpm exec biome",
             "pnpm exec eslint",
-            "pnpm lint",
             "pnpm run biome",
             "pnpm run eslint",
             "pnpm run lint",
