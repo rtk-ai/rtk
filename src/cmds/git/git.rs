@@ -4,10 +4,11 @@ use crate::core::config;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
-use std::process::Stdio;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -68,7 +69,88 @@ fn looks_like_path(arg: &str) -> bool {
     arg.contains('/') || arg.contains('\\') || arg.starts_with('.') || arg.starts_with('~')
 }
 
-/// Re-insert `--` before the first path-like argument when clap has consumed it.
+fn resolve_git_path(base: &Path, value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+fn diff_pathspec_root(global_args: &[String]) -> Option<PathBuf> {
+    let mut cwd = std::env::current_dir().ok()?;
+    let mut pathspec_root = cwd.clone();
+    let mut explicit_work_tree = false;
+    let mut i = 0;
+
+    while i < global_args.len() {
+        match global_args[i].as_str() {
+            "-C" => {
+                cwd = resolve_git_path(&cwd, global_args.get(i + 1)?);
+                if !explicit_work_tree {
+                    pathspec_root = cwd.clone();
+                }
+                i += 2;
+            }
+            "--work-tree" => {
+                pathspec_root = resolve_git_path(&cwd, global_args.get(i + 1)?);
+                explicit_work_tree = true;
+                i += 2;
+            }
+            arg if arg.starts_with("--work-tree=") => {
+                pathspec_root = resolve_git_path(&cwd, &arg["--work-tree=".len()..]);
+                explicit_work_tree = true;
+                i += 1;
+            }
+            "-c" | "--git-dir" => {
+                i += 2;
+            }
+            arg if arg.starts_with("--git-dir=") => {
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    Some(pathspec_root)
+}
+
+fn existing_pathspec(arg: &str, pathspec_root: Option<&Path>) -> bool {
+    if arg.is_empty() || arg == "--" || arg.starts_with('-') {
+        return false;
+    }
+
+    let path = Path::new(arg);
+    if path.is_absolute() {
+        return path.exists();
+    }
+
+    pathspec_root
+        .map(|root| root.join(path).exists())
+        .unwrap_or(false)
+}
+
+fn is_git_revision(arg: &str, global_args: &[String]) -> bool {
+    if arg.is_empty() || arg == "--" || arg.starts_with('-') {
+        return false;
+    }
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("rev-parse")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg("--end-of-options")
+        .arg(format!("{arg}^{{object}}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    matches!(cmd.status(), Ok(status) if status.success())
+}
+
+/// Re-insert `--` before the trailing pathspec when clap has consumed it.
 ///
 /// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
 /// first positional argument (before any other positional).  This means:
@@ -77,16 +159,27 @@ fn looks_like_path(arg: &str) -> bool {
 ///
 /// Without the `--` separator git may treat an unambiguous path as a revision and
 /// emit "fatal: ambiguous argument".  We re-insert `--` before the first
-/// path-like argument when `--` is absent so git always gets the correct intent.
-fn normalize_diff_args(args: &[String]) -> Vec<String> {
+/// trailing pathspec when `--` is absent so git always gets the correct intent.
+fn normalize_diff_args(args: &[String], global_args: &[String]) -> Vec<String> {
     // Already has `--` — nothing to do
     if args.iter().any(|a| a == "--") {
         return args.to_vec();
     }
-    // Find the first non-flag arg that looks like a path
+
+    let pathspec_root = diff_pathspec_root(global_args);
+    let pathspec_root = pathspec_root.as_deref();
     let path_start = args
         .iter()
-        .position(|arg| !arg.starts_with('-') && looks_like_path(arg));
+        .enumerate()
+        .rev()
+        .take_while(|(_, arg)| {
+            !arg.starts_with('-')
+                && (looks_like_path(arg)
+                    || (existing_pathspec(arg, pathspec_root) && !is_git_revision(arg, global_args)))
+        })
+        .last()
+        .map(|(idx, _)| idx);
+
     match path_start {
         Some(idx) => {
             let mut out = args[..idx].to_vec();
@@ -107,7 +200,7 @@ fn run_diff(
     let timer = tracking::TimedExecution::start();
 
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
-    let args = &normalize_diff_args(args);
+    let args = &normalize_diff_args(args, global_args);
 
     // Check if user wants stat output
     let wants_stat = args
@@ -1675,6 +1768,7 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_git_cmd_no_global_args() {
@@ -1730,6 +1824,58 @@ mod tests {
         let cmd = git_cmd(&global_args);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, vec!["--no-pager", "--bare"]);
+    }
+
+    #[test]
+    fn test_diff_pathspec_root_tracks_chained_c_dirs() {
+        let tmp = tempdir().expect("create temp dir");
+        let repo = tmp.path().join("repo");
+        let nested = repo.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+
+        let global_args = vec![
+            "-C".to_string(),
+            repo.display().to_string(),
+            "-C".to_string(),
+            "nested".to_string(),
+        ];
+
+        assert_eq!(diff_pathspec_root(&global_args), Some(nested));
+    }
+
+    #[test]
+    fn test_diff_pathspec_root_uses_work_tree_relative_to_cwd() {
+        let tmp = tempdir().expect("create temp dir");
+        let repo = tmp.path().join("repo");
+        let worktree = repo.join("worktree");
+        std::fs::create_dir_all(&worktree).expect("create worktree dir");
+
+        let global_args = vec![
+            "-C".to_string(),
+            repo.display().to_string(),
+            "--work-tree".to_string(),
+            "worktree".to_string(),
+        ];
+
+        assert_eq!(diff_pathspec_root(&global_args), Some(worktree));
+    }
+
+    #[test]
+    fn test_diff_pathspec_root_keeps_explicit_work_tree_after_later_c() {
+        let tmp = tempdir().expect("create temp dir");
+        let repo = tmp.path().join("repo");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        std::fs::create_dir_all(&worktree).expect("create worktree dir");
+
+        let global_args = vec![
+            "--work-tree".to_string(),
+            worktree.display().to_string(),
+            "-C".to_string(),
+            repo.display().to_string(),
+        ];
+
+        assert_eq!(diff_pathspec_root(&global_args), Some(worktree));
     }
 
     #[test]
@@ -1809,7 +1955,7 @@ mod tests {
             "--".to_string(),
             "src/main.rs".to_string(),
         ];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args(&args, &[]), args);
     }
 
     /// Core regression: clap ate `--` before a path with `/`.
@@ -1817,7 +1963,7 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_reinserts_separator_before_path_with_slash() {
         let args = vec!["apps/client/frontend/src/MyComponent.tsx".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args(&args, &[]);
         assert_eq!(
             normalized,
             vec!["--".to_string(), "apps/client/frontend/src/MyComponent.tsx".to_string()],
@@ -1829,7 +1975,7 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_reinserts_separator_after_ref() {
         let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args(&args, &[]);
         assert_eq!(
             normalized,
             vec!["HEAD".to_string(), "--".to_string(), "src/foo.rs".to_string()]
@@ -1840,7 +1986,7 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_reinserts_separator_after_flag() {
         let args = vec!["--cached".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args(&args, &[]);
         assert_eq!(
             normalized,
             vec!["--cached".to_string(), "--".to_string(), "src/foo.rs".to_string()]
@@ -1851,25 +1997,94 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_no_injection_for_pure_flags() {
         let args = vec!["--stat".to_string(), "--cached".to_string()];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args(&args, &[]), args);
     }
 
     /// Dotfile / relative-path detection (starts with `.`).
     #[test]
     fn test_normalize_diff_args_dotfile_is_path() {
         let args = vec![".gitignore".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args(&args, &[]);
         assert_eq!(
             normalized,
             vec!["--".to_string(), ".gitignore".to_string()]
         );
     }
 
+    #[test]
+    fn test_normalize_diff_args_reinserts_separator_before_bare_filenames() {
+        let tmp = tempdir().expect("create temp dir");
+        std::fs::write(tmp.path().join("Dockerfile"), "FROM scratch\n").expect("write Dockerfile");
+        std::fs::write(tmp.path().join(".dockerignore"), "node_modules\n")
+            .expect("write .dockerignore");
+
+        let args = vec!["Dockerfile".to_string(), ".dockerignore".to_string()];
+        let normalized = normalize_diff_args(&args, &["-C".to_string(), tmp.path().display().to_string()]);
+
+        assert_eq!(
+            normalized,
+            vec![
+                "--".to_string(),
+                "Dockerfile".to_string(),
+                ".dockerignore".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_normalize_diff_args_honors_existing_revision_before_pathspec() {
+        let tmp = tempdir().expect("create temp dir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        assert!(init.status.success(), "git init failed: {:?}", init);
+
+        let email = Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config user.email");
+        assert!(email.status.success(), "git config user.email failed: {:?}", email);
+
+        let name = Command::new("git")
+            .args(["config", "user.name", "RTK Test"])
+            .current_dir(&repo)
+            .output()
+            .expect("git config user.name");
+        assert!(name.status.success(), "git config user.name failed: {:?}", name);
+
+        std::fs::write(repo.join("Dockerfile"), "FROM scratch\n").expect("write Dockerfile");
+
+        let add = Command::new("git")
+            .args(["add", "Dockerfile"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        assert!(add.status.success(), "git add failed: {:?}", add);
+
+        let commit = Command::new("git")
+            .args(["commit", "--quiet", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success(), "git commit failed: {:?}", commit);
+
+        let args = vec!["HEAD".to_string(), "Dockerfile".to_string()];
+        let normalized = normalize_diff_args(&args, &["-C".to_string(), repo.display().to_string()]);
+
+        assert_eq!(normalized, vec!["HEAD", "--", "Dockerfile"]);
+    }
+
     /// A bare word that isn't path-like (e.g. a branch name) → no injection.
     #[test]
     fn test_normalize_diff_args_no_injection_for_bare_ref() {
         let args = vec!["HEAD".to_string()];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args(&args, &[]), args);
     }
 
     #[test]
