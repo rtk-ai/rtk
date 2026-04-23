@@ -750,6 +750,96 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
     output.trim_end().to_string()
 }
 
+/// Extract in-progress state lines from plain `git status` output.
+///
+/// Compact mode runs `git status --porcelain -b`, which omits the state header
+/// git prints for rebase / merge / cherry-pick / revert / bisect / am / sparse
+/// checkout. Hiding that block is a correctness bug — e.g. during an interactive
+/// rebase edit, the user sees a "clean" status and misses "You are currently
+/// editing a commit while rebasing ...".
+///
+/// This helper walks the plain-status output we already capture for tracking
+/// and returns the state block, preserving the directive hints git prints with
+/// it (`git rebase --continue`, `git commit --amend`, etc.). Returns `None`
+/// when no state is in progress.
+fn extract_state_header(raw: &str) -> Option<String> {
+    // Phrases git prints from wt-status.c to announce in-progress state.
+    const ANCHORS: &[&str] = &[
+        "rebase in progress",
+        "You are currently rebasing",
+        "You are currently editing",
+        "You are currently splitting",
+        "You are currently cherry-picking",
+        "You are currently reverting",
+        "You are currently bisecting",
+        "You are in the middle of",
+        "You are in a sparse checkout",
+        "All conflicts fixed but you are still merging",
+        "You have unmerged paths",
+        "Last command done",
+        "Next command to do",
+        "No commands remaining",
+    ];
+
+    // Headers of the file-change blocks — everything relevant to state appears
+    // above these in git's output, so they double as a terminator.
+    const STOPPERS: &[&str] = &[
+        "Changes to be committed:",
+        "Changes not staged for commit:",
+        "Untracked files:",
+        "Unmerged paths:",
+        "no changes added to commit",
+        "nothing to commit",
+        "nothing added to commit",
+    ];
+
+    let mut found = false;
+    let mut out: Vec<String> = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim_end();
+        let stripped = trimmed.trim_start();
+
+        if STOPPERS.iter().any(|s| stripped.starts_with(s)) {
+            break;
+        }
+
+        // Branch header is already rendered from porcelain output.
+        if stripped.starts_with("On branch ")
+            || stripped.starts_with("HEAD detached")
+            || stripped.starts_with("Your branch ")
+        {
+            continue;
+        }
+
+        // Generic non-state hints — these are noise in normal status and
+        // never appear inside a state block.
+        if stripped.starts_with("(use \"git add")
+            || stripped.starts_with("(use \"git restore")
+        {
+            continue;
+        }
+
+        if !found && ANCHORS.iter().any(|a| stripped.contains(a)) {
+            found = true;
+        }
+
+        if found {
+            out.push(trimmed.to_string());
+        }
+    }
+
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(out.join("\n"))
+    }
+}
+
 /// Minimal filtering for git status with user-provided args
 fn filter_status_with_args(output: &str) -> String {
     let mut result = Vec::new();
@@ -848,10 +938,18 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     let formatted = format_status_output(&result.stdout);
 
-    println!("{}", formatted);
+    // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
+    // plain-status output we already captured for tracking. Porcelain omits it
+    // and hiding it misleads the user about the true repo state.
+    let final_output = match extract_state_header(&raw_output) {
+        Some(state) => format!("{}\n{}", state, formatted),
+        None => formatted,
+    };
+
+    println!("{}", final_output);
 
     // Track for statistics
-    timer.track("git status", "rtk git status", &raw_output, &formatted);
+    timer.track("git status", "rtk git status", &raw_output, &final_output);
 
     Ok(0)
 }
@@ -2028,6 +2126,83 @@ mod tests {
         let porcelain = "";
         let result = format_status_output(porcelain);
         assert_eq!(result, "Clean working tree");
+    }
+
+    #[test]
+    fn test_extract_state_header_clean_returns_none() {
+        let raw = "On branch main\nYour branch is up to date with 'origin/main'.\n\nnothing to commit, working tree clean\n";
+        assert_eq!(extract_state_header(raw), None);
+    }
+
+    #[test]
+    fn test_extract_state_header_no_state_with_changes_returns_none() {
+        let raw = "On branch main\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n\tmodified:   src/main.rs\n\nno changes added to commit\n";
+        assert_eq!(extract_state_header(raw), None);
+    }
+
+    #[test]
+    fn test_extract_state_header_editing_while_rebasing() {
+        let raw = "On branch feature\n\ninteractive rebase in progress; onto abc1234\nLast command done (1 command done):\n   edit abc123 some message\nNo commands remaining.\nYou are currently editing a commit while rebasing branch 'feature' on 'abc1234'.\n  (use \"git commit --amend\" to amend the current commit)\n  (use \"git rebase --continue\" once you are satisfied with your changes)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert!(out.contains("interactive rebase in progress"));
+        assert!(out.contains("You are currently editing a commit while rebasing"));
+        assert!(out.contains("git rebase --continue"));
+        assert!(out.contains("git commit --amend"));
+        assert!(!out.contains("On branch"));
+    }
+
+    #[test]
+    fn test_extract_state_header_merge_unresolved() {
+        let raw = "On branch main\nYou have unmerged paths.\n  (fix conflicts and run \"git commit\")\n  (use \"git merge --abort\" to abort the merge)\n\nUnmerged paths:\n\tboth modified:   src/main.rs\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert!(out.contains("You have unmerged paths"));
+        assert!(out.contains("git merge --abort"));
+        assert!(!out.contains("Unmerged paths:"));
+    }
+
+    #[test]
+    fn test_extract_state_header_cherry_pick() {
+        let raw = "On branch main\n\nYou are currently cherry-picking commit abc1234.\n  (fix conflicts and run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert!(out.contains("You are currently cherry-picking"));
+        assert!(out.contains("git cherry-pick --continue"));
+        assert!(out.contains("git cherry-pick --abort"));
+    }
+
+    #[test]
+    fn test_extract_state_header_bisect() {
+        let raw = "On branch main\n\nYou are currently bisecting, started from branch 'main'.\n  (use \"git bisect reset\" to get back to the original branch)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert!(out.contains("You are currently bisecting"));
+        assert!(out.contains("git bisect reset"));
+    }
+
+    #[test]
+    fn test_extract_state_header_revert() {
+        let raw = "On branch main\n\nYou are currently reverting commit abc1234.\n  (fix conflicts and run \"git revert --continue\")\n  (use \"git revert --abort\" to cancel the revert operation)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert!(out.contains("You are currently reverting"));
+        assert!(out.contains("git revert --continue"));
+    }
+
+    #[test]
+    fn test_extract_state_header_merge_in_middle() {
+        let raw = "On branch main\n\nAll conflicts fixed but you are still merging.\n  (use \"git commit\" to conclude merge)\n\nChanges to be committed:\n\tmodified:   src/main.rs\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert!(out.contains("All conflicts fixed but you are still merging"));
+        assert!(!out.contains("Changes to be committed:"));
+    }
+
+    #[test]
+    fn test_extract_state_header_drops_generic_add_hints() {
+        // `(use "git add ...)` is generic status hint noise. Confirm that
+        // when we're inside a state block, it's still skipped but the state
+        // itself survives.
+        let raw = "On branch main\n\nYou are currently rebasing branch 'foo' on 'bar'.\n  (use \"git add <file>...\" to mark resolution)\n  (use \"git rebase --continue\" once done)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert!(out.contains("You are currently rebasing"));
+        assert!(out.contains("git rebase --continue"));
+        assert!(!out.contains("git add <file>"));
     }
 
     #[test]
