@@ -1405,6 +1405,56 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ─── Kiro CLI support ─────────────────────────────────────────
+
+const KIRO_RULES: &str = include_str!("../../hooks/kiro/rules.md");
+
+pub fn run_kiro_mode(global: bool, verbose: u8) -> Result<()> {
+    run_kiro_mode_at(global, verbose)
+}
+
+fn run_kiro_mode_at(global: bool, verbose: u8) -> Result<()> {
+    // Kiro CLI reads steering files from:
+    //   Global: ~/.kiro/steering/*.md (loaded into every conversation)
+    //   Local:  .kiro/steering/*.md   (project-scoped)
+    let (target_dir, rules_path, scope_label) = if global {
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let dir = home.join(".kiro").join("steering");
+        let path = dir.join("rtk-rules.md");
+        (dir, path, "global (~/.kiro/steering/rtk-rules.md)")
+    } else {
+        let dir = PathBuf::from(".kiro").join("steering");
+        let path = dir.join("rtk-rules.md");
+        (dir, path, "project (.kiro/steering/rtk-rules.md)")
+    };
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        println!("\nRTK already configured for Kiro CLI ({scope_label}).\n");
+        println!("  Rules: {scope_label} (already present)");
+    } else {
+        fs::create_dir_all(&target_dir).context("Failed to create Kiro steering directory")?;
+        let new_content = if existing.trim().is_empty() {
+            KIRO_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), KIRO_RULES)
+        };
+        fs::write(&rules_path, &new_content)
+            .context("Failed to write Kiro steering rules")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote {}", rules_path.display());
+        }
+
+        println!("\nRTK configured for Kiro CLI.\n");
+        println!("  Rules: {scope_label} (installed)");
+    }
+    println!("  Kiro CLI will now use rtk commands for token savings.");
+    println!("  Restart Kiro CLI. Test with: git status\n");
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
