@@ -36,6 +36,9 @@
           # so we disable pkg-config detection to avoid conflicts.
           RUSQLITE_USE_PKG_CONFIG = "0";
 
+          # test_tool_exists_finds_git asserts `git` is on PATH during tests.
+          nativeCheckInputs = with pkgs; [ git ];
+
           # Tests need a writable HOME (for dirs::data_local_dir) and
           # RTK_DB_PATH (tracking tests create an SQLite database).
           preCheck = ''

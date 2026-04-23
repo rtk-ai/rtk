@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # RTK suggest hook for Claude Code PreToolUse:Bash
 # Emits system reminders when rtk-compatible commands are detected.
 # Outputs JSON with systemMessage to inform Claude Code without modifying execution.
@@ -97,10 +97,8 @@ elif echo "$FIRST_CMD" | grep -qE '^head\s+'; then
   fi
 
 # --- JS/TS tooling ---
-elif echo "$FIRST_CMD" | grep -qE '^(pnpm\s+)?vitest(\s|$)'; then
-  SUGGESTION="rtk vitest run"
-elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+test(\s|$)'; then
-  SUGGESTION="rtk vitest run"
+elif echo "$FIRST_CMD" | grep -qE '^(pnpm\s+)?vitest(\s+run)?(\s|$)'; then
+  SUGGESTION="rtk vitest"
 elif echo "$FIRST_CMD" | grep -qE '^pnpm\s+tsc(\s|$)'; then
   SUGGESTION="rtk tsc"
 elif echo "$FIRST_CMD" | grep -qE '^(npx\s+)?tsc(\s|$)'; then

@@ -1,3 +1,5 @@
+//! Pattern-matches CLI errors against known correction rules.
+
 use lazy_static::lazy_static;
 use regex::Regex;
 
@@ -5,6 +7,7 @@ use regex::Regex;
 pub enum ErrorType {
     UnknownFlag,
     CommandNotFound,
+    #[allow(dead_code)]
     WrongSyntax,
     WrongPath,
     MissingArg,
@@ -229,9 +232,7 @@ pub fn find_corrections(commands: &[CommandExecution]) -> Vec<CorrectionPair> {
         }
 
         // Look ahead for correction within CORRECTION_WINDOW
-        for j in (i + 1)..std::cmp::min(i + 1 + CORRECTION_WINDOW, commands.len()) {
-            let candidate = &commands[j];
-
+        for candidate in commands.iter().skip(i + 1).take(CORRECTION_WINDOW) {
             let similarity = command_similarity(&cmd.command, &candidate.command);
 
             // Must meet minimum similarity

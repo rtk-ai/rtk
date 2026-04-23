@@ -28,8 +28,10 @@ Thumbs.db
 # Test artifacts
 *.cast.bak
 
-# Benchmark results
-scripts/benchmark/
+# Benchmark results (fixture data, not infra)
+scripts/benchmark/diff/
+scripts/benchmark/rtk/
+scripts/benchmark/unix/
 benchmark-report.md
 
 # SQLite databases
@@ -38,6 +40,7 @@ benchmark-report.md
 *.sqlite3
 rtk_tracking.db
 claudedocs
+.omc
 
 # Vitals provenance data
 .vitals/

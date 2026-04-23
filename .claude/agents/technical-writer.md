@@ -227,11 +227,11 @@ echo $LAST_COMMAND  # Should show "rtk git status"
 ### 1. Create Filter Module
 
 ```bash
-touch src/newcmd_cmd.rs
+touch src/cmds/<ecosystem>/newcmd_cmd.rs
 ```
 
 ```rust
-// src/newcmd_cmd.rs
+// src/cmds/<ecosystem>/newcmd_cmd.rs
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;

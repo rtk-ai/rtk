@@ -1,0 +1,26 @@
+[filters.just]
+description = "Compact just task runner output — strip recipe headers, keep command output"
+match_command = "^just\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*Available recipes:",
+  "^\\s*just --list",
+]
+truncate_lines_at = 150
+max_lines = 50
+
+[[tests.just]]
+name = "preserves command output"
+input = "cargo test\n\ntest result: ok. 42 passed; 0 failed\n"
+expected = "cargo test\ntest result: ok. 42 passed; 0 failed"
+
+[[tests.just]]
+name = "preserves error output"
+input = "error: Compilation failed\nsrc/main.rs:10: expected `;`"
+expected = "error: Compilation failed\nsrc/main.rs:10: expected `;`"
+
+[[tests.just]]
+name = "empty input"
+input = ""
+expected = ""
