@@ -77,10 +77,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
             // If no lines were parsed (e.g., unrecognized locale), fall back to raw output.
             // This is safer than returning "(empty)" for a non-empty directory.
-            let has_content = raw
+            let has_real_content = raw
                 .lines()
-                .any(|l| !l.starts_with("total ") && !l.is_empty());
-            if parsed_count == 0 && has_content {
+                .any(|l| !l.starts_with("total ") && !l.is_empty() && !is_dotdir(l));
+            if parsed_count == 0 && has_real_content {
                 return raw.to_string();
             }
 
@@ -334,6 +334,17 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user user  4096  1月  1 12:00 .\n\
                      drwxr-xr-x 16 user user 20480  1月  1 12:00 ..\n";
+        let (entries, summary, parsed_count) = compact_ls(input, false);
+        assert_eq!(parsed_count, 0);
+        assert_eq!(entries, "(empty)\n");
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn test_compact_empty_english_locale() {
+        let input = "total 0\n\
+                     drwxr-xr-x  2 lumin  wheel  64 Apr 23 00:37 .\n\
+                     drwxr-xr-x 16 root  wheel 164576 Apr 23 00:37 ..\n";
         let (entries, summary, parsed_count) = compact_ls(input, false);
         assert_eq!(parsed_count, 0);
         assert_eq!(entries, "(empty)\n");
