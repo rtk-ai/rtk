@@ -1101,11 +1101,18 @@ enum GoCommands {
     Other(Vec<OsString>),
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum MvnCommands {
     /// Compile sources with compact output (errors + warnings only)
     Compile {
         /// Additional mvn compile arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compile test sources with compact output (same shape as `compile`)
+    #[command(name = "test-compile")]
+    TestCompile {
+        /// Additional mvn test-compile arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1173,6 +1180,73 @@ const RTK_META_COMMANDS: &[&str] = &[
     "rewrite",
 ];
 
+/// Known mvn goals that RTK has dedicated filters for.
+/// Kept in sync with `MvnCommands`.
+const KNOWN_MVN_GOALS: &[&str] = &[
+    "compile",
+    "test-compile",
+    "test",
+    "package",
+    "clean",
+    "integration-test",
+    "install",
+    "dependency:tree",
+];
+
+/// Mvn flags whose *next* positional token is a value, not a goal.
+/// Used to avoid mistaking e.g. `-pl test` for the `test` goal.
+const MVN_VALUE_FLAGS: &[&str] = &[
+    "-pl",
+    "--projects",
+    "-f",
+    "--file",
+    "-s",
+    "--settings",
+    "-gs",
+    "--global-settings",
+    "-P",
+    "--activate-profiles",
+    "-T",
+    "--threads",
+    "-b",
+    "--builder",
+    "-rf",
+    "--resume-from",
+];
+
+/// When Clap fails on a flag-first `mvn` invocation (e.g. `mvn -pl x -am test ...`),
+/// locate the first recognized goal among the positional tokens and return
+/// `(goal, remaining_args_without_goal)` so we can dispatch to the matching filter.
+///
+/// Returns `None` if `args` is not an `mvn` invocation or no known goal is present.
+fn try_mvn_reorder(args: &[String]) -> Option<(&'static str, Vec<String>)> {
+    if args.first().map(String::as_str) != Some("mvn") {
+        return None;
+    }
+
+    let mut skip_next = false;
+    for (i, tok) in args[1..].iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if tok.starts_with('-') {
+            if MVN_VALUE_FLAGS.contains(&tok.as_str()) {
+                skip_next = true;
+            }
+            continue;
+        }
+        if let Some(&goal) = KNOWN_MVN_GOALS.iter().find(|g| **g == tok.as_str()) {
+            let goal_idx = i + 1; // position inside `args`
+            let mut rest: Vec<String> = Vec::with_capacity(args.len() - 2);
+            rest.extend_from_slice(&args[1..goal_idx]);
+            rest.extend_from_slice(&args[goal_idx + 1..]);
+            return Some((goal, rest));
+        }
+    }
+    None
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1185,6 +1259,23 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
     if RTK_META_COMMANDS.contains(&args[0].as_str()) {
         parse_error.exit();
+    }
+
+    // Flag-first mvn: reorder so `mvn -pl x -am test ...` reaches the `test` filter.
+    // Clap's `external_subcommand` can't catch this because the first token is a flag.
+    if let Some((goal, rest)) = try_mvn_reorder(&args) {
+        let exit_code = match goal {
+            "compile" => mvn_cmd::run_compile(&rest, 0)?,
+            "test-compile" => mvn_cmd::run_test_compile(&rest, 0)?,
+            "test" => mvn_cmd::run_test(&rest, 0)?,
+            "package" => mvn_cmd::run_package(&rest, 0)?,
+            "clean" => mvn_cmd::run_clean(&rest, 0)?,
+            "integration-test" => mvn_cmd::run_integration_test(&rest, 0)?,
+            "install" => mvn_cmd::run_install(&rest, 0)?,
+            "dependency:tree" => mvn_cmd::run_dependency_tree(&rest, 0)?,
+            _ => unreachable!("goal came from KNOWN_MVN_GOALS"),
+        };
+        return Ok(exit_code);
     }
 
     let raw_command = args.join(" ");
@@ -2155,6 +2246,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mvn { command } => match command {
             MvnCommands::Compile { args } => mvn_cmd::run_compile(&args, cli.verbose)?,
+            MvnCommands::TestCompile { args } => mvn_cmd::run_test_compile(&args, cli.verbose)?,
             MvnCommands::Test { args } => mvn_cmd::run_test(&args, cli.verbose)?,
             MvnCommands::Package { args } => mvn_cmd::run_package(&args, cli.verbose)?,
             MvnCommands::Clean { args } => mvn_cmd::run_clean(&args, cli.verbose)?,
@@ -3061,5 +3153,92 @@ mod tests {
             cli.ultra_compact,
             "--ultra-compact long form must still enable ultra-compact mode"
         );
+    }
+
+    fn s(vs: &[&str]) -> Vec<String> {
+        vs.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn mvn_reorder_flag_first_finds_test_goal() {
+        let args = s(&[
+            "mvn",
+            "-pl",
+            "evita_test/evita_functional_tests",
+            "-am",
+            "test",
+            "-Dtest=ReferenceHistogramStatisticsTranslatorTest",
+        ]);
+        let (goal, rest) = try_mvn_reorder(&args).expect("should find test goal");
+        assert_eq!(goal, "test");
+        assert_eq!(
+            rest,
+            s(&[
+                "-pl",
+                "evita_test/evita_functional_tests",
+                "-am",
+                "-Dtest=ReferenceHistogramStatisticsTranslatorTest",
+            ])
+        );
+    }
+
+    #[test]
+    fn mvn_reorder_goal_first_still_matches() {
+        let args = s(&["mvn", "test", "-pl", "mod", "-am"]);
+        let (goal, rest) = try_mvn_reorder(&args).expect("should find test goal");
+        assert_eq!(goal, "test");
+        assert_eq!(rest, s(&["-pl", "mod", "-am"]));
+    }
+
+    #[test]
+    fn mvn_reorder_skips_value_of_pl_flag() {
+        // `-pl test` must NOT be interpreted as the `test` goal.
+        let args = s(&["mvn", "-pl", "test", "-am", "compile"]);
+        let (goal, rest) = try_mvn_reorder(&args).expect("should find compile goal");
+        assert_eq!(goal, "compile");
+        assert_eq!(rest, s(&["-pl", "test", "-am"]));
+    }
+
+    #[test]
+    fn mvn_reorder_no_known_goal_returns_none() {
+        let args = s(&["mvn", "-pl", "mod", "-am", "site"]);
+        assert!(try_mvn_reorder(&args).is_none());
+    }
+
+    #[test]
+    fn mvn_reorder_non_mvn_command_returns_none() {
+        let args = s(&["cargo", "test"]);
+        assert!(try_mvn_reorder(&args).is_none());
+    }
+
+    #[test]
+    fn mvn_reorder_preserves_arg_order_after_extraction() {
+        let args = s(&["mvn", "-X", "-pl", "mod", "clean", "-DskipTests"]);
+        let (goal, rest) = try_mvn_reorder(&args).expect("should find clean goal");
+        assert_eq!(goal, "clean");
+        assert_eq!(rest, s(&["-X", "-pl", "mod", "-DskipTests"]));
+    }
+
+    #[test]
+    fn mvn_reorder_dependency_tree_goal() {
+        let args = s(&["mvn", "-f", "pom.xml", "dependency:tree"]);
+        let (goal, rest) = try_mvn_reorder(&args).expect("should find dependency:tree");
+        assert_eq!(goal, "dependency:tree");
+        assert_eq!(rest, s(&["-f", "pom.xml"]));
+    }
+
+    #[test]
+    fn mvn_reorder_test_compile_goal_flag_first() {
+        let args = s(&["mvn", "-pl", "evita_engine", "test-compile", "-am"]);
+        let (goal, rest) = try_mvn_reorder(&args).expect("should find test-compile");
+        assert_eq!(goal, "test-compile");
+        assert_eq!(rest, s(&["-pl", "evita_engine", "-am"]));
+    }
+
+    #[test]
+    fn mvn_reorder_test_goal_not_shadowed_by_test_compile() {
+        let args = s(&["mvn", "test", "-pl", "mod"]);
+        let (goal, _) = try_mvn_reorder(&args).expect("should find test");
+        assert_eq!(goal, "test");
     }
 }
