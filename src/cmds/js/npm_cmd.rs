@@ -1,6 +1,8 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
+use crate::cmds::js::script_detect::{detect_script_tool, ScriptTool};
 use crate::core::runner;
+use crate::core::toml_filter;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
 
@@ -109,13 +111,53 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
         eprintln!("Running: npm {}", args.join(" "));
     }
 
-    runner::run_filtered(
-        cmd,
-        "npm",
-        &args.join(" "),
-        filter_npm_output,
-        runner::RunOptions::default(),
-    )
+    // When the command runs a package.json script (either explicit
+    // `rtk npm run <script>` or the shorthand form), detect whether the
+    // script body invokes a tool we have a filter for. If so, chain that
+    // tool's filter on top of the generic npm boilerplate strip.
+    let script_name: Option<&str> = if is_run_explicit {
+        args.get(1).map(String::as_str)
+    } else if !is_npm_subcommand {
+        args.first().map(String::as_str)
+    } else {
+        None
+    };
+
+    match script_name.and_then(detect_script_tool) {
+        Some(ScriptTool::Biome) => {
+            // Biome TOML filter matches `^biome\b`.
+            if let Some(biome) = toml_filter::find_matching_filter("biome") {
+                runner::run_filtered(
+                    cmd,
+                    "npm",
+                    &args.join(" "),
+                    move |raw: &str| {
+                        let stripped = filter_npm_output(raw);
+                        toml_filter::apply_filter(biome, &stripped)
+                    },
+                    runner::RunOptions::default(),
+                )
+            } else {
+                // Biome TOML filter is compiled in at build time, so this
+                // branch is effectively unreachable. Fall back rather than
+                // panic if the registry ever changes.
+                runner::run_filtered(
+                    cmd,
+                    "npm",
+                    &args.join(" "),
+                    filter_npm_output,
+                    runner::RunOptions::default(),
+                )
+            }
+        }
+        None => runner::run_filtered(
+            cmd,
+            "npm",
+            &args.join(" "),
+            filter_npm_output,
+            runner::RunOptions::default(),
+        ),
+    }
 }
 
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN
@@ -123,8 +165,11 @@ fn filter_npm_output(output: &str) -> String {
     let mut result = Vec::new();
 
     for line in output.lines() {
-        // Skip npm boilerplate
-        if line.starts_with('>') && line.contains('@') {
+        // Skip npm boilerplate: both the `> pkg@ver <script>` banner and the
+        // bare `> <script-body>` line that npm echoes before handing off to
+        // the script. Stripping both lets downstream filters (e.g. the biome
+        // TOML filter) see clean tool output.
+        if line.starts_with('>') {
             continue;
         }
         // Skip npm lifecycle scripts
@@ -219,5 +264,72 @@ npm notice
         let output = "\n\n\n";
         let result = filter_npm_output(output);
         assert_eq!(result, "ok");
+    }
+
+    // --- #1489 PR 2: package.json-aware filter chaining ---
+
+    #[test]
+    fn test_filter_npm_output_preserves_biome_diagnostic_lines() {
+        // Sanity: filter_npm_output alone passes biome error lines through.
+        let raw = "\
+> mypkg@1.0.0 lint
+> biome check
+
+./src/app.ts:5:3 lint/style/useConst
+  \u{00d7} This variable can be declared as const.
+";
+        let out = filter_npm_output(raw);
+        assert!(out.contains("./src/app.ts:5:3 lint/style/useConst"));
+        assert!(out.contains("This variable can be declared as const."));
+        assert!(!out.contains("> mypkg@1.0.0 lint"));
+    }
+
+    #[test]
+    fn test_filter_npm_output_then_biome_filter_drops_biome_noise() {
+        // When the lint script runs biome and produces a clean result, the
+        // chained filter should produce "biome: ok" via biome.toml's
+        // on_empty fallback.
+        let raw = "\
+> mypkg@1.0.0 lint
+> biome check
+
+Checked 42 files in 0.3s
+";
+        let stripped = filter_npm_output(raw);
+        let biome = toml_filter::find_matching_filter("biome")
+            .expect("biome filter should be compiled into BUILTIN_TOML");
+        let out = toml_filter::apply_filter(biome, &stripped);
+        assert_eq!(out, "biome: ok");
+    }
+
+    #[test]
+    fn test_filter_npm_output_then_biome_filter_preserves_errors() {
+        // When biome reports errors, the chain must keep the diagnostic
+        // block intact while dropping biome's summary chrome.
+        let raw = "\
+> mypkg@1.0.0 lint
+> biome check
+
+Checked 42 files in 0.5s
+
+./src/app.ts:5:3 lint/style/useConst
+  \u{00d7} This variable can be declared as const.
+
+Found 1 error.
+";
+        let stripped = filter_npm_output(raw);
+        let biome = toml_filter::find_matching_filter("biome")
+            .expect("biome filter should be compiled into BUILTIN_TOML");
+        let out = toml_filter::apply_filter(biome, &stripped);
+        assert!(
+            out.contains("./src/app.ts:5:3 lint/style/useConst"),
+            "chain must keep biome diagnostic lines; got: {}",
+            out
+        );
+        assert!(
+            !out.contains("Checked 42 files"),
+            "biome filter should strip 'Checked N files' noise; got: {}",
+            out
+        );
     }
 }
