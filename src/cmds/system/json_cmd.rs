@@ -1,11 +1,24 @@
 //! Inspects JSON structure without showing values, saving tokens on large payloads.
 
+use crate::core::toon::{strip_nulls, toon_encode};
 use crate::core::tracking;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
+
+/// Apply TOON encoding pipeline: strip nulls then compact key syntax.
+/// Falls back to original input if not valid JSON or TOON is longer.
+pub fn compress_json_output(input: &str) -> String {
+    let cleaned = strip_nulls(input).unwrap_or_else(|| input.to_string());
+    if let Some(toon) = toon_encode(&cleaned) {
+        if toon.len() < cleaned.len() {
+            return toon;
+        }
+    }
+    cleaned
+}
 
 /// Reject non-JSON files with a clear error before doing any I/O.
 fn validate_json_extension(file: &Path) -> Result<()> {
@@ -50,7 +63,12 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
     let output = if schema_only {
         filter_json_string(&content, max_depth)?
     } else {
-        filter_json_compact(&content, max_depth)?
+        let toon = compress_json_output(&content);
+        if toon.starts_with("TOON:") {
+            toon
+        } else {
+            filter_json_compact(&content, max_depth)?
+        }
     };
     println!("{}", output);
     timer.track(
@@ -79,7 +97,12 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
     let output = if schema_only {
         filter_json_string(&content, max_depth)?
     } else {
-        filter_json_compact(&content, max_depth)?
+        let toon = compress_json_output(&content);
+        if toon.starts_with("TOON:") {
+            toon
+        } else {
+            filter_json_compact(&content, max_depth)?
+        }
     };
     println!("{}", output);
     timer.track("cat - (stdin)", "rtk json -", &content, &output);

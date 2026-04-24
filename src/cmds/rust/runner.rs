@@ -1,6 +1,7 @@
 //! Runs arbitrary commands and captures only stderr or test failures.
 
 use crate::core::stream::StreamFilter;
+use crate::core::verifier::Verifier;
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -125,6 +126,15 @@ pub fn run_err(command: &str, verbose: u8) -> Result<i32> {
     )
 }
 
+fn apply_with_verification(original: &str, filtered: String) -> String {
+    let result = Verifier::new().verify(original, &filtered);
+    if !result.is_safe(0.6) {
+        eprintln!("rtk: verifier fallback (confidence {:.0}%)", result.confidence * 100.0);
+        return original.to_string();
+    }
+    filtered
+}
+
 /// Run tests and show only failures
 pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
     if verbose > 0 {
@@ -136,7 +146,7 @@ pub fn run_test(command: &str, verbose: u8) -> Result<i32> {
         cmd,
         "test",
         command,
-        move |raw| extract_test_summary(raw, &command_owned),
+        move |raw| apply_with_verification(raw, extract_test_summary(raw, &command_owned)),
         crate::core::runner::RunOptions::with_tee("test"),
     )
 }

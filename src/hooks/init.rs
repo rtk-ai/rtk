@@ -56,6 +56,62 @@ const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
 
+/// Canonical list of supported agent names.
+pub const KNOWN_AGENTS: &[&str] = &[
+    "claude", "cursor", "windsurf", "cline", "gemini", "opencode", "codex",
+];
+
+/// Normalize an agent name or alias to its canonical form.
+pub fn normalize_agent(name: &str) -> Option<&'static str> {
+    match name.to_lowercase().as_str() {
+        "claude" | "claude-code" | "claudecode" => Some("claude"),
+        "cursor" => Some("cursor"),
+        "windsurf" => Some("windsurf"),
+        "cline" | "roo" | "roocline" | "kilocode" => Some("cline"),
+        "gemini" | "gemini-cli" | "geminicli" => Some("gemini"),
+        "opencode" => Some("opencode"),
+        "codex" => Some("codex"),
+        _ => None,
+    }
+}
+
+/// Compute the set of agents to configure, respecting --only / --skip.
+pub fn resolve_agents(only: Option<&str>, skip: Option<&str>) -> anyhow::Result<Vec<&'static str>> {
+    fn parse(s: &str) -> anyhow::Result<Vec<&'static str>> {
+        let mut out = Vec::new();
+        for part in s.split(',') {
+            let name = part.trim();
+            match normalize_agent(name) {
+                Some(canonical) => {
+                    if !out.contains(&canonical) {
+                        out.push(canonical);
+                    }
+                }
+                None => anyhow::bail!(
+                    "Unknown agent '{}'. Accepted: {}",
+                    name,
+                    KNOWN_AGENTS.join(", ")
+                ),
+            }
+        }
+        Ok(out)
+    }
+
+    match (only, skip) {
+        (Some(o), None) => parse(o),
+        (None, Some(s)) => {
+            let to_skip = parse(s)?;
+            Ok(KNOWN_AGENTS
+                .iter()
+                .copied()
+                .filter(|a| !to_skip.contains(a))
+                .collect())
+        }
+        (None, None) => Ok(KNOWN_AGENTS.to_vec()),
+        (Some(_), Some(_)) => anyhow::bail!("--only and --skip cannot be combined"),
+    }
+}
+
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PatchMode {
@@ -3774,5 +3830,66 @@ More notes
                 "settings.json must contain hook command"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod agent_selection_tests {
+    use super::{normalize_agent, resolve_agents, KNOWN_AGENTS};
+
+    #[test]
+    fn test_only_single_agent() {
+        let agents = resolve_agents(Some("claude"), None).unwrap();
+        assert_eq!(agents, vec!["claude"]);
+    }
+
+    #[test]
+    fn test_only_multiple_agents() {
+        let agents = resolve_agents(Some("claude,cursor"), None).unwrap();
+        assert_eq!(agents.len(), 2);
+        assert!(agents.contains(&"claude"));
+        assert!(agents.contains(&"cursor"));
+    }
+
+    #[test]
+    fn test_skip_removes_agents() {
+        let agents = resolve_agents(None, Some("cursor,windsurf")).unwrap();
+        assert!(!agents.contains(&"cursor"));
+        assert!(!agents.contains(&"windsurf"));
+        assert!(agents.contains(&"claude"));
+    }
+
+    #[test]
+    fn test_no_flags_returns_all_known() {
+        let agents = resolve_agents(None, None).unwrap();
+        assert_eq!(agents.len(), KNOWN_AGENTS.len());
+    }
+
+    #[test]
+    fn test_alias_claude_code() {
+        assert_eq!(normalize_agent("claude-code"), Some("claude"));
+    }
+
+    #[test]
+    fn test_alias_roo() {
+        assert_eq!(normalize_agent("roo"), Some("cline"));
+    }
+
+    #[test]
+    fn test_alias_gemini_cli() {
+        assert_eq!(normalize_agent("gemini-cli"), Some("gemini"));
+    }
+
+    #[test]
+    fn test_unknown_agent_error() {
+        let result = resolve_agents(Some("vscode"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown agent"));
+    }
+
+    #[test]
+    fn test_deduplication() {
+        let agents = resolve_agents(Some("claude,claude-code"), None).unwrap();
+        assert_eq!(agents.len(), 1);
     }
 }

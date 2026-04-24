@@ -1,0 +1,12 @@
+use anyhow::{Context, Result};
+use std::path::Path;
+
+pub fn load_config(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path)
+        .with_context(|| format!("Cannot read {}", path.display()))
+}
+
+pub fn write_config(path: &Path, content: &str) -> Result<()> {
+    std::fs::write(path, content)
+        .with_context(|| format!("Failed to write {}", path.display()))
+}

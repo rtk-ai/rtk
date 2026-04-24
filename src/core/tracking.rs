@@ -1421,6 +1421,10 @@ pub fn args_display(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate RTK_DB_PATH to prevent races on parallel test runs.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     // 1. estimate_tokens — verify ~4 chars/token ratio
     #[test]
@@ -1547,6 +1551,7 @@ mod tests {
     #[test]
     fn test_custom_db_path_env() {
         use std::env;
+        let _guard = ENV_MUTEX.lock().unwrap();
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
         env::set_var("RTK_DB_PATH", &custom_path);
@@ -1561,6 +1566,7 @@ mod tests {
     #[test]
     fn test_default_db_path() {
         use std::env;
+        let _guard = ENV_MUTEX.lock().unwrap();
 
         // Ensure no env var is set
         env::remove_var("RTK_DB_PATH");

@@ -328,6 +328,14 @@ enum Commands {
         #[arg(short, long)]
         global: bool,
 
+        /// Only configure these agents (comma-separated: claude, cursor, windsurf, cline, gemini, opencode, codex)
+        #[arg(long, value_name = "AGENTS", conflicts_with = "skip")]
+        only: Option<String>,
+
+        /// Configure all agents except these (comma-separated)
+        #[arg(long, value_name = "AGENTS", conflicts_with = "only")]
+        skip: Option<String>,
+
         /// Install OpenCode plugin (in addition to Claude Code)
         #[arg(long)]
         opencode: bool,
@@ -650,6 +658,17 @@ enum Commands {
         #[arg(long)]
         require_all: bool,
     },
+
+    /// Recover original content referenced by a §ref:HASH§ dedup token
+    #[command(about = "Recover original content from a §ref:HASH§ dedup token")]
+    Expand {
+        /// The hash prefix (first 8 chars from the §ref:HASH§ token)
+        hash: String,
+    },
+
+    /// Evict stale dedup cache entries and show cache stats
+    #[command(about = "Evict stale dedup cache entries and show stats")]
+    DedupCompact,
 
     /// Ruff linter/formatter with compact output
     Ruff {
@@ -1745,6 +1764,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Init {
             global,
+            only,
+            skip,
             opencode,
             gemini,
             agent,
@@ -1757,6 +1778,8 @@ fn run_cli() -> Result<i32> {
             codex,
             copilot,
         } => {
+            // --only / --skip: validate agent list early
+            let _ = hooks::init::resolve_agents(only.as_deref(), skip.as_deref())?;
             if show {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
@@ -2368,6 +2391,45 @@ fn run_cli() -> Result<i32> {
                 hooks::integrity::run_verify(cli.verbose)?;
                 hooks::verify_cmd::run(None, require_all)?;
             }
+            0
+        }
+
+        Commands::Expand { hash } => {
+            use crate::core::dedup_cache::DedupCache;
+            let db_path = core::config::Config::load()
+                .ok()
+                .and_then(|c| c.tracking.database_path)
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join("rtk/history.db")
+                });
+            let cache = DedupCache::new(db_path)?;
+            match cache.expand_prefix(&hash)? {
+                Some(content) => print!("{}", content),
+                None => {
+                    eprintln!("rtk expand: no cached content for hash '{hash}'");
+                    std::process::exit(1);
+                }
+            }
+            0
+        }
+
+        Commands::DedupCompact => {
+            use crate::core::dedup_cache::DedupCache;
+            let db_path = core::config::Config::load()
+                .ok()
+                .and_then(|c| c.tracking.database_path)
+                .unwrap_or_else(|| {
+                    dirs::data_local_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join("rtk/history.db")
+                });
+            let cache = DedupCache::new(db_path)?;
+            let n = cache.evict_stale()?;
+            println!("rtk dedup-compact: evicted {n} stale cache entries");
+            let stats = cache.stats()?;
+            println!("  Cache: {} entries, {:.1} KB", stats.count, stats.size_kb);
             0
         }
     };
