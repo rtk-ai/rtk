@@ -1,8 +1,8 @@
 //! Filters npm output and auto-injects the "run" subcommand when appropriate.
 
-use crate::core::tracking;
+use crate::core::runner;
 use crate::core::utils::resolved_command;
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// Known npm subcommands that should NOT get "run" injected.
 /// Shared between production code and tests to avoid drift.
@@ -73,9 +73,7 @@ const NPM_SUBCOMMANDS: &[&str] = &[
     "restart",
 ];
 
-pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
     let mut cmd = resolved_command("npm");
 
     // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
@@ -111,26 +109,13 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<()> {
         eprintln!("Running: npm {}", args.join(" "));
     }
 
-    let output = cmd.output().context("Failed to run npm")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let filtered = filter_npm_output(&raw);
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("npm {}", args.join(" ")),
-        &format!("rtk npm {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "npm",
+        &args.join(" "),
+        filter_npm_output,
+        runner::RunOptions::default(),
+    )
 }
 
 /// Filter npm run output - strip boilerplate, progress bars, npm WARN

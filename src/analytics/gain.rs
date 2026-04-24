@@ -5,6 +5,7 @@ use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
 use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
+use chrono::Local;
 use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -23,10 +24,24 @@ pub fn run(
     all: bool,
     format: &str,
     failures: bool,
+    reset: bool,
+    yes: bool,
     _verbose: u8,
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
     let project_scope = resolve_project_scope(project)?; // added: resolve project path
+
+    if reset {
+        if !yes && !confirm_reset()? {
+            println!("Aborted.");
+            return Ok(());
+        }
+        tracker
+            .reset_all()
+            .context("Failed to reset token savings")?;
+        println!("{}", styled("Token savings stats reset to zero.", true));
+        return Ok(());
+    }
 
     if failures {
         return show_failures(&tracker);
@@ -230,7 +245,7 @@ pub fn run(
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
-                    let time = rec.timestamp.format("%m-%d %H:%M");
+                    let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
                     let cmd_short = if rec.rtk_cmd.len() > 25 {
                         format!("{}...", &rec.rtk_cmd[..22])
                     } else {
@@ -723,4 +738,27 @@ fn show_failures(tracker: &Tracker) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Prompt the user to confirm a destructive reset operation.
+/// Defaults to No in non-interactive (piped) environments.
+fn confirm_reset() -> Result<bool> {
+    use std::io::{self, BufRead, IsTerminal, Write};
+
+    eprint!("This will permanently delete all tracking data. Continue? [y/N] ");
+    io::stderr().flush().ok();
+
+    if !io::stdin().is_terminal() {
+        eprintln!("(non-interactive mode, defaulting to N)");
+        return Ok(false);
+    }
+
+    let stdin = io::stdin();
+    let mut line = String::new();
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .context("Failed to read confirmation")?;
+
+    Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
 }

@@ -5,9 +5,9 @@
 //! (e.g., user specified `--format documentation`) or when injected JSON output
 //! fails to parse.
 
-use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, fallback_tail, ruby_exec, truncate};
-use anyhow::{Context, Result};
+use crate::core::runner;
+use crate::core::utils::{fallback_tail, ruby_exec, truncate};
+use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
@@ -62,13 +62,9 @@ struct RspecSummary {
 
 // ── Public entry point ───────────────────────────────────────────────────────
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = ruby_exec("rspec");
 
-    // Inject --format json unless the user already specified a format.
-    // Handles: --format, -f, --format=..., -fj, -fjson, -fdocumentation (from PR #534)
     let has_format = args.iter().any(|a| {
         a == "--format"
             || a == "-f"
@@ -87,48 +83,20 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: rspec{} {}", injected, args.join(" "));
     }
 
-    let output = cmd.output().context(
-        "Failed to run rspec. Is it installed? Try: gem install rspec or add it to your Gemfile",
-    )?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    let exit_code = exit_code_from_output(&output, "rspec");
-
-    let filtered = if stdout.trim().is_empty() && !output.status.success() {
-        "RSpec: FAILED (no stdout, see stderr below)".to_string()
-    } else if has_format {
-        // User specified format — use text fallback on stripped output
-        let stripped = strip_noise(&stdout);
-        filter_rspec_text(&stripped)
-    } else {
-        filter_rspec_output(&stdout)
-    };
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "rspec", exit_code) {
-        println!("{}\n{}", filtered, hint);
-    } else {
-        println!("{}", filtered);
-    }
-
-    if !stderr.trim().is_empty() && (!output.status.success() || verbose > 0) {
-        eprintln!("{}", stderr.trim());
-    }
-
-    timer.track(
-        &format!("rspec {}", args.join(" ")),
-        &format!("rtk rspec {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "rspec",
+        &args.join(" "),
+        move |stdout| {
+            if has_format {
+                let stripped = strip_noise(stdout);
+                filter_rspec_text(&stripped)
+            } else {
+                filter_rspec_output(stdout)
+            }
+        },
+        runner::RunOptions::stdout_only().tee("rspec"),
+    )
 }
 
 // ── Noise stripping ─────────────────────────────────────────────────────────

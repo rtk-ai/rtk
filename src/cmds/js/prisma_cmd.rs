@@ -1,5 +1,6 @@
 //! Filters Prisma CLI output by stripping ASCII art and verbose decoration.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
@@ -19,7 +20,7 @@ pub enum MigrateSubcommand {
     Deploy,
 }
 
-pub fn run(cmd: PrismaCommand, args: &[String], verbose: u8) -> Result<()> {
+pub fn run(cmd: PrismaCommand, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         PrismaCommand::Generate => run_generate(args, verbose),
         PrismaCommand::Migrate { subcommand } => run_migrate(subcommand, args, verbose),
@@ -38,7 +39,7 @@ fn create_prisma_command() -> Command {
     }
 }
 
-fn run_generate(args: &[String], verbose: u8) -> Result<()> {
+fn run_generate(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = create_prisma_command();
@@ -52,34 +53,30 @@ fn run_generate(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: prisma generate");
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .context("Failed to run prisma generate (try: npm install -g prisma)")?;
 
-    let exit_code = output.status.code().unwrap_or(1);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track("prisma generate", "rtk prisma generate", &raw, &raw);
-        std::process::exit(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = filter_prisma_generate(&raw);
     println!("{}", filtered);
     timer.track("prisma generate", "rtk prisma generate", &raw, &filtered);
 
-    Ok(())
+    Ok(0)
 }
 
-fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> Result<()> {
+fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = create_prisma_command();
@@ -111,22 +108,19 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
         eprintln!("Running: {}", cmd_name);
     }
 
-    let output = cmd.output().context("Failed to run prisma migrate")?;
+    let result = exec_capture(&mut cmd).context("Failed to run prisma migrate")?;
 
-    let exit_code = output.status.code().unwrap_or(1);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, &raw);
-        std::process::exit(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = match subcommand {
@@ -138,10 +132,10 @@ fn run_migrate(subcommand: MigrateSubcommand, args: &[String], verbose: u8) -> R
     println!("{}", filtered);
     timer.track(cmd_name, &format!("rtk {}", cmd_name), &raw, &filtered);
 
-    Ok(())
+    Ok(0)
 }
 
-fn run_db_push(args: &[String], verbose: u8) -> Result<()> {
+fn run_db_push(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = create_prisma_command();
@@ -155,29 +149,26 @@ fn run_db_push(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: prisma db push");
     }
 
-    let output = cmd.output().context("Failed to run prisma db push")?;
+    let result = exec_capture(&mut cmd).context("Failed to run prisma db push")?;
 
-    let exit_code = output.status.code().unwrap_or(1);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    if !output.status.success() {
-        if !stdout.trim().is_empty() {
-            eprint!("{}", stdout);
+    if !result.success() {
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
         }
-        if !stderr.trim().is_empty() {
-            eprint!("{}", stderr);
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
         }
         timer.track("prisma db push", "rtk prisma db push", &raw, &raw);
-        std::process::exit(exit_code);
+        return Ok(result.exit_code);
     }
 
     let filtered = filter_db_push(&raw);
     println!("{}", filtered);
     timer.track("prisma db push", "rtk prisma db push", &raw, &filtered);
 
-    Ok(())
+    Ok(0)
 }
 
 /// Filter prisma generate output - strip ASCII art, extract counts

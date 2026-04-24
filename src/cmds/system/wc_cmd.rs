@@ -6,13 +6,11 @@
 /// - `wc -w file.py`  → `96`
 /// - `wc -c file.py`  → `978`
 /// - `wc -l *.py`     → table with common path prefix stripped
-use crate::core::tracking;
+use crate::core::runner::{self, RunOptions};
 use crate::core::utils::resolved_command;
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("wc");
     for arg in args {
         cmd.arg(arg);
@@ -22,35 +20,14 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: wc {}", args.join(" "));
     }
 
-    let output = cmd.output().context("Failed to run wc")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !output.status.success() {
-        let msg = if stderr.trim().is_empty() {
-            stdout.trim().to_string()
-        } else {
-            stderr.trim().to_string()
-        };
-        eprintln!("FAILED: wc {}", msg);
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    let raw = stdout.to_string();
-
-    // Detect which columns the user requested
     let mode = detect_mode(args);
-    let filtered = filter_wc_output(&raw, &mode);
-    println!("{}", filtered);
-
-    timer.track(
-        &format!("wc {}", args.join(" ")),
-        &format!("rtk wc {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    Ok(())
+    runner::run_filtered(
+        cmd,
+        "wc",
+        &args.join(" "),
+        |stdout| filter_wc_output(stdout, &mode),
+        RunOptions::stdout_only(),
+    )
 }
 
 /// Which columns the user requested

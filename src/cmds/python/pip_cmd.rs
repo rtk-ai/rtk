@@ -1,5 +1,6 @@
 //! Filters pip and uv package manager output.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
@@ -13,7 +14,7 @@ struct Package {
     latest_version: Option<String>,
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Auto-detect uv vs pip
@@ -27,7 +28,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     // Detect subcommand
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
 
-    let (cmd_str, filtered) = match subcommand {
+    let (cmd_str, filtered, exit_code) = match subcommand {
         "list" => run_list(base_cmd, &args[1..], verbose)?,
         "outdated" => run_outdated(base_cmd, &args[1..], verbose)?,
         "install" | "uninstall" | "show" => {
@@ -47,10 +48,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    Ok(())
+    Ok(exit_code)
 }
 
-fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
+fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
     let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
@@ -67,25 +68,18 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
         eprintln!("Running: {} pip list --format=json", base_cmd);
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip list", base_cmd))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_list(&stdout);
+    let filtered = filter_pip_list(&result.stdout);
     println!("{}", filtered);
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok((raw, filtered))
+    Ok((raw, filtered, result.exit_code))
 }
 
-fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
+fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
     let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
@@ -102,25 +96,18 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
         eprintln!("Running: {} pip list --outdated --format=json", base_cmd);
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip list --outdated", base_cmd))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_outdated(&stdout);
+    let filtered = filter_pip_outdated(&result.stdout);
     println!("{}", filtered);
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok((raw, filtered))
+    Ok((raw, filtered, result.exit_code))
 }
 
-fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String)> {
+fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
     let mut cmd = resolved_command(base_cmd);
 
     if base_cmd == "uv" {
@@ -135,22 +122,15 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
         eprintln!("Running: {} pip {}", base_cmd, args.join(" "));
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip {}", base_cmd, args.join(" ")))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    print!("{}", stdout);
-    eprint!("{}", stderr);
+    print!("{}", result.stdout);
+    eprint!("{}", result.stderr);
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok((raw.clone(), raw))
+    Ok((raw.clone(), raw, result.exit_code))
 }
 
 /// Filter pip list JSON output

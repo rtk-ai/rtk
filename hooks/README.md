@@ -38,7 +38,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
-- **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `~/.codex/` location
+- **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 
 ## Supported Agents
@@ -184,7 +184,7 @@ Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk car
 ### Override Controls
 
 - **`RTK_DISABLED=1`**: Per-command override (`RTK_DISABLED=1 git status` runs raw)
-- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite
+- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite. Matches against the full command after stripping env prefixes. Subcommand patterns work (`"git push"` excludes `git push origin main`). Patterns starting with `^` are treated as regex.
 - **Already-RTK**: `rtk git status` passes through unchanged (no `rtk rtk git`)
 
 ## Exit Code Contract

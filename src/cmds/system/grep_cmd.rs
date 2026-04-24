@@ -1,6 +1,7 @@
 //! Filters grep output by grouping matches by file.
 
 use crate::core::config;
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
@@ -17,7 +18,7 @@ pub fn run(
     file_type: Option<&str>,
     extra_args: &[String],
     verbose: u8,
-) -> Result<()> {
+) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -28,7 +29,11 @@ pub fn run(
     let rg_pattern = pattern.replace(r"\|", "|");
 
     let mut rg_cmd = resolved_command("rg");
-    rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
+    // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
+    // Without this, rg returns 0 matches for files in .gitignore, causing
+    // false negatives that make AI agents draw wrong conclusions.
+    // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
+    rg_cmd.args(["-n", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -42,26 +47,22 @@ pub fn run(
         rg_cmd.arg(arg);
     }
 
-    let output = rg_cmd
-        .output()
+    let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
-            resolved_command("grep")
-                .args(["-rn", pattern, path])
-                .output()
+            let mut grep_cmd = resolved_command("grep");
+            grep_cmd.args(["-rn", pattern, path]);
+            exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let exit_code = output.status.code().unwrap_or(1);
+    let exit_code = result.exit_code;
+    let raw_output = result.stdout.clone();
 
-    let raw_output = stdout.to_string();
-
-    if stdout.trim().is_empty() {
+    if result.stdout.trim().is_empty() {
         // Show stderr for errors (bad regex, missing file, etc.)
         if exit_code == 2 {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.trim().is_empty() {
-                eprintln!("{}", stderr.trim());
+            if !result.stderr.trim().is_empty() {
+                eprintln!("{}", result.stderr.trim());
             }
         }
         let msg = format!("0 matches for '{}'", pattern);
@@ -72,23 +73,22 @@ pub fn run(
             &raw_output,
             &msg,
         );
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
-        return Ok(());
+        return Ok(exit_code);
     }
 
-    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
-    let mut total = 0;
+    // Always filter: truncate long lines, apply per-file and global caps.
+    // Output in standard file:line:content format that AI agents can parse.
+    // (A passthrough approach yields 0% savings — no reason for RTK to exist on that path.)
+    let total_matches = result.stdout.lines().count();
 
-    // Compile context regex once (instead of per-line in clean_line)
     let context_re = if context_only {
         Regex::new(&format!("(?i).{{0,20}}{}.*", regex::escape(pattern))).ok()
     } else {
         None
     };
 
-    for line in stdout.lines() {
+    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    for line in result.stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
 
         let (file, line_num, content) = if parts.len() == 3 {
@@ -101,43 +101,39 @@ pub fn run(
             continue;
         };
 
-        total += 1;
         let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!("{} matches in {}F:\n\n", total, by_file.len()));
+    rtk_output.push_str(&format!(
+        "{} matches in {} files:\n\n",
+        total_matches,
+        by_file.len()
+    ));
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
     files.sort_by_key(|(f, _)| *f);
 
+    let per_file = config::limits().grep_max_per_file;
     for (file, matches) in files {
         if shown >= max_results {
             break;
         }
 
         let file_display = compact_path(file);
-        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, matches.len()));
-
-        let per_file = config::limits().grep_max_per_file;
         for (line_num, content) in matches.iter().take(per_file) {
-            rtk_output.push_str(&format!("  {:>4}: {}\n", line_num, content));
-            shown += 1;
             if shown >= max_results {
                 break;
             }
+            rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
+            shown += 1;
         }
-
-        if matches.len() > per_file {
-            rtk_output.push_str(&format!("  +{}\n", matches.len() - per_file));
-        }
-        rtk_output.push('\n');
     }
 
-    if total > shown {
-        rtk_output.push_str(&format!("... +{}\n", total - shown));
+    if total_matches > shown {
+        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
     }
 
     print!("{}", rtk_output);
@@ -148,11 +144,7 @@ pub fn run(
         &rtk_output,
     );
 
-    if exit_code != 0 {
-        std::process::exit(exit_code);
-    }
-
-    Ok(())
+    Ok(exit_code)
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
@@ -316,6 +308,26 @@ mod tests {
             assert!(
                 output.status.code() == Some(1) || output.status.success(),
                 "rg -n should be accepted"
+            );
+        }
+        // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    #[test]
+    fn test_rg_no_ignore_vcs_flag_accepted() {
+        // Verify rg accepts --no-ignore-vcs (used to match grep -r behavior for .gitignore)
+        let mut cmd = resolved_command("rg");
+        cmd.args([
+            "-n",
+            "--no-heading",
+            "--no-ignore-vcs",
+            "NONEXISTENT_PATTERN_12345",
+            ".",
+        ]);
+        if let Ok(output) = cmd.output() {
+            assert!(
+                output.status.code() == Some(1) || output.status.success(),
+                "rg --no-ignore-vcs should be accepted"
             );
         }
         // If rg is not installed, skip gracefully (test still passes)

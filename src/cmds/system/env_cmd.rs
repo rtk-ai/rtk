@@ -4,6 +4,7 @@ use crate::core::tracking;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::env;
+use std::fmt::Write;
 
 /// Show filtered environment variables (hide sensitive data)
 pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
@@ -123,7 +124,10 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         println!("\nTotal: {} vars (showing {} relevant)", total, shown);
     }
 
-    let raw: String = vars.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
+    let raw: String = vars.iter().fold(String::new(), |mut output, (k, v)| {
+        let _ = writeln!(output, "{}={}", k, v);
+        output
+    });
     let rtk = format!("{} vars -> {} shown", total, shown);
     timer.track("env", "rtk env", &raw, &rtk);
     Ok(())
@@ -203,4 +207,96 @@ fn is_tool_var(key: &str) -> bool {
 fn is_interesting_var(key: &str) -> bool {
     let patterns = ["HOME", "USER", "LANG", "LC_", "TZ", "PWD", "OLDPWD"];
     patterns.iter().any(|p| key.to_uppercase().starts_with(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mask_value_short() {
+        assert_eq!(mask_value("abc"), "****");
+        assert_eq!(mask_value(""), "****");
+    }
+
+    #[test]
+    fn test_mask_value_long() {
+        let result = mask_value("supersecrettoken");
+        assert!(result.contains("****"), "Masked value should contain ****");
+        assert!(result.starts_with("su"), "Should preserve 2-char prefix");
+        assert!(result.ends_with("en"), "Should preserve 2-char suffix");
+    }
+
+    #[test]
+    fn test_mask_value_exactly_four() {
+        assert_eq!(mask_value("abcd"), "****");
+    }
+
+    #[test]
+    fn test_mask_value_five_chars() {
+        let result = mask_value("abcde");
+        assert!(result.starts_with("ab"));
+        assert!(result.ends_with("de"));
+    }
+
+    #[test]
+    fn test_is_lang_var_rust() {
+        assert!(is_lang_var("RUST_LOG"));
+        assert!(is_lang_var("CARGO_HOME"));
+        assert!(is_lang_var("GOPATH"));
+        assert!(is_lang_var("NODE_ENV"));
+    }
+
+    #[test]
+    fn test_is_lang_var_negative() {
+        assert!(!is_lang_var("HOME"));
+        assert!(!is_lang_var("PATH"));
+        assert!(!is_lang_var("USER"));
+    }
+
+    #[test]
+    fn test_is_cloud_var() {
+        assert!(is_cloud_var("AWS_ACCESS_KEY_ID"));
+        assert!(is_cloud_var("AZURE_CLIENT_ID"));
+        assert!(is_cloud_var("DOCKER_HOST"));
+        assert!(is_cloud_var("KUBERNETES_SERVICE_HOST"));
+    }
+
+    #[test]
+    fn test_is_cloud_var_negative() {
+        assert!(!is_cloud_var("HOME"));
+        assert!(!is_cloud_var("RUST_LOG"));
+    }
+
+    #[test]
+    fn test_is_tool_var() {
+        assert!(is_tool_var("EDITOR"));
+        assert!(is_tool_var("GIT_AUTHOR_NAME"));
+        assert!(is_tool_var("SSH_AUTH_SOCK"));
+        assert!(is_tool_var("CLAUDE_API_KEY"));
+    }
+
+    #[test]
+    fn test_is_interesting_var() {
+        assert!(is_interesting_var("HOME"));
+        assert!(is_interesting_var("USER"));
+        assert!(is_interesting_var("LANG"));
+        assert!(is_interesting_var("TZ"));
+        assert!(is_interesting_var("PWD"));
+    }
+
+    #[test]
+    fn test_is_interesting_var_negative() {
+        assert!(!is_interesting_var("RANDOM_VAR"));
+        assert!(!is_interesting_var("MY_CUSTOM_VAR"));
+    }
+
+    #[test]
+    fn test_sensitive_patterns_contains_keys() {
+        let patterns = get_sensitive_patterns();
+        assert!(patterns.contains("key"));
+        assert!(patterns.contains("secret"));
+        assert!(patterns.contains("password"));
+        assert!(patterns.contains("token"));
+    }
 }

@@ -12,6 +12,7 @@
 //!
 //! Reference: SA-2025-RTK-001 (Finding F-01)
 
+use super::constants::{CLAUDE_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -69,7 +70,7 @@ pub fn store_hash(hook_path: &Path) -> Result<()> {
     let filename = hook_path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("rtk-rewrite.sh");
+        .unwrap_or(REWRITE_HOOK_FILE);
 
     let content = format!("{}  {}\n", hash, filename);
 
@@ -119,6 +120,8 @@ pub fn remove_hash(hook_path: &Path) -> Result<bool> {
 ///
 /// Returns `IntegrityStatus` indicating the result. Callers decide
 /// how to handle each status (warn, block, ignore).
+/// NOTE: Legacy — kept for backwards compatibility. Prefer `verify_hook_at()` directly.
+#[allow(dead_code)]
 pub fn verify_hook() -> Result<IntegrityStatus> {
     let hook_path = resolve_hook_path()?;
     verify_hook_at(&hook_path)
@@ -181,7 +184,11 @@ fn read_stored_hash(path: &Path) -> Result<String> {
 /// Resolve the default hook path (~/.claude/hooks/rtk-rewrite.sh)
 pub fn resolve_hook_path() -> Result<PathBuf> {
     dirs::home_dir()
-        .map(|h| h.join(".claude").join("hooks").join("rtk-rewrite.sh"))
+        .map(|h| {
+            h.join(CLAUDE_DIR)
+                .join(HOOKS_SUBDIR)
+                .join(REWRITE_HOOK_FILE)
+        })
         .context("Cannot determine home directory. Is $HOME set?")
 }
 
@@ -193,6 +200,25 @@ pub fn run_verify(verbose: u8) -> Result<()> {
     if verbose > 0 {
         eprintln!("Hook:  {}", hook_path.display());
         eprintln!("Hash:  {}", hash_file.display());
+    }
+
+    // If no legacy script exists, check for native binary command registration
+    if !hook_path.exists() && !hash_file.exists() {
+        // Check if the native binary command is registered in settings.json
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let settings_path = home.join(CLAUDE_DIR).join("settings.json");
+        if settings_path.exists() {
+            let content = fs::read_to_string(&settings_path).unwrap_or_default();
+            if content.contains("rtk hook claude") {
+                println!("PASS  native binary hook registered in settings.json");
+                println!("      command: rtk hook claude");
+                println!("      (no script file — integrity check not applicable)");
+                return Ok(());
+            }
+        }
+        println!("SKIP  RTK hook not installed");
+        println!("      Run `rtk init -g` to install.");
+        return Ok(());
     }
 
     match verify_hook_at(&hook_path)? {
@@ -240,10 +266,21 @@ pub fn run_verify(verbose: u8) -> Result<()> {
 /// - `Tampered`: print warning to stderr, exit 1
 /// - `OrphanedHash`: warn to stderr, continue
 ///
+/// When RTK uses native binary commands (no script file), integrity
+/// checking is a no-op — there is no script to tamper with.
+///
 /// No env-var bypass is provided — if the hook is legitimately modified,
 /// re-run `rtk init -g --auto-patch` to re-establish the baseline.
 pub fn runtime_check() -> Result<()> {
-    match verify_hook()? {
+    let hook_path = resolve_hook_path()?;
+
+    // If the legacy script doesn't exist, skip integrity check entirely.
+    // In the new binary command model, there is no script file to verify.
+    if !hook_path.exists() {
+        return Ok(());
+    }
+
+    match verify_hook_at(&hook_path)? {
         IntegrityStatus::Verified | IntegrityStatus::NotInstalled => {
             // All good, proceed
         }
