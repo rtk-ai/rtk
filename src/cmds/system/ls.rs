@@ -35,6 +35,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .collect();
 
     let mut cmd = resolved_command("ls");
+    // Force C locale so month names and number formatting are always ASCII-English,
+    // regardless of the user's LANG/LC_ALL (fixes #1475: non-English locales return "(empty)").
+    cmd.env("LC_ALL", "C");
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
@@ -456,6 +459,33 @@ mod tests {
     #[test]
     fn test_parse_ls_line_returns_none_for_total() {
         assert!(parse_ls_line("total 48").is_none());
+    }
+
+    // Regression test for #1475: non-English locales (de_DE, fr_FR) produce date
+    // formats like "23 Apr. 14:55" or "23 avril 14:55" that the English-only regex
+    // cannot match. The fix spawns ls with LC_ALL=C so the output is always English.
+    // This test verifies that the parser correctly rejects locale-variant date lines
+    // (i.e., they do not silently produce garbage entries) and that the directory
+    // listing falls back to "(empty)" rather than producing wrong output.
+    #[test]
+    fn test_compact_rejects_non_english_locale_dates() {
+        // German locale: day-first, period after month abbreviation
+        let german = "total 8\n\
+                      -rw-r--r--  1 user staff 1234 23 Apr. 14:55 file.txt\n";
+        let (entries, _) = compact_ls(german, false);
+        assert_eq!(
+            entries, "(empty)\n",
+            "German locale date must not be silently misparsed; got: {entries}"
+        );
+
+        // French locale: full month name
+        let french = "total 8\n\
+                      -rw-r--r--  1 user staff 1234 23 avril 14:55 file.txt\n";
+        let (entries, _) = compact_ls(french, false);
+        assert_eq!(
+            entries, "(empty)\n",
+            "French locale date must not be silently misparse; got: {entries}"
+        );
     }
 
     #[test]
