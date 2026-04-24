@@ -1184,6 +1184,17 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     // Detect positional arguments (not flags) — indicates branch creation
     let has_positional_arg = args.iter().any(|a| !a.starts_with('-'));
 
+    // Detect verbose-list intent: the user asked for commit hashes,
+    // `[origin/...]` upstream markers, and subjects. There are two ways
+    // that intent reaches us: either a `-v`/`-vv`/`--verbose` survived
+    // in `args` (trailing position, e.g. `rtk git branch --list -v`), or
+    // rtk's global `--verbose` flag consumed it before the subcommand
+    // was parsed (leading position, e.g. `rtk git branch -vv`). Either
+    // source means the compact `filter_branch_output` would defeat the
+    // flag, so we skip the filter and forward git's output as-is.
+    let verbose_in_args = is_verbose_branch_list(args);
+    let has_verbose_intent = verbose_in_args || verbose > 0;
+
     // --show-current: passthrough with raw stdout (not "ok")
     if has_show_flag {
         let mut cmd = git_cmd(global_args);
@@ -1259,6 +1270,14 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         cmd.arg("-a");
     }
     cmd.arg("--no-color");
+    // If rtk's global `--verbose` swallowed the user's `-v`/`-vv`, forward
+    // the equivalent flag to git. Without this the user's intent never
+    // reaches the child process. `args` is checked first so explicit
+    // `--verbose` / `-v` in args wins and avoids duplicating the flag.
+    if !verbose_in_args && verbose > 0 {
+        let count = verbose.min(2);
+        cmd.arg(format!("-{}", "v".repeat(count as usize)));
+    }
     for arg in args {
         cmd.arg(arg);
     }
@@ -1278,7 +1297,13 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
-    let filtered = filter_branch_output(&result.stdout);
+    let filtered = if has_verbose_intent {
+        // Passthrough: the user asked for verbose format. Trim the
+        // trailing newline so println! doesn't double it.
+        result.stdout.trim_end().to_string()
+    } else {
+        filter_branch_output(&result.stdout)
+    };
     println!("{}", filtered);
 
     timer.track(
@@ -1289,6 +1314,33 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     );
 
     Ok(0)
+}
+
+/// Returns true when `git branch` args request verbose list output
+/// (`-v`, `-vv`, or `--verbose`). Short-flag groups like `-va` and
+/// `-av` are recognized so combined forms pass through too. Long
+/// flags whose name happens to contain `v` (e.g. `--vim`,
+/// `--verify-signatures`) are not matched, and a positional branch
+/// name containing `v` never looks like a short-flag group because
+/// the leading `-` is required.
+fn is_verbose_branch_list(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        if a == "--verbose" {
+            return true;
+        }
+        if let Some(rest) = a.strip_prefix('-') {
+            // Short-flag group: single leading `-`, non-empty tail,
+            // all ASCII letters. Reject `--foo` (starts with `-`)
+            // and bare `-` (empty tail) up front.
+            if !rest.starts_with('-')
+                && !rest.is_empty()
+                && rest.chars().all(|c| c.is_ascii_alphabetic())
+            {
+                return rest.contains('v');
+            }
+        }
+        false
+    })
 }
 
 fn filter_branch_output(output: &str) -> String {
@@ -1971,6 +2023,71 @@ mod tests {
         assert!(result.contains("* main"));
         assert!(result.contains("develop"));
         assert!(!result.contains("remote-only"));
+    }
+
+    // Regression tests for issue #1499: `rtk git branch -vv` stripped
+    // commit hashes, `[origin/...]` upstream markers, and commit subjects
+    // because list mode always ran `filter_branch_output`. The helper
+    // must recognize the canonical spellings, combined short-flag groups,
+    // and reject look-alikes (long flags containing `v`, positional
+    // branch names that happen to contain `v`).
+
+    #[test]
+    fn test_is_verbose_branch_list_canonical_flags() {
+        assert!(is_verbose_branch_list(&["-v".to_string()]));
+        assert!(is_verbose_branch_list(&["-vv".to_string()]));
+        assert!(is_verbose_branch_list(&["--verbose".to_string()]));
+    }
+
+    #[test]
+    fn test_is_verbose_branch_list_combined_with_list_flags() {
+        assert!(is_verbose_branch_list(&[
+            "--list".to_string(),
+            "-v".to_string()
+        ]));
+        assert!(is_verbose_branch_list(&[
+            "-a".to_string(),
+            "-vv".to_string()
+        ]));
+        assert!(is_verbose_branch_list(&[
+            "-vv".to_string(),
+            "--all".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_is_verbose_branch_list_combined_short_flag_group() {
+        // git accepts combined short-flag groups; `-va` is equivalent
+        // to `-v -a`. Recognize any group that contains `v`.
+        assert!(is_verbose_branch_list(&["-va".to_string()]));
+        assert!(is_verbose_branch_list(&["-av".to_string()]));
+        assert!(is_verbose_branch_list(&["-avv".to_string()]));
+    }
+
+    #[test]
+    fn test_is_verbose_branch_list_no_verbose() {
+        assert!(!is_verbose_branch_list(&[]));
+        assert!(!is_verbose_branch_list(&["-a".to_string()]));
+        assert!(!is_verbose_branch_list(&["--all".to_string()]));
+        assert!(!is_verbose_branch_list(&[
+            "--list".to_string(),
+            "-a".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_is_verbose_branch_list_does_not_match_long_flags_with_v() {
+        // Long flags whose name contains `v` must not be treated as `-v`.
+        assert!(!is_verbose_branch_list(&["--vim".to_string()]));
+        assert!(!is_verbose_branch_list(&["--verify-signatures".to_string()]));
+    }
+
+    #[test]
+    fn test_is_verbose_branch_list_does_not_match_positional_containing_v() {
+        // A positional branch name lacks the leading `-`, so it can
+        // never look like a short-flag group.
+        assert!(!is_verbose_branch_list(&["vee".to_string()]));
+        assert!(!is_verbose_branch_list(&["feature/v2".to_string()]));
     }
 
     #[test]
