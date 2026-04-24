@@ -690,6 +690,33 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
         }
     }
 
+    // Route `npm [run|run-script|rum|urn|x] lint` and `npx lint` through
+    // `rtk npm` / `rtk npx` instead of `rtk lint`. The project script body
+    // (biome vs eslint vs other) is unknown at rewrite time, and the ESLint
+    // JSON adapter silently swallows parse failures on non-ESLint output,
+    // hiding real lint errors on Biome projects.
+    let stripped_for_npm = ENV_PREFIX.replace(cmd_part, "");
+    let env_prefix_len_for_npm = cmd_part.len() - stripped_for_npm.len();
+    let env_prefix_for_npm = &cmd_part[..env_prefix_len_for_npm];
+    let cmd_clean_for_npm = stripped_for_npm.trim();
+    for &pm in &["npm", "npx"] {
+        if let Some(rest) = strip_word_prefix(cmd_clean_for_npm, pm) {
+            let (verb, script_and_args) = split_npm_dispatch(rest);
+            if let Some(rest_after_lint) = match_lint_script(script_and_args) {
+                let tail = match (verb, rest_after_lint.is_empty()) {
+                    ("", true) => "lint".to_string(),
+                    ("", false) => format!("lint {}", rest_after_lint),
+                    (v, true) => format!("{} lint", v),
+                    (v, false) => format!("{} lint {}", v, rest_after_lint),
+                };
+                return Some(format!(
+                    "{}rtk {} {}{}",
+                    env_prefix_for_npm, pm, tail, redirect_suffix
+                ));
+            }
+        }
+    }
+
     // Use classify_command for correct ignore/prefix handling
     let rtk_equivalent = match classify_command(cmd_part) {
         Classification::Supported { rtk_equivalent, .. } => {
@@ -774,6 +801,24 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+/// Split an `npm <verb> <rest>` tail into `(verb, rest_after_verb)`. Returns
+/// `("", full)` when the dispatch verb is absent (bare `npm <script>`).
+fn split_npm_dispatch(rest: &str) -> (&'static str, &str) {
+    const VERBS: &[&str] = &["run-script", "run", "rum", "urn", "x"];
+    for verb in VERBS {
+        if let Some(after) = strip_word_prefix(rest, verb) {
+            return (verb, after);
+        }
+    }
+    ("", rest)
+}
+
+/// Return `Some(remainder)` if `script_and_args` starts with the literal word
+/// `lint`; `None` otherwise.
+fn match_lint_script(script_and_args: &str) -> Option<&str> {
+    strip_word_prefix(script_and_args, "lint")
 }
 
 #[cfg(test)]
@@ -2437,21 +2482,21 @@ mod tests {
 
     #[test]
     fn test_rewrite_lint() {
+        // Commands that still rewrite to `rtk lint`. The `npm [verb] lint`
+        // and `npx lint` variants moved to `rtk npm` / `rtk npx` (see
+        // tests below + #1489); the bare-tool and non-lint-script variants
+        // remain here.
         let commands = vec![
             "npm exec biome",
             "npm exec eslint",
             "npm rum biome",
             "npm rum eslint",
-            "npm rum lint",
             "npm run biome",
             "npm run eslint",
-            "npm run lint",
             "npm run-script biome",
             "npm run-script eslint",
-            "npm run-script lint",
             "npm urn biome",
             "npm urn eslint",
-            "npm urn lint",
             "npm x biome",
             "npm x eslint",
             "pnpm dlx biome",
@@ -2466,10 +2511,8 @@ mod tests {
             "pnpm run-script lint",
             "npm biome",
             "npm eslint",
-            "npm lint",
             "npx biome",
             "npx eslint",
-            "npx lint",
             "pnpm biome",
             "pnpm eslint",
             "pnpm lint",
@@ -2488,6 +2531,121 @@ mod tests {
                 command
             );
         }
+    }
+
+    // --- #1489: npm/npx `lint` scripts route through rtk npm/rtk npx ---
+
+    #[test]
+    fn test_rewrite_npm_run_lint_routes_to_npm() {
+        assert_eq!(
+            rewrite_command("npm run lint", &[]),
+            Some("rtk npm run lint".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_run_lint_with_args_routes_to_npm() {
+        assert_eq!(
+            rewrite_command("npm run lint --fix", &[]),
+            Some("rtk npm run lint --fix".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_run_script_lint_routes_to_npm() {
+        assert_eq!(
+            rewrite_command("npm run-script lint", &[]),
+            Some("rtk npm run-script lint".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_lint_shorthand_routes_to_npm() {
+        // `npm lint` (no `run`) is an npm 7+ shorthand for `npm run lint`.
+        assert_eq!(
+            rewrite_command("npm lint", &[]),
+            Some("rtk npm lint".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_typo_variants_route_to_npm() {
+        // `rum` / `urn` / `x` are documented npm aliases (typo-tolerant).
+        assert_eq!(
+            rewrite_command("npm rum lint", &[]),
+            Some("rtk npm rum lint".into())
+        );
+        assert_eq!(
+            rewrite_command("npm urn lint", &[]),
+            Some("rtk npm urn lint".into())
+        );
+        assert_eq!(
+            rewrite_command("npm x lint", &[]),
+            Some("rtk npm x lint".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npx_lint_routes_to_npx() {
+        assert_eq!(
+            rewrite_command("npx lint", &[]),
+            Some("rtk npx lint".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npx_lint_with_args_routes_to_npx() {
+        assert_eq!(
+            rewrite_command("npx lint --fix src/", &[]),
+            Some("rtk npx lint --fix src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_prefixed_npm_run_lint_routes_to_npm() {
+        assert_eq!(
+            rewrite_command("FOO=1 npm run lint", &[]),
+            Some("FOO=1 rtk npm run lint".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_run_lint_preserves_redirect() {
+        assert_eq!(
+            rewrite_command("npm run lint 2>&1", &[]),
+            Some("rtk npm run lint 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_direct_eslint_still_routes_to_lint() {
+        // Bare `eslint <args>` must still route to `rtk lint <args>` — that
+        // path is correct. The rewrite strips the tool name; `rtk lint`'s
+        // adapter re-infers it.
+        assert_eq!(
+            rewrite_command("eslint src/", &[]),
+            Some("rtk lint src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_direct_biome_still_routes_to_lint() {
+        // Bare `biome <args>` retains its current routing. Biome-specific
+        // filter wiring is tracked separately (follow-up issue).
+        assert_eq!(
+            rewrite_command("biome check", &[]),
+            Some("rtk lint check".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_lint_staged_does_not_match() {
+        // Word-boundary regression: `npm lint-staged` must not be treated as
+        // `npm lint`. The `(\s|$)` suffix in the npm rule pattern protects
+        // against this.
+        let out = rewrite_command("npm lint-staged", &[]);
+        assert_ne!(out, Some("rtk npm lint-staged".into()));
+        assert_ne!(out, Some("rtk npm lint staged".into()));
     }
 
     #[test]
