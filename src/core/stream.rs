@@ -905,6 +905,7 @@ pub(crate) mod tests {
     #[cfg(not(windows))]
     #[test]
     fn test_streaming_merges_stderr_through_filter() {
+        // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo 'error[E0308]: type mismatch'; echo '   Compiling foo v1.0' >&2; echo '   Downloading bar v2.0' >&2; echo '   Finished dev' >&2; echo 'real error on stderr' >&2"]);
 
