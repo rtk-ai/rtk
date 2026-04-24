@@ -35,6 +35,18 @@ fn git_cmd(global_args: &[String]) -> Command {
     cmd
 }
 
+/// Create a git Command for internal parsing that must be locale-stable.
+///
+/// We only use this for non-user-facing parses where RTK depends on git's
+/// English status phrases. User-visible passthrough output keeps the user's
+/// locale.
+fn git_cmd_c_locale(global_args: &[String]) -> Command {
+    let mut cmd = git_cmd(global_args);
+    cmd.env("LC_ALL", "C");
+    cmd.env("LANG", "C");
+    cmd
+}
+
 pub fn run(
     cmd: GitCommand,
     args: &[String],
@@ -750,7 +762,97 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
     output.trim_end().to_string()
 }
 
-/// Extract in-progress state lines from plain `git status` output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitStatusState {
+    Rebase,
+    MergeConflicts,
+    MergeReadyToCommit,
+    CherryPick,
+    Revert,
+    Bisect,
+    Am,
+    SparseCheckout,
+}
+
+impl GitStatusState {
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Rebase => "rebase in progress",
+            Self::MergeConflicts => "merge in progress. unresolved conflicts",
+            Self::MergeReadyToCommit => "merge in progress. no conflicts",
+            Self::CherryPick => "cherry-pick in progress",
+            Self::Revert => "revert in progress",
+            Self::Bisect => "bisect in progress",
+            Self::Am => "am session in progress",
+            Self::SparseCheckout => "sparse checkout enabled",
+        }
+    }
+}
+
+fn detect_status_state(line: &str) -> Option<GitStatusState> {
+    if line.contains("All conflicts fixed but you are still merging") {
+        Some(GitStatusState::MergeReadyToCommit)
+    } else if line.contains("You have unmerged paths") {
+        Some(GitStatusState::MergeConflicts)
+    } else if line.contains("You are currently cherry-picking") {
+        Some(GitStatusState::CherryPick)
+    } else if line.contains("You are currently reverting") {
+        Some(GitStatusState::Revert)
+    } else if line.contains("You are currently bisecting") {
+        Some(GitStatusState::Bisect)
+    } else if line.contains("You are in the middle of an am session") {
+        Some(GitStatusState::Am)
+    } else if line.contains("You are in a sparse checkout") {
+        Some(GitStatusState::SparseCheckout)
+    } else if line.contains("rebase in progress")
+        || line.contains("You are currently rebasing")
+        || line.contains("You are currently editing")
+        || line.contains("You are currently splitting")
+        || line.contains("Last command done")
+        || line.contains("Next command to do")
+        || line.contains("No commands remaining")
+    {
+        Some(GitStatusState::Rebase)
+    } else {
+        None
+    }
+}
+
+fn extract_state_hint(line: &str) -> Option<&'static str> {
+    if line.contains("git commit --amend") {
+        Some("git commit --amend")
+    } else if line.contains("git rebase --continue") {
+        Some("git rebase --continue")
+    } else if line.contains("git rebase --abort") {
+        Some("git rebase --abort")
+    } else if line.contains("git rebase --skip") {
+        Some("git rebase --skip")
+    } else if line.contains("git cherry-pick --continue") {
+        Some("git cherry-pick --continue")
+    } else if line.contains("git cherry-pick --abort") {
+        Some("git cherry-pick --abort")
+    } else if line.contains("git cherry-pick --skip") {
+        Some("git cherry-pick --skip")
+    } else if line.contains("git revert --continue") {
+        Some("git revert --continue")
+    } else if line.contains("git revert --abort") {
+        Some("git revert --abort")
+    } else if line.contains("git revert --skip") {
+        Some("git revert --skip")
+    } else if line.contains("git bisect reset") {
+        Some("git bisect reset")
+    } else if line.contains("git merge --abort") {
+        Some("git merge --abort")
+    } else if line.contains("git am --continue") {
+        Some("git am --continue")
+    } else if line.contains("git am --abort") {
+        Some("git am --abort")
+    } else {
+        None
+    }
+}
+
+/// Extract a compact in-progress state summary from plain `git status` output.
 ///
 /// Compact mode runs `git status --porcelain -b`, which omits the state header
 /// git prints for rebase / merge / cherry-pick / revert / bisect / am / sparse
@@ -759,28 +861,9 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
 /// editing a commit while rebasing ...".
 ///
 /// This helper walks the plain-status output we already capture for tracking
-/// and returns the state block, preserving the directive hints git prints with
-/// it (`git rebase --continue`, `git commit --amend`, etc.). Returns `None`
-/// when no state is in progress.
+/// and emits a compact, RTK-style summary rather than dumping git's full prose.
+/// Returns `None` when no state is in progress.
 fn extract_state_header(raw: &str) -> Option<String> {
-    // Phrases git prints from wt-status.c to announce in-progress state.
-    const ANCHORS: &[&str] = &[
-        "rebase in progress",
-        "You are currently rebasing",
-        "You are currently editing",
-        "You are currently splitting",
-        "You are currently cherry-picking",
-        "You are currently reverting",
-        "You are currently bisecting",
-        "You are in the middle of",
-        "You are in a sparse checkout",
-        "All conflicts fixed but you are still merging",
-        "You have unmerged paths",
-        "Last command done",
-        "Next command to do",
-        "No commands remaining",
-    ];
-
     // Headers of the file-change blocks — everything relevant to state appears
     // above these in git's output, so they double as a terminator.
     const STOPPERS: &[&str] = &[
@@ -793,12 +876,11 @@ fn extract_state_header(raw: &str) -> Option<String> {
         "nothing added to commit",
     ];
 
-    let mut found = false;
-    let mut out: Vec<String> = Vec::new();
+    let mut state = None;
+    let mut hints: Vec<&'static str> = Vec::new();
 
     for line in raw.lines() {
-        let trimmed = line.trim_end();
-        let stripped = trimmed.trim_start();
+        let stripped = line.trim();
 
         if STOPPERS.iter().any(|s| stripped.starts_with(s)) {
             break;
@@ -820,24 +902,22 @@ fn extract_state_header(raw: &str) -> Option<String> {
             continue;
         }
 
-        if !found && ANCHORS.iter().any(|a| stripped.contains(a)) {
-            found = true;
+        if state.is_none() {
+            state = detect_status_state(stripped);
         }
 
-        if found {
-            out.push(trimmed.to_string());
+        if let Some(hint) = extract_state_hint(stripped) {
+            if !hints.contains(&hint) {
+                hints.push(hint);
+            }
         }
     }
 
-    while out.last().is_some_and(|l| l.trim().is_empty()) {
-        out.pop();
-    }
+    let state = state?;
+    let mut out = vec![state.summary().to_string()];
+    out.extend(hints.into_iter().map(|hint| format!("  {}", hint)));
 
-    if out.is_empty() {
-        None
-    } else {
-        Some(out.join("\n"))
-    }
+    Some(out.join("\n"))
 }
 
 /// Minimal filtering for git status with user-provided args
@@ -919,7 +999,7 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     // Default RTK compact mode (no args provided)
     // Get raw git status for tracking
-    let mut raw_cmd = git_cmd(global_args);
+    let mut raw_cmd = git_cmd_c_locale(global_args);
     raw_cmd.args(["status"]);
     let raw_output = exec_capture(&mut raw_cmd)
         .map(|r| r.stdout)
@@ -1852,6 +1932,22 @@ mod tests {
     }
 
     #[test]
+    fn test_git_cmd_c_locale_sets_stable_env() {
+        let cmd = git_cmd_c_locale(&[]);
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.expect("env value").to_string_lossy().to_string(),
+                )
+            })
+            .collect();
+        assert!(envs.contains(&("LC_ALL".to_string(), "C".to_string())));
+        assert!(envs.contains(&("LANG".to_string(), "C".to_string())));
+    }
+
+    #[test]
     fn test_compact_diff() {
         let diff = r#"diff --git a/foo.rs b/foo.rs
 --- a/foo.rs
@@ -2144,27 +2240,27 @@ mod tests {
     fn test_extract_state_header_editing_while_rebasing() {
         let raw = "On branch feature\n\ninteractive rebase in progress; onto abc1234\nLast command done (1 command done):\n   edit abc123 some message\nNo commands remaining.\nYou are currently editing a commit while rebasing branch 'feature' on 'abc1234'.\n  (use \"git commit --amend\" to amend the current commit)\n  (use \"git rebase --continue\" once you are satisfied with your changes)\n\nnothing to commit, working tree clean\n";
         let out = extract_state_header(raw).expect("state expected");
-        assert!(out.contains("interactive rebase in progress"));
-        assert!(out.contains("You are currently editing a commit while rebasing"));
+        assert!(out.contains("rebase in progress"));
         assert!(out.contains("git rebase --continue"));
         assert!(out.contains("git commit --amend"));
-        assert!(!out.contains("On branch"));
+        assert!(!out.contains("interactive rebase in progress"));
+        assert!(!out.contains("Last command done"));
     }
 
     #[test]
     fn test_extract_state_header_merge_unresolved() {
         let raw = "On branch main\nYou have unmerged paths.\n  (fix conflicts and run \"git commit\")\n  (use \"git merge --abort\" to abort the merge)\n\nUnmerged paths:\n\tboth modified:   src/main.rs\n";
         let out = extract_state_header(raw).expect("state expected");
-        assert!(out.contains("You have unmerged paths"));
+        assert!(out.contains("merge in progress. unresolved conflicts"));
         assert!(out.contains("git merge --abort"));
-        assert!(!out.contains("Unmerged paths:"));
+        assert!(!out.contains("git commit"));
     }
 
     #[test]
     fn test_extract_state_header_cherry_pick() {
         let raw = "On branch main\n\nYou are currently cherry-picking commit abc1234.\n  (fix conflicts and run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n\nnothing to commit, working tree clean\n";
         let out = extract_state_header(raw).expect("state expected");
-        assert!(out.contains("You are currently cherry-picking"));
+        assert!(out.contains("cherry-pick in progress"));
         assert!(out.contains("git cherry-pick --continue"));
         assert!(out.contains("git cherry-pick --abort"));
     }
@@ -2173,7 +2269,7 @@ mod tests {
     fn test_extract_state_header_bisect() {
         let raw = "On branch main\n\nYou are currently bisecting, started from branch 'main'.\n  (use \"git bisect reset\" to get back to the original branch)\n\nnothing to commit, working tree clean\n";
         let out = extract_state_header(raw).expect("state expected");
-        assert!(out.contains("You are currently bisecting"));
+        assert!(out.contains("bisect in progress"));
         assert!(out.contains("git bisect reset"));
     }
 
@@ -2181,7 +2277,7 @@ mod tests {
     fn test_extract_state_header_revert() {
         let raw = "On branch main\n\nYou are currently reverting commit abc1234.\n  (fix conflicts and run \"git revert --continue\")\n  (use \"git revert --abort\" to cancel the revert operation)\n\nnothing to commit, working tree clean\n";
         let out = extract_state_header(raw).expect("state expected");
-        assert!(out.contains("You are currently reverting"));
+        assert!(out.contains("revert in progress"));
         assert!(out.contains("git revert --continue"));
     }
 
@@ -2189,8 +2285,8 @@ mod tests {
     fn test_extract_state_header_merge_in_middle() {
         let raw = "On branch main\n\nAll conflicts fixed but you are still merging.\n  (use \"git commit\" to conclude merge)\n\nChanges to be committed:\n\tmodified:   src/main.rs\n";
         let out = extract_state_header(raw).expect("state expected");
-        assert!(out.contains("All conflicts fixed but you are still merging"));
-        assert!(!out.contains("Changes to be committed:"));
+        assert!(out.contains("merge in progress. no conflicts"));
+        assert!(!out.contains("git commit"));
     }
 
     #[test]
@@ -2200,9 +2296,25 @@ mod tests {
         // itself survives.
         let raw = "On branch main\n\nYou are currently rebasing branch 'foo' on 'bar'.\n  (use \"git add <file>...\" to mark resolution)\n  (use \"git rebase --continue\" once done)\n\nnothing to commit, working tree clean\n";
         let out = extract_state_header(raw).expect("state expected");
-        assert!(out.contains("You are currently rebasing"));
+        assert!(out.contains("rebase in progress"));
         assert!(out.contains("git rebase --continue"));
         assert!(!out.contains("git add <file>"));
+    }
+
+    #[test]
+    fn test_extract_state_header_am_session() {
+        let raw = "On branch main\n\nYou are in the middle of an am session.\n  (use \"git am --continue\" to continue)\n  (use \"git am --abort\" to restore the original branch)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert!(out.contains("am session in progress"));
+        assert!(out.contains("git am --continue"));
+        assert!(out.contains("git am --abort"));
+    }
+
+    #[test]
+    fn test_extract_state_header_sparse_checkout() {
+        let raw = "On branch main\n\nYou are in a sparse checkout with 17% of tracked files present.\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "sparse checkout enabled");
     }
 
     #[test]
