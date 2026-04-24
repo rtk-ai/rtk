@@ -337,7 +337,7 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 /// # Returns
 /// A `Command` configured with the resolved binary path.
 pub fn resolved_command(name: &str) -> Command {
-    match resolve_binary(name) {
+    let mut cmd = match resolve_binary(name) {
         Ok(path) => Command::new(path),
         Err(e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
@@ -358,7 +358,12 @@ pub fn resolved_command(name: &str) -> Command {
             }
             Command::new(name)
         }
-    }
+    };
+
+    // Child processes launched by RTK must bypass shell-level RTK shims to avoid
+    // recursive rewrites like `rtk vitest` -> shimmed `vitest` -> `rtk vitest`.
+    cmd.env("RTK_DISABLED", "1");
+    cmd
 }
 
 /// Check if a tool exists on PATH (PATHEXT-aware on Windows).
@@ -618,6 +623,19 @@ mod tests {
         assert!(
             output.status.success(),
             "cargo --version should succeed via resolved_command"
+        );
+    }
+
+    #[test]
+    fn test_resolved_command_sets_rtk_disabled() {
+        let cmd = resolved_command("cargo");
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(
+            envs.iter().any(|(key, value)| {
+                *key == std::ffi::OsStr::new("RTK_DISABLED")
+                    && *value == Some(std::ffi::OsStr::new("1"))
+            }),
+            "resolved_command should set RTK_DISABLED=1 on child processes"
         );
     }
 
