@@ -2057,20 +2057,7 @@ fn run_cli() -> Result<i32> {
                 "next" => next_cmd::run(&args[1..], cli.verbose)?,
                 "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
                 "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
-                _ => {
-                    // Generic npx passthrough: unknown tools run through npx, not npm.
-                    // Build the Command here so we can set SKIP_ENV_VALIDATION, then hand
-                    // it to the shared runner so tracking + streaming match pnpm_cmd.
-                    let mut cmd = core::utils::resolved_command("npx");
-                    for arg in &args {
-                        cmd.arg(arg);
-                    }
-                    if cli.skip_env {
-                        cmd.env("SKIP_ENV_VALIDATION", "1");
-                    }
-                    let args_str = args.join(" ");
-                    core::runner::run_passthrough_cmd(cmd, "npx", &args_str, cli.verbose)?
-                }
+                _ => npm_cmd::exec(&args, cli.verbose, cli.skip_env)?,
             }
         }
 

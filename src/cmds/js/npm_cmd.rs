@@ -74,8 +74,6 @@ const NPM_SUBCOMMANDS: &[&str] = &[
 ];
 
 pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
-    let mut cmd = resolved_command("npm");
-
     // Determine if this is "npm run <script>" or another npm subcommand (install, list, etc.)
     // Only inject "run" when args look like a script name, not a known npm subcommand.
     let first_arg = args.first().map(|s| s.as_str());
@@ -84,20 +82,35 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
         .map(|a| NPM_SUBCOMMANDS.contains(&a) || a.starts_with('-'))
         .unwrap_or(false);
 
-    let effective_args = if is_run_explicit {
-        // "rtk npm run build" → "npm run build"
-        cmd.arg("run");
-        &args[1..]
-    } else if is_npm_subcommand {
-        // "rtk npm install express" → "npm install express"
-        args
+    let mut effective_args: Vec<String> = Vec::with_capacity(args.len() + 1);
+    if is_run_explicit || is_npm_subcommand {
+        effective_args.extend_from_slice(args);
     } else {
         // "rtk npm build" → "npm run build" (assume script name)
-        cmd.arg("run");
-        args
-    };
+        effective_args.push("run".to_string());
+        effective_args.extend_from_slice(args);
+    }
 
-    for arg in effective_args {
+    run_filtered("npm", &effective_args, verbose, skip_env)
+}
+
+/// Run an npx tool through the same filtered pipeline as `npm`.
+///
+/// Used for unrouted tools in the `Commands::Npx` fallback so that
+/// `rtk npx cowsay hello` dispatches to `npx`, not `npm`. Honors `--skip-env`
+/// the same way `run` does.
+pub fn exec(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+    run_filtered("npx", args, verbose, skip_env)
+}
+
+/// Shared command-execution path for `run` (npm) and `exec` (npx).
+///
+/// Builds the resolved command, appends args, applies `SKIP_ENV_VALIDATION`,
+/// emits the verbose log line, and routes through `runner::run_filtered` with
+/// the npm output filter.
+fn run_filtered(name: &str, args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
+    let mut cmd = resolved_command(name);
+    for arg in args {
         cmd.arg(arg);
     }
 
@@ -105,14 +118,15 @@ pub fn run(args: &[String], verbose: u8, skip_env: bool) -> Result<i32> {
         cmd.env("SKIP_ENV_VALIDATION", "1");
     }
 
+    let args_display = args.join(" ");
     if verbose > 0 {
-        eprintln!("Running: npm {}", args.join(" "));
+        eprintln!("Running: {} {}", name, args_display);
     }
 
     runner::run_filtered(
         cmd,
-        "npm",
-        &args.join(" "),
+        name,
+        &args_display,
         filter_npm_output,
         runner::RunOptions::default(),
     )
