@@ -317,6 +317,9 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Recursive search (no-op: rg is recursive by default; accepted for grep compatibility)
+        #[arg(short = 'r', long)]
+        recursive: bool,
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -1731,6 +1734,7 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            recursive: _,    // no-op: rg is recursive by default; -r accepted for grep compat
             extra_args,
         } => grep_cmd::run(
             &pattern,
@@ -2987,5 +2991,67 @@ mod tests {
             cli.ultra_compact,
             "--ultra-compact long form must still enable ultra-compact mode"
         );
+    }
+
+    /// Regression: `grep -rn pattern path` must parse cleanly without falling back.
+    /// Before fix, `-r` was not a recognised flag, causing clap to error and route
+    /// the command through run_fallback, producing "rtk fallback: grep -r..." entries.
+    #[test]
+    fn test_grep_recursive_flag_parses() {
+        // -rn combined (the most common form used by LLMs)
+        let cli = Cli::try_parse_from(["rtk", "grep", "-rn", "pattern", "/some/path"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                recursive,
+                line_numbers,
+                ..
+            } => {
+                assert_eq!(pattern, "pattern");
+                assert_eq!(path, "/some/path");
+                assert!(recursive, "-r should set recursive=true");
+                assert!(line_numbers, "-n should set line_numbers=true");
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    /// Regression: `grep -r pattern path` (without -n) must also parse cleanly.
+    #[test]
+    fn test_grep_recursive_only_parses() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "-r", "fn main", "."]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                recursive,
+                ..
+            } => {
+                assert_eq!(pattern, "fn main");
+                assert_eq!(path, ".");
+                assert!(recursive);
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    /// Regression: `grep --recursive pattern path` long form must parse cleanly.
+    #[test]
+    fn test_grep_recursive_long_form_parses() {
+        let cli = Cli::try_parse_from(["rtk", "grep", "--recursive", "TODO", "src/"]).unwrap();
+        match cli.command {
+            Commands::Grep {
+                pattern,
+                path,
+                recursive,
+                ..
+            } => {
+                assert_eq!(pattern, "TODO");
+                assert_eq!(path, "src/");
+                assert!(recursive);
+            }
+            _ => panic!("Expected Grep command"),
+        }
     }
 }
