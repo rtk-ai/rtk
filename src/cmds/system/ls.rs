@@ -274,6 +274,24 @@ mod tests {
     }
 
     #[test]
+    fn test_compact_preserves_dotenv() {
+        // .env files MUST be visible by default. Hiding them silently caused
+        // agents to assume the project was unconfigured and overwrite the file
+        // with template defaults — destroying production secrets.
+        // See discussion: r/ClaudeCode "Token Optimizers...Silently Dangerous".
+        let input = "total 8\n\
+                     -rw-r--r--  1 user  staff  64 Jan  1 12:00 .env\n\
+                     -rw-r--r--  1 user  staff  64 Jan  1 12:00 .env.local\n\
+                     -rw-r--r--  1 user  staff  64 Jan  1 12:00 .env.example\n\
+                     -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
+        let (entries, _summary) = compact_ls(input, false);
+        assert!(entries.contains(".env"), "default ls must show .env");
+        assert!(entries.contains(".env.local"));
+        assert!(entries.contains(".env.example"));
+        assert!(entries.contains("main.rs"));
+    }
+
+    #[test]
     fn test_compact_show_all() {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
