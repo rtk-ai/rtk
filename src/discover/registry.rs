@@ -1093,8 +1093,20 @@ mod tests {
     fn test_registry_covers_all_git_subcommands() {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
-            "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "status",
+            "log",
+            "diff",
+            "show",
+            "add",
+            "commit",
+            "push",
+            "pull",
+            "branch",
+            "fetch",
+            "stash",
+            "worktree",
+            "cherry-pick",
+            "remote",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {
@@ -1955,6 +1967,58 @@ mod tests {
                 rtk_equivalent: "rtk docker",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn test_classify_yarn_lint() {
+        assert!(matches!(
+            classify_command("yarn lint"),
+            Classification::Supported { category, .. } if category == "Build"
+        ));
+        assert!(matches!(
+            classify_command("yarn lint src/"),
+            Classification::Supported { .. }
+        ));
+    }
+
+    #[test]
+    fn test_classify_yarn_test() {
+        assert!(matches!(
+            classify_command("yarn test"),
+            Classification::Supported { category, .. } if category == "Build"
+        ));
+    }
+
+    #[test]
+    fn test_classify_dig() {
+        assert!(matches!(
+            classify_command("dig example.com +short"),
+            Classification::Supported { category, .. } if category == "Network"
+        ));
+    }
+
+    #[test]
+    fn test_classify_ssh() {
+        assert!(matches!(
+            classify_command("ssh user@host ls /var/log"),
+            Classification::Supported { category, .. } if category == "Network"
+        ));
+    }
+
+    #[test]
+    fn test_classify_git_cherry_pick() {
+        assert!(matches!(
+            classify_command("git cherry-pick abc1234"),
+            Classification::Supported { category, .. } if category == "Git"
+        ));
+    }
+
+    #[test]
+    fn test_classify_git_remote() {
+        assert!(matches!(
+            classify_command("git remote -v"),
+            Classification::Supported { category, .. } if category == "Git"
         ));
     }
 

@@ -23,6 +23,8 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    CherryPick,
+    Remote,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -68,6 +70,8 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::CherryPick => run_cherry_pick(args, verbose, global_args),
+        GitCommand::Remote => run_remote(args, verbose, global_args),
     }
 }
 
@@ -1771,6 +1775,151 @@ fn filter_worktree_list(output: &str) -> String {
 }
 
 /// Runs an unsupported git subcommand by passing it through directly
+fn run_cherry_pick(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("git cherry-pick");
+    }
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("cherry-pick");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let result = exec_capture(&mut cmd).context("Failed to run git cherry-pick")?;
+
+    let combined = result.combined();
+    let is_conflict = !result.success();
+
+    if is_conflict {
+        let stderr = result.stderr.trim();
+        let stdout = result.stdout.trim();
+        if !stderr.is_empty() {
+            eprintln!("{}", stderr);
+        }
+        if !stdout.is_empty() {
+            println!("{}", stdout);
+        }
+
+        timer.track(
+            &format!("git cherry-pick {}", args.join(" ")),
+            &format!("rtk git cherry-pick {} (conflict)", args.join(" ")),
+            &combined,
+            &combined,
+        );
+        return Ok(result.exit_code);
+    }
+
+    let output = result.stdout.trim();
+    let compact = if output.lines().count() <= 3 {
+        output.to_string()
+    } else {
+        output
+            .lines()
+            .filter(|l| {
+                !l.starts_with("Author:")
+                    && !l.starts_with("Date:")
+                    && !l.trim().is_empty()
+            })
+            .take(5)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    println!("{}", compact);
+
+    timer.track(
+        &format!("git cherry-pick {}", args.join(" ")),
+        &format!("rtk git cherry-pick {}", args.join(" ")),
+        &combined,
+        &compact,
+    );
+
+    Ok(0)
+}
+
+fn run_remote(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("git remote");
+    }
+
+    let is_verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
+    let has_action = args
+        .iter()
+        .any(|a| a == "add" || a == "remove" || a == "rename" || a == "set-url" || a == "get-url" || a == "prune");
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("remote");
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let result = exec_capture(&mut cmd).context("Failed to run git remote")?;
+    let combined = result.combined();
+
+    if !result.success() {
+        eprintln!("{}", result.stderr.trim());
+        timer.track(
+            &format!("git remote {}", args.join(" ")),
+            &format!("rtk git remote {} (error)", args.join(" ")),
+            &combined,
+            &combined,
+        );
+        return Ok(result.exit_code);
+    }
+
+    let output = result.stdout.trim();
+
+    if has_action {
+        println!("{}", if output.is_empty() { "ok" } else { output });
+        timer.track(
+            &format!("git remote {}", args.join(" ")),
+            &format!("rtk git remote {}", args.join(" ")),
+            &combined,
+            if output.is_empty() { "ok" } else { output },
+        );
+        return Ok(0);
+    }
+
+    let compact = if is_verbose {
+        let mut lines: Vec<&str> = output.lines().collect();
+        lines.dedup_by(|a, b| {
+            let a_name = a.split_whitespace().next().unwrap_or("");
+            let b_name = b.split_whitespace().next().unwrap_or("");
+            a_name == b_name
+        });
+        lines
+            .into_iter()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        output
+            .lines()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let display = if compact.is_empty() {
+        "(no remotes)".to_string()
+    } else {
+        compact
+    };
+    println!("{}", display);
+
+    timer.track(
+        &format!("git remote {}", args.join(" ")),
+        &format!("rtk git remote {}", args.join(" ")),
+        &combined,
+        &display,
+    );
+
+    Ok(0)
+}
+
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 

@@ -855,6 +855,19 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Cherry-pick commit → compact success or full conflict output
+    #[command(name = "cherry-pick")]
+    CherryPick {
+        /// Git cherry-pick arguments (commit refs, flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Compact remote listing (deduplicates -v output)
+    Remote {
+        /// Git remote arguments (add, remove, rename, -v, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1539,6 +1552,20 @@ fn run_cli() -> Result<i32> {
                 )?,
                 GitCommands::Worktree { args } => git::run(
                     git::GitCommand::Worktree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::CherryPick { args } => git::run(
+                    git::GitCommand::CherryPick,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Remote { args } => git::run(
+                    git::GitCommand::Remote,
                     &args,
                     None,
                     cli.verbose,

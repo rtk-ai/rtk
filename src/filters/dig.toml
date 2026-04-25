@@ -1,0 +1,45 @@
+[filters.dig]
+description = "Compact dig output — keep ANSWER section and query metadata, strip decorative headers"
+match_command = "^dig\\b"
+strip_ansi = true
+keep_lines_matching = [
+  "^;;\\s*(ANSWER|AUTHORITY|ADDITIONAL)\\s+SECTION",
+  "^;;\\s*Query\\s+time",
+  "^;;\\s*SERVER:",
+  "^;;\\s*MSG SIZE",
+  "IN\\s+",
+  "^;",
+  "^[a-zA-Z0-9].*IN\\s+",
+]
+max_lines = 30
+on_empty = "dig: no answer"
+
+[[tests.dig]]
+name = "keeps answer section and metadata"
+input = """
+; <<>> DiG 9.10.6 <<>> example.com
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 12345
+;; flags: qr rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+
+;; QUESTION SECTION:
+;example.com.\t\tIN\tA
+
+;; ANSWER SECTION:
+example.com.\t5\tIN\tA\t93.184.216.34
+
+;; Query time: 42 msec
+;; SERVER: 8.8.8.8#53(8.8.8.8)
+;; MSG SIZE  rcvd: 56
+"""
+expected = ";; ANSWER SECTION:\nexample.com.\t5\tIN\tA\t93.184.216.34\n;; Query time: 42 msec\n;; SERVER: 8.8.8.8#53(8.8.8.8)\n;; MSG SIZE  rcvd: 56"
+
+[[tests.dig]]
+name = "no answer shows fallback"
+input = """
+; <<>> DiG 9.10.6 <<>> nonexistent.example
+;; global options: +cmd
+;; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 54321
+"""
+expected = "dig: no answer"

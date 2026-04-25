@@ -12,7 +12,7 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree|cherry-pick|remote)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
@@ -875,6 +875,33 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["liquibase"],
         category: "Infra",
         savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^yarn\s+(lint|test|build|check)\b",
+        rtk_cmd: "rtk yarn",
+        rewrite_prefixes: &["yarn"],
+        category: "Build",
+        savings_pct: 65.0,
+        subcmd_savings: &[("lint", 65.0), ("test", 80.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^dig\s+",
+        rtk_cmd: "rtk dig",
+        rewrite_prefixes: &["dig"],
+        category: "Network",
+        savings_pct: 55.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^ssh\s+",
+        rtk_cmd: "rtk ssh",
+        rewrite_prefixes: &["ssh"],
+        category: "Network",
+        savings_pct: 50.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

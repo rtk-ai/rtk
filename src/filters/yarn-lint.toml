@@ -1,0 +1,44 @@
+[filters.yarn-lint]
+description = "Compact yarn lint output — strip progress, blank lines, keep errors/warnings"
+match_command = "^yarn\\s+lint\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\$ ",
+  "^yarn run",
+  "^Done in",
+  "^\\[\\d+/\\d+\\]",
+]
+max_lines = 50
+truncate_lines_at = 200
+on_empty = "yarn lint: ok"
+
+[[tests.yarn-lint]]
+name = "strips progress noise, keeps errors"
+input = """
+$ eslint src/
+1:1  error  'x' is not defined  no-undef
+2:5  warning  Unexpected console statement  no-console
+
+Done in 3.21s.
+"""
+expected = "1:1  error  'x' is not defined  no-undef\n2:5  warning  Unexpected console statement  no-console"
+
+[[tests.yarn-lint]]
+name = "empty output shows ok"
+input = """
+$ eslint src/
+Done in 1.02s.
+"""
+expected = "yarn lint: ok"
+
+[[tests.yarn-lint]]
+name = "blank lines stripped"
+input = """
+src/main.ts
+  3:10  error  Missing semicolon  semi
+
+src/util.ts
+  1:1  warning  Unexpected var  no-var
+"""
+expected = "src/main.ts\n  3:10  error  Missing semicolon  semi\nsrc/util.ts\n  1:1  warning  Unexpected var  no-var"
