@@ -521,6 +521,25 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // Maven
+    RtkRule {
+        pattern: r"^(\.\/mvnw|mvnw|mvnd|mvn)\s+",
+        rtk_cmd: "rtk mvn",
+        rewrite_prefixes: &["./mvnw", "mvnw", "mvnd", "mvn"],
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[
+            ("test", 90.0),
+            ("clean", 90.0),
+            ("compile", 75.0),
+            ("package", 80.0),
+            ("install", 80.0),
+            ("integration-test", 85.0),
+            ("dependency:tree", 65.0),
+        ],
+        subcmd_status: &[],
+    },
+    // AWS CLI
     RtkRule {
         pattern: r"^aws\s+",
         rtk_cmd: "rtk aws",
