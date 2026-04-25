@@ -660,10 +660,8 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
             if rest.is_empty() {
                 return None;
             }
-            return match rewrite_segment_inner(rest, excluded, depth + 1) {
-                Some(rewritten) => Some(format!("{} {}", prefix, rewritten)),
-                None => None,
-            };
+            return rewrite_segment_inner(rest, excluded, depth + 1)
+                .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 

@@ -335,6 +335,7 @@ impl Tracker {
         Ok(tracker)
     }
 
+    #[cfg(test)]
     fn init_schema(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS commands (

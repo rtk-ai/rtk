@@ -6,6 +6,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
+use crate::hooks::constants::{
+    CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+};
+
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
@@ -986,7 +990,7 @@ fn migrate_old_hook_script(verbose: u8) {
             let _ = std::fs::remove_file(&hash_file);
         }
         // Remove Cursor legacy hook
-        let cursor_hook = home.join(".cursor").join("hooks").join(REWRITE_HOOK_FILE);
+        let cursor_hook = home.join(CURSOR_DIR).join("hooks").join(REWRITE_HOOK_FILE);
         if cursor_hook.exists() {
             let _ = std::fs::remove_file(&cursor_hook);
         }
@@ -1758,12 +1762,12 @@ fn codex_rtk_md_ref(codex_dir: &Path) -> String {
 }
 
 fn resolve_opencode_dir() -> Result<PathBuf> {
-    resolve_home_subdir(".config/opencode")
+    resolve_home_subdir(CONFIG_DIR).map(|p| p.join(OPENCODE_SUBDIR))
 }
 
 /// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
 fn opencode_plugin_path(opencode_dir: &Path) -> PathBuf {
-    opencode_dir.join("plugins").join("rtk.ts")
+    opencode_dir.join(PLUGIN_SUBDIR).join(OPENCODE_PLUGIN_FILE)
 }
 
 /// Prepare OpenCode plugin directory and return install path
@@ -1807,7 +1811,7 @@ fn remove_opencode_plugin(verbose: u8) -> Result<Vec<PathBuf>> {
 // ─── Cursor Agent support ─────────────────────────────────────────────
 
 fn resolve_cursor_dir() -> Result<PathBuf> {
-    resolve_home_subdir(".cursor")
+    resolve_home_subdir(CURSOR_DIR)
 }
 
 /// Install Cursor hooks: register binary command in hooks.json
@@ -2381,7 +2385,7 @@ exec rtk hook gemini
 "#;
 
 fn resolve_gemini_dir() -> Result<PathBuf> {
-    resolve_home_subdir(".gemini")
+    resolve_home_subdir(GEMINI_DIR)
 }
 
 /// Entry point for `rtk init --gemini`

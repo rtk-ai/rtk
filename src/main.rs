@@ -2227,9 +2227,16 @@ fn run_cli() -> Result<i32> {
                     libc::signal(sig, libc::SIG_DFL);
                     libc::raise(sig);
                 }
+                // nosemgrep: unsafe-block
                 unsafe {
-                    libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
-                    libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+                    libc::signal(
+                        libc::SIGINT,
+                        handle_signal as *const () as libc::sighandler_t,
+                    );
+                    libc::signal(
+                        libc::SIGTERM,
+                        handle_signal as *const () as libc::sighandler_t,
+                    );
                 }
             }
 
