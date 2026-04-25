@@ -315,14 +315,14 @@ impl SessionProvider for OpenCodeProvider {
         let conn = Self::connect()?;
         let directory = path.to_string_lossy().to_string();
 
-        // Query part table for bash tool calls in JSON data
-        // OpenCode stores tools in JSON format with "type":"tool" and "tool":"command"
+        // Query part table for bash tool calls using json_extract
+        // OpenCode format: {"type":"tool","tool":"bash","state":{"input":{"command":"..."}}}
         let mut stmt = conn.prepare(
             "SELECT p.data, p.time_created FROM part p
              JOIN session s ON p.session_id = s.id
              WHERE s.directory = ?
-             AND p.data LIKE '%\"type\":\"tool\"%'
-             AND p.data LIKE '%\"tool\":\"command\"%'
+             AND json_extract(p.data, '$.type') = 'tool'
+             AND json_extract(p.data, '$.tool') = 'bash'
              ORDER BY p.time_created",
         )?;
 
@@ -335,29 +335,25 @@ impl SessionProvider for OpenCodeProvider {
         let mut commands = Vec::new();
         let mut sequence_index = 0;
 
-        for row in rows {
-            if let Ok((data, _time)) = row {
-                // Parse JSON to extract command
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-                    let cmd = json
-                        .get("input")
-                        .and_then(|i| i.get("command"))
-                        .and_then(|c| c.as_str())
-                        .map(|s| s.to_string());
+        for row in rows.flatten() {
+            let (data, _time) = row;
+            // Parse JSON to extract command from state.input.command
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                let cmd = json
+                    .pointer("/state/input/command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string());
 
-                    if let Some(command) = cmd {
-                        // OpenCode doesn't store output in separate field
-                        // We'll set placeholder values
-                        commands.push(ExtractedCommand {
-                            command,
-                            output_len: None,
-                            session_id: directory.clone(),
-                            output_content: None,
-                            is_error: false,
-                            sequence_index,
-                        });
-                        sequence_index += 1;
-                    }
+                if let Some(command) = cmd {
+                    commands.push(ExtractedCommand {
+                        command,
+                        output_len: None,
+                        session_id: directory.clone(),
+                        output_content: None,
+                        is_error: false,
+                        sequence_index,
+                    });
+                    sequence_index += 1;
                 }
             }
         }
