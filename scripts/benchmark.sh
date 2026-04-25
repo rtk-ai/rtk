@@ -322,12 +322,6 @@ else
 fi
 
 # ===================
-# diff
-# ===================
-section "diff"
-bench "diff" "diff src/main.rs src/core/tracking.rs 2>&1 || true" "$RTK diff src/main.rs src/core/tracking.rs"
-
-# ===================
 # smart
 # ===================
 section "smart"
