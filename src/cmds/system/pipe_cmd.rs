@@ -3,6 +3,24 @@ use std::io::Read;
 
 use crate::core::stream::RAW_CAP;
 
+/// Find the nearest byte index <= end that is a valid UTF-8 character boundary.
+/// This replaces the unstable `str::floor_char_boundary` feature.
+fn floor_char_boundary(s: &str, end: usize) -> usize {
+    if end >= s.len() {
+        return s.len();
+    }
+    // Safety: We scan forward from `end` to find a valid char boundary.
+    // The worst case is scanning 4 bytes (max UTF-8 char size).
+    let mut check = end;
+    while !s.is_char_boundary(check) {
+        check -= 1;
+        if check == 0 {
+            return 0;
+        }
+    }
+    check
+}
+
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
         "cargo-test" | "cargo" => Some(crate::cmds::rust::cargo_cmd::filter_cargo_test),
@@ -132,7 +150,7 @@ fn find_wrapper(input: &str) -> String {
 pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     let end = input.len().min(1024);
     // Avoid panic: byte 1024 may fall inside a multi-byte UTF-8 char
-    let end = input.floor_char_boundary(end);
+    let end = floor_char_boundary(input, end);
     let first_1k = &input[..end];
 
     if first_1k.contains("test result:") && first_1k.contains("passed;") {
