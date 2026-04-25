@@ -1341,6 +1341,26 @@ fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
 
+    // RTK_DISABLED=1 — pass through all commands unmodified.
+    // Useful for pipeline phases that need full-fidelity output (gap analysis, code review).
+    // Equivalent to prepending `rtk proxy` to every command in the current environment.
+    if std::env::var("RTK_DISABLED").ok().as_deref() == Some("1") {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.is_empty() {
+            // No command to run — fall through to normal RTK (show help)
+        } else if !RTK_META_COMMANDS.contains(&args[0].as_str()) {
+            // Execute the underlying command with inherited stdio (no filtering)
+            let status = core::utils::resolved_command(&args[0])
+                .args(&args[1..])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .with_context(|| format!("RTK_DISABLED=1: failed to execute {}", args[0]))?;
+            return Ok(core::utils::exit_code_from_status(&status, &args[0]));
+        }
+    }
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
@@ -2918,6 +2938,16 @@ mod tests {
     }
 
     #[test]
+    fn test_rtk_disabled_bypasses_meta_command_guard() {
+        for meta in RTK_META_COMMANDS {
+            assert!(
+                RTK_META_COMMANDS.contains(meta),
+                "Meta-command {meta} should be in RTK_META_COMMANDS guard"
+            );
+        }
+    }
+
+    #[test]
     fn test_pnpm_subcommand_with_short_filter() {
         // -F is the short form of --filter in pnpm
         let cli =
@@ -2987,5 +3017,15 @@ mod tests {
             cli.ultra_compact,
             "--ultra-compact long form must still enable ultra-compact mode"
         );
+    }
+
+    #[test]
+    fn test_rtk_disabled_env_var_value_check() {
+        let active = |v: &str| v == "1";
+        assert!(active("1"), "RTK_DISABLED=1 should activate bypass");
+        assert!(!active("0"), "RTK_DISABLED=0 should NOT activate");
+        assert!(!active("true"), "RTK_DISABLED=true should NOT activate");
+        assert!(!active("yes"), "RTK_DISABLED=yes should NOT activate");
+        assert!(!active(""), "RTK_DISABLED= (empty) should NOT activate");
     }
 }
