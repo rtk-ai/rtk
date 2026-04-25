@@ -531,6 +531,9 @@ enum Commands {
 
     /// Discover missed RTK savings from Claude Code history
     Discover {
+        /// Session provider: claude (default) or opencode
+        #[arg(long, default_value = "claude")]
+        provider: String,
         /// Filter by project path (substring match)
         #[arg(short, long)]
         project: Option<String>,
@@ -1919,13 +1922,26 @@ fn run_cli() -> Result<i32> {
         Commands::Curl { args } => curl_cmd::run(&args, cli.verbose)?,
 
         Commands::Discover {
+            provider,
             project,
             limit,
             all,
             since,
             format,
         } => {
-            discover::run(project.as_deref(), all, since, limit, &format, cli.verbose)?;
+            let provider_type = match provider.as_str() {
+                "opencode" => discover::DiscoverProvider::OpenCode,
+                _ => discover::DiscoverProvider::Claude,
+            };
+            discover::run(
+                provider_type,
+                project.as_deref(),
+                all,
+                since,
+                limit,
+                &format,
+                cli.verbose,
+            )?;
             0
         }
 
