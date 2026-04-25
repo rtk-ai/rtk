@@ -3,6 +3,17 @@ use std::io::Read;
 
 use crate::core::stream::RAW_CAP;
 
+fn floor_char_boundary(s: &str, end: usize) -> usize {
+    if end >= s.len() {
+        return s.len();
+    }
+    let mut i = end;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
         "cargo-test" | "cargo" => Some(crate::cmds::rust::cargo_cmd::filter_cargo_test),
@@ -132,7 +143,7 @@ fn find_wrapper(input: &str) -> String {
 pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
     let end = input.len().min(1024);
     // Avoid panic: byte 1024 may fall inside a multi-byte UTF-8 char
-    let end = input.floor_char_boundary(end);
+    let end = floor_char_boundary(&input, end);
     let first_1k = &input[..end];
 
     if first_1k.contains("test result:") && first_1k.contains("passed;") {
