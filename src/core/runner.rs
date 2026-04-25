@@ -169,28 +169,16 @@ where
 }
 
 pub fn run_passthrough(tool: &str, args: &[std::ffi::OsString], verbose: u8) -> Result<i32> {
+    if verbose > 0 {
+        eprintln!("{} passthrough: {:?}", tool, args);
+    }
     let mut cmd = crate::core::utils::resolved_command(tool);
     cmd.args(args);
     let args_str = tracking::args_display(args);
-    run_passthrough_cmd(cmd, tool, &args_str, verbose)
-}
-
-/// Passthrough variant for callers that need to build the Command themselves
-/// (e.g., to set env vars like `SKIP_ENV_VALIDATION`). Handles the verbose log
-/// line and delegates to `run` with `RunMode::Passthrough`.
-pub fn run_passthrough_cmd(
-    cmd: Command,
-    tool_name: &str,
-    args_display: &str,
-    verbose: u8,
-) -> Result<i32> {
-    if verbose > 0 {
-        eprintln!("{} passthrough: {}", tool_name, args_display);
-    }
     run(
         cmd,
-        tool_name,
-        args_display,
+        tool,
+        &args_str,
         RunMode::Passthrough,
         RunOptions::default(),
     )
