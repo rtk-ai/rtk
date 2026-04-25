@@ -9,12 +9,21 @@ pub mod rules;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, OpenCodeProvider, SessionProvider};
 use registry::{
     category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
     strip_disabled_prefix, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
+
+/// Provider selection for discover command.
+#[derive(Debug, Clone, Copy)]
+pub enum DiscoverProvider {
+    /// Claude Code provider (default)
+    Claude,
+    /// OpenCode provider
+    OpenCode,
+}
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -39,6 +48,7 @@ struct UnsupportedBucket {
 }
 
 pub fn run(
+    provider_type: DiscoverProvider,
     project: Option<&str>,
     all: bool,
     since_days: u64,
@@ -46,7 +56,10 @@ pub fn run(
     format: &str,
     verbose: u8,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
+    let provider: &dyn SessionProvider = match provider_type {
+        DiscoverProvider::Claude => &ClaudeProvider,
+        DiscoverProvider::OpenCode => &OpenCodeProvider,
+    };
 
     // Determine project filter
     let project_filter = if all {
