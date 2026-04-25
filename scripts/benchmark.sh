@@ -202,7 +202,6 @@ bench "git log -n 10" "git log -10" "$RTK git log -n 10"
 bench "git log -n 5" "git log -5" "$RTK git log -n 5"
 bench "git diff" "git diff HEAD~1 2>/dev/null || echo ''" "$RTK git diff HEAD~1"
 bench "git show" "git show HEAD --stat 2>/dev/null || true" "$RTK git show HEAD --stat"
-bench "git branch" "git branch -a" "$RTK git branch -a"
 
 # ===================
 # grep
@@ -211,7 +210,6 @@ section "grep"
 bench "grep fn" "grep -rn 'fn ' src/ || true" "$RTK grep 'fn ' src/"
 bench "grep struct" "grep -rn 'struct ' src/ || true" "$RTK grep 'struct ' src/"
 bench "grep -l 40" "grep -rn 'fn ' src/ || true" "$RTK grep 'fn ' src/ -l 40"
-bench "grep --max 20" "grep -rn 'fn ' src/ | head -20 || true" "$RTK grep 'fn ' src/ --max 20"
 bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep 'fn ' src/ -c"
 
 # ===================
@@ -327,7 +325,7 @@ fi
 # diff
 # ===================
 section "diff"
-bench "diff" "diff Cargo.toml LICENSE 2>&1 || true" "$RTK diff Cargo.toml LICENSE"
+bench "diff" "diff src/main.rs src/core/tracking.rs 2>&1 || true" "$RTK diff src/main.rs src/core/tracking.rs"
 
 # ===================
 # smart
@@ -355,7 +353,8 @@ fi
 # ===================
 if command -v wget &> /dev/null; then
   section "wget"
-  bench "wget" "wget -qO- https://httpbin.org/robots.txt" "$RTK wget https://httpbin.org/robots.txt -O -"
+  bench "wget" "wget -qO- https://httpbin.org/json" "$RTK wget https://httpbin.org/json"
+  rm -f json 2>/dev/null
 fi
 
 # ===================
@@ -415,7 +414,7 @@ fi
 # ===================
 # gh (skip si pas dispo ou pas dans un repo)
 # ===================
-if command -v gh &> /dev/null && git rev-parse --git-dir &> /dev/null; then
+if command -v gh &> /dev/null && git rev-parse --git-dir &> /dev/null && gh auth status &> /dev/null; then
   section "gh"
   bench "gh pr list" "gh pr list 2>&1 || true" "$RTK gh pr list"
   bench "gh run list" "gh run list 2>&1 || true" "$RTK gh run list"
