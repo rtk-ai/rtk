@@ -1123,6 +1123,7 @@ fn migrate_old_hook_script(verbose: u8, dry_run: bool) {
                     "[dry-run] would migrate legacy hook script: {}",
                     old_hook.display()
                 );
+            // nosemgrep: filesystem-deletion
             } else if let Err(e) = std::fs::remove_file(&old_hook) {
                 if verbose > 0 {
                     eprintln!("  [warn] Failed to remove old hook script: {e}");
@@ -2435,6 +2436,7 @@ fn remove_cursor_hooks(verbose: u8, dry_run: bool) -> Result<Vec<String>> {
                 hook_path.display()
             );
         } else {
+            // nosemgrep: filesystem-deletion
             fs::remove_file(&hook_path).with_context(|| {
                 format!("Failed to remove Cursor hook: {}", hook_path.display())
             })?;
