@@ -63,12 +63,36 @@ const PNPM_SUBCOMMANDS: &[&str] = &[
     "workspace",
 ];
 
+fn split_pnpm_global_args(args: &[OsString]) -> (&[OsString], &[OsString]) {
+    let split_at = args
+        .iter()
+        .take_while(|arg| {
+            arg.to_str()
+                .map(|arg| arg.starts_with("--filter="))
+                .unwrap_or(false)
+        })
+        .count();
+
+    args.split_at(split_at)
+}
+
 fn needs_run_injection(args: &[OsString]) -> bool {
-    let Some(first) = args.first().and_then(|arg| arg.to_str()) else {
+    let (_, command_args) = split_pnpm_global_args(args);
+    let Some(first) = command_args.first().and_then(|arg| arg.to_str()) else {
         return false;
     };
 
     !first.starts_with('-') && !PNPM_SUBCOMMANDS.contains(&first)
+}
+
+fn pnpm_run_args(args: &[OsString]) -> Vec<OsString> {
+    let (global_args, script_args) = split_pnpm_global_args(args);
+    global_args
+        .iter()
+        .cloned()
+        .chain(std::iter::once(OsString::from("run")))
+        .chain(script_args.iter().cloned())
+        .collect()
 }
 
 fn filter_pnpm_script_output(output: &str) -> String {
@@ -580,19 +604,19 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         return run_passthrough(args, verbose);
     }
 
+    let run_args = pnpm_run_args(args);
     let mut cmd = resolved_command("pnpm");
-    cmd.arg("run");
-    cmd.args(args);
+    cmd.args(&run_args);
 
-    let args_display = tracking::args_display(args);
+    let args_display = tracking::args_display(&run_args);
     if verbose > 0 {
-        eprintln!("Running: pnpm run {}", args_display);
+        eprintln!("Running: pnpm {}", args_display);
     }
 
     runner::run_filtered(
         cmd,
         "pnpm",
-        &format!("run {}", args_display),
+        &args_display,
         filter_pnpm_script_output,
         runner::RunOptions::default(),
     )
@@ -624,6 +648,15 @@ mod tests {
             );
         }
 
+        assert!(needs_run_injection(&[
+            OsString::from("--filter=@app/web"),
+            OsString::from("build")
+        ]));
+        assert!(!needs_run_injection(&[
+            OsString::from("--filter=@app/web"),
+            OsString::from("install")
+        ]));
+
         for script in [
             "build",
             "dev",
@@ -644,6 +677,27 @@ mod tests {
                 script
             );
         }
+    }
+
+    #[test]
+    fn test_pnpm_run_args_preserve_global_filters() {
+        let args = [
+            OsString::from("--filter=@app/web"),
+            OsString::from("l2"),
+            OsString::from("--"),
+            OsString::from("--human"),
+        ];
+        let run_args = pnpm_run_args(&args);
+        assert_eq!(
+            run_args,
+            vec![
+                OsString::from("--filter=@app/web"),
+                OsString::from("run"),
+                OsString::from("l2"),
+                OsString::from("--"),
+                OsString::from("--human"),
+            ]
+        );
     }
 
     #[test]
