@@ -2771,19 +2771,22 @@ mod tests {
     #[test]
     fn test_rewrite_pnpm_command() {
         let commands = vec![
-            "exec",
-            "i",
-            "install",
-            "list",
-            "ls",
-            "outdated",
-            "run",
-            "run-script",
+            ("exec", "rtk pnpm exec"),
+            ("i", "rtk pnpm i"),
+            ("install", "rtk pnpm install"),
+            ("list", "rtk pnpm list"),
+            ("ls", "rtk pnpm ls"),
+            ("outdated", "rtk pnpm outdated"),
+            ("run", "rtk pnpm run"),
+            ("run-script", "rtk pnpm run-script"),
+            ("build", "rtk pnpm build"),
+            ("test:coverage", "rtk pnpm test:coverage"),
+            ("l2 -- --human", "rtk pnpm l2 -- --human"),
         ];
-        for command in commands {
+        for (command, expected) in commands {
             assert_eq!(
                 rewrite_command(format!("pnpm {command}").as_str(), &[]),
-                Some(format!("rtk pnpm {command}")),
+                Some(expected.to_string()),
                 "Failed for command: pnpm {}",
                 command
             );
@@ -2812,6 +2815,14 @@ mod tests {
         assert_eq!(
             rewrite_command("npm exec vitest", &[]),
             Some("rtk vitest".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_pnpm_and_git() {
+        assert_eq!(
+            rewrite_command("pnpm build && git status", &[]),
+            Some("rtk pnpm build && rtk git status".into())
         );
     }
 

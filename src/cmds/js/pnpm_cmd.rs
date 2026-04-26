@@ -1,5 +1,6 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
+use crate::core::runner;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
@@ -12,6 +13,87 @@ use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, Dependency,
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
+
+const PNPM_SUBCOMMANDS: &[&str] = &[
+    "add",
+    "approve-builds",
+    "audit",
+    "bin",
+    "catalog",
+    "config",
+    "create",
+    "dedupe",
+    "deploy",
+    "dlx",
+    "env",
+    "exec",
+    "explain",
+    "fetch",
+    "help",
+    "i",
+    "import",
+    "init",
+    "install",
+    "licenses",
+    "link",
+    "list",
+    "ln",
+    "ls",
+    "outdated",
+    "pack",
+    "patch",
+    "patch-commit",
+    "patch-remove",
+    "prune",
+    "publish",
+    "rebuild",
+    "remove",
+    "root",
+    "run",
+    "run-script",
+    "self-update",
+    "setup",
+    "store",
+    "test",
+    "unlink",
+    "uninstall",
+    "update",
+    "up",
+    "why",
+    "workspace",
+];
+
+fn needs_run_injection(args: &[OsString]) -> bool {
+    let Some(first) = args.first().and_then(|arg| arg.to_str()) else {
+        return false;
+    };
+
+    !first.starts_with('-') && !PNPM_SUBCOMMANDS.contains(&first)
+}
+
+fn filter_pnpm_script_output(output: &str) -> String {
+    let mut result = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('>') && (trimmed.contains('@') || trimmed[1..].trim_start().contains(' ')) {
+            continue;
+        }
+
+        result.push(line.to_string());
+    }
+
+    if result.is_empty() {
+        "ok".to_string()
+    } else {
+        result.join("\n")
+    }
+}
 
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]
@@ -493,6 +575,29 @@ fn filter_pnpm_install(output: &str) -> String {
     }
 }
 
+pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
+    if !needs_run_injection(args) {
+        return run_passthrough(args, verbose);
+    }
+
+    let mut cmd = resolved_command("pnpm");
+    cmd.arg("run");
+    cmd.args(args);
+
+    let args_display = tracking::args_display(args);
+    if verbose > 0 {
+        eprintln!("Running: pnpm run {}", args_display);
+    }
+
+    runner::run_filtered(
+        cmd,
+        "pnpm",
+        &format!("run {}", args_display),
+        filter_pnpm_script_output,
+        runner::RunOptions::default(),
+    )
+}
+
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("pnpm", args, verbose)
 }
@@ -500,6 +605,67 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pnpm_subcommand_routing() {
+        for subcmd in PNPM_SUBCOMMANDS {
+            assert!(
+                !needs_run_injection(&[OsString::from(subcmd)]),
+                "'pnpm {}' should NOT inject 'run'",
+                subcmd
+            );
+        }
+
+        for flag in ["--version", "-v", "--help"] {
+            assert!(
+                !needs_run_injection(&[OsString::from(flag)]),
+                "'pnpm {}' should NOT inject 'run'",
+                flag
+            );
+        }
+
+        for script in [
+            "build",
+            "dev",
+            "lint",
+            "typecheck",
+            "test:coverage",
+            "test:changed-surface:run",
+            "l1",
+            "l2",
+            "l3",
+            "smoke",
+            "comp",
+            "surface:run",
+        ] {
+            assert!(
+                needs_run_injection(&[OsString::from(script)]),
+                "'pnpm {}' SHOULD inject 'run'",
+                script
+            );
+        }
+    }
+
+    #[test]
+    fn test_filter_pnpm_script_output() {
+        let output = r#"
+> my-project@0.1.0 build /repo
+> next build
+
+▲ Next.js 16.1.6
+✓ Compiled successfully in 47s
+"#;
+        let result = filter_pnpm_script_output(output);
+        assert!(!result.contains("> my-project@"));
+        assert!(!result.contains("> next build"));
+        assert!(result.contains("Compiled successfully"));
+    }
+
+    #[test]
+    fn test_filter_pnpm_script_output_empty() {
+        let result = filter_pnpm_script_output("\n\n");
+        assert_eq!(result, "ok");
+    }
 
     #[test]
     fn test_pnpm_list_parser_json() {
