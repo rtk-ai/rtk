@@ -1463,7 +1463,7 @@ fn run_stash(
             let combined = result.combined();
 
             let msg = if result.success() {
-                let msg = format!("ok stash {}", sub);
+                let msg = stash_success_message(sub, &result.stdout);
                 println!("{}", msg);
                 msg
             } else {
@@ -1555,6 +1555,14 @@ fn run_stash(
     }
 
     Ok(0)
+}
+
+fn stash_success_message(sub: &str, stdout: &str) -> String {
+    if sub == "push" && stdout.contains("No local changes") {
+        "ok (nothing to stash)".to_string()
+    } else {
+        format!("ok stash {}", sub)
+    }
 }
 
 fn filter_stash_list(output: &str) -> String {
@@ -2011,6 +2019,13 @@ mod tests {
         let result = filter_stash_list(output);
         assert!(result.contains("stash@{0}: abc1234 fix login"));
         assert!(result.contains("stash@{1}: def5678 wip"));
+    }
+
+    #[test]
+    fn test_stash_push_noop_success_message() {
+        let output = "No local changes to save\n";
+        let result = stash_success_message("push", output);
+        assert_eq!(result, "ok (nothing to stash)");
     }
 
     #[test]
