@@ -62,6 +62,54 @@ pub fn run_copilot() -> Result<()> {
     }
 }
 
+/// Run the Codex CLI PreToolUse hook.
+///
+/// Codex currently parses `updatedInput` but does not apply it yet, so RTK uses
+/// deny-with-suggestion here instead of transparent rewrite.
+pub fn run_codex() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    let hook_event_name = v
+        .get("hook_event_name")
+        .and_then(|h| h.as_str())
+        .unwrap_or_default();
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+
+    if hook_event_name != PRE_TOOL_USE_KEY || !matches!(tool_name, "Bash" | "bash") {
+        return Ok(());
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(cmd) => cmd,
+        None => return Ok(()),
+    };
+
+    let output = match codex_block_response(cmd) {
+        Some(output) => output,
+        None => return Ok(()),
+    };
+
+    let _ = writeln!(io::stdout(), "{output}");
+    Ok(())
+}
+
 fn detect_format(v: &Value) -> HookFormat {
     // VS Code Copilot Chat / Claude Code: snake_case keys
     if let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) {
@@ -175,6 +223,17 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
     });
     let _ = writeln!(io::stdout(), "{output}");
     Ok(())
+}
+
+fn codex_block_response(cmd: &str) -> Option<Value> {
+    let rewritten = get_rewritten(cmd)?;
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": format!("Rerun that as: {}", rewritten)
+        }
+    }))
 }
 
 // ── Gemini hook ───────────────────────────────────────────────
@@ -524,6 +583,14 @@ mod tests {
         json!({ "toolName": "bash", "toolArgs": args })
     }
 
+    fn codex_input(event: &str, tool: &str, cmd: &str) -> Value {
+        json!({
+            "hook_event_name": event,
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+    }
+
     #[test]
     fn test_detect_vscode_bash() {
         assert!(matches!(
@@ -577,6 +644,33 @@ mod tests {
     #[test]
     fn test_get_rewritten_heredoc() {
         assert!(get_rewritten("cat <<'EOF'\nhello\nEOF").is_none());
+    }
+
+    #[test]
+    fn test_codex_hook_blocks_supported_command_with_suggestion() {
+        let output = codex_block_response("git status").unwrap();
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"],
+            PRE_TOOL_USE_KEY
+        );
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            output["hookSpecificOutput"]["permissionDecisionReason"],
+            "Rerun that as: rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_codex_hook_ignores_already_rtk_command() {
+        assert!(codex_block_response("rtk git status").is_none());
+    }
+
+    #[test]
+    fn test_codex_input_shape_matches_pre_tool_use_contract() {
+        let input = codex_input(PRE_TOOL_USE_KEY, "Bash", "git status");
+        assert_eq!(input["hook_event_name"], PRE_TOOL_USE_KEY);
+        assert_eq!(input["tool_name"], "Bash");
+        assert_eq!(input["tool_input"]["command"], "git status");
     }
 
     // --- Gemini format ---
