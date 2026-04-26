@@ -15,6 +15,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
+use cmds::php::composer_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -696,6 +697,14 @@ enum Commands {
     /// Pip package manager with compact output (auto-detects uv)
     Pip {
         /// Pip arguments (e.g., list, outdated, install)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Composer package manager with compact output
+    #[command(disable_help_flag = true, disable_version_flag = true)]
+    Composer {
+        /// Composer arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2075,6 +2084,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
+        Commands::Composer { args } => composer_cmd::run(&args, cli.verbose)?,
+
         Commands::Go { command } => match command {
             GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,
             GoCommands::Build { args } => go_cmd::run_build(&args, cli.verbose)?,
@@ -2424,6 +2435,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
+            | Commands::Composer { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
@@ -2924,6 +2936,45 @@ mod tests {
                 assert_eq!(filter, vec!["@app1", "@app2"]);
             }
             _ => panic!("Expected Pnpm command"),
+        }
+    }
+
+    #[test]
+    fn test_composer_install_args_parse() {
+        let cli = Cli::try_parse_from(["rtk", "composer", "install", "--no-dev"]).unwrap();
+        match cli.command {
+            Commands::Composer { args } => assert_eq!(args, vec!["install", "--no-dev"]),
+            _ => panic!("Expected Composer command"),
+        }
+    }
+
+    #[test]
+    fn test_composer_working_dir_args_parse() {
+        let cli = Cli::try_parse_from(["rtk", "composer", "-d", "app", "install"]).unwrap();
+        match cli.command {
+            Commands::Composer { args } => assert_eq!(args, vec!["-d", "app", "install"]),
+            _ => panic!("Expected Composer command"),
+        }
+    }
+
+    #[test]
+    fn test_composer_global_args_parse() {
+        let cli = Cli::try_parse_from(["rtk", "composer", "global", "require", "vendor/package"])
+            .unwrap();
+        match cli.command {
+            Commands::Composer { args } => {
+                assert_eq!(args, vec!["global", "require", "vendor/package"])
+            }
+            _ => panic!("Expected Composer command"),
+        }
+    }
+
+    #[test]
+    fn test_composer_help_passes_to_composer() {
+        let cli = Cli::try_parse_from(["rtk", "composer", "--help"]).unwrap();
+        match cli.command {
+            Commands::Composer { args } => assert_eq!(args, vec!["--help"]),
+            _ => panic!("Expected Composer command"),
         }
     }
 

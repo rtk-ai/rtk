@@ -2804,6 +2804,93 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_composer_kept_commands() {
+        for command in [
+            "install",
+            "i",
+            "update",
+            "u",
+            "upgrade",
+            "require",
+            "r",
+            "licenses",
+            "show",
+            "info",
+            "fund",
+            "dump-autoload",
+            "dumpautoload",
+            "check-platform-reqs",
+        ] {
+            assert_eq!(
+                rewrite_command(format!("composer {command}").as_str(), &[]),
+                Some(format!("rtk composer {command}")),
+                "Failed for command: composer {}",
+                command
+            );
+        }
+
+        assert_eq!(
+            rewrite_command("composer global show", &[]),
+            Some("rtk composer global show".into())
+        );
+        assert_eq!(
+            rewrite_command("composer global require vendor/package", &[]),
+            Some("rtk composer global require vendor/package".into())
+        );
+        assert_eq!(
+            rewrite_command("composer -d app install", &[]),
+            Some("rtk composer -d app install".into())
+        );
+        assert_eq!(
+            rewrite_command("composer --working-dir=app show", &[]),
+            Some("rtk composer --working-dir=app show".into())
+        );
+        assert_eq!(
+            rewrite_command(
+                "composer --no-interaction --no-ansi require vendor/package",
+                &[]
+            ),
+            Some("rtk composer --no-interaction --no-ansi require vendor/package".into())
+        );
+        assert_eq!(
+            rewrite_command("composer global --working-dir=app show", &[]),
+            Some("rtk composer global --working-dir=app show".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_composer_dropped_commands_passthrough() {
+        for command in [
+            "remove",
+            "reinstall",
+            "create-project",
+            "outdated",
+            "audit",
+            "search",
+            "validate",
+            "diagnose",
+            "status",
+            "suggests",
+            "depends",
+            "prohibits",
+            "bump",
+            "clear-cache",
+            "self-update",
+        ] {
+            assert_eq!(
+                rewrite_command(format!("composer {command}").as_str(), &[]),
+                None,
+                "composer {} should not be rewritten",
+                command
+            );
+        }
+        assert_eq!(
+            rewrite_command("composer -d app remove vendor/package", &[]),
+            None
+        );
+    }
+
+    #[test]
     fn test_rewrite_npm_with_args() {
         assert_eq!(
             rewrite_command("npm run test", &[]),
