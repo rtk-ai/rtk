@@ -1,6 +1,7 @@
 //! Filters dotnet CLI output — build, test, and format results.
 
 use crate::binlog;
+use crate::core::runner;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
@@ -76,7 +77,6 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
         anyhow::bail!("dotnet: no subcommand specified");
     }
 
-    let timer = tracking::TimedExecution::start();
     let subcommand = args[0].to_string_lossy().to_string();
 
     let mut cmd = resolved_command("dotnet");
@@ -90,22 +90,13 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: dotnet {} ...", subcommand);
     }
 
-    let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run dotnet {}", subcommand))?;
-
-    let raw = format!("{}\n{}", result.stdout, result.stderr);
-
-    print!("{}", result.stdout);
-    eprint!("{}", result.stderr);
-
-    timer.track(
-        &format!("dotnet {}", subcommand),
-        &format!("rtk dotnet {}", subcommand),
-        &raw,
-        &raw,
-    );
-
-    Ok(result.exit_code)
+    runner::run(
+        cmd,
+        "dotnet",
+        &tracking::args_display(args),
+        runner::RunMode::Passthrough,
+        runner::RunOptions::default(),
+    )
 }
 
 fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {

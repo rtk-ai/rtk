@@ -60,10 +60,8 @@ pub fn run(
 
     if result.stdout.trim().is_empty() {
         // Show stderr for errors (bad regex, missing file, etc.)
-        if exit_code == 2 {
-            if !result.stderr.trim().is_empty() {
-                eprintln!("{}", result.stderr.trim());
-            }
+        if exit_code == 2 && !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
         }
         let msg = format!("0 matches for '{}'", pattern);
         println!("{}", msg);

@@ -433,10 +433,16 @@ fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32>
     for arg in &extra_args {
         cmd.arg(arg);
     }
+    let mut args_display = format!("pr checks {}", pr_number);
+    if !extra_args.is_empty() {
+        args_display.push(' ');
+        args_display.push_str(&extra_args.join(" "));
+    }
+
     runner::run_filtered(
         cmd,
         "gh",
-        &format!("pr checks {}", pr_number),
+        &args_display,
         format_pr_checks,
         RunOptions::stdout_only()
             .early_exit_on_failure()

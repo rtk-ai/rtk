@@ -121,8 +121,6 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         }
     }
 
-    let timer = tracking::TimedExecution::start();
-
     let subcommand = args[0].to_string_lossy();
     let mut cmd = resolved_command("go");
     cmd.arg(&*subcommand);
@@ -135,25 +133,13 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: go {} ...", subcommand);
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to run go {}", subcommand))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
-
-    print!("{}", stdout);
-    eprint!("{}", stderr);
-
-    timer.track(
-        &format!("go {}", subcommand),
-        &format!("rtk go {}", subcommand),
-        &raw,
-        &raw, // No filtering for unsupported commands
-    );
-
-    Ok(exit_code_from_output(&output, "go"))
+    runner::run(
+        cmd,
+        "go",
+        &tracking::args_display(args),
+        runner::RunMode::Passthrough,
+        runner::RunOptions::default(),
+    )
 }
 
 /// Detect golangci-lint major version when invoked via `go tool`.

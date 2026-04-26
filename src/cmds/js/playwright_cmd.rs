@@ -1,5 +1,6 @@
 //! Filters Playwright E2E test output to show only failures.
 
+use crate::core::runner;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{detect_package_manager, resolved_command, strip_ansi};
@@ -284,6 +285,16 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     if verbose > 0 {
         eprintln!("Running: playwright {}", args.join(" "));
+    }
+
+    if args.iter().any(|arg| matches!(arg.as_str(), "codegen" | "show-report" | "--ui")) {
+        return runner::run(
+            cmd,
+            "playwright",
+            &args.join(" "),
+            runner::RunMode::Passthrough,
+            runner::RunOptions::default(),
+        );
     }
 
     let result = exec_capture(&mut cmd)

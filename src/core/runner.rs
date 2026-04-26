@@ -59,6 +59,33 @@ pub enum RunMode<'a> {
     Passthrough,
 }
 
+fn is_streaming_invocation(tool_name: &str, args_display: &str) -> bool {
+    let tool = tool_name.split_whitespace().next().unwrap_or(tool_name);
+    let args: Vec<&str> = args_display.split_whitespace().collect();
+
+    if args
+        .iter()
+        .any(|arg| matches!(*arg, "--watch" | "--watchAll" | "-w"))
+    {
+        return true;
+    }
+
+    let follows = args.iter().any(|arg| matches!(*arg, "--follow" | "-f"));
+    if follows && matches!(tool, "docker" | "kubectl" | "tail" | "journalctl") {
+        return true;
+    }
+
+    (tool == "go" && args.contains(&"run"))
+        || (tool == "playwright" && args.contains(&"codegen"))
+        || matches!(tool, "tail" | "nodemon" | "watchman")
+        || args.iter().any(|arg| {
+            matches!(
+                *arg,
+                "watch" | "dev" | "serve" | "start" | "codegen" | "show-report"
+            )
+        })
+}
+
 pub fn run(
     mut cmd: Command,
     tool_name: &str,
@@ -71,6 +98,15 @@ pub fn run(
 
     match mode {
         RunMode::Filtered(filter_fn) => {
+            if is_streaming_invocation(tool_name, args_display) {
+                let result =
+                    stream::run_streaming(&mut cmd, StdinMode::Inherit, FilterMode::Passthrough)
+                        .with_context(|| format!("Failed to run {}", tool_name))?;
+
+                timer.track_passthrough(&cmd_label, &format!("rtk {} (streaming)", cmd_label));
+                return Ok(result.exit_code);
+            }
+
             let result = stream::run_streaming(&mut cmd, StdinMode::Null, FilterMode::CaptureOnly)
                 .with_context(|| format!("Failed to run {}", tool_name))?;
 
@@ -198,4 +234,40 @@ pub fn run_streamed(
         RunMode::Streamed(filter),
         opts,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_streaming_invocation_detects_watch_flags() {
+        assert!(is_streaming_invocation("prettier", "--watch ."));
+        assert!(is_streaming_invocation("gh", "pr checks 123 --watch"));
+        assert!(is_streaming_invocation("jest", "run -w"));
+    }
+
+    #[test]
+    fn test_is_streaming_invocation_detects_follow_flags_for_log_tools() {
+        assert!(is_streaming_invocation("docker", "logs -f web"));
+        assert!(is_streaming_invocation("kubectl", "logs --follow web"));
+        assert!(!is_streaming_invocation("git", "log -f"));
+    }
+
+    #[test]
+    fn test_is_streaming_invocation_detects_dev_and_watch_subcommands() {
+        assert!(is_streaming_invocation("npm", "run dev"));
+        assert!(is_streaming_invocation("npm", "start"));
+        assert!(is_streaming_invocation("playwright", "codegen"));
+        assert!(is_streaming_invocation("dotnet", "watch run"));
+        assert!(is_streaming_invocation("go", "run ."));
+    }
+
+    #[test]
+    fn test_is_streaming_invocation_keeps_finite_commands_filterable() {
+        assert!(!is_streaming_invocation("npm", "run build"));
+        assert!(!is_streaming_invocation("gh", "pr checks 123"));
+        assert!(!is_streaming_invocation("go test", "./..."));
+        assert!(!is_streaming_invocation("dotnet", "build"));
+    }
 }
