@@ -1011,6 +1011,8 @@ enum HookCommands {
     Antigravity,
     /// Process Mistral Vibe CLI pre_tool hook (reads JSON from stdin)
     Vibe,
+    /// Process Kimi CLI PreToolUse hook (deny-with-suggestion, reads JSON from stdin)
+    Kimi,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -3067,6 +3069,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Vibe => {
                 hooks::hook_cmd::run_vibe()?;
+                0
+            }
+            HookCommands::Kimi => {
+                hooks::hook_cmd::run_kimi()?;
                 0
             }
             HookCommands::Check { agent, command } => {
