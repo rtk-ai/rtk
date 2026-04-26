@@ -7,6 +7,11 @@ use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::io::{self, IsTerminal, Read};
+
+fn has_count_flag(extra_args: &[String]) -> bool {
+    extra_args.iter().any(|a| a == "-c" || a == "--count")
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -23,6 +28,11 @@ pub fn run(
 
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern, path);
+    }
+
+    // Handle piped stdin
+    if !io::stdin().is_terminal() {
+        return run_stdin(pattern, max_line_len, max_results, context_only, extra_args, verbose);
     }
 
     // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
@@ -143,6 +153,104 @@ pub fn run(
     );
 
     Ok(exit_code)
+}
+fn run_stdin(
+    pattern: &str,
+    max_line_len: usize,
+    max_results: usize,
+    context_only: bool,
+    extra_args: &[String],
+    verbose: u8,
+) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    if verbose > 0 {
+        eprintln!("grep (stdin): '{}'", pattern);
+    }
+
+    // grep -c should return just the integer count via stdin
+    if has_count_flag(extra_args) {
+        let mut input = String::new();
+        io::stdin().read_to_string(&mut input)?;
+        let raw_output = input.clone();
+        let re_display = Regex::new(&pattern.replace(r"\|", "|")).unwrap_or_else(|_| Regex::new("").unwrap());
+        let count: i32 = input.lines().filter(|line| re_display.is_match(line.trim())).count() as i32;
+        println!("{}", count);
+        timer.track(
+            &format!("grep -c (stdin) '{}'", pattern),
+            "rtk grep",
+            &raw_output,
+            &count.to_string(),
+        );
+        return Ok(if count > 0 { 0 } else { 1 });
+    }
+
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+
+    let raw_output = input.clone();
+
+    // Support -i (case insensitive) from extra_args
+    let case_insensitive = extra_args.iter().any(|a| a == "-i" || a == "--case-insensitive");
+    let re_base = Regex::new(&pattern.replace(r"\|", "|")).unwrap_or_else(|_| Regex::new("").unwrap());
+    let re_display = if case_insensitive {
+        Regex::new(&format!("(?i){}", regex::escape(pattern))).unwrap_or_else(|_| Regex::new("").unwrap())
+    } else {
+        re_base
+    };
+
+    let context_re = if context_only {
+        Regex::new(&format!("(?i).{{0,20}}{}.*", regex::escape(pattern))).ok()
+    } else {
+        None
+    };
+
+    let matching_lines: Vec<(usize, String)> = input
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| re_display.is_match(line.trim()))
+        .map(|(i, line)| {
+            let cleaned = clean_line(line, max_line_len, context_re.as_ref(), pattern);
+            (i + 1, cleaned)
+        })
+        .collect();
+
+    let total = matching_lines.len();
+    let mut rtk_output = String::new();
+
+    if matching_lines.is_empty() {
+        let msg = format!("0 matches for '{}'", pattern);
+        println!("{}", msg);
+        timer.track(
+            &format!("grep (stdin) '{}'", pattern),
+            "rtk grep",
+            &raw_output,
+            &msg,
+        );
+        return Ok(1);
+    }
+
+    rtk_output.push_str(&format!("{} matches in 1F:\n\n", total));
+
+    let display_name = "(stdin)";
+    let shown_count = matching_lines.len().min(max_results);
+    for (line_num, content) in matching_lines.iter().take(max_results) {
+        rtk_output.push_str(&format!("  [stdin] {:>4}: {}\n", line_num, content));
+    }
+
+    if total > max_results {
+        rtk_output.push_str(&format!("... +{}\n", total - max_results));
+    }
+
+    print!("{}", rtk_output);
+    timer.track(
+        &format!("grep (stdin) '{}'", pattern),
+        "rtk grep",
+        &raw_output,
+        &rtk_output,
+    );
+
+    Ok(0)
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
