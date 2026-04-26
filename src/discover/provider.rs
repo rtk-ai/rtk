@@ -65,9 +65,11 @@ impl ClaudeProvider {
     /// `/home/chris/2_project`   → `-home-chris-2-project`
     /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\'];
+
         path.chars()
             .map(|c| {
-                if c == '/' || c == '.' || c == '_' || c == '\\' || !c.is_ascii() {
+                if !c.is_ascii() || SANITIZED_CHARS.contains(&c) {
                     '-'
                 } else {
                     c
