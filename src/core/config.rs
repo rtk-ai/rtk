@@ -32,6 +32,7 @@ pub struct HooksConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrackingConfig {
     pub enabled: bool,
     pub history_days: u32,
@@ -50,6 +51,7 @@ impl Default for TrackingConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DisplayConfig {
     pub colors: bool,
     pub emoji: bool,
@@ -67,6 +69,7 @@ impl Default for DisplayConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FilterConfig {
     pub ignore_dirs: Vec<String>,
     pub ignore_files: Vec<String>,
@@ -89,6 +92,7 @@ impl Default for FilterConfig {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TelemetryConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,6 +102,7 @@ pub struct TelemetryConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimitsConfig {
     /// Max total grep results to show (default: 200)
     pub grep_max_results: usize,
