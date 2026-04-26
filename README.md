@@ -395,7 +395,9 @@ For the full config reference (all sections, env vars, per-project filters), see
 ### Uninstall
 
 ```bash
-rtk init -g --uninstall     # Remove hook, RTK.md, settings.json entry
+rtk init -g --uninstall     # Remove all global RTK artifacts
+rtk init -g --codex --uninstall  # Remove only global Codex RTK artifacts
+rtk init -g --gemini --uninstall # Remove only global Gemini RTK artifacts
 cargo uninstall rtk          # Remove binary
 brew uninstall rtk           # If installed via Homebrew
 ```

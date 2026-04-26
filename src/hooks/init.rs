@@ -558,20 +558,11 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         return Ok(());
     }
 
-    if !global {
-        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
-    }
-
-    let claude_dir = resolve_claude_dir()?;
-    let mut removed = Vec::new();
-
-    // Also uninstall Gemini artifacts if --gemini or always (clean everything)
     if gemini {
         let gemini_removed = uninstall_gemini(verbose)?;
-        removed.extend(gemini_removed);
-        if !removed.is_empty() {
+        if !gemini_removed.is_empty() {
             println!("RTK uninstalled (Gemini):");
-            for item in &removed {
+            for item in &gemini_removed {
                 println!("  - {}", item);
             }
             println!("\nRestart Gemini CLI to apply changes.");
@@ -580,6 +571,19 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         }
         return Ok(());
     }
+
+    if !global {
+        anyhow::bail!("Uninstall only works with --global flag. For local projects, manually remove RTK from CLAUDE.md");
+    }
+
+    let claude_dir = resolve_claude_dir()?;
+    let mut removed = Vec::new();
+
+    // `rtk init -g --uninstall` is the catch-all global cleanup path.
+    // Keep `--gemini --uninstall` as a targeted Gemini-only uninstall above,
+    // but also remove Gemini artifacts here so global uninstall matches the
+    // user-facing "remove all global RTK artifacts" guidance.
+    removed.extend(uninstall_gemini(verbose)?);
 
     // 1. Remove legacy hook file (if exists from old installation)
     let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
@@ -636,7 +640,13 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         removed.push(format!("OpenCode plugin: {}", path.display()));
     }
 
-    // 6. Remove Cursor hooks
+    // 6. Remove Codex global instructions, if any.
+    if let Ok(codex_dir) = resolve_codex_dir() {
+        let codex_removed = uninstall_codex_at(&codex_dir, verbose)?;
+        removed.extend(codex_removed.into_iter().map(|item| format!("Codex {}", item)));
+    }
+
+    // 7. Remove Cursor hooks
     let cursor_removed = remove_cursor_hooks(verbose)?;
     removed.extend(cursor_removed);
 
@@ -648,7 +658,9 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         for item in removed {
             println!("  - {}", item);
         }
-        println!("\nRestart Claude Code, OpenCode, and Cursor (if used) to apply changes.");
+        println!(
+            "\nRestart Claude Code, Codex CLI, Gemini CLI, OpenCode, and Cursor (if used) to apply changes."
+        );
     }
 
     Ok(())
@@ -2297,11 +2309,13 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
     println!("  rtk init -g --auto-patch    # Same as above but no prompt");
     println!("  rtk init -g --no-patch      # Skip settings.json (manual setup)");
-    println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
+    println!("  rtk init -g --uninstall     # Remove all global RTK artifacts");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init -g --codex --uninstall  # Remove only global Codex RTK artifacts");
+    println!("  rtk init -g --gemini --uninstall # Remove only global Gemini RTK artifacts");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -2357,9 +2371,10 @@ fn show_codex_config() -> Result<()> {
     }
 
     println!("\nUsage:");
+    println!("  rtk init -g --uninstall         # Remove all global RTK artifacts");
     println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
     println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
-    println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
+    println!("  rtk init -g --codex --uninstall  # Remove only global Codex RTK artifacts");
 
     Ok(())
 }
@@ -3648,10 +3663,10 @@ More notes
     }
 
     use std::sync::Mutex;
-    static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_claude_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
-        let _guard = CLAUDE_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_OVERRIDE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
 
@@ -3661,6 +3676,28 @@ More notes
         match orig {
             Some(v) => std::env::set_var("RTK_CLAUDE_DIR", v),
             None => std::env::remove_var("RTK_CLAUDE_DIR"),
+        }
+    }
+
+    fn with_claude_and_codex_dir_overrides<F: FnOnce(&Path, &Path)>(tmp: &TempDir, f: F) {
+        let _guard = ENV_OVERRIDE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let claude_dir = tmp.path().join(CLAUDE_DIR);
+        let codex_dir = tmp.path().join(CODEX_DIR);
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::create_dir_all(&codex_dir).unwrap();
+
+        let orig_claude = std::env::var_os("RTK_CLAUDE_DIR");
+        let orig_codex = std::env::var_os("CODEX_HOME");
+        std::env::set_var("RTK_CLAUDE_DIR", &claude_dir);
+        std::env::set_var("CODEX_HOME", &codex_dir);
+        f(&claude_dir, &codex_dir);
+        match orig_claude {
+            Some(v) => std::env::set_var("RTK_CLAUDE_DIR", v),
+            None => std::env::remove_var("RTK_CLAUDE_DIR"),
+        }
+        match orig_codex {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
         }
     }
 
@@ -3699,6 +3736,35 @@ More notes
             assert!(
                 !settings_content.contains(CLAUDE_HOOK_COMMAND),
                 "hook entry must be removed from settings.json"
+            );
+        });
+    }
+
+    #[test]
+    fn test_global_uninstall_removes_codex_artifacts_too() {
+        let tmp = TempDir::new().unwrap();
+        with_claude_and_codex_dir_overrides(&tmp, |claude_dir, codex_dir| {
+            run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
+            run_codex_mode(true, 0).unwrap();
+
+            let codex_ref = codex_rtk_md_ref(codex_dir);
+            let agents_md = codex_dir.join(AGENTS_MD);
+            let codex_rtk_md = codex_dir.join(RTK_MD);
+
+            assert!(codex_rtk_md.exists(), "Codex RTK.md must be created");
+            assert!(
+                fs::read_to_string(&agents_md).unwrap().contains(&codex_ref),
+                "Codex AGENTS.md must reference RTK.md"
+            );
+
+            uninstall(true, false, false, false, 0).unwrap();
+
+            assert!(!claude_dir.join(RTK_MD).exists(), "Claude RTK.md must be removed");
+            assert!(!codex_rtk_md.exists(), "Codex RTK.md must be removed");
+            let agents_content = fs::read_to_string(&agents_md).unwrap_or_default();
+            assert!(
+                !agents_content.contains(&codex_ref),
+                "Codex AGENTS.md reference must be removed"
             );
         });
     }

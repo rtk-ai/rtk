@@ -345,7 +345,7 @@ enum Commands {
         #[arg(long = "no-patch", group = "patch")]
         no_patch: bool,
 
-        /// Remove RTK artifacts for the selected assistant mode
+        /// Remove RTK artifacts for the selected assistant mode, or all global installs when no mode flag is provided
         #[arg(long)]
         uninstall: bool,
 

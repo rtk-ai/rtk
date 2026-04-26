@@ -245,12 +245,14 @@ rtk vitest
 ```bash
 # Complete removal (global installations only)
 rtk init -g --uninstall
+rtk init -g --codex --uninstall    # Codex-only cleanup
+rtk init -g --gemini --uninstall   # Gemini-only cleanup
 
 # What gets removed:
-#   - Hook: ~/.claude/hooks/rtk-rewrite.sh
-#   - Context: ~/.claude/RTK.md
-#   - Reference: @RTK.md line from ~/.claude/CLAUDE.md
-#   - Registration: RTK hook entry from settings.json
+#   - Claude Code: hook, RTK.md, CLAUDE.md reference, settings.json entry
+#   - Codex CLI: global RTK.md + AGENTS.md reference
+#   - Gemini CLI: hook, GEMINI.md, settings.json entry
+#   - OpenCode / Cursor: global plugin or hook registrations
 
 # Restart Claude Code after uninstall
 ```
