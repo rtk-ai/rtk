@@ -8,6 +8,67 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 
+fn has_count_flag(extra_args: &[String]) -> bool {
+    extra_args.iter().any(|a| a == "-c" || a == "--count")
+}
+
+struct CountResult {
+    exit_code: i32,
+    count: i32,
+    raw_output: String,
+}
+
+fn run_count(
+    pattern: &str,
+    path: &str,
+    file_type: Option<&str>,
+    extra_args: &[String],
+    verbose: u8,
+) -> Result<CountResult> {
+    if verbose > 0 {
+        eprintln!("grep -c: '{}' in {}", pattern, path);
+    }
+
+    let rg_pattern = pattern.replace(r"\|", "|");
+    let mut rg_cmd = resolved_command("rg");
+    rg_cmd.args(["-c", "--no-heading", &rg_pattern, path]);
+
+    if let Some(ft) = file_type {
+        rg_cmd.arg("--type").arg(ft);
+    }
+
+    for arg in extra_args {
+        if arg == "-r" || arg == "--recursive" || arg == "-c" || arg == "--count" {
+            continue;
+        }
+        rg_cmd.arg(arg);
+    }
+
+    let result = exec_capture(&mut rg_cmd).or_else(|_| {
+        let mut grep_cmd = resolved_command("grep");
+        grep_cmd.args(["-c", "-r", pattern, path]);
+        exec_capture(&mut grep_cmd)
+    }).context("grep -c failed")?;
+
+    let exit_code = result.exit_code;
+
+    // rg -c outputs "file:count" per file; sum all counts
+    let count: i32 = result
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split(':').collect();
+            parts.last()?.parse::<i32>().ok()
+        })
+        .sum();
+
+    Ok(CountResult {
+        exit_code,
+        count,
+        raw_output: result.stdout,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     pattern: &str,
@@ -23,6 +84,19 @@ pub fn run(
 
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern, path);
+    }
+
+    // grep -c should return just the integer count, matching grep -c semantics
+    if has_count_flag(extra_args) {
+        let result = run_count(pattern, path, file_type, extra_args, verbose)?;
+        println!("{}", result.count);
+        timer.track(
+            &format!("grep -c '{}' {}", pattern, path),
+            "rtk grep",
+            &result.raw_output,
+            &result.count.to_string(),
+        );
+        return Ok(result.exit_code);
     }
 
     // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
@@ -309,5 +383,29 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    #[test]
+    fn test_has_count_flag() {
+        assert!(has_count_flag(&["-c".to_string()]));
+        assert!(has_count_flag(&["--count".to_string()]));
+        assert!(has_count_flag(&["-i".to_string(), "-c".to_string()]));
+        assert!(has_count_flag(&["-c".to_string(), "--count".to_string()]));
+        assert!(!has_count_flag(&["-i".to_string()]));
+        assert!(!has_count_flag(&[]));
+    }
+
+    #[test]
+    fn test_run_count_sums_all_file_counts() {
+        // Simulate rg -c output: "file1:3\nfile2:2\nfile3:1"
+        let output = "file1:3\nfile2:2\nfile3:1\n";
+        let count: i32 = output
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split(':').collect();
+                parts.last()?.parse::<i32>().ok()
+            })
+            .sum();
+        assert_eq!(count, 6);
     }
 }
