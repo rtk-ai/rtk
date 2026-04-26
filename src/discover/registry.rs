@@ -391,14 +391,18 @@ pub fn has_rtk_disabled_prefix(cmd: &str) -> bool {
     prefix_part.contains("RTK_DISABLED=")
 }
 
-/// Strip RTK_DISABLED=X and other env prefixes, return the actual command.
-pub fn strip_disabled_prefix(cmd: &str) -> &str {
+fn split_env_prefix(cmd: &str) -> (&str, &str) {
     let trimmed = cmd.trim();
     let stripped = ENV_PREFIX.replace(trimmed, "");
-    // stripped is a Cow<str> that borrows from trimmed when no replacement happens.
-    // We need to return a &str into the original, so compute the offset.
     let prefix_len = trimmed.len() - stripped.len();
-    trimmed[prefix_len..].trim_start()
+    let prefix_part = &trimmed[..prefix_len];
+    let rest = trimmed[prefix_len..].trim_start();
+    (prefix_part, rest)
+}
+
+/// Strip RTK_DISABLED=X and other env prefixes, return the actual command.
+pub fn strip_disabled_prefix(cmd: &str) -> &str {
+    split_env_prefix(cmd).1
 }
 
 fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
@@ -463,7 +467,10 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
 /// in addition to user-configured prefixes.
 ///
 /// Matching is whole-word: a prefix `"foo bar"` matches a command starting
-/// with `"foo bar "` (or equal to `"foo bar"`), not `"foobarbaz"`.
+/// with `"foo bar "` (or equal to `"foo bar"`), not `"foobarbaz"`. Matching
+/// is literal, not pattern-based: `docker exec <container>` is just an example
+/// shape, not a wildcard. To match `docker exec app git status`, configure the
+/// exact concrete prefix `docker exec app`.
 pub fn rewrite_command_with_prefixes(
     cmd: &str,
     excluded: &[String],
@@ -479,6 +486,7 @@ pub fn rewrite_command_with_prefixes(
     }
 
     let compiled = compile_exclude_patterns(excluded);
+    let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
 
     // Simple (non-compound) already-RTK command — return as-is.
     // For compound commands that start with "rtk" (e.g. "rtk git add . && cargo test"),
@@ -492,7 +500,7 @@ pub fn rewrite_command_with_prefixes(
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, &compiled, transparent_prefixes)
+    rewrite_compound(trimmed, &compiled, &normalized_prefixes)
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
@@ -672,6 +680,19 @@ fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
         .collect()
 }
 
+fn normalize_transparent_prefixes(prefixes: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = prefixes
+        .iter()
+        .map(|prefix| prefix.trim())
+        .filter(|prefix| !prefix.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    normalized.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    normalized.dedup();
+    normalized
+}
+
 fn rewrite_segment(
     seg: &str,
     excluded: &[ExcludePattern],
@@ -700,6 +721,20 @@ fn rewrite_segment_inner(
 
     if depth >= MAX_PREFIX_DEPTH {
         return None;
+    }
+
+    let (env_prefix, rest_after_env) = split_env_prefix(trimmed);
+    if !env_prefix.is_empty() {
+        let rewritten =
+            rewrite_segment_inner(rest_after_env, excluded, transparent_prefixes, depth + 1)?;
+        if has_rtk_disabled_prefix(trimmed) {
+            eprintln!(
+                "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
+                 Remove RTK_DISABLED=1 to restore token savings."
+            );
+            return None;
+        }
+        return Some(format!("{}{}", env_prefix, rewritten));
     }
 
     for &prefix in SHELL_PREFIX_BUILTINS {
@@ -767,29 +802,15 @@ fn rewrite_segment_inner(
     // Find the matching rule (rtk_cmd values are unique across all rules)
     let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
 
-    // Extract env prefix (sudo, env VAR=val, etc.)
-    let stripped_cow = ENV_PREFIX.replace(cmd_part, "");
-    let env_prefix_len = cmd_part.len() - stripped_cow.len();
-    let env_prefix = &cmd_part[..env_prefix_len];
-    let cmd_clean = stripped_cow.trim();
-
-    // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
-    // #508: warn on stderr so agents learn to stop overusing it
-    if has_rtk_disabled_prefix(cmd_part) {
-        eprintln!(
-            "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
-             Remove RTK_DISABLED=1 to restore token savings."
-        );
-        return None;
-    }
+    let cmd_clean = cmd_part;
 
     if let Some(parts) = parse_golangci_run_parts(cmd_clean) {
         let rewritten = if parts.global_segment.is_empty() {
-            format!("{}rtk golangci-lint {}", env_prefix, parts.run_segment)
+            format!("rtk golangci-lint {}", parts.run_segment)
         } else {
             format!(
-                "{}rtk golangci-lint {} {}",
-                env_prefix, parts.global_segment, parts.run_segment
+                "rtk golangci-lint {} {}",
+                parts.global_segment, parts.run_segment
             )
         };
         return Some(rewritten);
@@ -811,9 +832,9 @@ fn rewrite_segment_inner(
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
             let rewritten = if rest.is_empty() {
-                format!("{}{}{}", env_prefix, rule.rtk_cmd, redirect_suffix)
+                format!("{}{}", rule.rtk_cmd, redirect_suffix)
             } else {
-                format!("{}{} {}{}", env_prefix, rule.rtk_cmd, rest, redirect_suffix)
+                format!("{} {}{}", rule.rtk_cmd, rest, redirect_suffix)
             };
             return Some(rewritten);
         }
@@ -3613,11 +3634,37 @@ mod tests {
     }
 
     #[test]
+    fn test_transparent_prefix_composed_with_env_prefix() {
+        let prefixes = vec!["bundle exec".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("RAILS_ENV=test bundle exec git status", &[], &prefixes),
+            Some("RAILS_ENV=test bundle exec rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_env_prefix_composed_with_builtin() {
+        assert_eq!(
+            rewrite_command("sudo noglob git status", &[]),
+            Some("sudo noglob rtk git status".into())
+        );
+    }
+
+    #[test]
     fn test_transparent_prefix_multiple_configured() {
         let prefixes = vec!["shadowenv exec --".to_string(), "direnv exec .".to_string()];
         assert_eq!(
             rewrite_command_with_prefixes("direnv exec . git status", &[], &prefixes),
             Some("direnv exec . rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefix_overlapping_entries_use_longest_match() {
+        let prefixes = vec!["docker".to_string(), "docker exec app".to_string()];
+        assert_eq!(
+            rewrite_command_with_prefixes("docker exec app git status", &[], &prefixes),
+            Some("docker exec app rtk git status".into())
         );
     }
 

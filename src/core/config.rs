@@ -41,6 +41,10 @@ pub struct HooksConfig {
     /// `direnv exec`, `nix develop --command`, `docker exec <container>`,
     /// `poetry run`, or `bundle exec`.
     ///
+    /// Matching is literal, not pattern-based. `docker exec <container>` is an
+    /// example shape, not a wildcard; configure the exact concrete prefix you
+    /// actually use, such as `docker exec app`.
+    ///
     /// Extends the built-in `SHELL_PREFIX_BUILTINS` list (`noglob`, `command`,
     /// `builtin`, `exec`, `nocorrect`) with user- or organization-specific
     /// wrappers. Matching is whole-word: a configured prefix `"foo bar"` matches
