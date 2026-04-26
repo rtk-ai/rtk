@@ -89,7 +89,9 @@ rtk init --global
 ## Uninstall
 
 ```bash
-rtk init -g --uninstall    # remove hook, RTK.md, and settings.json entry
+rtk init -g --uninstall    # remove all global RTK artifacts
+rtk init -g --codex --uninstall  # remove only global Codex RTK artifacts
+rtk init -g --gemini --uninstall # remove only global Gemini RTK artifacts
 cargo uninstall rtk         # remove binary (if installed via Cargo)
 brew uninstall rtk          # remove binary (if installed via Homebrew)
 ```

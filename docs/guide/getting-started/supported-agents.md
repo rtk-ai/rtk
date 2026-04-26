@@ -110,6 +110,8 @@ rtk init --windsurf    # creates .windsurfrules in current project
 
 ```bash
 rtk init --codex    # creates AGENTS.md or patches existing one
+rtk init -g --codex    # installs global Codex instructions in $CODEX_HOME or ~/.codex
+rtk init -g --codex --uninstall    # removes only global Codex RTK artifacts
 ```
 
 ### Kilo Code
