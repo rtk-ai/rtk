@@ -1,71 +1,49 @@
 # RTK - Rust Token Killer (Codex CLI)
 
-RTK is a token-optimized CLI proxy for shell commands. Use it deliberately:
-save context on noisy output without hiding exact details needed for the task.
+**Usage**: Token-optimized CLI proxy for noisy shell commands.
 
-## Decision Policy
+## Rule
 
-Use RTK when the shell command is likely to emit noisy or large output and the
-filtered output still preserves the signal needed for implementation,
-debugging, or verification.
-
-Do not blindly prefix every command with `rtk`. In particular, do not rewrite
-shell builtins such as `test -d`, `[`/`]`, `printf`, `pwd`, or tiny probes.
-
-## Prefer RTK For
+Use `rtk` when filtered output preserves the signal you need. Do not blindly
+prefix tiny probes, shell builtins, or commands where exact output matters.
 
 ```bash
 rtk git status
 rtk git diff
 rtk git show
 rtk gh pr view <num>
-rtk gh run view <id>
 rtk grep <pattern> <path>
-rtk find <path> -name <pattern>
 rtk read <file>
 rtk cargo test
 rtk pytest
 rtk vitest run
-rtk playwright test
-rtk tsc
-rtk lint
-rtk docker logs <container>
-rtk kubectl logs <pod>
-rtk curl <url>
 ```
 
-For noisy repo scripts that RTK cannot rewrite directly, use generic wrappers:
+For noisy repo scripts, use generic wrappers:
 
 ```bash
 rtk test bun run test
 rtk err bun run typecheck
-rtk err bun run lint
 rtk err bun run build
-rtk err bun run validate:local:agent
 ```
 
-## Use Raw Commands For
+## Raw Commands
 
-- Exact file snippets or exact formatting where every line/character matters.
-- Machine-readable JSON that will be piped into `jq`, saved, or consumed later.
-- Small probes such as `pwd`, `command -v`, `printf`, `date`, or `test -d`.
-- Interactive or long-running commands such as dev servers and watchers.
-- Secret/env inspection, binary/media output, or user-requested raw/full output.
+Use raw commands for exact file snippets, JSON consumed by another command,
+small probes like `pwd`/`printf`/`test -d`, interactive servers, secrets,
+binary output, or user-requested full output.
 
-## Hook Behavior
+## Codex Hook
 
-Codex hooks cannot rewrite Bash input in place yet. If a raw command is blocked
-with `Rerun that as: ...`, rerun the exact suggested `rtk ...` command unless it
-conflicts with explicit user instructions or a safety rule.
+Codex hooks cannot rewrite Bash input in place yet. If blocked with
+`Rerun that as: ...`, run the suggested command.
 
-## Escape Hatches
+## Meta Commands
 
 ```bash
-rtk proxy <cmd>       # track invocation but bypass filtering
-RTK_DISABLED=1 <cmd>  # skip hook rewrite for one command
-rtk gain              # token savings analytics
-rtk gain --history    # recent command savings history
-rtk hook-audit        # hook rewrite metrics when RTK_HOOK_AUDIT=1 is enabled
+rtk gain             # Token savings analytics
+rtk gain --history   # Recent command savings history
+rtk proxy <cmd>      # Track invocation but bypass filtering
 rtk --version
 which rtk
 ```

@@ -1789,12 +1789,12 @@ fn codex_agents_policy(rtk_md_ref: &str) -> String {
     format!(
         r#"{CODEX_RTK_POLICY_START}
 ## RTK Shell Output Policy
-- Use `rtk` for shell commands likely to produce noisy or large output when the filtered output still preserves the signal needed for the task.
-- Prefer RTK for: `git status/log/diff/show`, `gh pr/issue/run/api`, `rg`/`grep`, `find`, `ls`, `tree`, `cat`/`head`/`tail` when reading broad files, `cargo`, `pytest`, `vitest`, `jest`, `playwright`, `tsc`, lint/typecheck/build/test scripts, Docker/Kubernetes/AWS logs or listings, and HTTP/API responses.
-- For repo scripts that RTK cannot rewrite directly, use generic wrappers: `rtk test <command>` for tests and `rtk err <command>` for typecheck/lint/build/validate commands.
-- Do not blindly prefix every shell command with `rtk`. Use raw commands when exact output is required, including exact file snippets, machine-readable JSON consumed by later commands, small probes like `pwd` or `printf`, interactive or long-running dev servers, secret/env inspection, binary/media output, or when the user asks for raw/full output.
-- If the Codex hook blocks a command and says `Rerun that as: ...`, rerun the exact suggested `rtk ...` command unless it conflicts with explicit user instructions or a safety rule.
-- Use `rtk proxy <command>` only when RTK invocation/tracking is useful but filtering must be bypassed. Use `rtk gain` or `rtk hook-audit` when diagnosing RTK adoption.
+- Use `rtk` for noisy shell commands when filtered output preserves the signal needed.
+- Prefer RTK for Git/GitHub status, diffs, searches, broad file reads, tests, builds, typechecks, linters, logs, and API responses.
+- For repo scripts, use `rtk test <command>` for tests and `rtk err <command>` for typecheck/lint/build commands.
+- Use raw commands for exact snippets, JSON consumed by another command, tiny probes like `pwd`/`printf`/`test -d`, interactive servers, secrets, binary output, or user-requested full output.
+- If the Codex hook blocks a command with `Rerun that as: ...`, run the suggested command.
+- Use `rtk proxy <command>` when tracking is useful but filtering must be bypassed.
 - Expanded RTK reference: {rtk_md_ref}.
 {CODEX_RTK_POLICY_END}"#
     )
