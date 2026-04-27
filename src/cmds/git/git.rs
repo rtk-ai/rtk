@@ -43,7 +43,6 @@ fn git_cmd(global_args: &[String]) -> Command {
 fn git_cmd_c_locale(global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.env("LC_ALL", "C");
-    cmd.env("LANG", "C");
     cmd
 }
 
@@ -789,6 +788,16 @@ impl GitStatusState {
     }
 }
 
+const REBASE_INDICATORS: &[&str] = &[
+    "rebase in progress",
+    "You are currently rebasing",
+    "You are currently editing",
+    "You are currently splitting",
+    "Last command done",
+    "Next command to do",
+    "No commands remaining",
+];
+
 fn detect_status_state(line: &str) -> Option<GitStatusState> {
     if line.contains("All conflicts fixed but you are still merging") {
         Some(GitStatusState::MergeReadyToCommit)
@@ -804,52 +813,35 @@ fn detect_status_state(line: &str) -> Option<GitStatusState> {
         Some(GitStatusState::Am)
     } else if line.contains("You are in a sparse checkout") {
         Some(GitStatusState::SparseCheckout)
-    } else if line.contains("rebase in progress")
-        || line.contains("You are currently rebasing")
-        || line.contains("You are currently editing")
-        || line.contains("You are currently splitting")
-        || line.contains("Last command done")
-        || line.contains("Next command to do")
-        || line.contains("No commands remaining")
-    {
+    } else if REBASE_INDICATORS.iter().any(|i| line.contains(i)) {
         Some(GitStatusState::Rebase)
     } else {
         None
     }
 }
 
+const STATE_HINTS: &[&str] = &[
+    "git commit --amend",
+    "git rebase --continue",
+    "git rebase --abort",
+    "git rebase --skip",
+    "git cherry-pick --continue",
+    "git cherry-pick --abort",
+    "git cherry-pick --skip",
+    "git revert --continue",
+    "git revert --abort",
+    "git revert --skip",
+    "git bisect reset",
+    "git merge --abort",
+    "git am --continue",
+    "git am --abort",
+];
+
 fn extract_state_hint(line: &str) -> Option<&'static str> {
-    if line.contains("git commit --amend") {
-        Some("git commit --amend")
-    } else if line.contains("git rebase --continue") {
-        Some("git rebase --continue")
-    } else if line.contains("git rebase --abort") {
-        Some("git rebase --abort")
-    } else if line.contains("git rebase --skip") {
-        Some("git rebase --skip")
-    } else if line.contains("git cherry-pick --continue") {
-        Some("git cherry-pick --continue")
-    } else if line.contains("git cherry-pick --abort") {
-        Some("git cherry-pick --abort")
-    } else if line.contains("git cherry-pick --skip") {
-        Some("git cherry-pick --skip")
-    } else if line.contains("git revert --continue") {
-        Some("git revert --continue")
-    } else if line.contains("git revert --abort") {
-        Some("git revert --abort")
-    } else if line.contains("git revert --skip") {
-        Some("git revert --skip")
-    } else if line.contains("git bisect reset") {
-        Some("git bisect reset")
-    } else if line.contains("git merge --abort") {
-        Some("git merge --abort")
-    } else if line.contains("git am --continue") {
-        Some("git am --continue")
-    } else if line.contains("git am --abort") {
-        Some("git am --abort")
-    } else {
-        None
-    }
+    STATE_HINTS
+        .iter()
+        .find(|hint| line.contains(*hint))
+        .copied()
 }
 
 /// Extract a compact in-progress state summary from plain `git status` output.
@@ -915,7 +907,7 @@ fn extract_state_header(raw: &str) -> Option<String> {
 
     let state = state?;
     let mut out = vec![state.summary().to_string()];
-    out.extend(hints.into_iter().map(|hint| format!("  {}", hint)));
+    out.extend(hints.into_iter().map(String::from));
 
     Some(out.join("\n"))
 }
@@ -1944,7 +1936,6 @@ mod tests {
             })
             .collect();
         assert!(envs.contains(&("LC_ALL".to_string(), "C".to_string())));
-        assert!(envs.contains(&("LANG".to_string(), "C".to_string())));
     }
 
     #[test]
