@@ -226,7 +226,18 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
 }
 
 fn codex_block_response(cmd: &str) -> Option<Value> {
+    codex_block_response_with_verdict(cmd, permissions::check_command(cmd))
+}
+
+fn codex_block_response_with_verdict(cmd: &str, verdict: PermissionVerdict) -> Option<Value> {
+    if verdict == PermissionVerdict::Deny {
+        audit_log("deny", cmd, "");
+        return None;
+    }
+
     let rewritten = get_rewritten(cmd)?;
+    audit_log("rewrite", cmd, &rewritten);
+
     Some(json!({
         "hookSpecificOutput": {
             "hookEventName": PRE_TOOL_USE_KEY,
@@ -663,6 +674,11 @@ mod tests {
     #[test]
     fn test_codex_hook_ignores_already_rtk_command() {
         assert!(codex_block_response("rtk git status").is_none());
+    }
+
+    #[test]
+    fn test_codex_hook_respects_deny_verdict() {
+        assert!(codex_block_response_with_verdict("git status", PermissionVerdict::Deny).is_none());
     }
 
     #[test]

@@ -743,6 +743,11 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
         removed.push("hooks.json: removed RTK PreToolUse hook".to_string());
     }
 
+    let config_toml_path = codex_dir.join(CONFIG_TOML);
+    if remove_codex_hook_flag_from_config(&config_toml_path, verbose)? {
+        removed.push("config.toml: removed features.codex_hooks".to_string());
+    }
+
     Ok(removed)
 }
 
@@ -788,21 +793,92 @@ fn remove_codex_hook_from_json(root: &mut serde_json::Value) -> bool {
         None => return false,
     };
 
-    let original_len = hooks.len();
-    hooks.retain(|entry| {
-        let hook_entries = match entry.get("hooks").and_then(|h| h.as_array()) {
+    let mut removed = false;
+
+    for entry in hooks.iter_mut() {
+        let hook_entries = match entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
             Some(hook_entries) => hook_entries,
-            None => return true,
+            None => continue,
         };
 
-        !hook_entries.iter().any(|hook| {
-            hook.get("command")
+        let original_len = hook_entries.len();
+        hook_entries.retain(|hook| {
+            !hook
+                .get("command")
                 .and_then(|c| c.as_str())
                 .is_some_and(is_codex_hook_command)
-        })
+        });
+
+        if hook_entries.len() < original_len {
+            removed = true;
+        }
+    }
+
+    hooks.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_none_or(|hook_entries| !hook_entries.is_empty())
     });
 
-    hooks.len() < original_len
+    removed
+}
+
+fn remove_codex_hook_flag_from_config(path: &Path, verbose: u8) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut root: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as TOML", path.display()))?;
+
+    let removed = remove_codex_hook_flag_from_toml(&mut root);
+    if !removed {
+        return Ok(false);
+    }
+
+    backup_file_if_exists(path, verbose)?;
+    let serialized =
+        toml::to_string_pretty(&root).context("Failed to serialize Codex config.toml")?;
+    atomic_write(path, &serialized)?;
+
+    if verbose > 0 {
+        eprintln!("Removed Codex hook flag from {}", path.display());
+    }
+
+    Ok(true)
+}
+
+fn remove_codex_hook_flag_from_toml(root: &mut toml::Value) -> bool {
+    let Some(root_table) = root.as_table_mut() else {
+        return false;
+    };
+
+    let Some(features_value) = root_table.get_mut("features") else {
+        return false;
+    };
+
+    let Some(features_table) = features_value.as_table_mut() else {
+        return false;
+    };
+
+    let removed = features_table.remove("codex_hooks").is_some();
+    if !removed {
+        return false;
+    }
+
+    if features_table.is_empty() {
+        root_table.remove("features");
+    }
+
+    true
 }
 
 /// Orchestrator: patch settings.json with RTK hook (binary command variant)
@@ -2113,6 +2189,33 @@ fn codex_hook_already_present(root: &serde_json::Value) -> bool {
         })
 }
 
+fn print_codex_hooks_status(scope: &str, path: &Path) {
+    if !path.exists() {
+        println!("[--] {scope} hooks.json: not found");
+        return;
+    }
+
+    match fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(json) => {
+                if codex_hook_already_present(&json) {
+                    println!("[ok] {scope} hooks.json: RTK PreToolUse hook");
+                } else {
+                    println!("[--] {scope} hooks.json: exists but RTK hook missing");
+                }
+            }
+            Err(err) => {
+                println!(
+                    "[!!] {scope} hooks.json: invalid JSON ({err}); treating as not configured"
+                );
+            }
+        },
+        Err(err) => {
+            println!("[!!] {scope} hooks.json: could not read ({err}); treating as not configured");
+        }
+    }
+}
+
 fn normalize_codex_hooks_root(root: &mut serde_json::Value) {
     if !root.is_object() {
         *root = serde_json::json!({ "hooks": {} });
@@ -2696,17 +2799,7 @@ fn show_codex_config() -> Result<()> {
         println!("[--] Global AGENTS.md: not found");
     }
 
-    if global_hooks_json.exists() {
-        let content = fs::read_to_string(&global_hooks_json)?;
-        let json: serde_json::Value = serde_json::from_str(&content)?;
-        if codex_hook_already_present(&json) {
-            println!("[ok] Global hooks.json: RTK PreToolUse hook");
-        } else {
-            println!("[--] Global hooks.json: exists but RTK hook missing");
-        }
-    } else {
-        println!("[--] Global hooks.json: not found");
-    }
+    print_codex_hooks_status("Global", &global_hooks_json);
 
     if codex_hooks_enabled(&global_config_toml)? {
         println!("[ok] Global config.toml: features.codex_hooks = true");
@@ -2735,17 +2828,7 @@ fn show_codex_config() -> Result<()> {
         println!("[--] Local AGENTS.md: not found");
     }
 
-    if local_hooks_json.exists() {
-        let content = fs::read_to_string(&local_hooks_json)?;
-        let json: serde_json::Value = serde_json::from_str(&content)?;
-        if codex_hook_already_present(&json) {
-            println!("[ok] Local hooks.json: RTK PreToolUse hook");
-        } else {
-            println!("[--] Local hooks.json: exists but RTK hook missing");
-        }
-    } else {
-        println!("[--] Local hooks.json: not found");
-    }
+    print_codex_hooks_status("Local", &local_hooks_json);
 
     if codex_hooks_enabled(&local_config_toml)? {
         println!("[ok] Local config.toml: features.codex_hooks = true");
@@ -3452,6 +3535,86 @@ More notes
     }
 
     #[test]
+    fn test_remove_codex_hook_from_json_preserves_sibling_hooks() {
+        let mut json_content = serde_json::json!({
+            "hooks": {
+                (PRE_TOOL_USE_KEY): [{
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "python3 ./other-hook.py"
+                        },
+                        {
+                            "type": "command",
+                            "command": "rtk hook codex"
+                        }
+                    ]
+                }]
+            }
+        });
+
+        let removed = remove_codex_hook_from_json(&mut json_content);
+
+        assert!(removed);
+        let pre_tool_use = json_content["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        assert_eq!(pre_tool_use.len(), 1);
+        let hooks = pre_tool_use[0]["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0]["command"], "python3 ./other-hook.py");
+    }
+
+    #[test]
+    fn test_remove_codex_hook_flag_from_toml() {
+        let mut config: toml::Value = r#"
+[features]
+codex_hooks = true
+other_feature = true
+"#
+        .parse()
+        .unwrap();
+
+        assert!(remove_codex_hook_flag_from_toml(&mut config));
+        assert!(!codex_hooks_enabled_value(&config));
+        assert_eq!(
+            config
+                .get("features")
+                .and_then(|features| features.get("other_feature"))
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_remove_codex_hook_flag_removes_empty_features_table() {
+        let mut config: toml::Value = r#"
+[features]
+codex_hooks = true
+"#
+        .parse()
+        .unwrap();
+
+        assert!(remove_codex_hook_flag_from_toml(&mut config));
+        assert!(config.get("features").is_none());
+    }
+
+    fn codex_hooks_enabled_value(root: &toml::Value) -> bool {
+        root.get("features")
+            .and_then(|features| features.get("codex_hooks"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn test_print_codex_hooks_status_handles_invalid_json() {
+        let temp = TempDir::new().unwrap();
+        let hooks_json = temp.path().join(HOOKS_JSON);
+        fs::write(&hooks_json, "{not-json").unwrap();
+
+        print_codex_hooks_status("Test", &hooks_json);
+    }
+
+    #[test]
     fn test_ensure_codex_hooks_feature_enabled_creates_and_is_idempotent() {
         let temp = TempDir::new().unwrap();
         let config_path = temp.path().join(CONFIG_TOML);
@@ -3542,6 +3705,7 @@ More notes
         let agents_md = codex_dir.join("AGENTS.md");
         let rtk_md = codex_dir.join("RTK.md");
         let hooks_json = codex_dir.join(HOOKS_JSON);
+        let config_toml = codex_dir.join(CONFIG_TOML);
 
         fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
         fs::write(&rtk_md, "codex config").unwrap();
@@ -3561,11 +3725,12 @@ More notes
             .to_string(),
         )
         .unwrap();
+        fs::write(&config_toml, "[features]\ncodex_hooks = true\n").unwrap();
 
         let removed_first = uninstall_codex_at(codex_dir, 0).unwrap();
         let removed_second = uninstall_codex_at(codex_dir, 0).unwrap();
 
-        assert_eq!(removed_first.len(), 3);
+        assert_eq!(removed_first.len(), 4);
         assert!(removed_second.is_empty());
         assert!(!rtk_md.exists());
 
@@ -3576,6 +3741,10 @@ More notes
         let hooks_content = fs::read_to_string(&hooks_json).unwrap();
         let hooks_json: serde_json::Value = serde_json::from_str(&hooks_content).unwrap();
         assert!(!codex_hook_already_present(&hooks_json));
+
+        let config_content = fs::read_to_string(&config_toml).unwrap();
+        let config: toml::Value = toml::from_str(&config_content).unwrap();
+        assert!(!codex_hooks_enabled_value(&config));
     }
 
     #[test]

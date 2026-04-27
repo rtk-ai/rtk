@@ -7,7 +7,8 @@
 - Prompt-level guidance via `rtk-awareness.md`, injected into `AGENTS.md` with an `@RTK.md` reference
 - Programmatic Codex hook via `rtk hook codex`, wired through `hooks.json`
 - `rtk init --codex` also enables `features.codex_hooks = true` in the active Codex `config.toml`
-- Installed to `$CODEX_HOME` when set, otherwise `~/.codex/`, by `rtk init --codex`
+- `rtk init --codex` writes Codex hook files to the local `./.codex/` directory
+- `rtk init -g --codex` writes to `$CODEX_HOME` when set, otherwise `~/.codex/`
 
 ## Behavior
 
