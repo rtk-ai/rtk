@@ -54,6 +54,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
     let mut failures: Vec<String> = Vec::new();
     let mut current_failure: Vec<String> = Vec::new();
     let mut summary_line = String::new();
+    let mut had_failures_section = false;
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -64,6 +65,7 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("FAILURES") {
             state = ParseState::Failures;
+            had_failures_section = true;
             continue;
         } else if trimmed.starts_with("===") && trimmed.contains("short test summary") {
             state = ParseState::Summary;
@@ -126,9 +128,10 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
             ParseState::Summary => {
                 // FAILED/ERROR lines from `=== short test summary info ===` are a
                 // recap of failures already captured in the `=== FAILURES ===`
-                // section. Only collect them when FAILURES section was empty
-                // (e.g. user passed --tb=no) — otherwise every failure renders twice.
-                if failures.is_empty()
+                // section. Skip them entirely when we saw a FAILURES section
+                // (otherwise every failure renders twice); use them as the only
+                // source of failures when FAILURES section is absent (--tb=no).
+                if !had_failures_section
                     && (trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR"))
                 {
                     failures.push(trimmed.to_string());
@@ -416,6 +419,39 @@ FAILED tests/test_sample.py::TestSample::test_case - assert False
             occurrences, result
         );
         assert!(result.contains("[FAIL]"), "Output: {}", result);
+    }
+
+    #[test]
+    fn test_filter_pytest_tb_no_collects_all_failures() {
+        // With --tb=no there's no FAILURES section, only summary recap. All
+        // FAILED lines from the summary should still be captured.
+        let output = r#"=== test session starts ===
+collected 5 items
+
+tests/test_sample.py FFF..                                          [100%]
+
+=== short test summary info ===
+FAILED tests/test_sample.py::test_one - assert False
+FAILED tests/test_sample.py::test_two - assert False
+FAILED tests/test_sample.py::test_three - assert False
+=== 3 failed, 2 passed in 1.50s ==="#;
+
+        let result = filter_pytest_output(output);
+        assert!(
+            result.contains("test_one"),
+            "Missing test_one. Output:\n{}",
+            result
+        );
+        assert!(
+            result.contains("test_two"),
+            "Missing test_two. Output:\n{}",
+            result
+        );
+        assert!(
+            result.contains("test_three"),
+            "Missing test_three. Output:\n{}",
+            result
+        );
     }
 
     #[test]
