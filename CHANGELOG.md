@@ -243,6 +243,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **git:** remove `-u` short alias from `--ultra-compact` to fix `git push -u` upstream tracking ([#1086](https://github.com/rtk-ai/rtk/issues/1086))
+* **read:** stop counting `--max-lines` / `--tail-lines` truncation as token savings ([#1045](https://github.com/rtk-ai/rtk/issues/1045)). Affected users will see lower (and accurate) numbers in `rtk gain` going forward.
 
 ## [0.35.0](https://github.com/rtk-ai/rtk/compare/v0.34.3...v0.35.0) (2026-04-06)
 
