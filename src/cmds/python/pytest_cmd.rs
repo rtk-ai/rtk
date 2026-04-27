@@ -124,8 +124,13 @@ pub(crate) fn filter_pytest_output(output: &str) -> String {
                 }
             }
             ParseState::Summary => {
-                // FAILED test lines
-                if trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR") {
+                // FAILED/ERROR lines from `=== short test summary info ===` are a
+                // recap of failures already captured in the `=== FAILURES ===`
+                // section. Only collect them when FAILURES section was empty
+                // (e.g. user passed --tb=no) — otherwise every failure renders twice.
+                if failures.is_empty()
+                    && (trimmed.starts_with("FAILED") || trimmed.starts_with("ERROR"))
+                {
                     failures.push(trimmed.to_string());
                 }
             }
@@ -378,6 +383,39 @@ FAILED tests/test_foo.py::test_something - AssertionError
             "Should show actual test counts. Got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_pytest_no_duplicate_failures() {
+        // pytest prints each failure twice — once in `=== FAILURES ===` (with
+        // traceback) and once in `=== short test summary info ===` (one-liner).
+        // We must collect each failure only once.
+        let output = r#"=== test session starts ===
+collected 10 items
+
+tests/test_sample.py F                                              [100%]
+
+=== FAILURES ===
+___ TestSample.test_case ___
+
+    def test_case(self):
+>       assert False
+E       assert False
+
+tests/test_sample.py:8: AssertionError
+
+=== short test summary info ===
+FAILED tests/test_sample.py::TestSample::test_case - assert False
+=== 9 passed, 1 failed in 1.50s ==="#;
+
+        let result = filter_pytest_output(output);
+        let occurrences = result.matches("test_case").count();
+        assert_eq!(
+            occurrences, 1,
+            "Expected exactly one mention of test_case, got {}. Output:\n{}",
+            occurrences, result
+        );
+        assert!(result.contains("[FAIL]"), "Output: {}", result);
     }
 
     #[test]
