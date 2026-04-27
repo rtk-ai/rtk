@@ -106,7 +106,8 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
         Value::Number(n) => format!("{}{}", indent, n),
         Value::String(s) => {
             if s.len() > 80 {
-                format!("{}\"{}...\"", indent, &s[..77])
+                let end = s.floor_char_boundary(77);
+                format!("{}\"{}...\"", indent, &s[..end])
             } else {
                 format!("{}\"{}\"", indent, s)
             }
@@ -327,5 +328,20 @@ mod tests {
         let schema = extract_schema(&json, 0, 5);
         assert!(schema.contains("items"));
         assert!(schema.contains("(3)"));
+    }
+
+    #[test]
+    fn test_compact_long_multibyte_string_does_not_panic() {
+        let payload = "a".repeat(76) + &"日本語".repeat(5);
+        let json = format!(r#"{{"key": "{}"}}"#, payload);
+
+        let output = filter_json_compact(&json, 5)
+            .expect("filter_json_compact must not error on valid JSON");
+
+        assert!(output.contains("key"));
+        assert!(
+            output.contains("..."),
+            "long string should be truncated, got: {output}"
+        );
     }
 }
