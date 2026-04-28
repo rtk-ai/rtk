@@ -57,37 +57,36 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 
 ## Installation
 
-### Homebrew (recommended)
+> **Homeserve mirror — macOS only.** This fork (`HomeserveFR/rtk`) is a security-validated mirror of the upstream `rtk-ai/rtk`. Binaries are built from `homeserve/main` and only target macOS (Intel + Apple Silicon). Linux and Windows are intentionally not supported here — use the upstream repository if you need them.
+
+### Quick Install (macOS)
 
 ```bash
-brew install rtk
-```
-
-### Quick Install (Linux/macOS)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserve/main/install.sh | sh
 ```
 
 > Installs to `~/.local/bin`. Add to PATH if needed:
 > ```bash
-> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 > ```
+
+### Homebrew
+
+```bash
+brew install https://raw.githubusercontent.com/HomeserveFR/rtk/homeserve/main/Formula/rtk.rb
+```
 
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/HomeserveFR/rtk
 ```
 
 ### Pre-built Binaries
 
-Download from [releases](https://github.com/rtk-ai/rtk/releases):
-- macOS: `rtk-x86_64-apple-darwin.tar.gz` / `rtk-aarch64-apple-darwin.tar.gz`
-- Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
-- Windows: `rtk-x86_64-pc-windows-msvc.zip`
-
-> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) where the full hook system works natively. See [Windows setup](#windows) below for details.
+Download from [releases](https://github.com/HomeserveFR/rtk/releases):
+- macOS Intel: `rtk-x86_64-apple-darwin.tar.gz`
+- macOS Apple Silicon: `rtk-aarch64-apple-darwin.tar.gz`
 
 ### Verify Installation
 
