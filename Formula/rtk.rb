@@ -8,18 +8,18 @@
 class Rtk < Formula
   desc "High-performance CLI proxy to minimize LLM token consumption"
   homepage "https://github.com/HomeserveFR/rtk"
-  version "0.38.0"
+  version "0.38.1"
   license "MIT"
 
   on_macos do
     on_intel do
       url "https://github.com/HomeserveFR/rtk/releases/download/v#{version}/rtk-x86_64-apple-darwin.tar.gz"
-      sha256 "b628d2878912571994975ff5cd001fd30f5c796252e571ded6a588e043edc06a"
+      sha256 "b198307d727432d8355a127c4997e0a9440280b2f3c3704e4135604fc01f54b3"
     end
 
     on_arm do
       url "https://github.com/HomeserveFR/rtk/releases/download/v#{version}/rtk-aarch64-apple-darwin.tar.gz"
-      sha256 "21dd4c34d345737ef22770f1391243b3d4267e801e40ad2b75218c5c9e330054"
+      sha256 "73064058e3b287e0fa7f9d8d05cb7894b559bed6efe44d76863957c0d7a31b51"
     end
   end
 
