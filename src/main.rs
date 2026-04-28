@@ -19,8 +19,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, summary, tree, wc_cmd,
+    deps, env_cmd, extract_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls,
+    pipe_cmd, read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -320,6 +320,36 @@ enum Commands {
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
+    },
+
+    /// Extract char-windowed context around regex matches (minified-file friendly)
+    Extract {
+        /// Regex pattern to find
+        pattern: String,
+        /// File or directory to search
+        #[arg(default_value = ".")]
+        path: String,
+        /// Symmetric window size in chars (overridden by --before/--after if given)
+        #[arg(short = 'w', long, default_value = "100")]
+        window: usize,
+        /// Chars before each match (overrides --window for the left side)
+        #[arg(short = 'b', long)]
+        before: Option<usize>,
+        /// Chars after each match (overrides --window for the right side)
+        #[arg(short = 'a', long)]
+        after: Option<usize>,
+        /// Required substring inside the window (repeatable; ALL must match)
+        #[arg(short = 'r', long)]
+        require: Vec<String>,
+        /// Case-insensitive match for both pattern and --require
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        /// Max windows shown (token-budget cap)
+        #[arg(short = 'm', long, default_value = "100")]
+        max: usize,
+        /// Disable collapsing of identical windows in the same file
+        #[arg(long)]
+        no_dedupe: bool,
     },
 
     /// Initialize rtk instructions for assistant CLI usage
@@ -1743,6 +1773,28 @@ fn run_cli() -> Result<i32> {
             cli.verbose,
         )?,
 
+        Commands::Extract {
+            pattern,
+            path,
+            window,
+            before,
+            after,
+            require,
+            ignore_case,
+            max,
+            no_dedupe,
+        } => extract_cmd::run(
+            &pattern,
+            &path,
+            before.unwrap_or(window),
+            after.unwrap_or(window),
+            &require,
+            ignore_case,
+            max,
+            !no_dedupe,
+            cli.verbose,
+        )?,
+
         Commands::Init {
             global,
             opencode,
@@ -2406,6 +2458,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Kubectl { .. }
             | Commands::Summary { .. }
             | Commands::Grep { .. }
+            | Commands::Extract { .. }
             | Commands::Wget { .. }
             | Commands::Vitest { .. }
             | Commands::Prisma { .. }
