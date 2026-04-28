@@ -42,7 +42,7 @@ bench() {
   local rtk_cmd="$3"
 
   unix_out=$(eval "$unix_cmd" 2>/dev/null || true)
-  rtk_out=$(eval "$rtk_cmd" 2>/dev/null || true)
+  rtk_out=$(eval "$rtk_cmd" 2>&1 || true)
 
   unix_tokens=$(count_tokens "$unix_out")
   rtk_tokens=$(count_tokens "$rtk_out")
