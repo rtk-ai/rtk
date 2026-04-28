@@ -58,20 +58,51 @@ fn filter_curl_output(raw: &str) -> FilterResult {
     let trimmed = raw.trim();
     let tee_hint = force_tee_hint(raw, "curl");
 
-    // If the output is too long and we have a tee hint, truncate the output.
-    let content = if trimmed.len() >= MAX_RESPONSE_SIZE && tee_hint.is_some() {
-        let mut end = MAX_RESPONSE_SIZE;
-        // Ensure we don't cut in the middle of a UTF-8 character.
-        // .len() counts bytes, not chars.
-        while !trimmed.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}... ({} bytes total)", &trimmed[..end], trimmed.len())
-    } else {
-        trimmed.to_string()
-    };
+    if trimmed.len() < MAX_RESPONSE_SIZE || tee_hint.is_none() {
+        return FilterResult {
+            content: trimmed.to_string(),
+            tee_hint,
+        };
+    }
 
+    let total_bytes = trimmed.len();
+
+    // For JSON-shaped responses, mid-stream truncation produces invalid JSON
+    // that downstream agents can't parse. Emit a parseable envelope instead and
+    // fold the tee path into it so the caller doesn't print a separate trailer.
+    if is_json_shape(trimmed) {
+        let tee_log = tee_hint
+            .as_deref()
+            .and_then(|h| h.strip_prefix("[full output: "))
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or("");
+        let envelope = serde_json::json!({
+            "_rtk": {
+                "truncated": true,
+                "total_bytes": total_bytes,
+                "tee_log": tee_log,
+            }
+        })
+        .to_string();
+        return FilterResult {
+            content: envelope,
+            tee_hint: None,
+        };
+    }
+
+    // Non-JSON: keep the existing prefix-with-byte-count truncation.
+    let mut end = MAX_RESPONSE_SIZE;
+    // Ensure we don't cut in the middle of a UTF-8 character.
+    // .len() counts bytes, not chars.
+    while !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    let content = format!("{}... ({} bytes total)", &trimmed[..end], total_bytes);
     FilterResult { content, tee_hint }
+}
+
+fn is_json_shape(s: &str) -> bool {
+    matches!(s.as_bytes().first(), Some(b'{' | b'['))
 }
 
 struct FilterResult {
@@ -121,5 +152,48 @@ mod tests {
         let content = "a".repeat(500);
         let result = filter_curl_output(&content);
         assert!(result.content.contains("bytes total"));
+    }
+
+    #[test]
+    fn test_filter_curl_large_json_object_emits_valid_envelope() {
+        // Build a JSON object well past MAX_RESPONSE_SIZE so the truncation
+        // branch fires. With the prior implementation the result would be a
+        // mid-string slice ending in "... (N bytes total)" which is not
+        // parseable as JSON.
+        let payload = "x".repeat(600);
+        let json = format!(r#"{{"data":"{}"}}"#, payload);
+        let result = filter_curl_output(&json);
+
+        // Output must be valid JSON and identifiably an rtk envelope.
+        let parsed: serde_json::Value = serde_json::from_str(&result.content)
+            .expect("envelope must be valid JSON for downstream agents to parse");
+        let rtk = parsed
+            .get("_rtk")
+            .expect("envelope carries _rtk metadata key");
+        assert_eq!(rtk.get("truncated"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            rtk.get("total_bytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap(),
+            json.len() as u64
+        );
+        assert!(rtk.get("tee_log").and_then(|v| v.as_str()).is_some());
+
+        // Envelope already carries the tee path; suppress the separate trailer
+        // line so callers print one valid JSON document and nothing else.
+        assert!(result.tee_hint.is_none());
+    }
+
+    #[test]
+    fn test_filter_curl_large_json_array_emits_valid_envelope() {
+        let item = r#"{"id":1,"name":"placeholder-name-with-padding"}"#;
+        let array = format!("[{}]", vec![item; 20].join(","));
+        assert!(array.len() >= 500);
+        let result = filter_curl_output(&array);
+
+        let parsed: serde_json::Value = serde_json::from_str(&result.content)
+            .expect("array-shaped responses also need a parseable envelope");
+        assert!(parsed.get("_rtk").is_some());
+        assert!(result.tee_hint.is_none());
     }
 }
