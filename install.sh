@@ -1,18 +1,17 @@
 #!/usr/bin/env sh
-# rtk installer - https://github.com/rtk-ai/rtk
-# Usage: curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+# rtk installer (Homeserve mirror) - https://github.com/HomeserveFR/rtk
+# Usage: curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserve/main/install.sh | sh
 
 set -e
 
-REPO="rtk-ai/rtk"
+REPO="HomeserveFR/rtk"
 BINARY_NAME="rtk"
 INSTALL_DIR="${RTK_INSTALL_DIR:-$HOME/.local/bin}"
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 info() {
     printf "${GREEN}[INFO]${NC} %s\n" "$1"
@@ -27,16 +26,12 @@ error() {
     exit 1
 }
 
-# Detect OS
-detect_os() {
-    case "$(uname -s)" in
-        Linux*)  OS="linux";;
-        Darwin*) OS="darwin";;
-        *)       error "Unsupported operating system: $(uname -s)";;
-    esac
+require_macos() {
+    if [ "$(uname -s)" != "Darwin" ]; then
+        error "This Homeserve mirror of rtk only supports macOS. Detected: $(uname -s)"
+    fi
 }
 
-# Detect architecture
 detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64)  ARCH="x86_64";;
@@ -45,7 +40,6 @@ detect_arch() {
     esac
 }
 
-# Get latest release version
 get_latest_version() {
     VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [ -z "$VERSION" ]; then
@@ -53,24 +47,12 @@ get_latest_version() {
     fi
 }
 
-# Build target triple
 get_target() {
-    case "$OS" in
-        linux)
-            case "$ARCH" in
-                x86_64)  TARGET="x86_64-unknown-linux-musl";;
-                aarch64) TARGET="aarch64-unknown-linux-gnu";;
-            esac
-            ;;
-        darwin)
-            TARGET="${ARCH}-apple-darwin"
-            ;;
-    esac
+    TARGET="${ARCH}-apple-darwin"
 }
 
-# Download and install
 install() {
-    info "Detected: $OS $ARCH"
+    info "Detected: macOS $ARCH"
     info "Target: $TARGET"
     info "Version: $VERSION"
 
@@ -91,13 +73,11 @@ install() {
 
     chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 
-    # Cleanup
     rm -rf "$TEMP_DIR"
 
     info "Successfully installed ${BINARY_NAME} to ${INSTALL_DIR}/${BINARY_NAME}"
 }
 
-# Verify installation
 verify() {
     if command -v "$BINARY_NAME" >/dev/null 2>&1; then
         info "Verification: $($BINARY_NAME --version)"
@@ -108,9 +88,9 @@ verify() {
 }
 
 main() {
-    info "Installing $BINARY_NAME..."
+    info "Installing $BINARY_NAME (Homeserve mirror)..."
 
-    detect_os
+    require_macos
     detect_arch
     get_target
     get_latest_version
