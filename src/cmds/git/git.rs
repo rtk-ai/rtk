@@ -1674,9 +1674,11 @@ fn filter_worktree_list(output: &str) -> String {
 }
 
 /// Maximum number of sparse-checkout patterns to print before truncating to a
-/// `... +N more` summary. Mirrors the truncation thresholds used by
-/// `format_status_output` so very large monorepo cone lists don't blow up the
-/// LLM context.
+/// `... +N more` summary. Same order of magnitude as the configurable
+/// thresholds used by `format_status_output` (`status_max_files`,
+/// `status_max_untracked`, defaults 15/10) but intentionally fixed here —
+/// typical project configs never truncate, while a 200+ pattern monorepo cone
+/// list compresses meaningfully without blowing up the LLM context.
 const SPARSE_CHECKOUT_LIST_MAX_LINES: usize = 50;
 
 /// Subcommands of `git sparse-checkout` that mutate state.
@@ -1688,20 +1690,44 @@ const SPARSE_CHECKOUT_ACTION_SUBCOMMANDS: &[&str] = &[
     "init", "set", "add", "disable", "reapply",
 ];
 
+/// Returns true when `args` contains git's `--stdin` flag, which makes
+/// `set`/`add` read patterns line-by-line from stdin until EOF.
+///
+/// `exec_capture` unconditionally nulls stdin, so action subcommands invoked
+/// with `--stdin` would otherwise see immediate EOF and silently apply an
+/// empty pattern set — effectively wiping the user's sparse-checkout config
+/// while still reporting success.
+fn sparse_checkout_uses_stdin(sub: &str, args: &[String]) -> bool {
+    matches!(sub, "set" | "add") && args.iter().any(|a| a == "--stdin")
+}
+
+/// Build the args slice that `run_passthrough` expects from a sparse-checkout
+/// invocation: `["sparse-checkout", <sub>?, ...args]` as `OsString`s.
+fn sparse_checkout_passthrough_args(sub: Option<&str>, args: &[String]) -> Vec<OsString> {
+    let mut out: Vec<OsString> = Vec::with_capacity(args.len() + 2);
+    out.push(OsString::from("sparse-checkout"));
+    if let Some(sub) = sub {
+        out.push(OsString::from(sub));
+    }
+    for arg in args {
+        out.push(OsString::from(arg));
+    }
+    out
+}
+
 fn run_sparse_checkout(
     subcommand: Option<&str>,
     args: &[String],
     verbose: u8,
     global_args: &[String],
 ) -> Result<i32> {
-    let timer = tracking::TimedExecution::start();
-
     if verbose > 0 {
         eprintln!("git sparse-checkout {:?}", subcommand);
     }
 
     match subcommand {
         Some("list") => {
+            let timer = tracking::TimedExecution::start();
             let mut cmd = git_cmd(global_args);
             cmd.args(["sparse-checkout", "list"]);
             for arg in args {
@@ -1730,8 +1756,13 @@ fn run_sparse_checkout(
                 &result.stdout,
                 &filtered,
             );
+            Ok(0)
         }
-        Some(sub) if SPARSE_CHECKOUT_ACTION_SUBCOMMANDS.contains(&sub) => {
+        Some(sub)
+            if SPARSE_CHECKOUT_ACTION_SUBCOMMANDS.contains(&sub)
+                && !sparse_checkout_uses_stdin(sub, args) =>
+        {
+            let timer = tracking::TimedExecution::start();
             let mut cmd = git_cmd(global_args);
             cmd.args(["sparse-checkout", sub]);
             for arg in args {
@@ -1763,37 +1794,34 @@ fn run_sparse_checkout(
             if !result.success() {
                 return Ok(result.exit_code);
             }
+            Ok(0)
         }
         Some(sub) => {
-            // Unrecognized subcommand (e.g. `check-rules`, future additions):
-            // passthrough unfiltered so we never break valid git usage.
-            let mut passthrough_args: Vec<OsString> =
-                Vec::with_capacity(args.len() + 2);
-            passthrough_args.push(OsString::from("sparse-checkout"));
-            passthrough_args.push(OsString::from(sub));
-            for arg in args {
-                passthrough_args.push(OsString::from(arg));
-            }
-            let _ = timer; // tracking handled inside run_passthrough
-            return run_passthrough(&passthrough_args, global_args, verbose);
+            // Falls through to passthrough for three cases, all of which need
+            // an inherited stdin or unfiltered output:
+            //   1. `set --stdin` / `add --stdin`  — read patterns from stdin
+            //   2. `check-rules`                  — reads paths from stdin
+            //   3. unknown / future subcommands   — don't break valid git usage
+            //
+            // `run_passthrough` uses `.status()` which inherits the parent
+            // stdin/stdout/stderr, and tracks its own timing.
+            let passthrough_args = sparse_checkout_passthrough_args(Some(sub), args);
+            run_passthrough(&passthrough_args, global_args, verbose)
         }
         None => {
             // `git sparse-checkout` with no subcommand prints usage to stderr
             // and exits non-zero. Pass through so the user sees the real help.
-            let passthrough_args: Vec<OsString> = vec![OsString::from("sparse-checkout")];
-            let _ = timer;
-            return run_passthrough(&passthrough_args, global_args, verbose);
+            let passthrough_args = sparse_checkout_passthrough_args(None, args);
+            run_passthrough(&passthrough_args, global_args, verbose)
         }
     }
-
-    Ok(0)
 }
 
 /// Compress `git sparse-checkout list` output: trim, drop blank lines, and cap
 /// at `max_lines` patterns followed by a `... +N more` summary. Each pattern is
 /// preserved verbatim — sparse-checkout patterns are semantically meaningful
 /// (they decide which paths exist on disk), so we never reorder or merge them.
-pub(crate) fn filter_sparse_checkout_list(output: &str, max_lines: usize) -> String {
+fn filter_sparse_checkout_list(output: &str, max_lines: usize) -> String {
     let patterns: Vec<&str> = output
         .lines()
         .map(str::trim_end)
@@ -2223,16 +2251,55 @@ mod tests {
 
     #[test]
     fn test_sparse_checkout_action_subcommands_are_recognized() {
-        // Guard against accidental rename: each action must produce an `ok`
-        // success message in run_sparse_checkout. The list also drives the
-        // dispatch in the match arm above.
-        for sub in SPARSE_CHECKOUT_ACTION_SUBCOMMANDS {
-            assert!(
-                matches!(*sub, "init" | "set" | "add" | "disable" | "reapply"),
-                "unexpected sparse-checkout action subcommand: {}",
-                sub
-            );
+        // Equality (not membership) so accidental removals, additions, typos,
+        // or reordering all surface here — this slice drives dispatch.
+        assert_eq!(
+            SPARSE_CHECKOUT_ACTION_SUBCOMMANDS,
+            &["init", "set", "add", "disable", "reapply"]
+        );
+    }
+
+    #[test]
+    fn test_sparse_checkout_uses_stdin_only_for_set_and_add() {
+        // Carve-out predicate for the `--stdin` regression: only `set` and
+        // `add` accept `--stdin` per git-sparse-checkout(1).
+        assert!(sparse_checkout_uses_stdin(
+            "set",
+            &["--stdin".to_string()]
+        ));
+        assert!(sparse_checkout_uses_stdin(
+            "add",
+            &["--stdin".to_string()]
+        ));
+        // No `--stdin` token → false even for set/add.
+        assert!(!sparse_checkout_uses_stdin(
+            "set",
+            &["src".to_string(), "docs".to_string()]
+        ));
+        // Other action subcommands never read stdin.
+        for sub in ["init", "disable", "reapply"] {
+            assert!(!sparse_checkout_uses_stdin(
+                sub,
+                &["--stdin".to_string()]
+            ));
         }
+    }
+
+    #[test]
+    fn test_sparse_checkout_passthrough_args_with_subcommand() {
+        let out = sparse_checkout_passthrough_args(
+            Some("check-rules"),
+            &["-z".to_string(), "src/foo.rs".to_string()],
+        );
+        let strs: Vec<&str> = out.iter().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(strs, vec!["sparse-checkout", "check-rules", "-z", "src/foo.rs"]);
+    }
+
+    #[test]
+    fn test_sparse_checkout_passthrough_args_without_subcommand() {
+        let out = sparse_checkout_passthrough_args(None, &[]);
+        let strs: Vec<&str> = out.iter().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(strs, vec!["sparse-checkout"]);
     }
 
     #[test]

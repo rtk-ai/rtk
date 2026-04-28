@@ -2584,6 +2584,101 @@ mod tests {
         assert!(result.is_ok(), "git status should parse successfully");
     }
 
+    // ----- sparse-checkout clap parsing -----
+    //
+    // Pin the optional-subcommand + trailing_var_arg split for the hyphenated
+    // `sparse-checkout` variant. Regressions here would mis-dispatch dangerous
+    // forms (e.g. routing `set --stdin` to capture mode — see the `--stdin`
+    // regression test in run_sparse_checkout).
+
+    #[test]
+    fn test_git_sparse_checkout_list_no_args() {
+        let cli = Cli::try_parse_from(["rtk", "git", "sparse-checkout", "list"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::SparseCheckout { subcommand, args },
+                ..
+            } => {
+                assert_eq!(subcommand.as_deref(), Some("list"));
+                assert!(
+                    args.is_empty(),
+                    "list takes no positional args, got {:?}",
+                    args
+                );
+            }
+            _ => panic!("Expected Git SparseCheckout command"),
+        }
+    }
+
+    #[test]
+    fn test_git_sparse_checkout_set_with_patterns() {
+        let cli =
+            Cli::try_parse_from(["rtk", "git", "sparse-checkout", "set", "src", "docs"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::SparseCheckout { subcommand, args },
+                ..
+            } => {
+                assert_eq!(subcommand.as_deref(), Some("set"));
+                assert_eq!(args, vec!["src", "docs"]);
+            }
+            _ => panic!("Expected Git SparseCheckout command"),
+        }
+    }
+
+    #[test]
+    fn test_git_sparse_checkout_set_stdin_flag_lands_in_args() {
+        // `--stdin` must reach `args` so the runtime can detect it and route
+        // to passthrough (otherwise stdin gets nulled and patterns are wiped).
+        let cli = Cli::try_parse_from(["rtk", "git", "sparse-checkout", "set", "--stdin"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::SparseCheckout { subcommand, args },
+                ..
+            } => {
+                assert_eq!(subcommand.as_deref(), Some("set"));
+                assert_eq!(args, vec!["--stdin"]);
+            }
+            _ => panic!("Expected Git SparseCheckout command"),
+        }
+    }
+
+    #[test]
+    fn test_git_sparse_checkout_check_rules_with_z_flag() {
+        // `check-rules -z` is a real git invocation (NUL-delimited paths from
+        // stdin). Ensure the hyphenated subcommand parses with hyphen-prefixed
+        // trailing args.
+        let cli =
+            Cli::try_parse_from(["rtk", "git", "sparse-checkout", "check-rules", "-z"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::SparseCheckout { subcommand, args },
+                ..
+            } => {
+                assert_eq!(subcommand.as_deref(), Some("check-rules"));
+                assert_eq!(args, vec!["-z"]);
+            }
+            _ => panic!("Expected Git SparseCheckout command"),
+        }
+    }
+
+    #[test]
+    fn test_git_sparse_checkout_no_subcommand_is_none() {
+        // `rtk git sparse-checkout` (no further args) must parse with
+        // subcommand=None so the runtime can passthrough to git's usage error.
+        let cli = Cli::try_parse_from(["rtk", "git", "sparse-checkout"]).unwrap();
+        match cli.command {
+            Commands::Git {
+                command: GitCommands::SparseCheckout { subcommand, args },
+                ..
+            } => {
+                assert!(subcommand.is_none(), "expected None, got {:?}", subcommand);
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected Git SparseCheckout command"),
+        }
+    }
+
     #[test]
     fn test_try_parse_help_is_display_help() {
         match Cli::try_parse_from(["rtk", "--help"]) {
