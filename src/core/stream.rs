@@ -305,6 +305,7 @@ pub fn run_streaming(
     let mut capped_out = false;
     let mut capped_err = false;
     let mut saved_filter: Option<Box<dyn StreamFilter + '_>> = None;
+    let mut filter_fd_is_stderr = false;
 
     if is_streaming {
         enum StreamLine {
@@ -333,11 +334,13 @@ pub fn run_streaming(
         if let FilterMode::Streaming(mut filter) = stdout_mode {
             let stdout_handle = io::stdout();
             let mut out = stdout_handle.lock();
+            let stderr_handle = io::stderr();
+            let mut err_out = stderr_handle.lock();
 
             for msg in rx {
                 let (line, is_stderr) = match msg {
-                    StreamLine::Stdout(l) => (l, false),
                     StreamLine::Stderr(l) => (l, true),
+                    StreamLine::Stdout(l) => (l, false),
                 };
                 if is_stderr {
                     if !capped_err {
@@ -358,9 +361,11 @@ pub fn run_streaming(
                         eprintln!("[rtk] warning: stdout exceeds 10 MiB — filter input truncated");
                     }
                 }
+                filter_fd_is_stderr = is_stderr;
                 if let Some(output) = filter.feed_line(&line) {
                     filtered.push_str(&output);
-                    match write!(out, "{}", output) {
+                    let dest: &mut dyn Write = if is_stderr { &mut err_out } else { &mut out };
+                    match write!(dest, "{}", output) {
                         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => break,
                         Err(e) => return Err(e.into()),
                         Ok(_) => {}
@@ -369,7 +374,12 @@ pub fn run_streaming(
             }
             let tail = filter.flush();
             filtered.push_str(&tail);
-            match write!(io::stdout(), "{}", tail) {
+            let flush_dest: &mut dyn Write = if filter_fd_is_stderr {
+                &mut err_out
+            } else {
+                &mut out
+            };
+            match write!(flush_dest, "{}", tail) {
                 Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
                 Err(e) => return Err(e.into()),
                 Ok(_) => {}
@@ -459,7 +469,12 @@ pub fn run_streaming(
     if let Some(mut f) = saved_filter {
         if let Some(post) = f.on_exit(exit_code, &raw) {
             filtered.push_str(&post);
-            match write!(io::stdout(), "{}", post) {
+            let mut dest: Box<dyn Write> = if filter_fd_is_stderr {
+                Box::new(io::stderr().lock())
+            } else {
+                Box::new(io::stdout().lock())
+            };
+            match write!(dest, "{}", post) {
                 Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
                 Err(e) => return Err(e.into()),
                 Ok(_) => {}
@@ -904,8 +919,7 @@ pub(crate) mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn test_streaming_merges_stderr_through_filter() {
-        // nosemgrep: interpreter-execution
+    fn test_streaming_filters_both_fds_and_routes_to_correct_fd() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo 'error[E0308]: type mismatch'; echo '   Compiling foo v1.0' >&2; echo '   Downloading bar v2.0' >&2; echo '   Finished dev' >&2; echo 'real error on stderr' >&2"]);
 
@@ -937,27 +951,27 @@ pub(crate) mod tests {
         .unwrap();
 
         assert!(
+            result.filtered.contains("error[E0308]"),
+            "filtered should contain stdout errors, got: {}",
+            result.filtered
+        );
+        assert!(
             !result.filtered.contains("Compiling"),
-            "filtered output should not contain cargo noise, got: {}",
+            "cargo noise should be filtered out, got: {}",
             result.filtered
         );
         assert!(
             !result.filtered.contains("Downloading"),
-            "filtered output should not contain cargo noise, got: {}",
-            result.filtered
-        );
-        assert!(
-            result.filtered.contains("error[E0308]"),
-            "filtered output should contain real errors, got: {}",
+            "cargo noise should be filtered out, got: {}",
             result.filtered
         );
         assert!(
             result.raw_stderr.contains("Compiling"),
-            "raw_stderr should still capture noise for tracking"
+            "raw_stderr should capture all stderr lines"
         );
         assert!(
             result.raw_stderr.contains("real error on stderr"),
-            "raw_stderr should capture real errors"
+            "raw_stderr should capture all stderr lines"
         );
     }
 }
