@@ -742,10 +742,31 @@ fn should_passthrough_run_view(extra_args: &[String]) -> bool {
         .any(|a| a == "--log-failed" || a == "--log" || a == "--json")
 }
 
+/// Returns the value of `--job <id>` if present in `args`. `gh run view`
+/// treats `--job` as an alternative to the positional run-id, and our
+/// own filter ignores it (it lives in `flags_with_value`), so we need
+/// to peek explicitly to know whether a missing run-id is actually
+/// fatal.
+fn extract_job_id(args: &[String]) -> Option<String> {
+    args.windows(2)
+        .find_map(|pair| (pair[0] == "--job").then(|| pair[1].clone()))
+}
+
 fn view_run(args: &[String], _verbose: u8) -> Result<i32> {
     let (run_id, extra_args) = match extract_identifier_and_extra_args(args) {
         Some(result) => result,
-        None => return Err(anyhow::anyhow!("Run ID required")),
+        None => {
+            // `gh run view --job <id>` is a valid invocation per the
+            // gh CLI: the positional run-id becomes optional when
+            // `--job` supplies a job identifier directly. Without
+            // this branch, rtk rejected the command with
+            // "Run ID required" even though the user gave gh enough
+            // information to run successfully (issue #1568).
+            if extract_job_id(args).is_some() {
+                return run_passthrough_with_extra("gh", &["run", "view"], &args.to_vec());
+            }
+            return Err(anyhow::anyhow!("Run ID required"));
+        }
     };
     if should_passthrough_run_view(&extra_args) {
         return run_passthrough_with_extra("gh", &["run", "view", &run_id], &extra_args);
@@ -1133,6 +1154,54 @@ mod tests {
         let (id, extra) = extract_identifier_and_extra_args(&args).unwrap();
         assert_eq!(id, "12345");
         assert_eq!(extra, vec!["--log-failed", "--job", "67890"]);
+    }
+
+    #[test]
+    fn test_extract_job_id_when_present() {
+        // Regression for #1568: rtk needs to know `--job <id>` is
+        // present even when `extract_identifier_and_extra_args` finds
+        // no positional run-id, because `gh run view` treats `--job`
+        // as a valid alternative identifier.
+        let args: Vec<String> = vec![
+            "--job".into(),
+            "72893237475".into(),
+            "--repo".into(),
+            "owner/repo".into(),
+            "--log".into(),
+        ];
+        assert_eq!(extract_job_id(&args), Some("72893237475".to_string()));
+    }
+
+    #[test]
+    fn test_extract_job_id_absent() {
+        let args: Vec<String> = vec!["12345".into(), "--repo".into(), "owner/repo".into()];
+        assert_eq!(extract_job_id(&args), None);
+    }
+
+    #[test]
+    fn test_extract_job_id_does_not_match_substrings() {
+        // `--job-foo` should not be treated as `--job`.
+        let args: Vec<String> = vec!["--job-foo".into(), "bar".into()];
+        assert_eq!(extract_job_id(&args), None);
+    }
+
+    #[test]
+    fn test_run_view_only_job_flag_no_positional_resolves_to_none() {
+        // Mirrors the gh CLI invocation from #1568:
+        //   gh run view --job 72893237475 --repo owner/repo --log
+        // `extract_identifier_and_extra_args` correctly returns None
+        // (no positional). The actual fix in `view_run` reads
+        // `extract_job_id` to detect this case and pass through to gh
+        // instead of erroring with "Run ID required".
+        let args: Vec<String> = vec![
+            "--job".into(),
+            "72893237475".into(),
+            "--repo".into(),
+            "owner/repo".into(),
+            "--log".into(),
+        ];
+        assert!(extract_identifier_and_extra_args(&args).is_none());
+        assert_eq!(extract_job_id(&args), Some("72893237475".to_string()));
     }
 
     #[test]
