@@ -9,6 +9,37 @@ use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
 
+/// RTK's standard line budget for compact diff output. Anything beyond
+/// this is real RTK-side compression. A user-supplied `--max-lines` is
+/// applied separately by `truncate_to_lines` so it does not get counted
+/// as RTK token savings (issue #1561).
+const RTK_DIFF_BUDGET: usize = 500;
+
+/// Truncate `text` to `max_lines.unwrap_or(usize::MAX)` lines, returning
+/// a borrowed slice when no truncation occurs and an owned slice with
+/// a trailing breadcrumb otherwise. Mirrors the user-facing semantics
+/// of the inline `if result.len() >= max_lines` block in `compact_diff`,
+/// but as a *post* step so tracking can see the pre-truncation content.
+fn truncate_to_lines<'a>(text: &'a str, max_lines: Option<usize>) -> std::borrow::Cow<'a, str> {
+    let Some(max) = max_lines else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let mut out = String::new();
+    let mut count = 0usize;
+    for line in text.lines() {
+        if count >= max {
+            out.push_str("\n... (more changes truncated)");
+            return std::borrow::Cow::Owned(out);
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+        count += 1;
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 #[derive(Debug, Clone)]
 pub enum GitCommand {
     Diff,
@@ -186,20 +217,34 @@ fn run_diff(
 
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
+    // Compact diff with RTK's standard budget. The 500-line cap inside
+    // compact_diff IS RTK compression, but a user-supplied --max-lines
+    // is a *user* request and must not be counted as RTK savings (#1561).
+    // Compute the RTK-compressed view first, then truncate for display
+    // separately, so tracking is anchored to the pre-user-truncation
+    // content.
+    let mut tracking_diff = String::new();
     let mut final_output = result.stdout.clone();
     if !diff_result.stdout.is_empty() {
+        let compacted = compact_diff(&diff_result.stdout, RTK_DIFF_BUDGET);
+        let displayed = truncate_to_lines(&compacted, max_lines);
         println!("\n--- Changes ---");
-        let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
-        println!("{}", compacted);
+        println!("{}", displayed);
         final_output.push_str("\n--- Changes ---\n");
-        final_output.push_str(&compacted);
+        final_output.push_str(&displayed);
+        tracking_diff = compacted;
     }
 
+    let tracking_output = if max_lines.is_some() {
+        format!("{}\n--- Changes ---\n{}", result.stdout, tracking_diff)
+    } else {
+        final_output.clone()
+    };
     timer.track(
         &format!("git diff {}", args.join(" ")),
         &format!("rtk git diff {}", args.join(" ")),
         &format!("{}\n{}", result.stdout, diff_result.stdout),
-        &final_output,
+        &tracking_output,
     );
 
     Ok(0)
@@ -297,21 +342,32 @@ fn run_show(
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git show (diff)")?;
     let diff_text = diff_result.stdout.trim();
 
+    // Same anti-inflation pattern as run_diff: keep the RTK-compressed
+    // view for tracking, then truncate for display only when the user
+    // explicitly passed --max-lines.
+    let mut tracking_diff = String::new();
     let mut final_output = summary_result.stdout.clone();
     if !diff_text.is_empty() {
+        let compacted = compact_diff(diff_text, RTK_DIFF_BUDGET);
+        let displayed = truncate_to_lines(&compacted, max_lines);
         if verbose > 0 {
             println!("\n--- Changes ---");
         }
-        let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str(&format!("\n{}", compacted));
+        println!("{}", displayed);
+        final_output.push_str(&format!("\n{}", displayed));
+        tracking_diff = compacted;
     }
 
+    let tracking_output = if max_lines.is_some() {
+        format!("{}\n{}", summary_result.stdout, tracking_diff)
+    } else {
+        final_output.clone()
+    };
     timer.track(
         &format!("git show {}", args.join(" ")),
         &format!("rtk git show {}", args.join(" ")),
         &raw_output,
-        &final_output,
+        &tracking_output,
     );
 
     Ok(0)
@@ -2511,6 +2567,58 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Expected '50 lines truncated' (150 - 100 = 50), got:\n{}",
             result
         );
+    }
+
+    // ── Regression tests for #1561 (max-lines savings inflation) ──────────
+
+    #[test]
+    fn test_truncate_to_lines_no_truncation_when_none() {
+        let text = "line 1\nline 2\nline 3";
+        let out = truncate_to_lines(text, None);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)),
+            "no max_lines must return a borrowed slice (zero-alloc fast path)");
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn test_truncate_to_lines_under_limit_returns_owned_unchanged_body() {
+        let text = "line 1\nline 2\nline 3";
+        let out = truncate_to_lines(text, Some(10));
+        // No truncation breadcrumb when under the limit.
+        assert!(!out.contains("more changes truncated"));
+        assert!(out.contains("line 1"));
+        assert!(out.contains("line 3"));
+    }
+
+    #[test]
+    fn test_truncate_to_lines_over_limit_emits_breadcrumb() {
+        let text = (0..20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let out = truncate_to_lines(&text, Some(5));
+        assert!(out.contains("line 0"));
+        assert!(out.contains("line 4"));
+        assert!(!out.contains("line 5"), "line 5 must not appear when truncated to 5");
+        assert!(out.contains("more changes truncated"),
+            "breadcrumb must be present when truncation occurs, got:\n{}", out);
+    }
+
+    /// Core invariant from the issue: when --max-lines is supplied,
+    /// the *displayed* output is the user-truncated slice but the
+    /// *tracking* anchor is the RTK-compressed (pre-user-truncation)
+    /// text. Without the fix, `final_output` was both the displayed
+    /// and tracked content, so the dropped tail counted as savings.
+    #[test]
+    fn test_max_lines_does_not_inflate_tracking() {
+        // Synthesize a long compact-diff-shaped string.
+        let compacted: String = (0..200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let displayed = truncate_to_lines(&compacted, Some(5));
+
+        // Displayed slice is short and ends with the breadcrumb.
+        assert!(displayed.lines().count() <= 6); // 5 + breadcrumb line
+        assert!(displayed.contains("more changes truncated"));
+
+        // Tracking slice is the full compacted text (no breadcrumb).
+        assert!(!compacted.contains("more changes truncated"));
+        assert!(compacted.lines().count() == 200);
     }
 
     #[test]
