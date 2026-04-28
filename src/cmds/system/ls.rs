@@ -11,9 +11,14 @@ use std::io::IsTerminal;
 lazy_static! {
     /// Matches the date+time portion in `ls -la` output, which serves as a
     /// stable anchor regardless of owner/group column width.
-    /// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
+    ///
+    /// Two orderings are accepted:
+    ///   * `Mon DD HH:MM` / `Mon DD  YYYY` — POSIX/`LC_TIME=C` and US locales.
+    ///   * `DD Mon HH:MM` / `DD Mon  YYYY` — en_GB, en_IN, and many other
+    ///     locales that BSD `ls` honors. Without this branch, `rtk ls`
+    ///     parsed *zero* entries on those systems (issue #1566).
     static ref LS_DATE_RE: Regex = Regex::new(
-        r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})\s+"
+        r"\s+(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))\s+(?:\d{4}|\d{2}:\d{2})\s+"
     )
     .unwrap();
 }
@@ -542,6 +547,49 @@ mod tests {
     #[test]
     fn test_parse_ls_line_returns_none_for_total() {
         assert!(parse_ls_line("total 48").is_none());
+    }
+
+    // Regression test for #1566: BSD `ls` on en_GB / en_IN locales emits
+    // `DD Mon HH:MM` (e.g. `28 Apr 02:47`) instead of `Mon DD HH:MM`. The
+    // old regex only matched the latter, so every line was rejected and
+    // the command collapsed to "(empty)" with a 100% reduction banner.
+    #[test]
+    fn test_compact_locale_dd_mon_time() {
+        let input = "total 0\n\
+                     drwx------   7 user  staff   224 28 Apr 02:47 .\n\
+                     drwx------ 804 user  staff 25728 28 Apr 02:47 ..\n\
+                     -rw-r--r--   1 user  staff     0 28 Apr 02:47 alpha.dart\n\
+                     -rw-r--r--   1 user  staff     0 28 Apr 02:47 bravo.dart\n\
+                     -rw-r--r--   1 user  staff     0 28 Apr 02:47 charlie.dart\n";
+        let (entries, summary, _) = compact_ls(input, false);
+        assert!(entries.contains("alpha.dart"), "got: {entries}");
+        assert!(entries.contains("bravo.dart"), "got: {entries}");
+        assert!(entries.contains("charlie.dart"), "got: {entries}");
+        assert!(
+            summary.contains("Summary: 3 files"),
+            "summary should count 3 files, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn test_compact_locale_dd_mon_year() {
+        // Year-format ("DD Mon  YYYY", two spaces between day and year).
+        let input = "total 8\n\
+                     -rw-r--r--  1 user staff  5678 25 Dec  2024 archive.tar\n";
+        let (entries, _summary, _) = compact_ls(input, false);
+        assert!(entries.contains("archive.tar"), "got: {entries}");
+        assert!(entries.contains("5.5K"), "got: {entries}");
+    }
+
+    #[test]
+    fn test_parse_ls_line_locale_dd_mon_time() {
+        let (ft, size, name) = parse_ls_line(
+            "-rw-r--r--   1 user  staff   1234 28 Apr 02:47 file.txt",
+        )
+        .unwrap();
+        assert_eq!(ft, '-');
+        assert_eq!(size, 1234);
+        assert_eq!(name, "file.txt");
     }
 
     #[test]
