@@ -110,3 +110,101 @@ jobs:
           prerelease: ${{ inputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-formula:
+    name: Update Homebrew formula on homeserve/main
+    needs: [release]
+    if: ${{ !inputs.prerelease }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout homeserve/main
+        uses: actions/checkout@v4
+        with:
+          ref: homeserve/main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ steps.version.outputs.tag }}" --pattern checksums.txt
+
+      - name: Parse checksums
+        id: sha
+        run: |
+          INTEL=$(grep x86_64-apple-darwin.tar.gz checksums.txt | head -1 | awk '{print $1}')
+          ARM=$(grep aarch64-apple-darwin.tar.gz checksums.txt | head -1 | awk '{print $1}')
+          if [ -z "$INTEL" ] || [ -z "$ARM" ]; then
+            echo "::error::Failed to parse checksums for macOS targets"
+            exit 1
+          fi
+          echo "intel=$INTEL" >> "$GITHUB_OUTPUT"
+          echo "arm=$ARM" >> "$GITHUB_OUTPUT"
+
+      - name: Regenerate Formula/rtk.rb
+        run: |
+          mkdir -p Formula
+          cat > Formula/rtk.rb << 'EOF'
+          # typed: false
+          # frozen_string_literal: true
+
+          # Homebrew formula for rtk - Rust Token Killer (Homeserve mirror, macOS only)
+          # To install:
+          #   brew tap homeservefr/rtk https://github.com/HomeserveFR/rtk.git
+          #   brew install homeservefr/rtk/rtk
+          class Rtk < Formula
+            desc "High-performance CLI proxy to minimize LLM token consumption"
+            homepage "https://github.com/HomeserveFR/rtk"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              on_intel do
+                url "https://github.com/HomeserveFR/rtk/releases/download/v#{version}/rtk-x86_64-apple-darwin.tar.gz"
+                sha256 "INTEL_PLACEHOLDER"
+              end
+
+              on_arm do
+                url "https://github.com/HomeserveFR/rtk/releases/download/v#{version}/rtk-aarch64-apple-darwin.tar.gz"
+                sha256 "ARM_PLACEHOLDER"
+              end
+            end
+
+            def install
+              bin.install "rtk"
+            end
+
+            test do
+              assert_match "rtk #{version}", shell_output("#{bin}/rtk --version")
+            end
+          end
+          EOF
+          sed -i 's/^          //' Formula/rtk.rb
+          sed -i "s/VERSION_PLACEHOLDER/${{ steps.version.outputs.version }}/" Formula/rtk.rb
+          sed -i "s/INTEL_PLACEHOLDER/${{ steps.sha.outputs.intel }}/" Formula/rtk.rb
+          sed -i "s/ARM_PLACEHOLDER/${{ steps.sha.outputs.arm }}/" Formula/rtk.rb
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet Formula/rtk.rb; then
+            echo "Formula already up to date for ${{ steps.version.outputs.tag }}"
+            exit 0
+          fi
+          git add Formula/rtk.rb
+          git commit -m "chore(formula): update rtk to ${{ steps.version.outputs.version }}"
+          git push origin homeserve/main
