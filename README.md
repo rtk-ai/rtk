@@ -73,8 +73,11 @@ curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserv
 ### Homebrew
 
 ```bash
-brew install https://raw.githubusercontent.com/HomeserveFR/rtk/homeserve/main/Formula/rtk.rb
+brew tap homeservefr/rtk https://github.com/HomeserveFR/rtk.git
+brew install homeservefr/rtk/rtk
 ```
+
+> If you already have `rtk` from `homebrew/core` (upstream), uninstall it first: `brew uninstall rtk`.
 
 ### Cargo
 
