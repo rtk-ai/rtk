@@ -5,6 +5,13 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.38.1](https://github.com/HomeserveFR/rtk/compare/v0.38.0...v0.38.1) (2026-04-28)
+
+
+### Bug Fixes
+
+* **formula:** use brew tap install and auto-update formula on release ([c634a92](https://github.com/HomeserveFR/rtk/commit/c634a921268156d421decb820f5dc1be1a4e9eeb))
+
 ## [0.38.0](https://github.com/HomeserveFR/rtk/compare/v0.37.2...v0.38.0) (2026-04-28)
 
 
