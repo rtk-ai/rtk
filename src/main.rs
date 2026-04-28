@@ -846,6 +846,15 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Sparse-checkout management (init, set, add, list, disable, reapply)
+    #[command(name = "sparse-checkout")]
+    SparseCheckout {
+        /// Subcommand: list, init, set, add, disable, reapply, check-rules
+        subcommand: Option<String>,
+        /// Additional arguments (patterns for set/add, flags like --cone)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1532,6 +1541,13 @@ fn run_cli() -> Result<i32> {
                 )?,
                 GitCommands::Worktree { args } => git::run(
                     git::GitCommand::Worktree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::SparseCheckout { subcommand, args } => git::run(
+                    git::GitCommand::SparseCheckout { subcommand },
                     &args,
                     None,
                     cli.verbose,

@@ -8,6 +8,10 @@
 - Auto-detects `--merges` flag to avoid conflicting with `--no-merges` injection
 - Global git options (`-C`, `--git-dir`, `--work-tree`, `--no-pager`) are prepended before the subcommand
 - Exit code propagation is critical for CI/CD pipelines
+- **`sparse-checkout`** routes through `run_sparse_checkout()`:
+  - `list`  → prints all patterns verbatim, capped at 50 lines with `... +N more` (patterns are semantically meaningful, never reorder/merge)
+  - `init`/`set`/`add`/`disable`/`reapply` → collapses progress noise to `ok sparse-checkout <sub>`
+  - `check-rules`, missing subcommand, or any future subcommand → passthrough
 - **glab_cmd.rs** declares `-R`/`--repo` and `-g`/`--group` at the clap level; they are **appended** to the glab args (not prepended) so subcommand dispatch stays intact
 - `has_output_flag()` short-circuits to passthrough when the user explicitly requests `-F` / `--output` / `--json` (avoids double JSON injection)
 - `should_passthrough_view()` redirects `mr/issue view` to passthrough when `--web` or `--comments` is set
