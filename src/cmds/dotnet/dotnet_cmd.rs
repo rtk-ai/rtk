@@ -983,17 +983,10 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     let status_icon = if summary.succeeded { "ok" } else { "fail" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
-    let mut out = format!(
-        "{} dotnet build: {} projects, {} errors, {} warnings ({})",
-        status_icon,
-        summary.project_count,
-        summary.errors.len(),
-        summary.warnings.len(),
-        duration
-    );
+    let mut out = String::new();
 
     if !summary.errors.is_empty() {
-        out.push_str("\n---------------------------------------\n\nErrors:\n");
+        out.push_str("Errors:\n");
         for issue in summary.errors.iter().take(20) {
             out.push_str(&format!("{}\n", format_issue(issue, "error")));
         }
@@ -1006,7 +999,10 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     }
 
     if !summary.warnings.is_empty() {
-        out.push_str("\nWarnings:\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("Warnings:\n");
         for issue in summary.warnings.iter().take(10) {
             out.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
@@ -1018,7 +1014,23 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
         }
     }
 
-    // Binlog path omitted from output (temp file, already cleaned up)
+    if !out.is_empty() {
+        out.push_str("\n---------------------------------------\n");
+    }
+
+    // Status line is emitted last so consumers that read the tail of the stream
+    // (`| tail -N`, agent watch/monitor modes, bounded context windows) get a
+    // definitive verdict. Mirrors native `dotnet build`, which ends with
+    // `Build succeeded.` / `Build FAILED.`. See issue #1574.
+    out.push_str(&format!(
+        "{} dotnet build: {} projects, {} errors, {} warnings ({})",
+        status_icon,
+        summary.project_count,
+        summary.errors.len(),
+        summary.warnings.len(),
+        duration
+    ));
+
     out
 }
 
@@ -1038,7 +1050,7 @@ fn format_test_output(
         && summary.total == 0
         && summary.failed_tests.is_empty();
 
-    let mut out = if counts_unavailable {
+    let header = if counts_unavailable {
         format!(
             "{} dotnet test: completed (binlog-only mode, counts unavailable, {} warnings) ({})",
             status_icon, warning_count, duration
@@ -1061,8 +1073,10 @@ fn format_test_output(
         )
     };
 
+    let mut out = String::new();
+
     if has_failures && !summary.failed_tests.is_empty() {
-        out.push_str("\n---------------------------------------\n\nFailed Tests:\n");
+        out.push_str("Failed Tests:\n");
         for failed in summary.failed_tests.iter().take(15) {
             out.push_str(&format!("  {}\n", failed.name));
             for detail in &failed.details {
@@ -1079,7 +1093,10 @@ fn format_test_output(
     }
 
     if !errors.is_empty() {
-        out.push_str("\nErrors:\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("Errors:\n");
         for issue in errors.iter().take(10) {
             out.push_str(&format!("{}\n", format_issue(issue, "error")));
         }
@@ -1089,7 +1106,10 @@ fn format_test_output(
     }
 
     if !warnings.is_empty() {
-        out.push_str("\nWarnings:\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("Warnings:\n");
         for issue in warnings.iter().take(10) {
             out.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
@@ -1098,7 +1118,13 @@ fn format_test_output(
         }
     }
 
-    // Binlog path omitted from output (temp file, already cleaned up)
+    if !out.is_empty() {
+        out.push_str("\n---------------------------------------\n");
+    }
+
+    // Status line emitted last; see format_build_output (issue #1574).
+    out.push_str(&header);
+
     out
 }
 
@@ -1112,13 +1138,10 @@ fn format_restore_output(
     let status_icon = if has_errors { "fail" } else { "ok" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
-    let mut out = format!(
-        "{} dotnet restore: {} projects, {} errors, {} warnings ({})",
-        status_icon, summary.restored_projects, summary.errors, summary.warnings, duration
-    );
+    let mut out = String::new();
 
     if !errors.is_empty() {
-        out.push_str("\n---------------------------------------\n\nErrors:\n");
+        out.push_str("Errors:\n");
         for issue in errors.iter().take(20) {
             out.push_str(&format!("{}\n", format_issue(issue, "error")));
         }
@@ -1128,7 +1151,10 @@ fn format_restore_output(
     }
 
     if !warnings.is_empty() {
-        out.push_str("\nWarnings:\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("Warnings:\n");
         for issue in warnings.iter().take(10) {
             out.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
@@ -1137,7 +1163,16 @@ fn format_restore_output(
         }
     }
 
-    // Binlog path omitted from output (temp file, already cleaned up)
+    if !out.is_empty() {
+        out.push_str("\n---------------------------------------\n");
+    }
+
+    // Status line emitted last; see format_build_output (issue #1574).
+    out.push_str(&format!(
+        "{} dotnet restore: {} projects, {} errors, {} warnings ({})",
+        status_icon, summary.restored_projects, summary.errors, summary.warnings, duration
+    ));
+
     out
 }
 
@@ -1365,6 +1400,94 @@ mod tests {
 
         let output = format_test_output(&summary, &[], &[], Path::new("/tmp/test.binlog"));
         assert!(output.contains("counts unavailable"));
+    }
+
+    // Regression tests for issue #1574: status line must be the final line so that
+    // consumers reading the tail of the stream (`| tail -N`, agent watch/monitor
+    // modes, bounded context windows) get a definitive `ok` / `fail` verdict.
+    // Mirrors native `dotnet`, which ends with `Build succeeded.` / `Build FAILED.`.
+
+    #[test]
+    fn test_format_build_output_status_line_is_last_for_tail_consumers() {
+        let summary = binlog::BuildSummary {
+            succeeded: true,
+            project_count: 1,
+            errors: Vec::new(),
+            warnings: vec![binlog::BinlogIssue {
+                code: "CS0219".to_string(),
+                file: "src/Program.cs".to_string(),
+                line: 25,
+                column: 10,
+                message: "Variable assigned but never used".to_string(),
+            }],
+            duration_text: Some("00:00:01.23".to_string()),
+        };
+        let output = format_build_output(&summary, Path::new("/tmp/build.binlog"));
+        let last_line = output.lines().last().expect("output must not be empty");
+        assert!(
+            last_line.starts_with("ok dotnet build:"),
+            "status line must be the last line for `| tail -N` consumers, got: {:?}",
+            last_line
+        );
+
+        let last_5: Vec<&str> = output.lines().rev().take(5).collect();
+        assert!(
+            last_5.iter().any(|l| l.starts_with("ok dotnet build:")),
+            "`tail -5` must include the status line, got tail: {:?}",
+            last_5
+        );
+    }
+
+    #[test]
+    fn test_format_test_output_status_line_is_last_for_tail_consumers() {
+        let summary = binlog::TestSummary {
+            passed: 940,
+            failed: 0,
+            skipped: 7,
+            total: 947,
+            project_count: 1,
+            failed_tests: Vec::new(),
+            duration_text: Some("1 s".to_string()),
+        };
+        let warnings = vec![binlog::BinlogIssue {
+            code: String::new(),
+            file: "/sdk/Microsoft.TestPlatform.targets".to_string(),
+            line: 48,
+            column: 5,
+            message: "Violators:".to_string(),
+        }];
+        let output = format_test_output(&summary, &[], &warnings, Path::new("/tmp/test.binlog"));
+        let last_line = output.lines().last().expect("output must not be empty");
+        assert!(
+            last_line.starts_with("ok dotnet test:"),
+            "status line must be the last line, got: {:?}",
+            last_line
+        );
+    }
+
+    #[test]
+    fn test_format_restore_output_status_line_is_last_for_tail_consumers() {
+        let summary = binlog::RestoreSummary {
+            restored_projects: 1,
+            warnings: 0,
+            errors: 1,
+            duration_text: Some("00:00:01.00".to_string()),
+        };
+        let issues = vec![binlog::BinlogIssue {
+            code: "NU1101".to_string(),
+            file: "/repo/src/App/App.csproj".to_string(),
+            line: 0,
+            column: 0,
+            message: "Unable to find package Foo.Bar".to_string(),
+        }];
+        let output =
+            format_restore_output(&summary, &issues, &[], Path::new("/tmp/restore.binlog"));
+        let last_line = output.lines().last().expect("output must not be empty");
+        assert!(
+            last_line.starts_with("fail dotnet restore:"),
+            "status line must be the last line, got: {:?}",
+            last_line
+        );
     }
 
     #[test]
