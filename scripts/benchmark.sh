@@ -42,7 +42,7 @@ bench() {
   local rtk_cmd="$3"
 
   unix_out=$(eval "$unix_cmd" 2>/dev/null || true)
-  rtk_out=$(eval "$rtk_cmd" 2>&1 || true)
+  rtk_out=$(eval "$rtk_cmd" 2>/dev/null || true)
 
   unix_tokens=$(count_tokens "$unix_out")
   rtk_tokens=$(count_tokens "$rtk_out")
@@ -255,7 +255,7 @@ bench "env --show-all" "env" "$RTK env --show-all"
 # ===================
 section "err"
 if command -v cargo &>/dev/null; then
-  bench "err cargo build" "cargo build 2>&1 || true" "$RTK err cargo build"
+  bench "err cargo build" "cargo build 2>&1 || true" "$RTK err cargo build 2>&1"
 else
   echo "⏭️  err cargo build (cargo not in PATH, skipped)"
 fi
@@ -265,7 +265,7 @@ fi
 # ===================
 section "test"
 if command -v cargo &>/dev/null; then
-  bench "test cargo test" "cargo test 2>&1 || true" "$RTK test cargo test"
+  bench "test cargo test" "cargo test 2>&1 || true" "$RTK test cargo test 2>&1"
 else
   echo "⏭️  test cargo test (cargo not in PATH, skipped)"
 fi
@@ -313,10 +313,10 @@ fi
 # ===================
 section "cargo"
 if command -v cargo &>/dev/null; then
-  bench "cargo build" "cargo build 2>&1 || true" "$RTK cargo build"
-  bench "cargo test" "cargo test 2>&1 || true" "$RTK cargo test"
-  bench "cargo clippy" "cargo clippy 2>&1 || true" "$RTK cargo clippy"
-  bench "cargo check" "cargo check 2>&1 || true" "$RTK cargo check"
+  bench "cargo build" "cargo build 2>&1 || true" "$RTK cargo build 2>&1"
+  bench "cargo test" "cargo test 2>&1 || true" "$RTK cargo test 2>&1"
+  bench "cargo clippy" "cargo clippy 2>&1 || true" "$RTK cargo clippy 2>&1"
+  bench "cargo check" "cargo check 2>&1 || true" "$RTK cargo check 2>&1"
 else
   echo "⏭️  cargo build/test/clippy/check (cargo not in PATH, skipped)"
 fi
@@ -366,7 +366,7 @@ if [ -f "package.json" ]; then
   section "modern JS stack"
 
   if command -v tsc &> /dev/null || [ -f "node_modules/.bin/tsc" ]; then
-    bench "tsc" "tsc --noEmit 2>&1 || true" "$RTK tsc --noEmit"
+    bench "tsc" "tsc --noEmit 2>&1 || true" "$RTK tsc --noEmit 2>&1"
   fi
 
   if command -v prettier &> /dev/null || [ -f "node_modules/.bin/prettier" ]; then
