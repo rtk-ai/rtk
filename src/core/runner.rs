@@ -59,14 +59,22 @@ pub enum RunMode<'a> {
     Passthrough,
 }
 
+/// Detect long-running invocations before `RunMode::Filtered` captures output.
+///
+/// `args_display` must be structured command arguments, not user-controlled prose.
+/// `RunMode::Streamed` and `RunMode::Passthrough` do not call this helper.
 fn is_streaming_invocation(tool_name: &str, args_display: &str) -> bool {
     let tool = tool_name.split_whitespace().next().unwrap_or(tool_name);
     let args: Vec<&str> = args_display.split_whitespace().collect();
 
     if args
         .iter()
-        .any(|arg| matches!(*arg, "--watch" | "--watchAll" | "-w"))
+        .any(|arg| matches!(*arg, "--watch" | "--watchAll"))
     {
+        return true;
+    }
+
+    if args.contains(&"-w") && matches!(tool, "jest" | "vitest" | "webpack" | "nodemon") {
         return true;
     }
 
@@ -248,6 +256,13 @@ mod tests {
     }
 
     #[test]
+    fn test_is_streaming_invocation_scopes_short_watch_flag() {
+        assert!(is_streaming_invocation("vitest", "run -w"));
+        assert!(!is_streaming_invocation("wc", "-w src/main.rs"));
+        assert!(!is_streaming_invocation("cargo", "test -w"));
+    }
+
+    #[test]
     fn test_is_streaming_invocation_detects_follow_flags_for_log_tools() {
         assert!(is_streaming_invocation("docker", "logs -f web"));
         assert!(is_streaming_invocation("kubectl", "logs --follow web"));
@@ -257,6 +272,7 @@ mod tests {
     #[test]
     fn test_is_streaming_invocation_detects_dev_and_watch_subcommands() {
         assert!(is_streaming_invocation("npm", "run dev"));
+        assert!(is_streaming_invocation("pnpm", "run dev"));
         assert!(is_streaming_invocation("npm", "start"));
         assert!(is_streaming_invocation("playwright", "codegen"));
         assert!(is_streaming_invocation("dotnet", "watch run"));
@@ -267,6 +283,7 @@ mod tests {
     fn test_is_streaming_invocation_keeps_finite_commands_filterable() {
         assert!(!is_streaming_invocation("npm", "run build"));
         assert!(!is_streaming_invocation("gh", "pr checks 123"));
+        assert!(!is_streaming_invocation("go", "test ./..."));
         assert!(!is_streaming_invocation("go test", "./..."));
         assert!(!is_streaming_invocation("dotnet", "build"));
     }
