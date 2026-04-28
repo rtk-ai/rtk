@@ -1,13 +1,13 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
 use crate::core::config;
-use crate::core::stream::exec_capture;
+use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
-use std::process::Stdio;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
+use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -883,8 +883,7 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
         // Count what was added
         let mut stat_cmd = git_cmd(global_args);
         stat_cmd.args(["diff", "--cached", "--stat", "--shortstat"]);
-        let stat_result =
-            exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
+        let stat_result = exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
 
         let compact = if stat_result.stdout.trim().is_empty() {
             "ok (nothing to add)".to_string()
@@ -1003,7 +1002,10 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let output = cmd.stdin(Stdio::inherit()).output().context("Failed to run git push")?;
+    let output = cmd
+        .stdin(Stdio::inherit())
+        .output()
+        .context("Failed to run git push")?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1224,11 +1226,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         let result = exec_capture(&mut cmd).context("Failed to run git branch")?;
         let combined = result.combined();
 
-        let msg = if result.success() {
-            "ok"
-        } else {
-            &combined
-        };
+        let msg = if result.success() { "ok" } else { &combined };
 
         timer.track(
             &format!("git branch {}", args.join(" ")),
@@ -1391,6 +1389,23 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
     Ok(0)
 }
 
+/// Format status message for stash operations.
+/// - For create operations (push/save): checks for "No local changes"
+/// - For other operations: uses "ok stash <subcommand>" format
+fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
+    match subcommand {
+        None | Some("push") | Some("save") => {
+            // Create operations check for "no local changes"
+            if result.stdout.contains("No local changes") {
+                "ok (nothing to stash)".to_string()
+            } else {
+                "ok stashed".to_string()
+            }
+        }
+        Some(sub) => format!("ok stash {}", sub),
+    }
+}
+
 fn run_stash(
     subcommand: Option<&str>,
     args: &[String],
@@ -1407,8 +1422,7 @@ fn run_stash(
         Some("list") => {
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", "list"]);
-            let result =
-                exec_capture(&mut cmd).context("Failed to run git stash list")?;
+            let result = exec_capture(&mut cmd).context("Failed to run git stash list")?;
 
             if result.stdout.trim().is_empty() {
                 let msg = "No stashes";
@@ -1432,8 +1446,7 @@ fn run_stash(
             for arg in args {
                 cmd.arg(arg);
             }
-            let result =
-                exec_capture(&mut cmd).context("Failed to run git stash show")?;
+            let result = exec_capture(&mut cmd).context("Failed to run git stash show")?;
 
             let filtered = if result.stdout.trim().is_empty() {
                 let msg = "Empty stash";
@@ -1452,7 +1465,8 @@ fn run_stash(
                 &filtered,
             );
         }
-        Some("pop") | Some("apply") | Some("drop") | Some("push") => {
+        Some("apply") | Some("branch") | Some("clear") | Some("create") | Some("drop")
+        | Some("export") | Some("import") | Some("pop") | Some("store") => {
             let sub = subcommand.unwrap();
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", sub]);
@@ -1463,7 +1477,7 @@ fn run_stash(
             let combined = result.combined();
 
             let msg = if result.success() {
-                let msg = format!("ok stash {}", sub);
+                let msg = format_stash_message(subcommand, &result);
                 println!("{}", msg);
                 msg
             } else {
@@ -1485,10 +1499,19 @@ fn run_stash(
                 return Ok(result.exit_code);
             }
         }
-        Some(sub) => {
-            // Unrecognized subcommand: passthrough to git stash <sub> [args]
+        // Default: "git stash [push] [--] [<pathspec>...]" or "git stash save [<message>]"
+        Some(_) | None => {
+            let (sub, arg) = match subcommand {
+                Some("save") => ("save", None),
+                Some("push") => ("push", None),
+                Some(s) => ("push", Some(s)),
+                None => ("push", None),
+            };
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", sub]);
+            if let Some(arg) = arg {
+                cmd.arg(arg);
+            }
             for arg in args {
                 cmd.arg(arg);
             }
@@ -1496,7 +1519,7 @@ fn run_stash(
             let combined = result.combined();
 
             let msg = if result.success() {
-                let msg = format!("ok stash {}", sub);
+                let msg = format_stash_message(subcommand, &result);
                 println!("{}", msg);
                 msg
             } else {
@@ -1513,40 +1536,6 @@ fn run_stash(
                 &combined,
                 &msg,
             );
-
-            if !result.success() {
-                return Ok(result.exit_code);
-            }
-        }
-        None => {
-            // Default: git stash (push)
-            let mut cmd = git_cmd(global_args);
-            cmd.arg("stash");
-            for arg in args {
-                cmd.arg(arg);
-            }
-            let result = exec_capture(&mut cmd).context("Failed to run git stash")?;
-            let combined = result.combined();
-
-            let msg = if result.success() {
-                if result.stdout.contains("No local changes") {
-                    let msg = "ok (nothing to stash)";
-                    println!("{}", msg);
-                    msg.to_string()
-                } else {
-                    let msg = "ok stashed";
-                    println!("{}", msg);
-                    msg.to_string()
-                }
-            } else {
-                eprintln!("FAILED: git stash");
-                if !result.stderr.trim().is_empty() {
-                    eprintln!("{}", result.stderr);
-                }
-                combined.clone()
-            };
-
-            timer.track("git stash", "rtk git stash", &combined, &msg);
 
             if !result.success() {
                 return Ok(result.exit_code);
@@ -1599,11 +1588,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         let result = exec_capture(&mut cmd).context("Failed to run git worktree")?;
         let combined = result.combined();
 
-        let msg = if result.success() {
-            "ok"
-        } else {
-            &combined
-        };
+        let msg = if result.success() { "ok" } else { &combined };
 
         timer.track(
             &format!("git worktree {}", args.join(" ")),
@@ -1627,8 +1612,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     // Default: list mode
     let mut cmd = git_cmd(global_args);
     cmd.args(["worktree", "list"]);
-    let result =
-        exec_capture(&mut cmd).context("Failed to run git worktree list")?;
+    let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
 
     let filtered = filter_worktree_list(&result.stdout);
     println!("{}", filtered);
@@ -1866,7 +1850,11 @@ mod tests {
         let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
         assert_eq!(
             normalized,
-            vec!["HEAD".to_string(), "--".to_string(), "src/foo.rs".to_string()]
+            vec![
+                "HEAD".to_string(),
+                "--".to_string(),
+                "src/foo.rs".to_string()
+            ]
         );
     }
 
@@ -1877,7 +1865,11 @@ mod tests {
         let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
         assert_eq!(
             normalized,
-            vec!["--cached".to_string(), "--".to_string(), "src/foo.rs".to_string()]
+            vec![
+                "--cached".to_string(),
+                "--".to_string(),
+                "src/foo.rs".to_string()
+            ]
         );
     }
 
@@ -1893,10 +1885,7 @@ mod tests {
     fn test_normalize_diff_args_dotfile_is_path() {
         let args = vec![".gitignore".to_string()];
         let normalized = normalize_diff_args_impl(&args, exists_mock(&[".gitignore"]));
-        assert_eq!(
-            normalized,
-            vec!["--".to_string(), ".gitignore".to_string()]
-        );
+        assert_eq!(normalized, vec!["--".to_string(), ".gitignore".to_string()]);
     }
 
     /// A bare ref (HEAD) that doesn't exist as a file → no injection.
@@ -1979,7 +1968,11 @@ mod tests {
         let result = filter_branch_output(output);
         assert!(result.contains("* main"));
         assert!(result.contains("develop"));
-        assert!(result.contains("feature-x"), "origin branch shown: {}", result);
+        assert!(
+            result.contains("feature-x"),
+            "origin branch shown: {}",
+            result
+        );
         assert!(
             result.contains("release-v3"),
             "upstream branch shown: {}",
