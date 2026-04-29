@@ -616,6 +616,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_exit_code_preserved() {
+        // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "exit 42"]);
         let result = run_streaming(&mut cmd, StdinMode::Null, FilterMode::Passthrough).unwrap();
@@ -680,6 +681,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_raw_cap_at_10mb() {
+        // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         // ~11 MiB of 80-char lines (fast: fewer lines than `yes | head -6M`)
         cmd.args([
@@ -700,6 +702,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_run_streaming_stderr_cap_at_10mb() {
+        // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         // ~11 MiB on stderr, nothing on stdout
         cmd.args([
@@ -766,6 +769,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exec_capture_stderr() {
+        // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo err_msg >&2"]);
         let result = exec_capture(&mut cmd).unwrap();
@@ -774,6 +778,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_exec_capture_combined() {
+        // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo out_msg; echo err_msg >&2"]);
         let result = exec_capture(&mut cmd).unwrap();
@@ -920,6 +925,7 @@ pub(crate) mod tests {
     #[cfg(not(windows))]
     #[test]
     fn test_streaming_filters_both_fds_and_routes_to_correct_fd() {
+        // nosemgrep: interpreter-execution
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo 'error[E0308]: type mismatch'; echo '   Compiling foo v1.0' >&2; echo '   Downloading bar v2.0' >&2; echo '   Finished dev' >&2; echo 'real error on stderr' >&2"]);
 
