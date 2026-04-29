@@ -2,7 +2,6 @@
 
 use crate::cmds::cpp::msbuild_cmd;
 use crate::core::filter::{self, FilterLevel, Language};
-use crate::core::text_encoding::{self, TextEncoding};
 use crate::core::tracking;
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -17,15 +16,12 @@ lazy_static! {
     static ref MSBUILD_LNK_RE: Regex = Regex::new(r": error LNK\d+").unwrap();
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     file: &Path,
     level: FilterLevel,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
-    line_range: Option<(usize, usize)>,
     line_numbers: bool,
-    encoding: TextEncoding,
     verbose: u8,
 ) -> Result<()> {
     let timer = tracking::TimedExecution::start();
@@ -35,14 +31,7 @@ pub fn run(
     }
 
     // Read file content (handles UTF-16 LE/BE BOM — MSBuild logs on Windows)
-    let (content, used_encoding, used_fallback) = read_file_text(file, encoding)?;
-    if used_fallback {
-        eprintln!(
-            "rtk read: decoded {} as {}",
-            file.display(),
-            used_encoding.label()
-        );
-    }
+    let content = read_file_text(file)?;
 
     // Auto-detect MSBuild log files and route through the msbuild filter.
     // Without this, `rtk read msbuild.log` (after `msbuild *> file.log`) would
@@ -100,13 +89,10 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, line_range, &lang);
+    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
     let rtk_output = if line_numbers {
-        match line_range {
-            Some((start, _end)) => format_with_line_numbers_offset(&filtered, start),
-            None => format_with_line_numbers(&filtered),
-        }
+        format_with_line_numbers(&filtered)
     } else {
         filtered.clone()
     };
@@ -124,9 +110,7 @@ pub fn run_stdin(
     level: FilterLevel,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
-    line_range: Option<(usize, usize)>,
     line_numbers: bool,
-    _encoding: TextEncoding,
     verbose: u8,
 ) -> Result<()> {
     use std::io::{self, Read as IoRead};
@@ -169,13 +153,10 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, line_range, &lang);
+    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
     let rtk_output = if line_numbers {
-        match line_range {
-            Some((start, _end)) => format_with_line_numbers_offset(&filtered, start),
-            None => format_with_line_numbers(&filtered),
-        }
+        format_with_line_numbers(&filtered)
     } else {
         filtered.clone()
     };
@@ -238,128 +219,43 @@ fn maybe_apply_msbuild_filter(content: &str) -> Option<String> {
     Some(out)
 }
 
-fn read_file_text(
-    path: &Path,
-    encoding: TextEncoding,
-) -> Result<(String, text_encoding::UsedEncoding, bool)> {
+fn read_file_text(path: &Path) -> Result<String> {
     let bytes = fs::read(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
-
-    // Avoid dumping binary-ish content as Latin1 garbage in --encoding auto mode.
-    // This is intentionally conservative and only triggers for obvious cases.
-    if encoding == TextEncoding::Auto && looks_binary_bytes(&bytes) {
-        let preview = hex_preview(&bytes, 64);
-        let nul = bytes.iter().take(8192).filter(|b| **b == 0).count();
-        let msg = format!(
-            "rtk read: file appears binary ({} bytes, nul={} in first 8192)\n\
-binary preview (first {} bytes): {}\n\
-hint: use `rtk read --encoding latin1 <file>` to force raw bytes-as-text\n",
-            bytes.len(),
-            nul,
-            preview.len,
-            preview.hex
-        );
-        return Ok((msg, text_encoding::UsedEncoding::Utf8, false));
-    }
-
-    let decoded = text_encoding::decode_bytes(&bytes, encoding)
-        .with_context(|| format!("Failed to decode file: {}", path.display()))?;
-    Ok((decoded.text, decoded.used, decoded.used_fallback))
+    decode_bytes(&bytes)
+        .with_context(|| format!("Failed to decode file: {}", path.display()))
 }
 
-struct HexPreview {
-    hex: String,
-    len: usize,
+/// Decode raw bytes to UTF-8, detecting UTF-16 LE/BE and UTF-8 BOMs.
+/// MSBuild log files on Windows are UTF-16 LE (BOM: FF FE) — without this
+/// detection the read filter crashed with "stream did not contain valid UTF-8".
+fn decode_bytes(bytes: &[u8]) -> Result<String> {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        return Ok(decode_utf16(&bytes[2..], true));
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        return Ok(decode_utf16(&bytes[2..], false));
+    }
+    let payload = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &bytes[3..]
+    } else {
+        bytes
+    };
+    String::from_utf8(payload.to_vec()).context("stream did not contain valid UTF-8")
 }
 
-fn hex_preview(bytes: &[u8], max: usize) -> HexPreview {
-    let n = std::cmp::min(bytes.len(), max);
-    let mut out = String::new();
-    for (i, b) in bytes.iter().take(n).enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        out.push_str(&format!("{:02X}", b));
-    }
-    HexPreview { hex: out, len: n }
-}
-
-fn looks_binary_bytes(bytes: &[u8]) -> bool {
-    if bytes.len() >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF)) {
-        return false;
-    }
-    let len = std::cmp::min(bytes.len(), 8192);
-    let sample = &bytes[..len];
-    if sample.is_empty() {
-        return false;
-    }
-
-    // UTF-16 without BOM can contain many NULs; don't treat it as binary.
-    if looks_utf16_no_bom(sample) {
-        return false;
-    }
-
-    // A single NUL byte is a strong signal for binary in this tool's context.
-    if sample.contains(&0) {
-        return true;
-    }
-
-    // If a large fraction of bytes are control chars (excluding \t,\n,\r), treat as binary-ish.
-    let mut control = 0usize;
-    for b in sample {
-        if *b < 0x09 || (*b > 0x0D && *b < 0x20) {
-            control += 1;
-        }
-    }
-    (control as f64 / sample.len() as f64) > 0.30
-}
-
-fn looks_utf16_no_bom(sample: &[u8]) -> bool {
-    if sample.len() < 4 {
-        return false;
-    }
-    let mut zeros_even = 0usize;
-    let mut zeros_odd = 0usize;
-    let mut pairs = 0usize;
-    for chunk in sample.chunks_exact(2).take(4096) {
-        pairs += 1;
-        if chunk[0] == 0 {
-            zeros_even += 1;
-        }
-        if chunk[1] == 0 {
-            zeros_odd += 1;
-        }
-    }
-    if pairs == 0 {
-        return false;
-    }
-    let even_ratio = zeros_even as f64 / pairs as f64;
-    let odd_ratio = zeros_odd as f64 / pairs as f64;
-
-    fn ascii_lane_ratio(sample: &[u8], lane: usize) -> f64 {
-        let mut total = 0usize;
-        let mut ascii = 0usize;
-        for chunk in sample.chunks_exact(2).take(4096) {
-            let b = chunk[lane];
-            if b == 0 {
-                continue;
+fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| {
+            if little_endian {
+                u16::from_le_bytes([c[0], c[1]])
+            } else {
+                u16::from_be_bytes([c[0], c[1]])
             }
-            total += 1;
-            let is_ascii =
-                b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7E).contains(&b);
-            if is_ascii {
-                ascii += 1;
-            }
-        }
-        if total == 0 {
-            0.0
-        } else {
-            ascii as f64 / total as f64
-        }
-    }
-
-    (odd_ratio >= 0.60 && even_ratio < 0.10 && ascii_lane_ratio(sample, 0) >= 0.85)
-        || (even_ratio >= 0.60 && odd_ratio < 0.10 && ascii_lane_ratio(sample, 1) >= 0.85)
+        })
+        .collect();
+    String::from_utf16_lossy(&units)
 }
 
 fn format_with_line_numbers(content: &str) -> String {
@@ -372,46 +268,12 @@ fn format_with_line_numbers(content: &str) -> String {
     out
 }
 
-fn format_with_line_numbers_offset(content: &str, start_line: usize) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let max_line_num = start_line.saturating_add(lines.len()).saturating_sub(1);
-    let width = max_line_num.to_string().len().max(1);
-    let mut out = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        out.push_str(&format!(
-            "{:>width$} │ {}\n",
-            start_line + i,
-            line,
-            width = width
-        ));
-    }
-    out
-}
-
 fn apply_line_window(
     content: &str,
     max_lines: Option<usize>,
     tail_lines: Option<usize>,
-    line_range: Option<(usize, usize)>,
     lang: &Language,
 ) -> String {
-    if let Some((start, end)) = line_range {
-        if start == 0 || end == 0 || end < start {
-            return String::new();
-        }
-        let lines: Vec<&str> = content.lines().collect();
-        let start_idx = start.saturating_sub(1).min(lines.len());
-        let end_idx = end.min(lines.len());
-        if end_idx <= start_idx {
-            return String::new();
-        }
-        let mut result = lines[start_idx..end_idx].join("\n");
-        if content.ends_with('\n') {
-            result.push('\n');
-        }
-        return result;
-    }
-
     if let Some(tail) = tail_lines {
         if tail == 0 {
             return String::new();
@@ -450,102 +312,8 @@ fn main() {{
         )?;
 
         // Just verify it doesn't panic
-        run(
-            file.path(),
-            FilterLevel::Minimal,
-            None,
-            None,
-            None,
-            false,
-            TextEncoding::Auto,
-            0,
-        )?;
+        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
         Ok(())
-    }
-
-    #[test]
-    fn test_read_auto_fallback_cp949() -> Result<()> {
-        let mut file = NamedTempFile::new()?;
-        let (bytes, _, _) = encoding_rs::EUC_KR.encode("안녕\n");
-        file.write_all(&bytes)?;
-
-        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
-        assert!(used_fallback);
-        assert_eq!(used, text_encoding::UsedEncoding::Cp949);
-        assert!(txt.contains("안녕"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_read_auto_utf16_le_no_bom() -> Result<()> {
-        let mut file = NamedTempFile::new()?;
-        // "Hi\n" in UTF-16 LE without BOM
-        file.write_all(&[0x48, 0x00, 0x69, 0x00, 0x0A, 0x00])?;
-        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
-        assert!(used_fallback);
-        assert_eq!(used, text_encoding::UsedEncoding::Utf16Le);
-        assert!(txt.contains("Hi"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_read_auto_utf16_le_bom() -> Result<()> {
-        let mut file = NamedTempFile::new()?;
-        // BOM + "Hi\n" in UTF-16 LE
-        file.write_all(&[0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00, 0x0A, 0x00])?;
-        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
-        assert!(!used_fallback);
-        assert_eq!(used, text_encoding::UsedEncoding::Utf16Le);
-        assert!(txt.contains("Hi"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_read_auto_windows_1252() -> Result<()> {
-        let mut file = NamedTempFile::new()?;
-        // "Hé" in windows-1252: 0x48 0xE9 (invalid UTF-8)
-        file.write_all(&[0x48, 0xE9])?;
-        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
-        assert!(used_fallback);
-        assert_eq!(used, text_encoding::UsedEncoding::Windows1252);
-        assert!(txt.contains('é'));
-        Ok(())
-    }
-
-    #[test]
-    fn test_read_auto_binary_preview() -> Result<()> {
-        let mut file = NamedTempFile::new()?;
-        file.write_all(&[0x00, 0x01, 0x02, 0x03, 0x00, 0xFF])?;
-        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
-        assert!(!used_fallback);
-        assert_eq!(used, text_encoding::UsedEncoding::Utf8);
-        assert!(txt.contains("file appears binary"));
-        assert!(txt.contains("binary preview"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_apply_line_window_range() {
-        let lang = Language::Unknown;
-        let s = "a\nb\nc\nd\n";
-        let out = apply_line_window(s, None, None, Some((2, 3)), &lang);
-        assert_eq!(out, "b\nc\n");
-    }
-
-    #[test]
-    fn test_apply_line_window_invalid_range_empty() {
-        let lang = Language::Unknown;
-        let s = "a\nb\nc\n";
-        assert_eq!(apply_line_window(s, None, None, Some((0, 2)), &lang), "");
-        assert_eq!(apply_line_window(s, None, None, Some((3, 2)), &lang), "");
-    }
-
-    #[test]
-    fn test_format_with_line_numbers_offset() {
-        let s = "b\nc\n";
-        let out = format_with_line_numbers_offset(s, 2);
-        assert!(out.contains("2 │ b"));
-        assert!(out.contains("3 │ c"));
     }
 
     #[test]
@@ -643,45 +411,25 @@ fn main() {{
     fn test_decode_utf16_le_bom() {
         // "abc" in UTF-16 LE with BOM
         let bytes: &[u8] = &[0xFF, 0xFE, b'a', 0, b'b', 0, b'c', 0];
-        assert_eq!(
-            text_encoding::decode_bytes(bytes, TextEncoding::Auto)
-                .unwrap()
-                .text,
-            "abc"
-        );
+        assert_eq!(decode_bytes(bytes).unwrap(), "abc");
     }
 
     #[test]
     fn test_decode_utf16_be_bom() {
         // "abc" in UTF-16 BE with BOM
         let bytes: &[u8] = &[0xFE, 0xFF, 0, b'a', 0, b'b', 0, b'c'];
-        assert_eq!(
-            text_encoding::decode_bytes(bytes, TextEncoding::Auto)
-                .unwrap()
-                .text,
-            "abc"
-        );
+        assert_eq!(decode_bytes(bytes).unwrap(), "abc");
     }
 
     #[test]
     fn test_decode_utf8_bom_stripped() {
         let bytes: &[u8] = &[0xEF, 0xBB, 0xBF, b'h', b'i'];
-        assert_eq!(
-            text_encoding::decode_bytes(bytes, TextEncoding::Auto)
-                .unwrap()
-                .text,
-            "hi"
-        );
+        assert_eq!(decode_bytes(bytes).unwrap(), "hi");
     }
 
     #[test]
     fn test_decode_plain_utf8() {
-        assert_eq!(
-            text_encoding::decode_bytes(b"plain text", TextEncoding::Auto)
-                .unwrap()
-                .text,
-            "plain text"
-        );
+        assert_eq!(decode_bytes(b"plain text").unwrap(), "plain text");
     }
 
     #[test]
@@ -692,24 +440,7 @@ fn main() {{
         for c in line.encode_utf16() {
             bytes.extend_from_slice(&c.to_le_bytes());
         }
-        assert_eq!(
-            text_encoding::decode_bytes(&bytes, TextEncoding::Auto)
-                .unwrap()
-                .text,
-            line
-        );
-    }
-
-    #[test]
-    fn test_looks_utf16_no_bom_allows_odd_length_sample() {
-        // UTF-16LE-like ASCII: H i ! with a trailing odd byte.
-        let sample = vec![0x48, 0x00, 0x69, 0x00, 0x21, 0x00, 0xFF];
-        assert!(looks_utf16_no_bom(&sample));
-    }
-
-    #[test]
-    fn test_looks_utf16_no_bom_short_sample_false() {
-        assert!(!looks_utf16_no_bom(&[0x00, 0x41, 0x00]));
+        assert_eq!(decode_bytes(&bytes).unwrap(), line);
     }
 
     #[test]
@@ -720,37 +451,28 @@ fn main() {{
         for c in "Build succeeded.\n".encode_utf16() {
             file.write_all(&c.to_le_bytes())?;
         }
-        run(
-            file.path(),
-            FilterLevel::Minimal,
-            None,
-            None,
-            None,
-            false,
-            TextEncoding::Auto,
-            0,
-        )?;
+        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
         Ok(())
     }
 
     #[test]
     fn test_apply_line_window_tail_lines() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, None, Some(2), None, &Language::Unknown);
+        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd\n");
     }
 
     #[test]
     fn test_apply_line_window_tail_lines_no_trailing_newline() {
         let input = "a\nb\nc\nd";
-        let output = apply_line_window(input, None, Some(2), None, &Language::Unknown);
+        let output = apply_line_window(input, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
     }
 
     #[test]
     fn test_apply_line_window_max_lines_still_works() {
         let input = "a\nb\nc\nd\n";
-        let output = apply_line_window(input, Some(2), None, None, &Language::Unknown);
+        let output = apply_line_window(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
     }

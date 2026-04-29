@@ -28,8 +28,7 @@
   <a href="README_zh.md">中文</a> &bull;
   <a href="README_ja.md">日本語</a> &bull;
   <a href="README_ko.md">한국어</a> &bull;
-  <a href="README_es.md">Espanol</a> &bull;
-  <a href="README_pt.md">Português</a>
+  <a href="README_es.md">Espanol</a>
 </p>
 
 ---
@@ -120,36 +119,6 @@ git status  # Automatically rewritten to rtk git status
 
 Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
 
-## Grep (agent-friendly)
-
-```bash
-rtk grep "Foo" . --files-only
-rtk grep "Foo" . --count-by-file
-rtk grep "Foo" . --top-files 10
-rtk grep "Foo" . --agent-safe
-rtk grep "Foo" . --agent-safe --max-per-file 30
-rtk grep "Foo" . --json
-rtk grep "Foo" . --agent-safe --json
-rtk grep "Foo" . --all --full-lines
-
-# Opt-in preset for agents (grep only in this slice):
-RTK_AGENT_SAFE=1 rtk grep "Foo" .
-```
-
-Notes:
-- `--files-only`: locator mode (paths only)
-- `--count-by-file`: counts per file
-- `--top-files N`: ranked file summary (top N files)
-- `--agent-safe`: caps match spam + adds summary/hints (flags override env/config)
-- `--json`: machine-readable JSON only (no human text)
-- `--all`: disables match caps
-- `--full-lines`: disables line clipping
-
-PowerShell:
-```powershell
-$env:RTK_AGENT_SAFE="1"; rtk grep "Foo" src
-```
-
 **Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
 ## How It Works
@@ -177,15 +146,9 @@ Four strategies applied per command type:
 rtk ls .                        # Token-optimized directory tree
 rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
-rtk read file.rs --lines 430:540 # Inclusive line range (1-based)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
-rtk grep "pattern" .            # Grouped search results (legacy defaults)
-rtk grep "Foo" . --files-only   # Unique matching file paths
-rtk grep "Foo" . --count-by-file # Counts per file
-rtk grep "Foo" . --agent-safe   # Token-safe preset (caps + clipping + summary)
-rtk grep "Foo" . --agent-safe --max-per-file 30
-rtk grep "Foo" . --all --full-lines # Legacy full output (uncapped + unclipped)
+rtk grep "pattern" .            # Grouped search results
 rtk diff file1 file2            # Condensed diff
 ```
 
@@ -262,7 +225,6 @@ rtk codegraph index <path>      # Summary only, no per-file progress (-90%)
 Select-String -Path f -Pattern p   # auto-rewritten -> rtk grep
 Get-Content <file>                  # auto-rewritten -> rtk read
 GC <file>                           # auto-rewritten -> rtk read
-rtk read <file> --lines 430:540     # Prefer over Get-Content line-range loops
 Remove-Item <path> -Force           # -> ok <basename>
 ```
 
@@ -307,7 +269,6 @@ rtk json config.json            # Structure without values
 rtk deps                        # Dependencies summary
 rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
-rtk log ERRORLOG.TXT --events 20 # Tail key error/assert events (deduped)
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
 rtk summary <long command>      # Heuristic summary
