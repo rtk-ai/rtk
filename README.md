@@ -68,7 +68,7 @@ brew install homeservefr/rtk/rtk
 
 > If you already have `rtk` from `homebrew/core` (upstream), uninstall it first: `brew uninstall rtk`.
 
-### Quick Install (Linux, alternative for macOS)
+### Quick Install (Linux, Windows Git Bash, alternative for macOS)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserve/main/install.sh | sh
@@ -76,8 +76,9 @@ curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserv
 
 > Installs to `~/.local/bin`. Add to PATH if needed:
 > ```bash
-> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc on Linux
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc on Linux / Git Bash
 > ```
+> On Windows, this script runs from **Git Bash** (MINGW) and downloads the same `rtk-x86_64-pc-windows-msvc.zip` you would get manually.
 
 ### Cargo
 

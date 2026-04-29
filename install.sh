@@ -28,9 +28,10 @@ error() {
 
 detect_os() {
     case "$(uname -s)" in
-        Darwin) OS="darwin";;
-        Linux)  OS="linux";;
-        *)      error "Unsupported operating system: $(uname -s). Use the Windows zip release manually.";;
+        Darwin)                OS="darwin";  ARCHIVE_EXT="tar.gz"; BINARY_FILE="rtk";;
+        Linux)                 OS="linux";   ARCHIVE_EXT="tar.gz"; BINARY_FILE="rtk";;
+        MINGW*|MSYS*|CYGWIN*)  OS="windows"; ARCHIVE_EXT="zip";    BINARY_FILE="rtk.exe";;
+        *)                     error "Unsupported operating system: $(uname -s)";;
     esac
 }
 
@@ -60,6 +61,29 @@ get_target() {
             fi
             TARGET="x86_64-unknown-linux-musl"
             ;;
+        windows)
+            if [ "$ARCH" != "x86_64" ]; then
+                error "This Homeserve mirror only ships Windows binaries for x86_64. Detected: $ARCH"
+            fi
+            TARGET="x86_64-pc-windows-msvc"
+            ;;
+    esac
+}
+
+extract_archive() {
+    case "$ARCHIVE_EXT" in
+        tar.gz)
+            tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
+            ;;
+        zip)
+            if command -v unzip >/dev/null 2>&1; then
+                unzip -q -o "$ARCHIVE" -d "$TEMP_DIR"
+            elif command -v tar >/dev/null 2>&1 && tar --help 2>&1 | grep -q -- '--format'; then
+                tar -xf "$ARCHIVE" -C "$TEMP_DIR"
+            else
+                error "Cannot extract zip: neither 'unzip' nor a zip-capable 'tar' is available."
+            fi
+            ;;
     esac
 }
 
@@ -68,9 +92,9 @@ install() {
     info "Target: $TARGET"
     info "Version: $VERSION"
 
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.tar.gz"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.${ARCHIVE_EXT}"
     TEMP_DIR=$(mktemp -d)
-    ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.tar.gz"
+    ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.${ARCHIVE_EXT}"
 
     info "Downloading from: $DOWNLOAD_URL"
     if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
@@ -78,24 +102,37 @@ install() {
     fi
 
     info "Extracting..."
-    tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
+    extract_archive
 
     mkdir -p "$INSTALL_DIR"
-    mv "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/"
+    mv "${TEMP_DIR}/${BINARY_FILE}" "${INSTALL_DIR}/${BINARY_FILE}"
 
-    chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
+    chmod +x "${INSTALL_DIR}/${BINARY_FILE}" 2>/dev/null || true
 
     rm -rf "$TEMP_DIR"
 
-    info "Successfully installed ${BINARY_NAME} to ${INSTALL_DIR}/${BINARY_NAME}"
+    info "Successfully installed ${BINARY_FILE} to ${INSTALL_DIR}/${BINARY_FILE}"
 }
 
 verify() {
-    if command -v "$BINARY_NAME" >/dev/null 2>&1; then
+    INSTALLED_PATH="${INSTALL_DIR}/${BINARY_FILE}"
+    if "$INSTALLED_PATH" --version >/dev/null 2>&1; then
+        info "Verification: $("$INSTALLED_PATH" --version)"
+    elif command -v "$BINARY_NAME" >/dev/null 2>&1; then
         info "Verification: $($BINARY_NAME --version)"
     else
-        warn "Binary installed but not in PATH. Add to your shell profile:"
-        warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        warn "Binary installed at ${INSTALLED_PATH} but not on PATH yet."
+        case "$OS" in
+            windows)
+                warn "On Windows / Git Bash, add to PATH (one-time):"
+                warn "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+                warn "Then restart your terminal. Or add ${INSTALL_DIR} to the Windows User PATH via System Properties."
+                ;;
+            *)
+                warn "Add to your shell profile:"
+                warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+                ;;
+        esac
     fi
 }
 
