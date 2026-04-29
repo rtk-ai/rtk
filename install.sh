@@ -26,10 +26,12 @@ error() {
     exit 1
 }
 
-require_macos() {
-    if [ "$(uname -s)" != "Darwin" ]; then
-        error "This Homeserve mirror of rtk only supports macOS. Detected: $(uname -s)"
-    fi
+detect_os() {
+    case "$(uname -s)" in
+        Darwin) OS="darwin";;
+        Linux)  OS="linux";;
+        *)      error "Unsupported operating system: $(uname -s). Use the Windows zip release manually.";;
+    esac
 }
 
 detect_arch() {
@@ -48,11 +50,21 @@ get_latest_version() {
 }
 
 get_target() {
-    TARGET="${ARCH}-apple-darwin"
+    case "$OS" in
+        darwin)
+            TARGET="${ARCH}-apple-darwin"
+            ;;
+        linux)
+            if [ "$ARCH" != "x86_64" ]; then
+                error "This Homeserve mirror only ships Linux binaries for x86_64. Detected: $ARCH"
+            fi
+            TARGET="x86_64-unknown-linux-musl"
+            ;;
+    esac
 }
 
 install() {
-    info "Detected: macOS $ARCH"
+    info "Detected: $OS $ARCH"
     info "Target: $TARGET"
     info "Version: $VERSION"
 
@@ -90,7 +102,7 @@ verify() {
 main() {
     info "Installing $BINARY_NAME (Homeserve mirror)..."
 
-    require_macos
+    detect_os
     detect_arch
     get_target
     get_latest_version
