@@ -5,6 +5,13 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.0](https://github.com/HomeserveFR/rtk/compare/v0.38.1...v0.39.0) (2026-04-29)
+
+
+### Features
+
+* **release:** re-enable Linux x86_64 and Windows x86_64 binaries ([9446a17](https://github.com/HomeserveFR/rtk/commit/9446a17213ef2c8a6403db0ebaa98a0d84ef651b))
+
 ## [0.38.1](https://github.com/HomeserveFR/rtk/compare/v0.38.0...v0.38.1) (2026-04-28)
 
 
