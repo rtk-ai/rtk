@@ -59,7 +59,16 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 
 > **Homeserve mirror.** This fork (`HomeserveFR/rtk`) is a security-validated mirror of the upstream `rtk-ai/rtk`. Binaries are built from `homeserve/main` for macOS (Intel + Apple Silicon), Linux x86_64 (musl, statically linked), and Windows x86_64.
 
-### Quick Install (macOS / Linux)
+### Homebrew (recommended for macOS, also works on Linuxbrew)
+
+```bash
+brew tap homeservefr/rtk https://github.com/HomeserveFR/rtk.git
+brew install homeservefr/rtk/rtk
+```
+
+> If you already have `rtk` from `homebrew/core` (upstream), uninstall it first: `brew uninstall rtk`.
+
+### Quick Install (Linux, alternative for macOS)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserve/main/install.sh | sh
@@ -69,15 +78,6 @@ curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserv
 > ```bash
 > echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc on Linux
 > ```
-
-### Homebrew (macOS / Linuxbrew)
-
-```bash
-brew tap homeservefr/rtk https://github.com/HomeserveFR/rtk.git
-brew install homeservefr/rtk/rtk
-```
-
-> If you already have `rtk` from `homebrew/core` (upstream), uninstall it first: `brew uninstall rtk`.
 
 ### Cargo
 
