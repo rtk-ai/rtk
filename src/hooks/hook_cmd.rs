@@ -506,6 +506,101 @@ fn run_cursor_inner_with_rules(
     }
 }
 
+// ── Kiro CLI hook ──────────────────────────────────────────────
+
+/// Run the Kiro CLI preToolUse hook.
+/// Deny-with-suggestion: blocks rewritable commands (exit 2 + stderr) so the LLM retries with `rtk`.
+pub fn run_kiro() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(tool_name, "execute_bash" | "shell") {
+        return Ok(());
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    if cmd.starts_with("rtk ") || cmd == "rtk" {
+        return Ok(());
+    }
+
+    if permissions::check_command(cmd) == PermissionVerdict::Deny {
+        audit_log("deny", cmd, "");
+        return Ok(());
+    }
+
+    match get_rewritten(cmd) {
+        Some(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            let _ = writeln!(
+                io::stderr(),
+                "Command should use rtk for token savings. Use: {}",
+                rewritten
+            );
+            std::process::exit(2);
+        }
+        None => {
+            audit_log("skip:no_match", cmd, "");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_kiro_inner(input: &str) -> (Option<String>, bool) {
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return (None, false),
+    };
+
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(tool_name, "execute_bash" | "shell") {
+        return (None, false);
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return (None, false),
+    };
+
+    if cmd.starts_with("rtk ") || cmd == "rtk" {
+        return (None, false);
+    }
+
+    match get_rewritten(cmd) {
+        Some(rewritten) => {
+            let msg = format!(
+                "Command should use rtk for token savings. Use: {}",
+                rewritten
+            );
+            (Some(msg), true)
+        }
+        None => (None, false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,5 +999,65 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // --- Kiro CLI hook ---
+
+    fn kiro_input(tool: &str, cmd: &str) -> String {
+        serde_json::json!({
+            "hook_event_name": "preToolUse",
+            "tool_name": tool,
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_kiro_rewritable_command_blocked() {
+        let (msg, blocked) = run_kiro_inner(&kiro_input("shell", "git status"));
+        assert!(blocked, "rewritable command should be blocked");
+        assert!(msg.unwrap().contains("rtk git status"));
+    }
+
+    #[test]
+    fn test_kiro_already_rtk_passthrough() {
+        let (msg, blocked) = run_kiro_inner(&kiro_input("shell", "rtk git status"));
+        assert!(!blocked);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_kiro_non_rewritable_allowed() {
+        let (msg, blocked) = run_kiro_inner(&kiro_input("shell", "echo hello"));
+        assert!(!blocked);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_kiro_empty_command_passthrough() {
+        let (msg, blocked) = run_kiro_inner(&kiro_input("shell", ""));
+        assert!(!blocked);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_kiro_non_bash_tool_passthrough() {
+        let (msg, blocked) = run_kiro_inner(&kiro_input("fs_read", "git status"));
+        assert!(!blocked);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_kiro_malformed_json_passthrough() {
+        let (msg, blocked) = run_kiro_inner("not json at all");
+        assert!(!blocked);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_kiro_execute_bash_tool_also_works() {
+        let (msg, blocked) = run_kiro_inner(&kiro_input("execute_bash", "cargo test"));
+        assert!(blocked, "execute_bash should also be intercepted");
+        assert!(msg.unwrap().contains("rtk cargo test"));
     }
 }

@@ -30,6 +30,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
+| Kiro CLI | `rtk init -g --agent kiro-cli` | Steering + agent config | -- |
 
 
 ## Integrity Verification
@@ -87,6 +88,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
 | Codex | ask parsed but no-op | allow (limitation — fails open) |
+| Kiro CLI (rtk hook kiro) | No updatedInput | deny-with-suggestion (agent retries) |
 
 ### Implementation
 
