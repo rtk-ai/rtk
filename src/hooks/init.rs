@@ -1405,6 +1405,45 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ─── Factory Droid support ───────────────────────────────────
+
+const DROID_RULES: &str = include_str!("../../hooks/droid/rules.md");
+
+pub fn run_droid_mode(verbose: u8) -> Result<()> {
+    run_droid_mode_at(&std::env::current_dir()?, verbose)
+}
+
+fn run_droid_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
+    let target_dir = base_dir.join(".factory/rules");
+    let rules_path = target_dir.join("rtk-rules.md");
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        println!("\nRTK already configured for Factory Droid in this project.\n");
+        println!("  Rules: .factory/rules/rtk-rules.md (already present)");
+    } else {
+        fs::create_dir_all(&target_dir).context("Failed to create .factory/rules directory")?;
+        let new_content = if existing.trim().is_empty() {
+            DROID_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), DROID_RULES)
+        };
+        fs::write(&rules_path, &new_content)
+            .context("Failed to write .factory/rules/rtk-rules.md")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote .factory/rules/rtk-rules.md");
+        }
+
+        println!("\nRTK configured for Factory Droid.\n");
+        println!("  Rules: .factory/rules/rtk-rules.md (installed)");
+    }
+    println!("  Droid will now use rtk commands for token savings.");
+    println!("  Test with: git status\n");
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -2953,6 +2992,31 @@ More notes
 
         // Second run should not overwrite
         run_antigravity_mode_at(temp.path(), 0).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_droid_mode_creates_rules_file() {
+        let temp = TempDir::new().unwrap();
+        run_droid_mode_at(temp.path(), 0).unwrap();
+
+        let rules_path = temp.path().join(".factory/rules/rtk-rules.md");
+        assert!(rules_path.exists(), "Rules file should be created");
+        let content = fs::read_to_string(&rules_path).unwrap();
+        assert!(content.contains("RTK"), "Rules file should contain RTK");
+    }
+
+    #[test]
+    fn test_droid_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_droid_mode_at(temp.path(), 0).unwrap();
+
+        let path = temp.path().join(".factory/rules/rtk-rules.md");
+        let first = fs::read_to_string(&path).unwrap();
+
+        // Second run should not overwrite
+        run_droid_mode_at(temp.path(), 0).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
     }

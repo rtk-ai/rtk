@@ -2201,6 +2201,34 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_gradlew() {
+        assert_eq!(
+            rewrite_command("./gradlew test --stacktrace", &[]),
+            Some("rtk gradlew test --stacktrace".into())
+        );
+        assert_eq!(
+            rewrite_command("gradlew build", &[]),
+            Some("rtk gradlew build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradle() {
+        assert_eq!(
+            rewrite_command("gradle test", &[]),
+            Some("rtk gradle test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_xcodebuild() {
+        assert_eq!(
+            rewrite_command("xcodebuild test -scheme App", &[]),
+            Some("rtk xcodebuild test -scheme App".into())
+        );
+    }
+
+    #[test]
     fn test_classify_golangci_lint_with_inline_config_flag_before_run() {
         assert!(matches!(
             classify_command("golangci-lint --config=foo.yml run ./..."),

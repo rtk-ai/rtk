@@ -7,6 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
+use cmds::build::{gradle_cmd, xcodebuild_cmd};
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, gt_cmd};
@@ -44,6 +45,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Factory Droid
+    Droid,
 }
 
 #[derive(Parser)]
@@ -683,6 +686,27 @@ enum Commands {
     Go {
         #[command(subcommand)]
         command: GoCommands,
+    },
+
+    /// Gradle wrapper with compact output
+    Gradlew {
+        /// Gradle arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Gradle with compact output
+    Gradle {
+        /// Gradle arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// xcodebuild with compact output
+    Xcodebuild {
+        /// xcodebuild arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Graphite (gt) stacked PR commands with compact output
@@ -1646,6 +1670,12 @@ fn run_cli() -> Result<i32> {
             DockerCommands::Other(args) => container::run_docker_passthrough(&args, cli.verbose)?,
         },
 
+        Commands::Gradlew { args } => gradle_cmd::run("./gradlew", &args, cli.verbose)?,
+
+        Commands::Gradle { args } => gradle_cmd::run("gradle", &args, cli.verbose)?,
+
+        Commands::Xcodebuild { args } => xcodebuild_cmd::run(&args, cli.verbose)?,
+
         Commands::Kubectl { command } => match command {
             KubectlCommands::Pods { namespace, all } => {
                 let mut args: Vec<String> = Vec::new();
@@ -1745,6 +1775,11 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Droid) {
+                if global {
+                    anyhow::bail!("Droid is project-scoped. Use: rtk init --agent droid");
+                }
+                hooks::init::run_droid_mode(cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2657,6 +2692,24 @@ mod tests {
                 assert_eq!(command, vec!["git", "status"]);
             }
             _ => panic!("Expected Hook Check command"),
+        }
+    }
+
+    #[test]
+    fn test_gradlew_parses() {
+        let cli = Cli::try_parse_from(["rtk", "gradlew", "test", "--stacktrace"]).unwrap();
+        match cli.command {
+            Commands::Gradlew { args } => assert_eq!(args, vec!["test", "--stacktrace"]),
+            _ => panic!("Expected Gradlew command"),
+        }
+    }
+
+    #[test]
+    fn test_xcodebuild_parses() {
+        let cli = Cli::try_parse_from(["rtk", "xcodebuild", "test", "-scheme", "App"]).unwrap();
+        match cli.command {
+            Commands::Xcodebuild { args } => assert_eq!(args, vec!["test", "-scheme", "App"]),
+            _ => panic!("Expected Xcodebuild command"),
         }
     }
 
