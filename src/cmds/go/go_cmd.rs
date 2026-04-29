@@ -572,6 +572,23 @@ pub(crate) fn filter_go_build(output: &str) -> String {
     }
 
     if errors.is_empty() {
+        let has_unrecognized_output = output.lines().any(|l| {
+            let t = l.trim();
+            if t.is_empty() || t.starts_with('#') {
+                return false;
+            }
+            let lower = t.to_lowercase();
+            if lower.starts_with("go: downloading ")
+                || lower.starts_with("go: finding ")
+                || lower.starts_with("go: extracting ")
+            {
+                return false;
+            }
+            true
+        });
+        if has_unrecognized_output {
+            return format!("Go build: Failed\n{}", output.trim());
+        }
         return "Go build: Success".to_string();
     }
 
@@ -972,6 +989,22 @@ go: cannot load module missing listed in go.work file: open missing/go.mod: no s
         assert!(result.contains("go.mod file not found in current directory or any parent directory"));
         assert!(result.contains("no Go files in /tmp/example"));
         assert!(result.contains("go: cannot load module missing listed in go.work file"));
+    }
+
+    #[test]
+    fn test_filter_go_build_unrecognized_error_not_swallowed() {
+        let output = "stat /some/path/cmd/orator: directory not found\n";
+        let result = filter_go_build(output);
+        assert!(
+            result.contains("Failed"),
+            "Should report failure, got: {}",
+            result
+        );
+        assert!(
+            result.contains("directory not found"),
+            "Should preserve raw error, got: {}",
+            result
+        );
     }
 
     #[test]
