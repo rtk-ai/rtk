@@ -148,6 +148,7 @@ rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
 rtk diff file1 file2            # Condensed diff
+rtk sed -n '1,200p' file.log    # Compact large sed output
 ```
 
 ### Git

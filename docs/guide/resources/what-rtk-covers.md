@@ -114,6 +114,7 @@ Typical savings: 60-99%.
 | `grep` | 70% | Truncated lines, grouped by file |
 | `diff` | 65% | Context reduced |
 | `wc` | 60% | Compact counts |
+| `sed` | 60% | Large output shortened with head/tail and line truncation |
 | `cat` / `head` / `tail <file>` | 60-80% | Smart file reading via `rtk read` |
 | `rtk smart <file>` | 85% | 2-line heuristic code summary (signatures only) |
 

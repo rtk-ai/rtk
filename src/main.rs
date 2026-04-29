@@ -20,7 +20,7 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, summary, tree, wc_cmd,
+    read, sed_cmd, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -388,6 +388,14 @@ enum Commands {
     /// Word/line/byte count with compact output (strips paths and padding)
     Wc {
         /// Arguments passed to wc (files, flags like -l, -w, -c)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Stream editor with compact output for large substitutions/prints
+    #[command(disable_help_flag = true)]
+    Sed {
+        /// Arguments passed to sed
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1833,6 +1841,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::Sed { args } => sed_cmd::run(&args, cli.verbose)?,
+
         Commands::Gain {
             project, // added
             graph,
@@ -2407,6 +2417,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Summary { .. }
             | Commands::Grep { .. }
             | Commands::Wget { .. }
+            | Commands::Sed { .. }
             | Commands::Vitest { .. }
             | Commands::Prisma { .. }
             | Commands::Tsc { .. }
@@ -2592,6 +2603,17 @@ mod tests {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             )),
             Ok(_) => panic!("Expected parse error for unknown subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_sed_args_pass_through() {
+        let cli = Cli::try_parse_from(["rtk", "sed", "-n", "1,20p", "--help"]).unwrap();
+        match cli.command {
+            Commands::Sed { args } => {
+                assert_eq!(args, vec!["-n", "1,20p", "--help"]);
+            }
+            _ => panic!("Expected Sed command"),
         }
     }
 
