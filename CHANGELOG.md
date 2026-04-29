@@ -135,19 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **security:** default to ask when no permission rule matches ([#886](https://github.com/rtk-ai/rtk/issues/886)) ([41a6c6b](https://github.com/rtk-ai/rtk/commit/41a6c6bf6da78a4754794fdc6a1469df2e327920))
 * **tracking:** use std::env::temp_dir() for compatibility (instead of unix tmp) ([e918661](https://github.com/rtk-ai/rtk/commit/e918661440d7b50321f0535032f52c5e87aaf3cb))
 
-## [Unreleased]
-
-### Bug Fixes
-
-* **git:** remove `-u` short alias from `--ultra-compact` to fix `git push -u` upstream tracking ([#1086](https://github.com/rtk-ai/rtk/issues/1086))
-
-## [0.35.0](https://github.com/rtk-ai/rtk/compare/v0.34.3...v0.35.0) (2026-04-06)
-
-
-### Features
-
-* **aws:** expand CLI filters from 8 to 25 subcommands ([402c48e](https://github.com/rtk-ai/rtk/commit/402c48e66988e638a5b4f4dd193238fc1d0fe18f))
-
 
 ### Bug Fixes
 
@@ -180,7 +167,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **security:** default to ask when no permission rule matches ([#886](https://github.com/rtk-ai/rtk/issues/886)) ([41a6c6b](https://github.com/rtk-ai/rtk/commit/41a6c6bf6da78a4754794fdc6a1469df2e327920))
 * **tracking:** use std::env::temp_dir() for compatibility (instead of unix tmp) ([e918661](https://github.com/rtk-ai/rtk/commit/e918661440d7b50321f0535032f52c5e87aaf3cb))
 
-## [Unreleased]
 
 ### Features
 
@@ -252,13 +238,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * truncation accuracy + Copilot init + binary file detection ([966bcbe](https://github.com/rtk-ai/rtk/commit/966bcbe638be18bbaba4298df985804643f82c85))
 * **truncation:** accurate overflow counts and omission indicators ([58a9633](https://github.com/rtk-ai/rtk/commit/58a963347467613d48db05ad56bc8f1f3a06b65d))
 
-## [Unreleased]
+
 
 ### Bug Fixes
 
-* **wc:** `wc` filter was never invoked by the hook — removed `"wc "` from `IGNORED_PREFIXES` and added registry entry so `wc` commands are rewritten to `rtk wc`
-* **diff:** correct truncation overflow count in condense_unified_diff ([#833](https://github.com/rtk-ai/rtk/pull/833)) ([5399f83](https://github.com/rtk-ai/rtk/commit/5399f83))
-* **git:** replace vague truncation markers with exact counts in log and grep output ([#833](https://github.com/rtk-ai/rtk/pull/833)) ([185fb97](https://github.com/rtk-ai/rtk/commit/185fb97))
+
 
 ## [0.33.1](https://github.com/rtk-ai/rtk/compare/v0.33.0...v0.33.1) (2026-03-25)
 
@@ -306,7 +290,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **ruby:** use rails test for positional file args in rtk rake ([138e914](https://github.com/rtk-ai/rtk/commit/138e91411b4802e445a97429056cca73282d09e1))
 * update Discord invite link ([#711](https://github.com/rtk-ai/rtk/issues/711)) ([#786](https://github.com/rtk-ai/rtk/issues/786)) ([af56573](https://github.com/rtk-ai/rtk/commit/af56573ae2b234123e4685fd945980e644f40fa3))
 
-## [Unreleased]
+
 
 ### Bug Fixes
 
@@ -453,30 +437,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * curl JSON size guard ([#297](https://github.com/rtk-ai/rtk/issues/297)) + exclude_commands config ([#243](https://github.com/rtk-ai/rtk/issues/243)) ([#342](https://github.com/rtk-ai/rtk/issues/342)) ([a8d6106](https://github.com/rtk-ai/rtk/commit/a8d6106f736e049013ecb77f0f413167266dd40e))
 
-## [Unreleased]
 
-### Features
 
-* **toml-dsl:** declarative TOML filter engine — add command filters without writing Rust ([#299](https://github.com/rtk-ai/rtk/issues/299))
-  * 8 primitives: `strip_ansi`, `replace`, `match_output`, `strip/keep_lines_matching`, `truncate_lines_at`, `head/tail_lines`, `max_lines`, `on_empty`
-  * lookup chain: `.rtk/filters.toml` (project-local) → `~/.config/rtk/filters.toml` (user-global) → built-in filters
-  * `RTK_NO_TOML=1` bypass, `RTK_TOML_DEBUG=1` debug mode
-  * shadow warning when a TOML filter's match_command overlaps a Rust-handled command
-  * `rtk init` generates commented filter templates at both project and global level
-  * `rtk verify` command with `--require-all` for inline test validation
-  * 18 built-in filters: `tofu-plan/init/validate/fmt` ([#240](https://github.com/rtk-ai/rtk/issues/240)), `du` ([#284](https://github.com/rtk-ai/rtk/issues/284)), `fail2ban-client` ([#281](https://github.com/rtk-ai/rtk/issues/281)), `iptables` ([#282](https://github.com/rtk-ai/rtk/issues/282)), `mix-format/compile` ([#310](https://github.com/rtk-ai/rtk/issues/310)), `shopify-theme` ([#280](https://github.com/rtk-ai/rtk/issues/280)), `pio-run` ([#231](https://github.com/rtk-ai/rtk/issues/231)), `mvn-build` ([#338](https://github.com/rtk-ai/rtk/issues/338)), `pre-commit`, `helm`, `gcloud`, `ansible-playbook`
-* **hooks:** `exclude_commands` config — exclude specific commands from auto-rewrite ([#243](https://github.com/rtk-ai/rtk/issues/243))
 
-### Bug Fixes
-
-* **cargo clippy:** include actionable error details in compact output instead of summary-only counts ([#602](https://github.com/rtk-ai/rtk/issues/602))
-* **curl:** skip JSON schema replacement when schema is larger than original payload ([#297](https://github.com/rtk-ai/rtk/issues/297))
-* **toml-dsl:** fix regex overmatch on `tofu-plan/init/validate/fmt` and `mix-format/compile` — add `(\s|$)` word boundary to prevent matching subcommands (e.g. `tofu planet`, `mix formats`) ([#349](https://github.com/rtk-ai/rtk/issues/349))
-* **toml-dsl:** remove 3 dead built-in filters (`docker-inspect`, `docker-compose-ps`, `pnpm-build`) — Clap routes these commands before `run_fallback`, so the TOML filters never fire ([#351](https://github.com/rtk-ai/rtk/issues/351))
-* **toml-dsl:** `uv-sync` — remove `Resolved` short-circuit; it fires before the package list is printed, hiding installed packages ([#386](https://github.com/rtk-ai/rtk/issues/386))
-* **toml-dsl:** `dotnet-build` — short-circuit only when both warning and error counts are zero; builds with warnings now pass through ([#386](https://github.com/rtk-ai/rtk/issues/386))
-* **toml-dsl:** `poetry-install` — support Poetry 2.x bullet syntax (`•`) and `No changes.` up-to-date message ([#386](https://github.com/rtk-ai/rtk/issues/386))
-* **toml-dsl:** `ping` — add Windows format support (`Pinging` header, `Reply from` per-packet lines) ([#386](https://github.com/rtk-ai/rtk/issues/386))
 
 ## [0.25.0](https://github.com/rtk-ai/rtk/compare/v0.24.0...v0.25.0) (2026-03-05)
 
@@ -490,41 +453,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **find:** accept native find flags (-name, -type, etc.) ([#211](https://github.com/rtk-ai/rtk/issues/211)) ([7ac5bc4](https://github.com/rtk-ai/rtk/commit/7ac5bc4bd3942841cc1abb53399025b4fcae10c9))
 
-## [Unreleased]
 
-### ⚠️ Migration Required
 
-**Hook must be updated after upgrading** (`rtk init --global`).
 
-The Claude Code hook is now a thin delegator: all rewrite logic lives in the
-`rtk rewrite` command (single source of truth). The old hook embedded the full
-if-else mapping inline — it still works after upgrading, but won't pick up new
-commands automatically.
-
-**Upgrade path:**
-```bash
-cargo install rtk          # upgrade binary
-rtk init --global          # replace old hook with thin delegator
-```
-
-Running `rtk init` without `--global` updates the project-level hook only.
-Users who skip this step keep the old hook working as before — no immediate
-breakage, but future rule additions won't take effect until they migrate.
-
-### Features
-
-* **rewrite**: add `rtk rewrite` command — single source of truth for hook rewrites ([#241](https://github.com/rtk-ai/rtk/pull/241))
-  - New `src/discover/registry.rs` handles all command → RTK mapping
-  - Hook reduced to ~50 lines (thin delegator), no duplicate logic
-  - New commands automatically available in hook without hook file changes
-  - Supports compound commands (`&&`, `||`, `;`, `|`, `&`) and env prefixes
-* **discover**: extract rules/patterns into `src/discover/rules.rs` — adding a command now means editing one file only
-* **fix**: add `aws` and `psql` to rewrite registry (were missing despite modules existing since 0.24.0)
-
-### Tests
-
-* +48 regression tests covering all command categories: aws, psql, Python, Go, JS/TS,
-  compound operators, sudo/env prefixes, registry invariants (607 total, was 559)
 
 ## [0.24.0](https://github.com/rtk-ai/rtk/compare/v0.23.0...v0.24.0) (2026-03-04)
 
@@ -742,7 +673,7 @@ breakage, but future rule additions won't take effect until they migrate.
 
 * **init:** auto-patch settings.json for frictionless hook installation ([2db7197](https://github.com/rtk-ai/rtk/commit/2db7197e020857c02857c8ef836279c3fd660baf))
 
-## [Unreleased]
+
 
 ### Added
 - **settings.json auto-patch** for frictionless hook installation
@@ -971,7 +902,7 @@ breakage, but future rule additions won't take effect until they migrate.
 
 * **ci:** correct rust-toolchain action name ([9526471](https://github.com/pszymkowiak/rtk/commit/9526471530b7d272f32aca38ace7548fd221547e))
 
-## [Unreleased]
+
 
 ### Added
 - `prettier` command for format checking with package manager auto-detection (pnpm/yarn/npx)
