@@ -5,6 +5,40 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.38.0](https://github.com/rtk-ai/rtk/compare/v0.37.2...v0.38.0) (2026-04-29)
+
+
+### Features
+
+* **cicd:** enforce cicd sast & package check ([3bbbb49](https://github.com/rtk-ai/rtk/commit/3bbbb492f33f0e619ab0d1dbce4389ad49e763ae))
+* **gains:** add --reset flag ([e3149cb](https://github.com/rtk-ai/rtk/commit/e3149cb7fbed18eae95f753664ddd8eaaaf6cc39))
+* **glab:** add GitLab CLI (glab) command support ([048f2f9](https://github.com/rtk-ai/rtk/commit/048f2f980bd95c5918f309d1d7ebc096d196f00d))
+* **glab:** add GitLab CLI (glab) command support ([bc31f3f](https://github.com/rtk-ai/rtk/commit/bc31f3f0f39077884e8d52c3508e840b355f682e)), closes [#851](https://github.com/rtk-ai/rtk/issues/851)
+
+
+### Bug Fixes
+
+* **benchmark:** benchmark capture all fd only stream ([c590bd6](https://github.com/rtk-ai/rtk/commit/c590bd69329bb82608666958c7e06bf169a7d577))
+* **benchmark:** capture all fd for stream cmd benchmark ([e6c2523](https://github.com/rtk-ai/rtk/commit/e6c2523be1180772e40c175e2f9a523d349fb13d))
+* **benchmark:** extract format_diff_changes + remove wrong diff test ([e7ae6bf](https://github.com/rtk-ai/rtk/commit/e7ae6bf018882dba248f151ba4ec4929300b3e36))
+* **cicd:** : no semgrep alert on sh call cicd ([7681daf](https://github.com/rtk-ai/rtk/commit/7681dafc76f164cfad588fe37d9a165dcb476e10))
+* **discover:** also encode '_', '\', and non-ASCII chars in project path slug ([73a05c3](https://github.com/rtk-ai/rtk/commit/73a05c3262b6410cb24370d939c428d1dc0c7a77)), closes [#1457](https://github.com/rtk-ai/rtk/issues/1457)
+* **discover:** encode '.' as '-' in project path slug ([2d031f3](https://github.com/rtk-ai/rtk/commit/2d031f32e9ad4452c2cc229c030ea6c0936c8bec)), closes [#1457](https://github.com/rtk-ai/rtk/issues/1457)
+* **filters:** benchmark ci update + fix stream + filter quality ([137af04](https://github.com/rtk-ai/rtk/commit/137af0493189a86020da1feaa1de74df92466137))
+* **filters:** benchmark ci update + fix stream filter quality ([88d9f6a](https://github.com/rtk-ai/rtk/commit/88d9f6a0d94fd2b5b3d40c956e966756670a2704))
+* **git:** fix empty output when branch name contains '/' in git diff ([e070226](https://github.com/rtk-ai/rtk/commit/e0702260a94377b6bbec5cb79d91d81cba17b0ec))
+* **git:** fix empty output when branch name contains '/' in git diff ([13188a8](https://github.com/rtk-ai/rtk/commit/13188a88b22f692157b89874f4c76287a0b3ecae)), closes [#1431](https://github.com/rtk-ai/rtk/issues/1431)
+* grep false negatives, output mangling, and truncation annotations ([de41533](https://github.com/rtk-ai/rtk/commit/de415335ea069c06370855366945a3704579ee18))
+* **install:** resolve version via redirect to avoid GitHub API rate limits ([5e1a641](https://github.com/rtk-ai/rtk/commit/5e1a64180f094ae456780a78b675f243312089c6))
+* **npm:** regex match end line ([5e84e94](https://github.com/rtk-ai/rtk/commit/5e84e9471736fe58e89094854f4123ecb07c2d3b))
+* **npx:** dispatch unknown tools to npx instead of npm ([2c4569c](https://github.com/rtk-ai/rtk/commit/2c4569caa64d013ad4ada0b7580f9f16d8334c19)), closes [#815](https://github.com/rtk-ai/rtk/issues/815)
+* remove wrong cicd benchmark + npm test regex ([7e3690a](https://github.com/rtk-ai/rtk/commit/7e3690a23ab158ca8e1e890650554e20e3a0c17b))
+* **stream:** add semgrep flag for sh tests ([7cfcdbe](https://github.com/rtk-ai/rtk/commit/7cfcdbec8681b15b794b6aef982ccb38feb79fd7))
+* **stream:** add semgrep flag for sh tests ([d327724](https://github.com/rtk-ai/rtk/commit/d327724f814b6875903366db0b0616780b454ad1))
+* **stream:** route to respective fd ([605e335](https://github.com/rtk-ai/rtk/commit/605e335f0546d2ed8554a95e7749a0b494c510e3))
+* **stream:** route to respective fd ([81a1be6](https://github.com/rtk-ai/rtk/commit/81a1be6a744942515347dd296ddcf7d9f126200d))
+* **tracking:** test env path ([70b36b4](https://github.com/rtk-ai/rtk/commit/70b36b4dbc3e147219ad87cf539d073523b86a85))
+
 ## [0.37.2](https://github.com/rtk-ai/rtk/compare/v0.37.1...v0.37.2) (2026-04-20)
 
 
