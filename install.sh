@@ -30,9 +30,10 @@ error() {
 # Detect OS
 detect_os() {
     case "$(uname -s)" in
-        Linux*)  OS="linux";;
-        Darwin*) OS="darwin";;
-        *)       error "Unsupported operating system: $(uname -s)";;
+        Linux*)           OS="linux";;
+        Darwin*)          OS="darwin";;
+        MINGW*|MSYS*|CYGWIN*) OS="windows";;
+        *)                error "Unsupported operating system: $(uname -s)";;
     esac
 }
 
@@ -80,6 +81,12 @@ get_target() {
         darwin)
             TARGET="${ARCH}-apple-darwin"
             ;;
+        windows)
+            if [ "$ARCH" != "x86_64" ]; then
+                error "Only x86_64 is supported on Windows (Git Bash / MSYS2)"
+            fi
+            TARGET="x86_64-pc-windows-msvc"
+            ;;
     esac
 }
 
@@ -89,27 +96,51 @@ install() {
     info "Target: $TARGET"
     info "Version: $VERSION"
 
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.tar.gz"
     TEMP_DIR=$(mktemp -d)
-    ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.tar.gz"
 
-    info "Downloading from: $DOWNLOAD_URL"
-    if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
-        error "Failed to download binary"
+    if [ "$OS" = "windows" ]; then
+        ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.zip"
+        DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.zip"
+
+        info "Downloading from: $DOWNLOAD_URL"
+        if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
+            error "Failed to download binary"
+        fi
+
+        info "Extracting..."
+        if command -v unzip >/dev/null 2>&1; then
+            unzip -q "$ARCHIVE" -d "$TEMP_DIR"
+        else
+            error "unzip not found. Install it via: pacman -S unzip (MSYS2) or ensure Git Bash includes unzip"
+        fi
+
+        mkdir -p "$INSTALL_DIR"
+        mv "${TEMP_DIR}/${BINARY_NAME}.exe" "${INSTALL_DIR}/${BINARY_NAME}.exe"
+        # Create a no-extension copy so 'rtk' works in Git Bash without .exe
+        cp "${INSTALL_DIR}/${BINARY_NAME}.exe" "${INSTALL_DIR}/${BINARY_NAME}"
+        chmod +x "${INSTALL_DIR}/${BINARY_NAME}.exe" "${INSTALL_DIR}/${BINARY_NAME}"
+
+        rm -rf "$TEMP_DIR"
+        info "Successfully installed ${BINARY_NAME} to ${INSTALL_DIR}/"
+    else
+        ARCHIVE="${TEMP_DIR}/${BINARY_NAME}.tar.gz"
+        DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}-${TARGET}.tar.gz"
+
+        info "Downloading from: $DOWNLOAD_URL"
+        if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
+            error "Failed to download binary"
+        fi
+
+        info "Extracting..."
+        tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
+
+        mkdir -p "$INSTALL_DIR"
+        mv "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/"
+        chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
+
+        rm -rf "$TEMP_DIR"
+        info "Successfully installed ${BINARY_NAME} to ${INSTALL_DIR}/${BINARY_NAME}"
     fi
-
-    info "Extracting..."
-    tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
-
-    mkdir -p "$INSTALL_DIR"
-    mv "${TEMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/"
-
-    chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
-
-    # Cleanup
-    rm -rf "$TEMP_DIR"
-
-    info "Successfully installed ${BINARY_NAME} to ${INSTALL_DIR}/${BINARY_NAME}"
 }
 
 # Verify installation
@@ -118,7 +149,12 @@ verify() {
         info "Verification: $($BINARY_NAME --version)"
     else
         warn "Binary installed but not in PATH. Add to your shell profile:"
-        warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        if [ "$OS" = "windows" ]; then
+            warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+            warn "  (Add to ~/.bashrc or ~/.bash_profile for Git Bash)"
+        else
+            warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        fi
     fi
 }
 
