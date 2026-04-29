@@ -62,8 +62,14 @@ struct Cli {
     verbose: u8,
 
     /// Ultra-compact mode: ASCII icons, inline format (Level 2 optimizations)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "json")]
     ultra_compact: bool,
+
+    /// Emit machine-readable JSON envelope on stdout (untruncated, stable shape).
+    /// Bypasses the human formatter; intended for orchestrators and CI parsers.
+    /// Currently supported by: vitest, jest, playwright. Conflicts with -v / --ultra-compact.
+    #[arg(long, global = true, conflicts_with = "verbose")]
+    json: bool,
 
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
@@ -1889,7 +1895,7 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Jest { ref args } | Commands::Vitest { ref args } => {
-            vitest_cmd::run_test(&cli.command, args, cli.verbose)?
+            vitest_cmd::run_test(&cli.command, args, cli.verbose, cli.json)?
         }
 
         Commands::Prisma { command } => match command {
@@ -1934,7 +1940,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::Format { args } => format_cmd::run(&args, cli.verbose)?,
 
-        Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose)?,
+        Commands::Playwright { args } => playwright_cmd::run(&args, cli.verbose, cli.json)?,
 
         Commands::Cargo { command } => match command {
             CargoCommands::Build { args } => {
@@ -2056,7 +2062,7 @@ fn run_cli() -> Result<i32> {
                 }
                 "next" => next_cmd::run(&args[1..], cli.verbose)?,
                 "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
-                "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
+                "playwright" => playwright_cmd::run(&args[1..], cli.verbose, cli.json)?,
                 _ => npm_cmd::exec(&args, cli.verbose, cli.skip_env)?,
             }
         }
@@ -2434,6 +2440,29 @@ fn is_operational_command(cmd: &Commands) -> bool {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    /// T6 (--json conflict matrix): --json must reject combinations with -v / --ultra-compact.
+    #[test]
+    fn test_json_flag_parses_alone() {
+        let cli = Cli::try_parse_from(["rtk", "--json", "vitest"]).expect("--json alone parses");
+        assert!(cli.json);
+        assert_eq!(cli.verbose, 0);
+        assert!(!cli.ultra_compact);
+    }
+
+    #[test]
+    fn test_json_flag_conflicts_with_verbose() {
+        let err = Cli::try_parse_from(["rtk", "--json", "-v", "vitest"])
+            .expect_err("--json + -v must conflict");
+        assert!(matches!(err.kind(), ErrorKind::ArgumentConflict));
+    }
+
+    #[test]
+    fn test_json_flag_conflicts_with_ultra_compact() {
+        let err = Cli::try_parse_from(["rtk", "--json", "--ultra-compact", "vitest"])
+            .expect_err("--json + --ultra-compact must conflict");
+        assert!(matches!(err.kind(), ErrorKind::ArgumentConflict));
+    }
 
     #[test]
     fn test_git_commit_single_message() {

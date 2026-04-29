@@ -8,8 +8,9 @@ use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, strip_ansi};
 use crate::parser::{
-    emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_passthrough,
-    FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
+    build_json_envelope, emit_degradation_warning, emit_passthrough_warning, extract_json_object,
+    truncate_passthrough, FormatMode, OutputParser, ParseResult, TestFailure, TestResult,
+    TokenFormatter,
 };
 use crate::Commands;
 
@@ -204,7 +205,7 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_test(command: &Commands, args: &[String], verbose: u8, json: bool) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let (framework, mut cmd) = match command {
@@ -247,6 +248,29 @@ pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32>
 
     // Parse output using VitestParser
     let parse_result = VitestParser::parse(&result.stdout);
+
+    // R7: --json bypasses formatter, suppresses tier-warning stderr, emits stable envelope
+    if json {
+        let tool_name: &'static str = match framework {
+            "vitest" => "vitest",
+            "jest" => "jest",
+            _ => "vitest",
+        };
+        let envelope = build_json_envelope(tool_name, parse_result, result.exit_code);
+        let serialized = serde_json::to_string(&envelope)
+            .context("Failed to serialize JSON envelope")?;
+        println!("{}", serialized);
+
+        timer.track(
+            format!("{} run", framework).as_str(),
+            format!("rtk {} run --json", framework).as_str(),
+            &combined,
+            &serialized,
+        );
+
+        return Ok(result.exit_code);
+    }
+
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -382,6 +406,110 @@ Scope: all 6 workspace projects
         assert_eq!(data.passed, 4);
         assert_eq!(data.failed, 1);
         assert_eq!(data.duration_ms, None);
+    }
+
+    // --- JSON envelope tests (--json global flag) ---
+
+    use crate::parser::{build_json_envelope, JsonEnvelope};
+
+    /// T1 (vitest): full-tier envelope round-trips with all fields populated.
+    #[test]
+    fn test_vitest_json_envelope_full_tier() {
+        let json = r#"{
+            "numTotalTests": 13,
+            "numPassedTests": 13,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "testResults": [],
+            "startTime": 1000
+        }"#;
+
+        let parse_result = VitestParser::parse(json);
+        let envelope = build_json_envelope("vitest", parse_result, 0);
+        let serialized = serde_json::to_string(&envelope).expect("serialize");
+
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["tool"], "vitest");
+        assert_eq!(value["tier"], "full");
+        assert_eq!(value["exit"], 0);
+        assert_eq!(value["data"]["total"], 13);
+        assert_eq!(value["data"]["passed"], 13);
+        assert!(value.get("warnings").is_none());
+        assert!(value.get("raw").is_none());
+    }
+
+    /// T2 (vitest): JSON path preserves all failures (no take(5) truncation).
+    /// Fixture has 11 failures so it crosses the existing format_compact boundary.
+    #[test]
+    fn test_vitest_json_envelope_includes_all_failures() {
+        let mut assertion_results = String::new();
+        for i in 0..11 {
+            if i > 0 {
+                assertion_results.push(',');
+            }
+            assertion_results.push_str(&format!(
+                r#"{{"fullName": "test {}", "status": "failed", "failureMessages": ["boom {}"]}}"#,
+                i, i
+            ));
+        }
+        let json = format!(
+            r#"{{
+                "numTotalTests": 11,
+                "numPassedTests": 0,
+                "numFailedTests": 11,
+                "numPendingTests": 0,
+                "testResults": [{{"name": "spec.ts", "assertionResults": [{}]}}],
+                "startTime": 1000
+            }}"#,
+            assertion_results
+        );
+
+        let parse_result = VitestParser::parse(&json);
+        let envelope = build_json_envelope("vitest", parse_result, 1);
+        let serialized = serde_json::to_string(&envelope).unwrap();
+
+        let parsed: JsonEnvelope<TestResult> =
+            serde_json::from_str(&serialized).expect("envelope deserialize");
+        let data = parsed.data.expect("data present on full tier");
+        assert_eq!(data.failed, 11);
+        assert_eq!(data.failures.len(), 11, "all 11 failures must survive --json");
+        for (i, failure) in data.failures.iter().enumerate() {
+            assert_eq!(failure.test_name, format!("test {}", i));
+        }
+    }
+
+    /// T3 (vitest): malformed input yields passthrough envelope with raw field.
+    #[test]
+    fn test_vitest_json_envelope_passthrough() {
+        let parse_result = VitestParser::parse("not json at all and no test markers");
+        let envelope = build_json_envelope("vitest", parse_result, 2);
+        let serialized = serde_json::to_string(&envelope).unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["tier"], "passthrough");
+        assert_eq!(value["exit"], 2);
+        assert!(!value["raw"].as_str().unwrap_or("").is_empty());
+        assert!(value.get("data").is_none());
+    }
+
+    /// T4 (vitest): degraded tier (regex fallback) carries warnings array.
+    #[test]
+    fn test_vitest_json_envelope_degraded_with_warnings() {
+        let text = r#"
+ Test Files  2 passed (2)
+      Tests  13 passed (13)
+   Duration  450ms
+        "#;
+
+        let parse_result = VitestParser::parse(text);
+        let envelope = build_json_envelope("vitest", parse_result, 0);
+        let serialized = serde_json::to_string(&envelope).unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["tier"], "degraded");
+        assert!(value.get("data").is_some());
+        let warnings = value["warnings"].as_array().expect("warnings array present");
+        assert!(!warnings.is_empty(), "degraded tier must carry warnings");
     }
 
     #[test]

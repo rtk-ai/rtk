@@ -260,6 +260,42 @@ rtk session                     # Show RTK adoption across recent sessions
 ```bash
 -u, --ultra-compact    # ASCII icons, inline format (extra token savings)
 -v, --verbose          # Increase verbosity (-v, -vv, -vvv)
+    --json             # Machine-readable JSON envelope (untruncated)
+```
+
+### JSON output for programmatic consumers
+
+The `--json` flag emits a stable JSON envelope on stdout instead of the human formatter. It bypasses the top-N truncation that compact mode applies (e.g. `take(5)` for failures), which makes it suitable for orchestrators, CI parsers, and downstream tools that need every item.
+
+`--json` conflicts with `-v` / `--verbose` and `--ultra-compact` (clap rejects with exit code 2).
+
+**Currently supported by:** `vitest`, `jest`, `playwright`. Other tools (`tsc`, `lint`, `prettier`, `prisma`, `next`) keep their human formatters; JSON support for them is tracked as follow-up work.
+
+**Envelope shape:**
+
+```jsonc
+{
+  "tool": "<tool-name>",          // e.g. "vitest", "playwright"
+  "tier": "full" | "degraded" | "passthrough",
+  "exit": <i32>,                  // underlying tool's exit code
+  "data": <T>,                    // present iff tier ∈ {full, degraded}
+  "warnings": ["…"],              // present iff tier == degraded
+  "raw": "<truncated string>"     // present iff tier == passthrough
+}
+```
+
+**Examples:**
+
+```bash
+rtk --json vitest                         # full vitest TestResult, all failures
+rtk --json playwright test                # full playwright TestResult, all suites
+rtk --json jest                           # jest, same envelope as vitest
+```
+
+Pipe directly into `jq` for filtering:
+
+```bash
+rtk --json vitest | jq '.data.failures[] | {test_name, file_path}'
 ```
 
 ## Examples
