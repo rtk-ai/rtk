@@ -63,7 +63,7 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 brew install rtk
 ```
 
-### Quick Install (Linux/macOS/Windows Git Bash)
+### Quick Install (Linux/macOS/Windows)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
@@ -88,7 +88,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-> **Windows users**: **Git Bash** (included with [Git for Windows](https://git-scm.com/download/win)) is the recommended way to run RTK on Windows — the Quick Install above works directly in Git Bash and provides full hook support. For cmd.exe / PowerShell, extract the zip and add `rtk.exe` to your PATH manually. See [Windows setup](#windows) below for details.
+> **Windows users**: The Quick Install above works in **Git Bash** (included with [Git for Windows](https://git-scm.com/download/win)) and **WSL** — both provide full hook support. For cmd.exe / PowerShell, extract the zip and add `rtk.exe` to your PATH manually. See [Windows setup](#windows) below for details.
 
 ### Verify Installation
 
@@ -314,11 +314,11 @@ After install, **restart Claude Code**.
 
 ## Windows
 
-RTK on Windows is fully supported via **Git Bash** (MINGW64), which ships with [Git for Windows](https://git-scm.com/download/win). Git Bash provides the same experience as Linux — full hook auto-rewrite, `rtk init -g`, and the quick installer all work natively. WSL is also fully supported. cmd.exe / PowerShell have limited support (no auto-rewrite hook).
+RTK on Windows is fully supported via **Git Bash** (MINGW64) and **WSL**. Both provide the same experience as Linux — full hook auto-rewrite, `rtk init -g`, and the quick installer all work natively. cmd.exe / PowerShell have limited support (no auto-rewrite hook).
 
-### Git Bash — recommended for Windows
+### Git Bash
 
-Git Bash is already a common requirement for Windows developer tooling (including Claude Code). The quick installer detects Git Bash automatically:
+[Git Bash](https://git-scm.com/download/win) (included with Git for Windows) is a common requirement for Windows developer tooling including Claude Code. The quick installer detects Git Bash automatically:
 
 ```bash
 # In Git Bash
@@ -331,9 +331,9 @@ rtk init -g
 > echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile
 > ```
 
-### WSL (also full support)
+### WSL
 
-[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux) also works fully — RTK behaves identically to Linux:
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux) works fully — RTK behaves identically to Linux:
 
 ```bash
 # Inside WSL
