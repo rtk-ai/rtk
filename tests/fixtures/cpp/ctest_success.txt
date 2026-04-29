@@ -1,0 +1,35 @@
+Test project /home/user/proj/build
+    Start  1: test_lexer_basic
+1/15 Test  #1: test_lexer_basic ............................   Passed    0.02 sec
+    Start  2: test_lexer_unicode
+2/15 Test  #2: test_lexer_unicode ..........................   Passed    0.03 sec
+    Start  3: test_lexer_overflow
+3/15 Test  #3: test_lexer_overflow .........................   Passed    0.01 sec
+    Start  4: test_parser_simple
+4/15 Test  #4: test_parser_simple ..........................   Passed    0.04 sec
+    Start  5: test_parser_recursion
+5/15 Test  #5: test_parser_recursion .......................   Passed    0.06 sec
+    Start  6: test_parser_errors
+6/15 Test  #6: test_parser_errors ..........................   Passed    0.03 sec
+    Start  7: test_codegen_basic
+7/15 Test  #7: test_codegen_basic ..........................   Passed    0.02 sec
+    Start  8: test_codegen_optimize
+8/15 Test  #8: test_codegen_optimize .......................   Passed    0.05 sec
+    Start  9: test_runtime
+9/15 Test  #9: test_runtime ................................   Passed    0.10 sec
+    Start 10: test_diagnostics
+10/15 Test #10: test_diagnostics ...........................   Passed    0.01 sec
+    Start 11: test_symbols
+11/15 Test #11: test_symbols ...............................   Passed    0.01 sec
+    Start 12: test_io
+12/15 Test #12: test_io ....................................   Passed    0.04 sec
+    Start 13: test_ir
+13/15 Test #13: test_ir ....................................   Passed    0.03 sec
+    Start 14: test_asm
+14/15 Test #14: test_asm ...................................   Passed    0.04 sec
+    Start 15: test_link
+15/15 Test #15: test_link ..................................   Passed    0.02 sec
+
+100% tests passed, 0 tests failed out of 15
+
+Total Test time (real) =   0.51 sec

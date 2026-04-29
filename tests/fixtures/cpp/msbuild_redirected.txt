@@ -1,0 +1,1 @@
+msbuild MyProject.sln /t:Build /p:Configuration=Debug /p:Platform=Win32 /m:1 /nologo /v:m *> build-logs/msbuild_run1.log

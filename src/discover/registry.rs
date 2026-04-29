@@ -77,6 +77,32 @@ lazy_static! {
     static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
+
+    // PowerShell: Select-String → rtk grep (handles both -Path/-Pattern orderings).
+    static ref SELECT_STRING_PATH_FIRST: Regex = Regex::new(
+        r#"(?i)^Select-String\s+.*?-Path\s+(\S+).*?-Pattern\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)"#
+    ).unwrap();
+    static ref SELECT_STRING_PATTERN_FIRST: Regex = Regex::new(
+        r#"(?i)^Select-String\s+.*?-Pattern\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+).*?-Path\s+(\S+)"#
+    ).unwrap();
+
+    // PowerShell: Get-Content / GC → rtk read
+    static ref GET_CONTENT_RE: Regex =
+        Regex::new(r"(?i)^(?:Get-Content|GC)\s+(\S+)").unwrap();
+
+    // PowerShell: Remove-Item → rtk remove-item (preserves all original args)
+    static ref REMOVE_ITEM_RE: Regex = Regex::new(r"(?i)^Remove-Item\b").unwrap();
+
+    // NOTE: a previous `MSBUILD_REDIRECT_RE` rule attempted to detect
+    // `msbuild ... *> file.log` and emit a hint pointing at the log. It was
+    // removed because PowerShell consumes `*>` as an all-streams redirect
+    // operator BEFORE the command reaches RTK's hook — by the time
+    // `rtk rewrite` is invoked, the command string is just `msbuild ...`
+    // (no `*>`, no log path). The rule only ever fired on quoted/escaped
+    // inputs that bypass the shell, which never occurs in real Claude Code
+    // hook traffic. Document the limitation in user-facing docs (RTK.md):
+    // when output is redirected with `*>`, use `rtk read <logfile>` after
+    // the build completes.
 }
 
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
@@ -795,6 +821,44 @@ fn rewrite_segment(
     rewrite_segment_inner(seg, excluded, transparent_prefixes, 0)
 }
 
+/// Rewrite PowerShell built-ins (`Select-String`, `Get-Content`/`GC`, `Remove-Item`)
+/// to their RTK equivalents. Returns `None` if no PowerShell pattern matches.
+fn try_powershell_rewrite(cmd: &str) -> Option<String> {
+    if let Some(caps) = SELECT_STRING_PATH_FIRST
+        .captures(cmd)
+        .or_else(|| SELECT_STRING_PATTERN_FIRST.captures(cmd))
+    {
+        // Capture order differs between the two regexes: disambiguate by checking
+        // whether `-Path` appears before `-Pattern` in the original command.
+        let lower = cmd.to_ascii_lowercase();
+        let path_before_pattern = match (lower.find("-path"), lower.find("-pattern")) {
+            (Some(p), Some(q)) => p < q,
+            _ => false,
+        };
+        let (pattern, path) = if path_before_pattern {
+            (caps.get(2)?.as_str(), caps.get(1)?.as_str())
+        } else {
+            (caps.get(1)?.as_str(), caps.get(2)?.as_str())
+        };
+        return Some(format!("rtk grep {} {}", pattern, path));
+    }
+
+    if let Some(caps) = GET_CONTENT_RE.captures(cmd) {
+        let path = caps.get(1)?.as_str();
+        return Some(format!("rtk read {}", path));
+    }
+
+    if REMOVE_ITEM_RE.is_match(cmd) {
+        let rest = cmd[cmd.find(|c: char| c.is_whitespace()).unwrap_or(cmd.len())..].trim_start();
+        if rest.is_empty() {
+            return Some("rtk remove-item".to_string());
+        }
+        return Some(format!("rtk remove-item {}", rest));
+    }
+
+    None
+}
+
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     excluded.iter().any(|pat| match pat {
         ExcludePattern::Regex(re) => re.is_match(cmd),
@@ -855,6 +919,17 @@ fn rewrite_segment_inner(
         }
     }
 
+    // PowerShell-specific special cases. These rewrites do not pass through the
+    // standard prefix-swap path because the source command and rtk command have
+    // different argument orderings (Select-String) or fixed shapes.
+    if let Some(rewritten) = try_powershell_rewrite(trimmed) {
+        return Some(rewritten);
+    }
+
+    // (PowerShell `msbuild ... *> file.log` cannot be intercepted at rewrite
+    // time — the shell consumes `*>` before RTK sees the command string.
+    // See registry-level comment near MSBUILD_REDIRECT_RE removal.)
+
     // Strip trailing stderr/stdout redirects before matching (#530)
     // e.g. "git status 2>&1" → match "git status", re-append " 2>&1"
     let (cmd_part, redirect_suffix) = strip_trailing_redirects(trimmed);
@@ -862,6 +937,15 @@ fn rewrite_segment_inner(
     // Already RTK — pass through unchanged
     if cmd_part.starts_with("rtk ") || cmd_part == "rtk" {
         return Some(trimmed.to_string());
+    }
+
+    // make install/clean/distclean — pass through unchanged. The regex crate
+    // does not support negative lookahead, so this is enforced procedurally.
+    if let Some(rest) = cmd_part.strip_prefix("make ") {
+        let target = rest.split_whitespace().next().unwrap_or("");
+        if matches!(target, "install" | "clean" | "distclean") {
+            return None;
+        }
     }
 
     if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {

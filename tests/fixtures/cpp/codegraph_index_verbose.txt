@@ -1,0 +1,28 @@
+codegraph 0.4.2
+Indexing repo at /home/user/proj
+Parsing src/main.rs ok (12 symbols)
+Parsing src/lib.rs ok (8 symbols)
+Parsing src/util.rs ok (15 symbols)
+Parsing src/parser.rs ok (47 symbols)
+Parsing src/lexer.rs ok (32 symbols)
+Parsing src/codegen.rs ok (58 symbols)
+Parsing src/optimizer.rs ok (24 symbols)
+Parsing src/diagnostics.rs ok (19 symbols)
+Parsing src/types.rs ok (40 symbols)
+Parsing src/scope.rs ok (12 symbols)
+Parsing src/symbol.rs ok (28 symbols)
+Parsing src/ir.rs ok (51 symbols)
+Parsing src/asm.rs ok (44 symbols)
+Parsing src/link.rs ok (36 symbols)
+Parsing src/io.rs ok (17 symbols)
+Parsing src/runtime.rs ok (22 symbols)
+Parsing src/cmds/git.rs ok (88 symbols)
+Parsing src/cmds/cargo.rs ok (66 symbols)
+Parsing src/cmds/dotnet.rs ok (95 symbols)
+Parsing src/cmds/make.rs ok (24 symbols)
+Parsing src/cmds/cmake.rs ok (33 symbols)
+Files: 21
+Symbols: 771
+Edges: 2412
+Errors: 0
+Time: 0.92s

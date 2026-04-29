@@ -210,6 +210,25 @@ rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
 ```
 
+### C++ / CMake / MSBuild
+```bash
+rtk cmake --build <dir>         # Build errors only (-85%)
+rtk cmake -B <dir>              # Configure: errors + key settings only (-70%)
+rtk make [-j<N>]                # Make errors only (-80%)
+rtk ninja [-C <dir>]            # Ninja build errors only (-80%)
+rtk ctest [--test-dir dir]      # Failed tests only (-85%)
+rtk msbuild [sln] [flags]       # MSVC/LNK errors only, no project noise (-80%)
+rtk codegraph index <path>      # Summary only, no per-file progress (-90%)
+```
+
+### PowerShell
+```powershell
+Select-String -Path f -Pattern p   # auto-rewritten -> rtk grep
+Get-Content <file>                  # auto-rewritten -> rtk read
+GC <file>                           # auto-rewritten -> rtk read
+Remove-Item <path> -Force           # -> ok <basename>
+```
+
 ### AWS
 ```bash
 rtk aws sts get-caller-identity # One-line identity
@@ -326,6 +345,22 @@ rtk init --show             # Verify installation
 ```
 
 After install, **restart Claude Code**.
+
+### Commands Rewritten
+
+Selected entries (full set covered by the hook):
+
+| Raw Command | Rewritten To |
+|---|---|
+| `cmake --build / cmake -B` | `rtk cmake ...` |
+| `ctest` | `rtk ctest` |
+| `make` (non-lifecycle targets) | `rtk make` |
+| `ninja` | `rtk ninja` |
+| `msbuild` | `rtk msbuild` |
+| `codegraph index/update/search/...` | `rtk codegraph ...` |
+| `Select-String -Path f -Pattern p` | `rtk grep p f` |
+| `Get-Content / GC` | `rtk read` |
+| `Remove-Item` | `rtk remove-item` |
 
 ## Windows
 

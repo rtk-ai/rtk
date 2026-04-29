@@ -1,0 +1,24 @@
+Test project /home/user/proj/build
+    Start 1: test_lexer
+1/5 Test #1: test_lexer ......................   Passed    0.02 sec
+    Start 2: test_parser_failure
+2/5 Test #2: test_parser_failure .............***Failed    0.04 sec
+unit_test_parser.cpp:42: assertion failed
+  expected: 4
+  got:      5
+    Start 3: test_codegen
+3/5 Test #3: test_codegen ....................   Passed    0.03 sec
+    Start 4: test_runtime_failure
+4/5 Test #4: test_runtime_failure ............***Failed    0.10 sec
+runtime_test.cpp:88: SIGSEGV in __cxa_throw
+    Start 5: test_io
+5/5 Test #5: test_io .........................   Passed    0.02 sec
+
+60% tests passed, 2 tests failed out of 5
+
+Total Test time (real) =   0.21 sec
+
+The following tests FAILED:
+	  2 - test_parser_failure (Failed)
+	  4 - test_runtime_failure (Failed)
+Errors while running CTest

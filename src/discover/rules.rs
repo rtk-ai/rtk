@@ -997,6 +997,66 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // C++ / CMake / MSBuild
+    RtkRule {
+        pattern: r"^cmake\s+(--build|-B)\b",
+        rtk_cmd: "rtk cmake",
+        rewrite_prefixes: &["cmake"],
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[("--build", 85.0), ("-B", 70.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^ctest(?:\s|$)",
+        rtk_cmd: "rtk ctest",
+        rewrite_prefixes: &["ctest"],
+        category: "Tests",
+        savings_pct: 85.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // `make` rule covers any target except install/clean/distclean — the lifecycle
+    // exclusion is enforced in registry::rewrite_segment_inner since the regex
+    // crate does not support lookahead.
+    RtkRule {
+        pattern: r"^make(?:\s|$)",
+        rtk_cmd: "rtk make",
+        rewrite_prefixes: &["make"],
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^ninja(?:\s|$)",
+        rtk_cmd: "rtk ninja",
+        rewrite_prefixes: &["ninja"],
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^msbuild(?:\s|$)",
+        rtk_cmd: "rtk msbuild",
+        rewrite_prefixes: &["msbuild"],
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // codegraph: only the listed CLI subcommands are rewritten. `serve`, `install`,
+    // `watch`, `visualize`, `doctor`, and `config` deliberately fall through.
+    RtkRule {
+        pattern: r"^codegraph\s+(index|update|stats|find-symbol|search|callers|callees|impact|affected-tests)\b",
+        rtk_cmd: "rtk codegraph",
+        rewrite_prefixes: &["codegraph"],
+        category: "Build",
+        savings_pct: 85.0,
+        subcmd_savings: &[("index", 90.0), ("update", 90.0)],
+        subcmd_status: &[],
+    },
 ];
 
 pub const IGNORED_PREFIXES: &[&str] = &[

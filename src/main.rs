@@ -8,6 +8,7 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cpp::{cmake_cmd, codegraph_cmd, ctest_cmd, make_cmd, msbuild_cmd, remove_item};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -840,6 +841,100 @@ enum Commands {
     Hook {
         #[command(subcommand)]
         command: HookCommands,
+    },
+
+    /// CMake build / configure with compact diagnostics
+    Cmake {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// CTest with failure-only output
+    Ctest {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// make with errors-only output
+    Make {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// ninja with errors-only output
+    Ninja {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// MSBuild with MSVC compile/link diagnostics only
+    Msbuild {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// codegraph CLI with compact summaries
+    Codegraph {
+        #[command(subcommand)]
+        command: CodegraphCommands,
+    },
+
+    /// PowerShell Remove-Item wrapper (compact ok / error output)
+    #[command(name = "remove-item")]
+    RemoveItem {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CodegraphCommands {
+    /// Index a repository (per-file progress stripped)
+    Index {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Update an existing index (changed files only)
+    Update {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Repository statistics (decorative noise stripped)
+    Stats {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Find a symbol by name (truncated to 20 results)
+    #[command(name = "find-symbol")]
+    FindSymbol {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Semantic search (truncated to 20 results)
+    Search {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Find callers of a symbol (truncated to 20 results)
+    Callers {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Find callees of a symbol (truncated to 20 results)
+    Callees {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Impact analysis (truncated to 20 results)
+    Impact {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Affected tests — output passed through unchanged for CI consumers
+    #[command(name = "affected-tests")]
+    AffectedTests {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -2392,6 +2487,42 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Cmake { args } => cmake_cmd::run(&args, cli.verbose)?,
+
+        Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
+
+        Commands::Make { args } => make_cmd::run_make(&args, cli.verbose)?,
+
+        Commands::Ninja { args } => make_cmd::run_ninja(&args, cli.verbose)?,
+
+        Commands::Msbuild { args } => msbuild_cmd::run(&args, cli.verbose)?,
+
+        Commands::Codegraph { command } => match command {
+            CodegraphCommands::Index { args } => codegraph_cmd::run_index(&args, cli.verbose)?,
+            CodegraphCommands::Update { args } => codegraph_cmd::run_update(&args, cli.verbose)?,
+            CodegraphCommands::Stats { args } => codegraph_cmd::run_stats(&args, cli.verbose)?,
+            CodegraphCommands::FindSymbol { args } => {
+                codegraph_cmd::run_search_like("find-symbol", &args, cli.verbose)?
+            }
+            CodegraphCommands::Search { args } => {
+                codegraph_cmd::run_search_like("search", &args, cli.verbose)?
+            }
+            CodegraphCommands::Callers { args } => {
+                codegraph_cmd::run_search_like("callers", &args, cli.verbose)?
+            }
+            CodegraphCommands::Callees { args } => {
+                codegraph_cmd::run_search_like("callees", &args, cli.verbose)?
+            }
+            CodegraphCommands::Impact { args } => {
+                codegraph_cmd::run_search_like("impact", &args, cli.verbose)?
+            }
+            CodegraphCommands::AffectedTests { args } => {
+                codegraph_cmd::run_affected_tests(&args, cli.verbose)?
+            }
+        },
+
+        Commands::RemoveItem { args } => remove_item::run(&args, cli.verbose)?,
+
         Commands::Pipe {
             filter,
             passthrough,
@@ -2695,6 +2826,13 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Cmake { .. }
+            | Commands::Ctest { .. }
+            | Commands::Make { .. }
+            | Commands::Ninja { .. }
+            | Commands::Msbuild { .. }
+            | Commands::Codegraph { .. }
+            | Commands::RemoveItem { .. }
     )
 }
 

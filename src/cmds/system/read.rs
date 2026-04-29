@@ -1,11 +1,21 @@
 //! Reads source files with optional language-aware filtering to strip boilerplate.
 
+use crate::cmds::cpp::msbuild_cmd;
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::guard::never_worse;
 use crate::core::tracking;
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use regex::Regex;
 use std::fs;
 use std::path::Path;
+
+lazy_static! {
+    // Compiler / managed-code diagnostic: ": error C2065" / ": error L1234" / ": error MSB..."
+    static ref MSBUILD_DIAG_RE: Regex = Regex::new(r": error [CLM]\d+").unwrap();
+    // Linker diagnostic: ": error LNK2001" (covers "fatal error LNK..." too via the colon)
+    static ref MSBUILD_LNK_RE: Regex = Regex::new(r": error LNK\d+").unwrap();
+}
 
 pub fn run(
     file: &Path,
@@ -21,9 +31,25 @@ pub fn run(
         eprintln!("Reading: {} (filter: {})", file.display(), level);
     }
 
-    // Read file content
-    let content = fs::read_to_string(file)
-        .with_context(|| format!("Failed to read file: {}", file.display()))?;
+    // Read file content (handles UTF-16 LE/BE BOM — MSBuild logs on Windows)
+    let content = read_file_text(file)?;
+
+    // Auto-detect MSBuild log files and route through the msbuild filter.
+    // Without this, `rtk read msbuild.log` (after `msbuild *> file.log`) would
+    // pass through verbose project/task chatter at near-zero token savings.
+    if let Some(filtered) = maybe_apply_msbuild_filter(&content) {
+        if verbose > 0 {
+            eprintln!("Detected MSBuild log — applying msbuild filter");
+        }
+        print!("{}", filtered);
+        timer.track(
+            &format!("cat {}", file.display()),
+            "rtk read",
+            &content,
+            &filtered,
+        );
+        return Ok(());
+    }
 
     // Detect language from extension
     let lang = file
@@ -149,6 +175,98 @@ pub fn run_stdin(
     Ok(())
 }
 
+/// Heuristic: returns `true` if the first 200 lines contain ANY MSBuild marker.
+///
+/// Single marker is enough — real MSBuild logs may have hundreds of lines of
+/// progress chatter before the first error/build-result line, so requiring
+/// multiple markers in a 200-line sample misses logs where only `.vcxproj`
+/// references show up early. The detection runs on transcoded UTF-8 content
+/// (after BOM strip + UTF-16 → UTF-8 conversion) and tolerates `\r\n` line
+/// endings (`str::lines()` already strips `\r`, but explicit trim is kept
+/// for defense in depth).
+fn is_msbuild_log(content: &str) -> bool {
+    for (i, raw_line) in content.lines().take(200).enumerate() {
+        // Defense in depth: strip a stray UTF-8 BOM that survived decoding.
+        let line = if i == 0 {
+            raw_line.trim_start_matches('\u{FEFF}')
+        } else {
+            raw_line
+        };
+        let line = line.trim_end_matches('\r');
+
+        if line.contains("Build FAILED")
+            || line.contains("Build succeeded")
+            || line.contains(".vcxproj")
+            || MSBUILD_DIAG_RE.is_match(line)
+            || MSBUILD_LNK_RE.is_match(line)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// If `content` is an MSBuild log, run it through the msbuild filter and return
+/// the compressed output. Returns `None` for non-MSBuild content.
+fn maybe_apply_msbuild_filter(content: &str) -> Option<String> {
+    if !is_msbuild_log(content) {
+        return None;
+    }
+    let filtered = msbuild_cmd::filter_output(content, &[]);
+    if filtered.starts_with("msbuild: ok") {
+        return Some("rtk read: build ok \u{2014} no errors found in log\n".to_string());
+    }
+    if filtered.starts_with("msbuild: no output captured") {
+        // Detection passed but the filter found nothing structured — fall
+        // back to the regular read pipeline so the user still sees content.
+        return None;
+    }
+    let mut out = filtered;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Some(out)
+}
+
+fn read_file_text(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("Failed to read file: {}", path.display()))?;
+    decode_bytes(&bytes)
+        .with_context(|| format!("Failed to decode file: {}", path.display()))
+}
+
+/// Decode raw bytes to UTF-8, detecting UTF-16 LE/BE and UTF-8 BOMs.
+/// MSBuild log files on Windows are UTF-16 LE (BOM: FF FE) — without this
+/// detection the read filter crashed with "stream did not contain valid UTF-8".
+fn decode_bytes(bytes: &[u8]) -> Result<String> {
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        return Ok(decode_utf16(&bytes[2..], true));
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        return Ok(decode_utf16(&bytes[2..], false));
+    }
+    let payload = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &bytes[3..]
+    } else {
+        bytes
+    };
+    String::from_utf8(payload.to_vec()).context("stream did not contain valid UTF-8")
+}
+
+fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| {
+            if little_endian {
+                u16::from_le_bytes([c[0], c[1]])
+            } else {
+                u16::from_be_bytes([c[0], c[1]])
+            }
+        })
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
 fn format_with_line_numbers(content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let width = lines.len().to_string().len();
@@ -212,6 +330,138 @@ fn main() {{
         // Test that run_stdin has correct signature and compiles
         // We don't actually run it because it would hang waiting for stdin
         // Compile-time verification that the function exists with correct signature
+    }
+
+    #[test]
+    fn test_is_msbuild_log_failure_fixture() {
+        let raw = include_str!("../../../tests/fixtures/cpp/msbuild_failure_compiler.txt");
+        assert!(is_msbuild_log(raw));
+    }
+
+    #[test]
+    fn test_is_msbuild_log_success_fixture() {
+        let raw = include_str!("../../../tests/fixtures/cpp/msbuild_success.txt");
+        assert!(is_msbuild_log(raw));
+    }
+
+    #[test]
+    fn test_is_msbuild_log_rejects_plain_text() {
+        let plain = "This is just\nsome regular text\nno build markers here\n";
+        assert!(!is_msbuild_log(plain));
+    }
+
+    #[test]
+    fn test_is_msbuild_log_single_marker_is_enough() {
+        // Single marker is sufficient under OR semantics (real msbuild logs
+        // often start with hundreds of lines of progress chatter before the
+        // first error/build-result line).
+        assert!(is_msbuild_log("see MyProject.vcxproj for details\n"));
+        assert!(is_msbuild_log("Build FAILED.\n"));
+        assert!(is_msbuild_log("Build succeeded.\n"));
+        assert!(is_msbuild_log("foo.lib(bar.obj) : error LNK2001: x\n"));
+        assert!(is_msbuild_log("a.cpp(1): error C2065: x\n"));
+    }
+
+    #[test]
+    fn test_is_msbuild_log_skips_first_200_only() {
+        // 250 plain lines then an MSBuild marker → not detected (200-line cap).
+        let mut s = String::new();
+        for _ in 0..250 {
+            s.push_str("plain line\n");
+        }
+        s.push_str("Build FAILED.\n");
+        assert!(!is_msbuild_log(&s));
+    }
+
+    #[test]
+    fn test_is_msbuild_log_strips_utf8_bom_first_line() {
+        let txt = "\u{FEFF}.vcxproj reference\nmore content\n";
+        assert!(is_msbuild_log(txt));
+    }
+
+    #[test]
+    fn test_is_msbuild_log_handles_crlf() {
+        let txt = "header\r\nBuild FAILED.\r\n";
+        assert!(is_msbuild_log(txt));
+    }
+
+    #[test]
+    fn test_maybe_apply_msbuild_filter_success() {
+        let raw = include_str!("../../../tests/fixtures/cpp/msbuild_success.txt");
+        let out = maybe_apply_msbuild_filter(raw).expect("should detect");
+        assert!(out.starts_with("rtk read: build ok"));
+    }
+
+    #[test]
+    fn test_maybe_apply_msbuild_filter_failure_compresses() {
+        let raw = include_str!("../../../tests/fixtures/cpp/msbuild_failure_compiler.txt");
+        let out = maybe_apply_msbuild_filter(raw).expect("should detect");
+        assert!(out.contains("C2065"));
+        assert!(out.contains("Build FAILED"));
+        // Must drop the verbose header chatter
+        assert!(!out.contains("Microsoft (R) Build Engine"));
+        assert!(!out.contains("Done Building Project"));
+        // Must compress
+        assert!(
+            out.len() < raw.len(),
+            "filter should reduce size: raw={} filtered={}",
+            raw.len(),
+            out.len()
+        );
+    }
+
+    #[test]
+    fn test_maybe_apply_msbuild_filter_skips_non_msbuild() {
+        let plain = "Just some\nregular file content\n";
+        assert!(maybe_apply_msbuild_filter(plain).is_none());
+    }
+
+    #[test]
+    fn test_decode_utf16_le_bom() {
+        // "abc" in UTF-16 LE with BOM
+        let bytes: &[u8] = &[0xFF, 0xFE, b'a', 0, b'b', 0, b'c', 0];
+        assert_eq!(decode_bytes(bytes).unwrap(), "abc");
+    }
+
+    #[test]
+    fn test_decode_utf16_be_bom() {
+        // "abc" in UTF-16 BE with BOM
+        let bytes: &[u8] = &[0xFE, 0xFF, 0, b'a', 0, b'b', 0, b'c'];
+        assert_eq!(decode_bytes(bytes).unwrap(), "abc");
+    }
+
+    #[test]
+    fn test_decode_utf8_bom_stripped() {
+        let bytes: &[u8] = &[0xEF, 0xBB, 0xBF, b'h', b'i'];
+        assert_eq!(decode_bytes(bytes).unwrap(), "hi");
+    }
+
+    #[test]
+    fn test_decode_plain_utf8() {
+        assert_eq!(decode_bytes(b"plain text").unwrap(), "plain text");
+    }
+
+    #[test]
+    fn test_decode_utf16_le_msbuild_style() {
+        // Simulate a tiny MSBuild log line in UTF-16 LE
+        let line = "Build succeeded.\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for c in line.encode_utf16() {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        assert_eq!(decode_bytes(&bytes).unwrap(), line);
+    }
+
+    #[test]
+    fn test_read_utf16_le_file() -> Result<()> {
+        // End-to-end: rtk read on a UTF-16 LE file should not crash
+        let mut file = NamedTempFile::with_suffix(".log")?;
+        file.write_all(&[0xFF, 0xFE])?;
+        for c in "Build succeeded.\n".encode_utf16() {
+            file.write_all(&c.to_le_bytes())?;
+        }
+        run(file.path(), FilterLevel::Minimal, None, None, false, 0)?;
+        Ok(())
     }
 
     #[test]
