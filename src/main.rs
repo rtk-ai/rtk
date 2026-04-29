@@ -2159,8 +2159,13 @@ fn run_cli() -> Result<i32> {
                 0
             } else {
                 use std::process::Command as ProcCommand;
-                let shell = if cfg!(windows) { "cmd" } else { "sh" };
-                let flag = if cfg!(windows) { "/C" } else { "-c" };
+                // In Git Bash (MSYSTEM set), use bash -c so shell syntax works correctly.
+                // Fall back to cmd /C for native Windows console environments.
+                let (shell, flag) = if cfg!(windows) && std::env::var_os("MSYSTEM").is_none() {
+                    ("cmd", "/C")
+                } else {
+                    ("sh", "-c")
+                };
                 let status = ProcCommand::new(shell)
                     .arg(flag)
                     .arg(&raw)
