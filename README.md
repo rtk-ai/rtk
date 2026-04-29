@@ -63,7 +63,7 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 brew install rtk
 ```
 
-### Quick Install (Linux/macOS)
+### Quick Install (Linux/macOS/Windows Git Bash)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
@@ -71,7 +71,8 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 
 > Installs to `~/.local/bin`. Add to PATH if needed:
 > ```bash
-> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # Linux / Windows Git Bash
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # macOS (zsh)
 > ```
 
 ### Cargo
@@ -87,7 +88,7 @@ Download from [releases](https://github.com/rtk-ai/rtk/releases):
 - Linux: `rtk-x86_64-unknown-linux-musl.tar.gz` / `rtk-aarch64-unknown-linux-gnu.tar.gz`
 - Windows: `rtk-x86_64-pc-windows-msvc.zip`
 
-> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your PATH (e.g. `C:\Users\<you>\.local\bin`). Run RTK from **Command Prompt**, **PowerShell**, or **Windows Terminal** — do not double-click the `.exe` (it will flash and close). For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) where the full hook system works natively. See [Windows setup](#windows) below for details.
+> **Windows users**: **Git Bash** (included with [Git for Windows](https://git-scm.com/download/win)) is the recommended way to run RTK on Windows — the Quick Install above works directly in Git Bash and provides full hook support. For cmd.exe / PowerShell, extract the zip and add `rtk.exe` to your PATH manually. See [Windows setup](#windows) below for details.
 
 ### Verify Installation
 
@@ -313,11 +314,26 @@ After install, **restart Claude Code**.
 
 ## Windows
 
-RTK works on Windows with some limitations. The auto-rewrite hook (`rtk-rewrite.sh`) requires a Unix shell, so on native Windows RTK falls back to **CLAUDE.md injection mode** — your AI assistant receives RTK instructions but commands are not rewritten automatically.
+RTK on Windows is fully supported via **Git Bash** (MINGW64), which ships with [Git for Windows](https://git-scm.com/download/win). Git Bash provides the same experience as Linux — full hook auto-rewrite, `rtk init -g`, and the quick installer all work natively. WSL is also fully supported. cmd.exe / PowerShell have limited support (no auto-rewrite hook).
 
-### Recommended: WSL (full support)
+### Git Bash — recommended for Windows
 
-For the best experience, use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux). Inside WSL, RTK works exactly like Linux — full hook support, auto-rewrite, everything:
+Git Bash is already a common requirement for Windows developer tooling (including Claude Code). The quick installer detects Git Bash automatically:
+
+```bash
+# In Git Bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+```
+
+> Add `~/.local/bin` to your PATH if the installer warns it is missing:
+> ```bash
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile
+> ```
+
+### WSL (also full support)
+
+[WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (Windows Subsystem for Linux) also works fully — RTK behaves identically to Linux:
 
 ```bash
 # Inside WSL
@@ -325,28 +341,27 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 rtk init -g
 ```
 
-### Native Windows (limited support)
+### Native Windows — cmd.exe / PowerShell (limited)
 
-On native Windows (cmd.exe / PowerShell), RTK filters work but the hook does not auto-rewrite commands:
+On native Windows without Git Bash or WSL, RTK filters work but the hook cannot auto-rewrite commands:
 
 ```powershell
 # 1. Download and extract rtk-x86_64-pc-windows-msvc.zip from releases
 # 2. Add rtk.exe to your PATH
-# 3. Initialize (falls back to CLAUDE.md injection)
+# 3. Initialize and use rtk explicitly
 rtk init -g
-# 4. Use rtk explicitly
 rtk cargo test
 rtk git status
 ```
 
-**Important**: Do not double-click `rtk.exe` — it is a CLI tool that prints usage and exits immediately. Always run it from a terminal (Command Prompt, PowerShell, or Windows Terminal).
+**Important**: Do not double-click `rtk.exe` — it is a CLI tool that exits immediately without a terminal.
 
-| Feature | WSL | Native Windows |
-|---------|-----|----------------|
-| Filters (cargo, git, etc.) | Full | Full |
-| Auto-rewrite hook | Yes | No (CLAUDE.md fallback) |
-| `rtk init -g` | Hook mode | CLAUDE.md mode |
-| `rtk gain` / analytics | Full | Full |
+| Feature | Git Bash | WSL | cmd / PowerShell |
+|---------|----------|-----|------------------|
+| Filters (cargo, git, etc.) | Full | Full | Full |
+| Auto-rewrite hook | Yes | Yes | No |
+| `rtk init -g` | Hook mode | Hook mode | Hook mode (no rewrite) |
+| `rtk gain` / analytics | Full | Full | Full |
 
 ## Supported AI Tools
 
