@@ -46,7 +46,9 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
-    if !args.iter().any(|a| a == "-json") {
+    let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
+
+    if !skip_json {
         cmd.arg("-json");
     }
 
@@ -55,14 +57,24 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: go test -json {}", args.join(" "));
+        eprintln!(
+            "Running: go test {}{}",
+            if !skip_json { "-json " } else { "" },
+            args.join(" ")
+        );
     }
+
+    let filter: fn(&str) -> String = if skip_json {
+        |s: &str| s.to_string()
+    } else {
+        filter_go_test_json
+    };
 
     runner::run_filtered(
         cmd,
         "go test",
         &args.join(" "),
-        filter_go_test_json,
+        filter,
         crate::core::runner::RunOptions::stdout_only().tee("go_test"),
     )
 }
