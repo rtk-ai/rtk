@@ -57,20 +57,9 @@ rtk filters and compresses command outputs before they reach your LLM context. S
 
 ## Installation
 
-> **Homeserve mirror — macOS only.** This fork (`HomeserveFR/rtk`) is a security-validated mirror of the upstream `rtk-ai/rtk`. Binaries are built from `homeserve/main` and only target macOS (Intel + Apple Silicon). Linux and Windows are intentionally not supported here — use the upstream repository if you need them.
+> **Homeserve mirror.** This fork (`HomeserveFR/rtk`) is a security-validated mirror of the upstream `rtk-ai/rtk`. Binaries are built from `homeserve/main` for macOS (Intel + Apple Silicon), Linux x86_64 (musl, statically linked), and Windows x86_64.
 
-### Quick Install (macOS)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserve/main/install.sh | sh
-```
-
-> Installs to `~/.local/bin`. Add to PATH if needed:
-> ```bash
-> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-> ```
-
-### Homebrew
+### Homebrew (recommended for macOS, also works on Linuxbrew)
 
 ```bash
 brew tap homeservefr/rtk https://github.com/HomeserveFR/rtk.git
@@ -78,6 +67,17 @@ brew install homeservefr/rtk/rtk
 ```
 
 > If you already have `rtk` from `homebrew/core` (upstream), uninstall it first: `brew uninstall rtk`.
+
+### Quick Install (Linux, alternative for macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HomeserveFR/rtk/refs/heads/homeserve/main/install.sh | sh
+```
+
+> Installs to `~/.local/bin`. Add to PATH if needed:
+> ```bash
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc on Linux
+> ```
 
 ### Cargo
 
@@ -90,6 +90,10 @@ cargo install --git https://github.com/HomeserveFR/rtk
 Download from [releases](https://github.com/HomeserveFR/rtk/releases):
 - macOS Intel: `rtk-x86_64-apple-darwin.tar.gz`
 - macOS Apple Silicon: `rtk-aarch64-apple-darwin.tar.gz`
+- Linux x86_64: `rtk-x86_64-unknown-linux-musl.tar.gz`
+- Windows x86_64: `rtk-x86_64-pc-windows-msvc.zip`
+
+> **Windows users**: Extract the zip and place `rtk.exe` somewhere in your `PATH` (e.g. `C:\Users\<you>\.local\bin`). Run from Command Prompt, PowerShell, or Windows Terminal — do not double-click the `.exe`.
 
 ### Verify Installation
 
