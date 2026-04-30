@@ -1463,9 +1463,19 @@ fn run_stash(
             let combined = result.combined();
 
             let msg = if result.success() {
-                let msg = format!("ok stash {}", sub);
-                println!("{}", msg);
-                msg
+                // `git stash push` exits 0 even when no stash entry is created
+                // (e.g. clean tree, or pathspecs that match nothing). The generic
+                // "ok stash push" message hid that case and led to lost WIP in
+                // #1535 — surface it explicitly instead.
+                if sub == "push" && stash_push_is_noop(&combined) {
+                    let msg = "noop stash push (no local changes)".to_string();
+                    println!("{}", msg);
+                    msg
+                } else {
+                    let msg = format!("ok stash {}", sub);
+                    println!("{}", msg);
+                    msg
+                }
             } else {
                 eprintln!("FAILED: git stash {}", sub);
                 if !result.stderr.trim().is_empty() {
@@ -1555,6 +1565,13 @@ fn run_stash(
     }
 
     Ok(0)
+}
+
+/// Detect the "git stash push" no-op case where git exits 0 but did not
+/// actually create a stash entry. Covers both an entirely clean tree and
+/// pathspec-restricted invocations whose pathspecs matched nothing.
+fn stash_push_is_noop(combined: &str) -> bool {
+    combined.contains("No local changes to save")
 }
 
 fn filter_stash_list(output: &str) -> String {
@@ -2002,6 +2019,25 @@ mod tests {
             main_count,
             result
         );
+    }
+
+    #[test]
+    fn test_stash_push_is_noop_detects_no_local_changes() {
+        // Real `git stash push` output on a clean tree: stdout-only, exit 0.
+        assert!(stash_push_is_noop("No local changes to save\n"));
+        // Same message can appear when restricted by a pathspec that matched nothing.
+        assert!(stash_push_is_noop(
+            "error: pathspec 'missing.txt' did not match any file(s) known to git\nNo local changes to save\n"
+        ));
+    }
+
+    #[test]
+    fn test_stash_push_is_noop_negative_for_real_stash() {
+        // A successful stash creation does not contain the no-op marker.
+        assert!(!stash_push_is_noop(
+            "Saved working directory and index state WIP on main: abc1234 fix login\n"
+        ));
+        assert!(!stash_push_is_noop(""));
     }
 
     #[test]
