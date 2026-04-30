@@ -563,16 +563,47 @@ fn is_go_test_failure_line(line: &str) -> bool {
 /// Filter go build output - show only errors
 pub(crate) fn filter_go_build(output: &str) -> String {
     let mut errors: Vec<String> = Vec::new();
+    let mut unrecognized: Vec<String> = Vec::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
         if is_go_build_error_line(trimmed) {
             errors.push(trimmed.to_string());
+        } else if !is_go_build_progress_line(trimmed) {
+            // Output we don't classify as either an error or known progress
+            // is almost certainly a failure mode the filter doesn't know about
+            // (#1599: e.g. "stat ...: directory not found"). Don't swallow it.
+            unrecognized.push(trimmed.to_string());
         }
     }
 
-    if errors.is_empty() {
+    if errors.is_empty() && unrecognized.is_empty() {
         return "Go build: Success".to_string();
+    }
+
+    if errors.is_empty() {
+        // Pass the unrecognized output through so the user sees what actually
+        // happened rather than a misleading "Success".
+        let mut result = String::new();
+        result.push_str(&format!(
+            "Go build: failed ({} unrecognized line{})\n",
+            unrecognized.len(),
+            if unrecognized.len() == 1 { "" } else { "s" }
+        ));
+        result.push_str("═══════════════════════════════════════\n");
+        for (i, line) in unrecognized.iter().take(20).enumerate() {
+            result.push_str(&format!("{}. {}\n", i + 1, truncate(line, 240)));
+        }
+        if unrecognized.len() > 20 {
+            result.push_str(&format!(
+                "\n... +{} more lines\n",
+                unrecognized.len() - 20
+            ));
+        }
+        return result.trim().to_string();
     }
 
     let mut result = String::new();
@@ -588,6 +619,19 @@ pub(crate) fn filter_go_build(output: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+/// Lines we treat as benign progress noise from `go build`. A truly successful
+/// build produces no output, or only these. Anything else is suspect and is
+/// surfaced to the user instead of being collapsed into "Success" (#1599).
+fn is_go_build_progress_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.starts_with("go: downloading ")
+        || lower.starts_with("go: finding ")
+        || lower.starts_with("go: extracting ")
+        // "# package/path" lines are package-context headers go emits ahead
+        // of compiler errors; on their own (no following error) they are noise.
+        || line.starts_with('#')
 }
 
 fn is_go_build_error_line(line: &str) -> bool {
@@ -865,6 +909,37 @@ main.go:15:2: cannot use x (type int) as type string"#;
         assert!(result.contains("2 errors"));
         assert!(result.contains("undefined: missingFunc"));
         assert!(result.contains("cannot use x"));
+    }
+
+    #[test]
+    fn test_filter_go_build_passes_through_unrecognized_failure_output() {
+        // Real `go build -o /tmp/test ./cmd/nonexistent` output (#1599):
+        // a stat-style failure that doesn't match any of the known error
+        // patterns. Used to be reported as "Go build: Success".
+        let output = "stat /home/user/project/cmd/nonexistent: directory not found\n";
+        let result = filter_go_build(output);
+        assert!(
+            !result.contains("Success"),
+            "must not report success when there is unrecognized output, got: {result}"
+        );
+        assert!(
+            result.contains("failed"),
+            "must surface failure, got: {result}"
+        );
+        assert!(
+            result.contains("directory not found"),
+            "must include the unrecognized line verbatim, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_filter_go_build_progress_only_still_succeeds() {
+        // A `# package` header on its own (no compiler error following) is
+        // package-context noise; combined with download progress it must NOT
+        // be promoted to a failure (avoid regressing the package-context case).
+        let output = "go: downloading github.com/foo/bar v1.0.0\n# example.com/foo\n";
+        let result = filter_go_build(output);
+        assert_eq!(result, "Go build: Success");
     }
 
     #[test]
