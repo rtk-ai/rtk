@@ -91,8 +91,15 @@ fn canonical_key(filter_path: &Path) -> Result<String> {
 
 /// Check if a project-local filter file is trusted.
 ///
-/// Priority: env var > hash match > untrusted.
+/// Priority: env var > exact path match > content-hash match > untrusted.
 /// All errors are soft — if anything fails, returns Untrusted (fail-secure).
+///
+/// The content-hash fallback exists so a single `rtk trust` review carries
+/// across git worktrees, additional self-hosted runners, and any other case
+/// where the canonical filesystem path differs but the file content is
+/// byte-identical to something already reviewed. Path-keyed lookup still wins
+/// when the same path has a recorded entry — that preserves the audit trail
+/// (and the explicit `ContentChanged` alarm) for known locations.
 pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
     // Fast path: env var override for CI pipelines only.
     // Requires a known CI env var to be set to prevent .envrc injection attacks.
@@ -122,22 +129,30 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
         }
     };
 
-    let entry = match store.trusted.get(&key) {
-        Some(e) => e,
-        None => return Ok(TrustStatus::Untrusted),
-    };
-
     let actual_hash = integrity::compute_hash(filter_path)
         .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
 
-    if actual_hash == entry.sha256 {
-        Ok(TrustStatus::Trusted)
-    } else {
-        Ok(TrustStatus::ContentChanged {
-            expected: entry.sha256.clone(),
-            actual: actual_hash,
-        })
+    // 1) Exact path match — preserves audit trail and surfaces ContentChanged
+    //    when the file at a known location was modified.
+    if let Some(entry) = store.trusted.get(&key) {
+        return if actual_hash == entry.sha256 {
+            Ok(TrustStatus::Trusted)
+        } else {
+            Ok(TrustStatus::ContentChanged {
+                expected: entry.sha256.clone(),
+                actual: actual_hash,
+            })
+        };
     }
+
+    // 2) Content-hash fallback — same bytes the user already reviewed at some
+    //    other path are trusted here too. sha256 collision resistance is the
+    //    security boundary; if the hash matches, the content matches.
+    if store.trusted.values().any(|e| e.sha256 == actual_hash) {
+        return Ok(TrustStatus::Trusted);
+    }
+
+    Ok(TrustStatus::Untrusted)
 }
 
 /// Store a pre-computed SHA-256 hash as trusted (avoids TOCTOU re-read).
@@ -294,6 +309,7 @@ mod tests {
     fn check_trust_with_store(filter_path: &Path, store_file: &Path) -> Result<TrustStatus> {
         // Note: env var check is NOT included here to avoid test interference.
         // The env var path is tested separately in test_env_override.
+        // Mirrors the production lookup order: exact path → content hash → untrusted.
         let key = canonical_key(filter_path)?;
 
         let store: TrustStore = if store_file.exists() {
@@ -303,21 +319,24 @@ mod tests {
             TrustStore::default()
         };
 
-        let entry = match store.trusted.get(&key) {
-            Some(e) => e,
-            None => return Ok(TrustStatus::Untrusted),
-        };
-
         let actual_hash = integrity::compute_hash(filter_path)?;
 
-        if actual_hash == entry.sha256 {
-            Ok(TrustStatus::Trusted)
-        } else {
-            Ok(TrustStatus::ContentChanged {
-                expected: entry.sha256.clone(),
-                actual: actual_hash,
-            })
+        if let Some(entry) = store.trusted.get(&key) {
+            return if actual_hash == entry.sha256 {
+                Ok(TrustStatus::Trusted)
+            } else {
+                Ok(TrustStatus::ContentChanged {
+                    expected: entry.sha256.clone(),
+                    actual: actual_hash,
+                })
+            };
         }
+
+        if store.trusted.values().any(|e| e.sha256 == actual_hash) {
+            return Ok(TrustStatus::Trusted);
+        }
+
+        Ok(TrustStatus::Untrusted)
     }
 
     fn trust_with_store(filter_path: &Path, store_file: &Path) -> Result<()> {
@@ -488,6 +507,86 @@ mod tests {
     fn test_risk_summary_detects_match_output() {
         let content = "[filters.evil]\nmatch_command = \"scan\"\nmatch_output = \"vulnerability\"";
         print_risk_summary(content);
+    }
+
+    #[test]
+    fn test_content_hash_fallback_trusts_identical_bytes_at_new_path() {
+        // Real-world scenario: user trusts .rtk/filters.toml in the main checkout,
+        // then a git worktree creates a second copy at a different path.
+        let temp = TempDir::new().unwrap();
+        let original = temp.path().join("repo-a").join("filters.toml");
+        let worktree = temp.path().join("repo-b").join("filters.toml");
+        std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+
+        let body = "[filters.test]\nmatch_command = \"echo\"";
+        std::fs::write(&original, body).unwrap();
+        std::fs::write(&worktree, body).unwrap();
+
+        let store_file = setup_test_env(&temp);
+        trust_with_store(&original, &store_file).unwrap();
+
+        // Worktree copy was never trusted by path, but content hash matches
+        // the original entry — should be Trusted via the fallback.
+        let status = check_trust_with_store(&worktree, &store_file).unwrap();
+        assert_eq!(status, TrustStatus::Trusted);
+    }
+
+    #[test]
+    fn test_content_hash_fallback_does_not_trust_different_bytes() {
+        // Negative case: a file at a new path with content that doesn't match
+        // any trusted hash must remain Untrusted.
+        let temp = TempDir::new().unwrap();
+        let trusted = temp.path().join("repo-a").join("filters.toml");
+        let stranger = temp.path().join("repo-b").join("filters.toml");
+        std::fs::create_dir_all(trusted.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(stranger.parent().unwrap()).unwrap();
+
+        std::fs::write(&trusted, "[filters.safe]\nmatch_command = \"echo\"").unwrap();
+        std::fs::write(
+            &stranger,
+            "[filters.evil]\nmatch_command = \".*\"\nmatch_output = \"password\"",
+        )
+        .unwrap();
+
+        let store_file = setup_test_env(&temp);
+        trust_with_store(&trusted, &store_file).unwrap();
+
+        let status = check_trust_with_store(&stranger, &store_file).unwrap();
+        assert_eq!(status, TrustStatus::Untrusted);
+    }
+
+    #[test]
+    fn test_path_match_takes_precedence_over_hash_fallback() {
+        // If a path has a recorded entry, ContentChanged at that path must win
+        // over a hash-fallback Trusted via some other entry. This preserves
+        // the audit trail / alarm for the known location.
+        let temp = TempDir::new().unwrap();
+        let path_a = temp.path().join("a").join("filters.toml");
+        let path_b = temp.path().join("b").join("filters.toml");
+        std::fs::create_dir_all(path_a.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(path_b.parent().unwrap()).unwrap();
+
+        let body_v1 = "[filters.v1]\nmatch_command = \"echo\"";
+        let body_v2 = "[filters.v2]\nmatch_command = \"echo\"";
+
+        // Trust path_a at v1 and path_b at v2
+        std::fs::write(&path_a, body_v1).unwrap();
+        std::fs::write(&path_b, body_v2).unwrap();
+        let store_file = setup_test_env(&temp);
+        trust_with_store(&path_a, &store_file).unwrap();
+        trust_with_store(&path_b, &store_file).unwrap();
+
+        // Now overwrite path_a with v2 bytes — same content as path_b's entry.
+        // Hash-fallback would say Trusted, but path_a has its own entry that
+        // says expected=v1, so we must surface ContentChanged.
+        std::fs::write(&path_a, body_v2).unwrap();
+
+        let status = check_trust_with_store(&path_a, &store_file).unwrap();
+        match status {
+            TrustStatus::ContentChanged { .. } => {} // expected
+            other => panic!("Expected ContentChanged, got {:?}", other),
+        }
     }
 
     #[test]
