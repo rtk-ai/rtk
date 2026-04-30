@@ -35,6 +35,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .collect();
 
     let mut cmd = resolved_command("ls");
+    // Force C locale so month names and date format are predictable
+    // (the parser anchors on English month abbreviations like "Jan", "Feb", ...).
+    // Without this, non-English locales (it_IT, fr_FR, de_DE, ...) produce
+    // localized dates that fail to parse, yielding spurious "(empty)" output.
+    cmd.env("LC_ALL", "C");
+    cmd.env("LANG", "C");
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
@@ -456,6 +462,26 @@ mod tests {
     #[test]
     fn test_parse_ls_line_returns_none_for_total() {
         assert!(parse_ls_line("total 48").is_none());
+    }
+
+    // Regression test: non-English locales (it_IT, fr_FR, de_DE, ...) produce
+    // localized month names and date formats that the regex can't parse,
+    // causing every line to be skipped and the output to become "(empty)".
+    // The fix forces LC_ALL=C when invoking `ls` (see run() above), so this
+    // test documents the parser's contract: it only handles English ls output.
+    #[test]
+    fn test_compact_localized_output_skipped() {
+        // Italian-locale ls output (LANG=it_IT.UTF-8): "30 apr 14.54" date format
+        let italian_input = "totale 8\n\
+                             drwxr-xr-x  2 user user 4096 30 apr 14.54 src\n\
+                             -rw-r--r--  1 user user 1234 30 apr 14.54 main.rs\n";
+        let (entries, _summary) = compact_ls(italian_input, false);
+        // Without LC_ALL=C, parser fails on every line -> "(empty)"
+        // This is why run() must force C locale.
+        assert_eq!(
+            entries, "(empty)\n",
+            "parser should fail on localized output (relies on LC_ALL=C in run())"
+        );
     }
 
     #[test]
