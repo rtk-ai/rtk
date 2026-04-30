@@ -1009,7 +1009,14 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
     let stdout = String::from_utf8_lossy(&output.stdout);
     let raw = format!("{}{}", stdout, stderr);
 
-    if output.status.success() {
+    // Server-side rejections (GitHub repository rulesets / GH013, pre-receive
+    // hooks, branch protection) sometimes leave git's local exit code at 0
+    // while the actual ref transfer was declined — see #1581. Scan stderr for
+    // explicit rejection markers so we never report "ok" for a push that the
+    // remote refused.
+    let rejected = push_is_rejected(&stderr);
+
+    if output.status.success() && !rejected {
         let compact = if stderr.contains("Everything up-to-date") {
             "ok (up-to-date)".to_string()
         } else {
@@ -1046,10 +1053,23 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
-        return Ok(exit_code_from_output(&output, "git push"));
+        let code = exit_code_from_output(&output, "git push");
+        // If git itself exited 0 but the remote rejected the push, surface a
+        // non-zero exit so scripted callers and AI agents see the failure.
+        return Ok(if code == 0 { 1 } else { code });
     }
 
     Ok(0)
+}
+
+/// Detect server-side push rejections that may leave the local `git push`
+/// exit code at 0 (#1581: GitHub repository rulesets, plus other server-side
+/// rejection paths whose markers always reach stderr).
+fn push_is_rejected(stderr: &str) -> bool {
+    stderr.contains("! [remote rejected]")
+        || stderr.contains("remote: error:")
+        || stderr.contains("push declined")
+        || stderr.contains("GH013")
 }
 
 fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -2002,6 +2022,37 @@ mod tests {
             main_count,
             result
         );
+    }
+
+    #[test]
+    fn test_push_is_rejected_detects_github_ruleset() {
+        // Real stderr from a push declined by a GitHub repository ruleset (GH013).
+        let stderr = "remote: error: GH013: Repository rule violations found for refs/heads/alpha.\n\
+                      remote: \n\
+                      remote: - Changes must be made through a pull request.\n\
+                      To https://github.com/example/repo.git\n\
+                      ! [remote rejected] alpha -> alpha (push declined due to repository rule violations)\n\
+                      error: failed to push some refs to 'https://github.com/example/repo.git'\n";
+        assert!(push_is_rejected(stderr));
+    }
+
+    #[test]
+    fn test_push_is_rejected_detects_remote_rejected_alone() {
+        // Some server rejections only emit "! [remote rejected]" without "remote: error:".
+        let stderr = "To git@example.com:owner/repo.git\n\
+                      ! [remote rejected] main -> main (pre-receive hook declined)\n\
+                      error: failed to push some refs to 'git@example.com:owner/repo.git'\n";
+        assert!(push_is_rejected(stderr));
+    }
+
+    #[test]
+    fn test_push_is_rejected_negative_for_clean_push() {
+        // Vanilla "Everything up-to-date" must not look rejected.
+        assert!(!push_is_rejected("Everything up-to-date\n"));
+        // Standard fast-forward push stderr contains "->" but no rejection marker.
+        let stderr = "To github.com:owner/repo.git\n   abc1234..def5678  main -> main\n";
+        assert!(!push_is_rejected(stderr));
+        assert!(!push_is_rejected(""));
     }
 
     #[test]
