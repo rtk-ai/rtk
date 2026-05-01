@@ -256,7 +256,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         return Ok(crate::core::utils::exit_code_from_output(&output, "aws"));
     }
 
-    let filtered = match json_cmd::filter_json_string(&raw, JSON_COMPRESS_DEPTH) {
+    let filtered = match json_cmd::filter_json_schema(&raw, JSON_COMPRESS_DEPTH) {
         Ok(schema) => {
             println!("{}", schema);
             schema

@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Reject non-JSON files with a clear error before doing any I/O.
 fn validate_json_extension(file: &Path) -> Result<()> {
@@ -47,12 +48,21 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-    let output = if schema_only {
-        filter_json_string(&content, max_depth)?
+    let (output, truncated) = if schema_only {
+        filter_json_schema(&content, max_depth).map(|s| (s, false))?
     } else {
         filter_json_compact(&content, max_depth)?
     };
+
     println!("{}", output);
+
+    if truncated {
+        let value: Value = serde_json::from_str(&content).context("Failed to parse JSON")?;
+        if let Some(hint) = write_json_hint(&value, file) {
+            println!("{}", hint);
+        }
+    }
+
     timer.track(
         &format!("cat {}", file.display()),
         "rtk json",
@@ -76,102 +86,90 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
         .read_to_string(&mut content)
         .context("Failed to read from stdin")?;
 
-    let output = if schema_only {
-        filter_json_string(&content, max_depth)?
+    let (output, truncated) = if schema_only {
+        filter_json_schema(&content, max_depth).map(|s| (s, false))?
     } else {
         filter_json_compact(&content, max_depth)?
     };
+
     println!("{}", output);
+
+    if truncated {
+        let value: Value = serde_json::from_str(&content).context("Failed to parse JSON")?;
+        if let Some(hint) = write_json_hint(&value, Path::new("stdin")) {
+            println!("{}", hint);
+        }
+    }
+
     timer.track("cat - (stdin)", "rtk json -", &content, &output);
     Ok(())
 }
 
 /// Parse a JSON string and return compact representation with values preserved.
 /// Long strings are truncated, arrays are summarized.
-pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<String> {
+pub fn filter_json_compact(json_str: &str, max_depth: usize) -> Result<(String, bool)> {
     let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
-    Ok(compact_json(&value, 0, max_depth))
+    let mut truncated = false;
+    let output = compact_json(&value, 0, max_depth, &mut truncated);
+    Ok((output, truncated))
 }
 
-fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
-    let indent = "  ".repeat(depth);
+const STRING_CHARS_LIMIT: usize = 80;
 
+/// Compact JSON output - single-line with truncation tracking.
+fn compact_json(value: &Value, depth: usize, max_depth: usize, truncated: &mut bool) -> String {
     if depth > max_depth {
-        return format!("{}...", indent);
+        *truncated = true;
+        return "…".to_string();
     }
 
     match value {
-        Value::Null => format!("{}null", indent),
-        Value::Bool(b) => format!("{}{}", indent, b),
-        Value::Number(n) => format!("{}{}", indent, n),
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
         Value::String(s) => {
-            if s.len() > 80 {
-                let end = s.floor_char_boundary(77);
-                format!("{}\"{}...\"", indent, &s[..end])
+            if s.chars().count() > STRING_CHARS_LIMIT {
+                *truncated = true;
+                let truncated_str: String = s.chars().take(STRING_CHARS_LIMIT - 1).collect();
+                format!(r#""{}…""#, truncated_str)
             } else {
-                format!("{}\"{}\"", indent, s)
+                format!(r#""{}""#, s)
             }
         }
         Value::Array(arr) => {
             if arr.is_empty() {
-                format!("{}[]", indent)
+                "[]".to_string()
             } else if arr.len() > 5 {
-                let first = compact_json(&arr[0], depth + 1, max_depth);
-                format!("{}[{}, ... +{} more]", indent, first.trim(), arr.len() - 1)
+                *truncated = true;
+                let first = compact_json(&arr[0], depth + 1, max_depth, truncated);
+                format!("[{}, … +{} more]", first, arr.len() - 1)
             } else {
                 let items: Vec<String> = arr
                     .iter()
-                    .map(|v| compact_json(v, depth + 1, max_depth))
+                    .map(|v| compact_json(v, depth + 1, max_depth, truncated))
                     .collect();
-                let all_simple = arr.iter().all(|v| {
-                    matches!(
-                        v,
-                        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
-                    )
-                });
-                if all_simple {
-                    let inline: Vec<&str> = items.iter().map(|s| s.trim()).collect();
-                    format!("{}[{}]", indent, inline.join(", "))
-                } else {
-                    let mut lines = vec![format!("{}[", indent)];
-                    for item in &items {
-                        lines.push(format!("{},", item));
-                    }
-                    lines.push(format!("{}]", indent));
-                    lines.join("\n")
-                }
+                format!("[{}]", items.join(","))
             }
         }
         Value::Object(map) => {
             if map.is_empty() {
-                format!("{}{{}}", indent)
+                "{}".to_string()
             } else {
-                let mut lines = vec![format!("{}{{", indent)];
                 let mut keys: Vec<_> = map.keys().collect();
                 keys.sort();
 
+                let mut parts = Vec::new();
                 for (i, key) in keys.iter().enumerate() {
-                    let val = &map[*key];
-                    let is_simple = matches!(
-                        val,
-                        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
-                    );
-
-                    if is_simple {
-                        let val_str = compact_json(val, 0, max_depth);
-                        lines.push(format!("{}  {}: {}", indent, key, val_str.trim()));
-                    } else {
-                        lines.push(format!("{}  {}:", indent, key));
-                        lines.push(compact_json(val, depth + 1, max_depth));
-                    }
-
                     if i >= 20 {
-                        lines.push(format!("{}  ... +{} more keys", indent, keys.len() - i - 1));
+                        *truncated = true;
+                        parts.push(format!("… +{} more keys", keys.len() - i));
                         break;
                     }
+                    let val = &map[*key];
+                    let val_str = compact_json(val, depth + 1, max_depth, truncated);
+                    parts.push(format!(r#""{}":{}"#, key, val_str));
                 }
-                lines.push(format!("{}}}", indent));
-                lines.join("\n")
+                format!("{{{}}}", parts.join(","))
             }
         }
     }
@@ -179,97 +177,135 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
 
 /// Parse a JSON string and return its schema representation (types only, no values).
 /// Useful for piping JSON from other commands (e.g., `gh api`, `curl`).
-pub fn filter_json_string(json_str: &str, max_depth: usize) -> Result<String> {
+pub fn filter_json_schema(json_str: &str, max_depth: usize) -> Result<String> {
     let value: Value = serde_json::from_str(json_str).context("Failed to parse JSON")?;
     Ok(extract_schema(&value, 0, max_depth))
 }
 
+/// Schema extraction - single-line output with char-based truncation.
 fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
-    let indent = "  ".repeat(depth);
-
     if depth > max_depth {
-        return format!("{}...", indent);
+        return "…".to_string();
     }
 
     match value {
-        Value::Null => format!("{}null", indent),
-        Value::Bool(_) => format!("{}bool", indent),
+        Value::Null => "null".to_string(),
+        Value::Bool(_) => "bool".to_string(),
         Value::Number(n) => {
             if n.is_i64() {
-                format!("{}int", indent)
+                "int".to_string()
             } else {
-                format!("{}float", indent)
+                "float".to_string()
             }
         }
         Value::String(s) => {
-            if s.len() > 50 {
-                format!("{}string[{}]", indent, s.len())
+            if s.chars().count() > 50 {
+                format!("string[{}]", s.chars().count())
             } else if s.is_empty() {
-                format!("{}string", indent)
+                "string".to_string()
+            } else if s.starts_with("http") {
+                "url".to_string()
+            } else if s.contains('-') && s.len() == 10 {
+                "date?".to_string()
             } else {
-                // Check if it looks like a URL, date, etc.
-                if s.starts_with("http") {
-                    format!("{}url", indent)
-                } else if s.contains('-') && s.len() == 10 {
-                    format!("{}date?", indent)
-                } else {
-                    format!("{}string", indent)
-                }
+                "string".to_string()
             }
         }
         Value::Array(arr) => {
             if arr.is_empty() {
-                format!("{}[]", indent)
+                "[]".to_string()
             } else {
                 let first_schema = extract_schema(&arr[0], depth + 1, max_depth);
-                let trimmed = first_schema.trim();
                 if arr.len() == 1 {
-                    format!("{}[\n{}\n{}]", indent, first_schema, indent)
+                    format!("[{}]", first_schema)
                 } else {
-                    format!("{}[{}] ({})", indent, trimmed, arr.len())
+                    format!("[{}] ({})", first_schema, arr.len())
                 }
             }
         }
         Value::Object(map) => {
             if map.is_empty() {
-                format!("{}{{}}", indent)
+                "{}".to_string()
             } else {
-                let mut lines = vec![format!("{}{{", indent)];
                 let mut keys: Vec<_> = map.keys().collect();
                 keys.sort();
 
+                let mut parts = Vec::new();
                 for (i, key) in keys.iter().enumerate() {
-                    let val = &map[*key];
-                    let val_schema = extract_schema(val, depth + 1, max_depth);
-                    let val_trimmed = val_schema.trim();
-
-                    // Inline simple types
-                    let is_simple = matches!(
-                        val,
-                        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)
-                    );
-
-                    if is_simple {
-                        if i < keys.len() - 1 {
-                            lines.push(format!("{}  {}: {},", indent, key, val_trimmed));
-                        } else {
-                            lines.push(format!("{}  {}: {}", indent, key, val_trimmed));
-                        }
-                    } else {
-                        lines.push(format!("{}  {}:", indent, key));
-                        lines.push(val_schema);
-                    }
-
-                    // Limit keys shown
                     if i >= 15 {
-                        lines.push(format!("{}  ... +{} more keys", indent, keys.len() - i - 1));
+                        parts.push(format!("… +{} more keys", keys.len() - i));
                         break;
                     }
+                    let val = &map[*key];
+                    let val_schema = extract_schema(val, depth + 1, max_depth);
+                    parts.push(format!(r#""{}":{}"#, key, val_schema));
                 }
-                lines.push(format!("{}}}", indent));
-                lines.join("\n")
+                format!("{{{}}}", parts.join(","))
             }
         }
+    }
+}
+
+/// Write full compact JSON to a file and return a hint string.
+fn write_json_hint(value: &Value, file: &Path) -> Option<String> {
+    let full_output = serde_json::to_string(value).ok()?;
+
+    let json_dir = dirs::data_local_dir()?.join("rtk").join("json");
+    std::fs::create_dir_all(&json_dir).ok()?;
+
+    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let file_slug = file.file_name().and_then(|n| n.to_str()).unwrap_or("stdin");
+    let sanitized: String = file_slug
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    let filename = format!("{}_{}.json", epoch, sanitized);
+    let filepath = json_dir.join(filename);
+
+    std::fs::write(&filepath, &full_output).ok()?;
+
+    cleanup_old_json_files(&json_dir);
+
+    let hint = if let Some(home) = dirs::home_dir() {
+        if let Ok(relative) = filepath.strip_prefix(&home) {
+            format!("[full output: ~/{}]", relative.display())
+        } else {
+            format!("[full output: {}]", filepath.display())
+        }
+    } else {
+        format!("[full output: {}]", filepath.display())
+    };
+
+    Some(hint)
+}
+
+/// Clean up old JSON full compact files, keeping only the last 20.
+fn cleanup_old_json_files(json_dir: &std::path::Path) {
+    let mut entries: Vec<_> = std::fs::read_dir(json_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .filter(|e| e.file_name().to_string_lossy().contains(".json"))
+        .collect();
+
+    if entries.len() <= 20 {
+        return;
+    }
+
+    entries.sort_by_key(|e| e.file_name());
+
+    let to_remove = entries.len() - 20;
+    for entry in entries.iter().take(to_remove) {
+        let _ = std::fs::remove_file(entry.path());
     }
 }
 
@@ -314,42 +350,116 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_schema_simple() {
-        let json: Value = serde_json::from_str(r#"{"name": "test", "count": 42}"#).unwrap();
+    fn test_filter_json_compact_single_line() {
+        let (output, truncated) = filter_json_compact(
+            r#"{
+              "name": "test",
+              "count": 42
+            }"#,
+            5,
+        )
+        .unwrap();
+        assert!(output.lines().count() == 1);
+        assert!(output.contains("\"name\":\"test\""));
+        assert!(output.contains("\"count\":42"));
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn test_filter_json_compact_string_limit() {
+        let long_string = "a".repeat(STRING_CHARS_LIMIT);
+        let json = format!(r#"{{"name": "{}"}}"#, long_string);
+        let (output, truncated) = filter_json_compact(&json, 5).unwrap();
+        assert!(!output.contains('…'));
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn test_filter_json_compact_string_truncation() {
+        let long_string = "a".repeat(STRING_CHARS_LIMIT + 20);
+        let json = format!(r#"{{"name": "{}"}}"#, long_string);
+        let (output, truncated) = filter_json_compact(&json, 5).unwrap();
+        assert!(output.contains('…'));
+        assert!(truncated);
+    }
+
+    #[test]
+    fn test_filter_json_compact_depth_truncation() {
+        let json = r#"{"a": {"b": {"c": 1}}}"#;
+        let (output, truncated) = filter_json_compact(json, 1).unwrap();
+        assert!(output.contains('…'));
+        assert!(truncated);
+    }
+
+    #[test]
+    fn test_filter_json_compact_array_truncation() {
+        let json = r#"{"items": [1, 2, 3, 4, 5, 6]}"#;
+        let (output, truncated) = filter_json_compact(json, 5).unwrap();
+        assert!(output.contains("… +5 more"));
+        assert!(truncated);
+    }
+
+    #[test]
+    fn test_extract_schema_single_line() {
+        let json: Value = serde_json::from_str(
+            r#"{
+                "name": "test",
+                "count": 42
+            }"#,
+        )
+        .unwrap();
         let schema = extract_schema(&json, 0, 5);
-        assert!(schema.contains("name"));
-        assert!(schema.contains("string"));
-        assert!(schema.contains("int"));
+        assert!(schema.lines().count() == 1);
+        assert!(schema.contains("\"name\":string"));
+        assert!(schema.contains("\"count\":int"));
     }
 
     #[test]
     fn test_extract_schema_array() {
         let json: Value = serde_json::from_str(r#"{"items": [1, 2, 3]}"#).unwrap();
         let schema = extract_schema(&json, 0, 5);
-        assert!(schema.contains("items"));
-        assert!(schema.contains("(3)"));
+        assert!(schema.lines().count() == 1);
+        assert!(schema.contains("[int] (3)"));
+    }
+
+    #[test]
+    fn test_extract_schema_utf8_truncation() {
+        let long_string = "a".repeat(100);
+        let json = format!(r#"{{"name": "{}"}}"#, long_string);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        let schema = extract_schema(&value, 0, 5);
+        assert!(schema.contains("string[100]"));
     }
 
     fn assert_value_truncated(payload: &str) {
-        let json = format!(r#"{{"key": "{}"}}"#, payload);
-        let output = filter_json_compact(&json, 5)
+        let json = format!(r#"{{"key":"{}"}}"#, payload);
+        let (output, truncated) = filter_json_compact(&json, 5)
             .expect("filter_json_compact must not error on valid JSON");
 
-        assert!(output.contains("key"));
-        assert!(
-            output.contains("..."),
-            "long string should be truncated, got: {output}"
-        );
+        let value: Value = serde_json::from_str(output.as_str()).expect("Failed to parse JSON");
+        let s = value
+            .get("key")
+            .and_then(|val| val.as_str())
+            .expect("Output JSON should contain 'key' as a string");
 
-        let value = output
-            .split('"')
-            .nth(1)
-            .expect("output should contain a quoted string value");
         assert!(
-            value.len() <= 80,
-            "truncated value is {} bytes: {value}",
-            value.len()
+            truncated,
+            "Expected truncation for payload of length {}, got: {}",
+            payload.len(),
+            output
         );
+        assert!(
+            s.chars().count() == STRING_CHARS_LIMIT,
+            "Truncated string should be {} chars, got {}: {}",
+            STRING_CHARS_LIMIT,
+            s.chars().count(),
+            s
+        );
+        assert!(
+            s.ends_with("…"),
+            "Truncated string should end with '…', got: {}",
+            s
+        )
     }
 
     #[test]
