@@ -168,19 +168,12 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
     )
 }
 
-/// Format the hint line with ~ shorthand for home directory.
+/// Format the hint line with the absolute log path so downstream
+/// consumers can use it verbatim. `~` shorthand does not expand
+/// inside double quotes and an unquoted `~/path with spaces` splits
+/// on the space, so paths under `$HOME` are rendered absolute.
 fn format_hint(path: &std::path::Path) -> String {
-    let display = if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            format!("~/{}", relative.display())
-        } else {
-            path.display().to_string()
-        }
-    } else {
-        path.display().to_string()
-    };
-
-    format!("[full output: {}]", display)
+    format!("[full output: {}]", path.display())
 }
 
 /// Convenience: tee + format hint in one call.
@@ -438,6 +431,32 @@ mod tests {
         assert!(hint.starts_with("[full output: "));
         assert!(hint.ends_with(']'));
         assert!(hint.contains("123_cargo_test.log"));
+    }
+
+    #[test]
+    fn test_format_hint_renders_absolute_path_under_home() {
+        // `~` shorthand does not survive shell quoting; downstream
+        // consumers copy this hint verbatim, so a path under `$HOME`
+        // must render absolute, not as `~/...`.
+        let path = PathBuf::from("/home/dev/.local/share/rtk/tee/42_cargo_test.log");
+        let hint = format_hint(&path);
+        assert_eq!(
+            hint,
+            "[full output: /home/dev/.local/share/rtk/tee/42_cargo_test.log]"
+        );
+        assert!(!hint.contains('~'));
+    }
+
+    #[test]
+    fn test_format_hint_preserves_spaces_in_path() {
+        // Paths can legitimately contain spaces (macOS Application Support);
+        // the hint preserves them verbatim inside the [...] enclosure.
+        let path = PathBuf::from("/Users/dev/Library/Application Support/rtk/tee/7_curl.log");
+        let hint = format_hint(&path);
+        assert_eq!(
+            hint,
+            "[full output: /Users/dev/Library/Application Support/rtk/tee/7_curl.log]"
+        );
     }
 
     #[test]
