@@ -10,29 +10,24 @@ use std::collections::HashMap;
 use std::process::Stdio;
 
 fn parse_match_line(line: &str, default_path: &str) -> Option<(String, usize, String)> {
-    let parts: Vec<&str> = line.splitn(3, ':').collect();
+    lazy_static::lazy_static! {
+        static ref MATCH_LINE_RE: Regex = Regex::new(r"^(.+):(\d+):(.*)$").unwrap();
+    }
 
+    if let Some(caps) = MATCH_LINE_RE.captures(line) {
+        let file = caps.get(1)?.as_str().to_string();
+        let line_num = caps.get(2)?.as_str().parse().ok()?;
+        let content = caps.get(3)?.as_str().to_string();
+        return Some((file, line_num, content));
+    }
+
+    let parts: Vec<&str> = line.splitn(2, ':').collect();
     match parts.as_slice() {
         [line_num, content] => Some((
             default_path.to_string(),
-            line_num.parse().unwrap_or(0),
+            line_num.parse().ok()?,
             (*content).to_string(),
         )),
-        [first, second, third] => {
-            if let Ok(line_num) = first.parse::<usize>() {
-                Some((
-                    default_path.to_string(),
-                    line_num,
-                    format!("{}:{}", second, third),
-                ))
-            } else {
-                Some((
-                    (*first).to_string(),
-                    second.parse().unwrap_or(0),
-                    (*third).to_string(),
-                ))
-            }
-        }
         _ => None,
     }
 }
@@ -93,10 +88,8 @@ pub fn run(
 
     if result.stdout.trim().is_empty() {
         // Show stderr for errors (bad regex, missing file, etc.)
-        if exit_code == 2 {
-            if !result.stderr.trim().is_empty() {
-                eprintln!("{}", result.stderr.trim());
-            }
+        if exit_code == 2 && !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
         }
         let msg = format!("0 matches for '{}'", pattern);
         println!("{}", msg);
@@ -269,6 +262,29 @@ mod tests {
         assert_eq!(parsed.0, "hermes_cli/plugins.py");
         assert_eq!(parsed.1, 271);
         assert_eq!(parsed.2, "class PluginManager:");
+    }
+
+    #[test]
+    fn test_parse_match_line_with_content_colons() {
+        let parsed = parse_match_line(
+            "externalImportShell.class.php:81:        $this->queueProcessModel = ClassRegistry::init('Collections.QueueProcess');",
+            "externalImportShell.class.php",
+        )
+        .unwrap();
+        assert_eq!(parsed.0, "externalImportShell.class.php");
+        assert_eq!(parsed.1, 81);
+        assert_eq!(
+            parsed.2,
+            "        $this->queueProcessModel = ClassRegistry::init('Collections.QueueProcess');"
+        );
+    }
+
+    #[test]
+    fn test_parse_match_line_windows_path() {
+        let parsed = parse_match_line(r"C:\src\file.rs:42:fn main() {}", r"C:\src\file.rs").unwrap();
+        assert_eq!(parsed.0, r"C:\src\file.rs");
+        assert_eq!(parsed.1, 42);
+        assert_eq!(parsed.2, "fn main() {}");
     }
 
     #[test]

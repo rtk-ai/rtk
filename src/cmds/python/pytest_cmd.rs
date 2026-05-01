@@ -12,6 +12,69 @@ enum ParseState {
     Summary,
 }
 
+#[derive(Debug, Default, PartialEq)]
+struct SummaryCounts {
+    passed: usize,
+    failed: usize,
+    errors: usize,
+    skipped: usize,
+    xfailed: usize,
+    xpassed: usize,
+    deselected: usize,
+}
+
+impl SummaryCounts {
+    fn total(&self) -> usize {
+        self.passed
+            + self.failed
+            + self.errors
+            + self.skipped
+            + self.xfailed
+            + self.xpassed
+            + self.deselected
+    }
+
+    fn has_failure_details(&self) -> bool {
+        self.failed > 0 || self.errors > 0
+    }
+
+    fn display_parts(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+
+        if self.passed > 0 {
+            parts.push(format_outcome(self.passed, "passed", "passed"));
+        }
+        if self.failed > 0 {
+            parts.push(format_outcome(self.failed, "failed", "failed"));
+        }
+        if self.errors > 0 {
+            parts.push(format_outcome(self.errors, "error", "errors"));
+        }
+        if self.skipped > 0 {
+            parts.push(format_outcome(self.skipped, "skipped", "skipped"));
+        }
+        if self.xfailed > 0 {
+            parts.push(format_outcome(self.xfailed, "xfailed", "xfailed"));
+        }
+        if self.xpassed > 0 {
+            parts.push(format_outcome(self.xpassed, "xpassed", "xpassed"));
+        }
+        if self.deselected > 0 {
+            parts.push(format_outcome(self.deselected, "deselected", "deselected"));
+        }
+
+        parts
+    }
+}
+
+fn format_outcome(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {}", singular)
+    } else {
+        format!("{} {}", count, plural)
+    }
+}
+
 fn is_summary_line(line: &str) -> bool {
     let normalized = line.trim().trim_matches('=').trim().to_lowercase();
     if normalized.is_empty() {
@@ -32,6 +95,7 @@ fn is_summary_line(line: &str) -> bool {
     normalized.contains(" passed")
         || normalized.contains(" failed")
         || normalized.contains(" skipped")
+        || normalized.contains(" deselected")
         || normalized.contains(" xfailed")
         || normalized.contains(" xpassed")
         || normalized.contains(" error")
@@ -156,22 +220,29 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
         return "Pytest: No tests collected".to_string();
     }
 
-    // Parse summary line
-    let (passed, failed, skipped) = parse_summary_line(summary);
+    let counts = parse_summary_line(summary);
 
-    if failed == 0 && passed > 0 {
-        return format!("Pytest: {} passed", passed);
-    }
-
-    if passed == 0 && failed == 0 && skipped == 0 {
+    if counts.total() == 0 {
         return "Pytest: No tests collected".to_string();
     }
 
-    let mut result = String::new();
-    result.push_str(&format!("Pytest: {} passed, {} failed", passed, failed));
-    if skipped > 0 {
-        result.push_str(&format!(", {} skipped", skipped));
+    if counts.failed == 0
+        && counts.errors == 0
+        && counts.skipped == 0
+        && counts.xfailed == 0
+        && counts.xpassed == 0
+        && counts.deselected == 0
+        && counts.passed > 0
+    {
+        return format!("Pytest: {} passed", counts.passed);
     }
+
+    let mut result = format!("Pytest: {}", counts.display_parts().join(", "));
+
+    if !counts.has_failure_details() {
+        return result;
+    }
+
     result.push('\n');
     result.push_str("═══════════════════════════════════════\n");
 
@@ -192,12 +263,19 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
                 // Extract test name between ___
                 let test_name = first_line.trim_matches('_').trim();
                 result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
-            } else if first_line.starts_with("FAILED") {
-                // Summary format: "FAILED tests/test_foo.py::test_bar - AssertionError"
+            } else if first_line.starts_with("FAILED") || first_line.starts_with("ERROR") {
+                // Summary format: "FAILED/ERROR tests/test_foo.py::test_bar - AssertionError"
                 let parts: Vec<&str> = first_line.split(" - ").collect();
                 if let Some(test_path) = parts.first() {
-                    let test_name = test_path.trim_start_matches("FAILED ");
-                    result.push_str(&format!("{}. [FAIL] {}\n", i + 1, test_name));
+                    let test_name = test_path
+                        .trim_start_matches("FAILED ")
+                        .trim_start_matches("ERROR ");
+                    let status = if first_line.starts_with("ERROR") {
+                        "ERROR"
+                    } else {
+                        "FAIL"
+                    };
+                    result.push_str(&format!("{}. [{}] {}\n", i + 1, status, test_name));
                 }
                 if parts.len() > 1 {
                     result.push_str(&format!("     {}\n", truncate(parts[1], 100)));
@@ -234,36 +312,38 @@ fn build_pytest_summary(summary: &str, _test_files: &[String], failures: &[Strin
     result.trim().to_string()
 }
 
-fn parse_summary_line(summary: &str) -> (usize, usize, usize) {
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut skipped = 0;
+fn parse_summary_line(summary: &str) -> SummaryCounts {
+    let mut counts = SummaryCounts::default();
 
-    // Parse lines like "=== 4 passed, 1 failed in 0.50s ==="
+    // Parse lines like "=== 4 passed, 1 failed in 0.50s ===" or
+    // "1 passed, 1 error, 2 deselected in 0.50s"
     let parts: Vec<&str> = summary.split(',').collect();
 
     for part in parts {
         let words: Vec<&str> = part.split_whitespace().collect();
         for (i, word) in words.iter().enumerate() {
-            if i > 0 {
-                if word.contains("passed") {
-                    if let Ok(n) = words[i - 1].parse::<usize>() {
-                        passed = n;
-                    }
-                } else if word.contains("failed") {
-                    if let Ok(n) = words[i - 1].parse::<usize>() {
-                        failed = n;
-                    }
-                } else if word.contains("skipped") {
-                    if let Ok(n) = words[i - 1].parse::<usize>() {
-                        skipped = n;
-                    }
-                }
+            if i == 0 {
+                continue;
+            }
+
+            let Ok(n) = words[i - 1].parse::<usize>() else {
+                continue;
+            };
+
+            match word.trim_matches(|c: char| c == ',' || c == '=') {
+                "passed" => counts.passed = n,
+                "failed" => counts.failed = n,
+                "error" | "errors" => counts.errors = n,
+                "skipped" => counts.skipped = n,
+                "xfailed" => counts.xfailed = n,
+                "xpassed" => counts.xpassed = n,
+                "deselected" => counts.deselected = n,
+                _ => {}
             }
         }
     }
 
-    (passed, failed, skipped)
+    counts
 }
 
 #[cfg(test)]
@@ -389,23 +469,81 @@ FAILED tests/test_foo.py::test_something - assert False
     }
 
     #[test]
+    fn test_filter_pytest_quiet_error_summary() {
+        let output = r#"E                                                                       [100%]
+
+=========================== short test summary info ============================
+ERROR tests/test_foo.py::test_setup - RuntimeError: boom
+1 error in 0.20s"#;
+
+        let result = filter_pytest_output(output);
+        assert!(result.contains("Pytest: 1 error"));
+        assert!(result.contains("test_setup"));
+        assert!(result.contains("RuntimeError: boom"));
+    }
+
+    #[test]
+    fn test_filter_pytest_quiet_xfailed_summary() {
+        let output = r#".x                                                                      [100%]
+1 passed, 1 xfailed in 0.10s"#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 1 passed, 1 xfailed");
+    }
+
+    #[test]
+    fn test_filter_pytest_quiet_deselected_summary() {
+        let output = r#"2 deselected in 0.02s"#;
+
+        let result = filter_pytest_output(output);
+        assert_eq!(result, "Pytest: 2 deselected");
+    }
+
+    #[test]
     fn test_is_summary_line_detects_quiet_summary() {
         assert!(is_summary_line("25 passed in 3.92s"));
         assert!(is_summary_line("4 passed, 1 failed in 0.50s"));
         assert!(is_summary_line("no tests ran in 0.00s"));
+        assert!(is_summary_line("2 deselected in 0.02s"));
         assert!(!is_summary_line("E       AssertionError: expected 5"));
     }
 
     #[test]
     fn test_parse_summary_line() {
-        assert_eq!(parse_summary_line("=== 5 passed in 0.50s ==="), (5, 0, 0));
+        assert_eq!(
+            parse_summary_line("=== 5 passed in 0.50s ==="),
+            SummaryCounts {
+                passed: 5,
+                ..Default::default()
+            }
+        );
         assert_eq!(
             parse_summary_line("=== 4 passed, 1 failed in 0.50s ==="),
-            (4, 1, 0)
+            SummaryCounts {
+                passed: 4,
+                failed: 1,
+                ..Default::default()
+            }
         );
         assert_eq!(
             parse_summary_line("=== 3 passed, 1 failed, 2 skipped in 1.0s ==="),
-            (3, 1, 2)
+            SummaryCounts {
+                passed: 3,
+                failed: 1,
+                skipped: 2,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            parse_summary_line("1 passed, 1 error, 2 deselected, 3 xfailed, 4 xpassed in 1.0s"),
+            SummaryCounts {
+                passed: 1,
+                errors: 1,
+                deselected: 2,
+                xfailed: 3,
+                xpassed: 4,
+                ..Default::default()
+            }
         );
     }
 
