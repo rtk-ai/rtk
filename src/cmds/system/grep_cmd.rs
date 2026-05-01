@@ -50,20 +50,39 @@ pub fn run(
     let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
-            grep_cmd.args(["-rn", pattern, path]);
+            //When we fall back to grep,include all args, not just -rn.
+            grep_cmd.args(["-rn", pattern, path]).args(extra_args);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
+
+    // Passthrough output flags that produce output that is already small.
+    if has_format_flag(extra_args) {
+        print!("{}", result.stdout);
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr.trim());
+        }
+
+        let args_display = if extra_args.is_empty() {
+            format!("'{}' {}", pattern, path)
+        } else {
+            format!("{} '{}' {}", extra_args.join(" "), pattern, path)
+        };
+
+        timer.track_passthrough(
+            &format!("grep {}", args_display),
+            &format!("rtk grep {} (passthrough)", args_display),
+        );
+        return Ok(result.exit_code);
+    }
 
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
 
     if result.stdout.trim().is_empty() {
         // Show stderr for errors (bad regex, missing file, etc.)
-        if exit_code == 2 {
-            if !result.stderr.trim().is_empty() {
-                eprintln!("{}", result.stderr.trim());
-            }
+        if exit_code == 2 && !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
         }
         let msg = format!("0 matches for '{}'", pattern);
         println!("{}", msg);
@@ -145,6 +164,23 @@ pub fn run(
     );
 
     Ok(exit_code)
+}
+
+fn has_format_flag(extra_args: &[String]) -> bool {
+    extra_args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-c" | "--count"
+                | "-l"
+                | "--files-with-matches"
+                | "-L"
+                | "--files-without-match"
+                | "-o"
+                | "--only-matching"
+                | "-Z"
+                | "--null"
+        )
+    })
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
@@ -293,6 +329,48 @@ mod tests {
             wrong_overflow, overflow,
             "capping before subtraction gives wrong overflow"
         );
+    }
+
+    // --- format flag detection ---
+
+    #[test]
+    fn test_format_flag_detects_count() {
+        assert!(has_format_flag(&["-c".to_string()]));
+        assert!(has_format_flag(&["--count".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_files_with_matches() {
+        assert!(has_format_flag(&["-l".to_string()]));
+        assert!(has_format_flag(&["--files-with-matches".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_files_without_match() {
+        assert!(has_format_flag(&["-L".to_string()]));
+        assert!(has_format_flag(&["--files-without-match".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_only_matching() {
+        assert!(has_format_flag(&["-o".to_string()]));
+        assert!(has_format_flag(&["--only-matching".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_null() {
+        assert!(has_format_flag(&["-Z".to_string()]));
+        assert!(has_format_flag(&["--null".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_ignores_normal_flags() {
+        assert!(!has_format_flag(&[
+            "-i".to_string(),
+            "-w".to_string(),
+            "-A".to_string(),
+            "3".to_string(),
+        ]));
     }
 
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).

@@ -309,7 +309,7 @@ enum Commands {
         #[arg(short, long, default_value = "200")]
         max: usize,
         /// Show only match context (not full line)
-        #[arg(short, long)]
+        #[arg(long)]
         context_only: bool,
         /// Filter by file type (e.g., ts, py, rust)
         #[arg(short = 't', long)]

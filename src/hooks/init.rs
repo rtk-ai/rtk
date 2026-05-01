@@ -157,7 +157,7 @@ rtk prisma              # Prisma without ASCII art (88%)
 ```bash
 rtk ls <path>           # Tree format, compact (65%)
 rtk read <file>         # Code reading with filtering (60%)
-rtk grep <pattern>      # Search grouped by file (75%)
+rtk grep <pattern>      # Search grouped by file (75%). Format flags (-c, -l, -L, -o, -Z) run raw.
 rtk find <pattern>      # Find grouped by directory (70%)
 ```
 
