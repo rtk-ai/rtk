@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_compact_long_multibyte_string_does_not_panic() {
-        let payload = "a".repeat(76) + &"日本語".repeat(5);
+        let payload = "日本語テスト".repeat(85); // well above the 80-byte threshold
         let json = format!(r#"{{"key": "{}"}}"#, payload);
 
         let output = filter_json_compact(&json, 5)
@@ -343,5 +343,12 @@ mod tests {
             output.contains("..."),
             "long string should be truncated, got: {output}"
         );
+        for line in output.lines() {
+            assert!(
+                line.chars().count() <= 80,
+                "output line exceeds 80 chars ({} chars): {line}",
+                line.chars().count()
+            );
+        }
     }
 }
