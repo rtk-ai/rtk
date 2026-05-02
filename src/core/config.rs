@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub curl: CurlConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -29,6 +31,32 @@ pub struct HooksConfig {
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
     #[serde(default)]
     pub exclude_commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct CurlConfig {
+    /// URL substring markers that opt-out a `curl` command from RTK's
+    /// `rtk curl ... --schema` rewrite. Use this for private/internal
+    /// JSON APIs whose responses are consumed by parsers (jq, agents,
+    /// downstream code) that need raw JSON rather than RTK's schema
+    /// summary.
+    ///
+    /// Each marker is a substring match against the full command text;
+    /// any match in any segment of a compound command bypasses the
+    /// rewrite for that segment only. Defaults to empty — RTK's default
+    /// behavior of rewriting all `curl` invocations is unchanged unless
+    /// you opt in.
+    ///
+    /// Example:
+    /// ```toml
+    /// [curl]
+    /// bypass_url_markers = [
+    ///   "localhost:8080/api/",
+    ///   "//internal.example.com/",
+    /// ]
+    /// ```
+    #[serde(default)]
+    pub bypass_url_markers: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -231,6 +259,39 @@ enabled = true
         let config = Config::default();
         assert!(!config.telemetry.enabled);
         assert!(config.telemetry.consent_given.is_none());
+    }
+
+    #[test]
+    fn test_curl_config_default_empty() {
+        let config = Config::default();
+        assert!(
+            config.curl.bypass_url_markers.is_empty(),
+            "default curl.bypass_url_markers must be empty (opt-in only)"
+        );
+    }
+
+    #[test]
+    fn test_curl_config_deserialize() {
+        let toml = r#"
+[curl]
+bypass_url_markers = ["localhost:8080/", "//api.example.com/v1/"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(
+            config.curl.bypass_url_markers,
+            vec!["localhost:8080/", "//api.example.com/v1/"]
+        );
+    }
+
+    #[test]
+    fn test_curl_config_missing_section_is_valid() {
+        let toml = r#"
+[tracking]
+enabled = true
+history_days = 90
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.curl.bypass_url_markers.is_empty());
     }
 
     #[test]
