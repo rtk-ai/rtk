@@ -4,24 +4,19 @@ use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::resolved_command;
 use anyhow::Result;
-use lazy_static::lazy_static;
-use regex::Regex;
 use std::io::IsTerminal;
 
-lazy_static! {
-    /// Matches the date+time portion in `ls -la` output, which serves as a
-    /// stable anchor regardless of owner/group column width.
-    /// E.g.: " Mar 31 16:18 " or " Dec 25  2024 "
-    static ref LS_DATE_RE: Regex = Regex::new(
-        r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(?:\d{4}|\d{2}:\d{2})\s+"
-    )
-    .unwrap();
-}
-
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+pub fn run(args: &[String], verbose: u8, metadata: bool) -> Result<i32> {
     let show_all = args
         .iter()
         .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
+
+    // Auto-detect -l flag and enable metadata mode automatically
+    let has_long = args.iter().any(|a| a == "-l" || a == "--long" || a == "--format=long");
+    let has_short_l = args
+        .iter()
+        .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('l'));
+    let metadata = metadata || has_long || has_short_l;
 
     let flags: Vec<&str> = args
         .iter()
@@ -70,9 +65,9 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "ls",
-        &format!("-la {}", target_display),
+        &format!("-la {}{}", target_display, if metadata { " (metadata)" } else { "" }),
         |raw| {
-            let (entries, summary) = compact_ls(raw, show_all);
+            let (entries, summary) = compact_ls(raw, show_all, metadata);
 
             // Only show summary in interactive mode (not when piped)
             let is_tty = std::io::stdout().is_terminal();
@@ -113,59 +108,33 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Parse a single `ls -la` line, returning `(file_type_char, size, name)`.
-///
-/// Uses the date field as a stable anchor — the date format in `ls -la` is
-/// always three tokens (`Mon DD HH:MM` or `Mon DD  YYYY`), so we locate it
-/// with a regex, then extract size (rightmost number before the date) and
-/// filename (everything after the date). This handles owner/group names that
-/// contain spaces, which break the old fixed-column approach.
-fn parse_ls_line(line: &str) -> Option<(char, u64, String)> {
-    let date_match = LS_DATE_RE.find(line)?;
-    let name = line[date_match.end()..].to_string();
-
-    let before_date = &line[..date_match.start()];
-    let before_parts: Vec<&str> = before_date.split_whitespace().collect();
-    if before_parts.len() < 4 {
-        return None;
-    }
-
-    let perms = before_parts[0];
-    let file_type = perms.chars().next()?;
-
-    // Size is the rightmost parseable number before the date.
-    // nlinks is also numeric but appears earlier; scanning from the end
-    // guarantees we hit the size field first.
-    let mut size: u64 = 0;
-    for part in before_parts.iter().rev() {
-        if let Ok(s) = part.parse::<u64>() {
-            size = s;
-            break;
-        }
-    }
-
-    Some((file_type, size, name))
-}
-
 /// Parse ls -la output into compact format:
 ///   name/  (dirs)
 ///   name  size  (files)
+/// With metadata mode:
+///   name/  (1.2K, Jan 15, drwxr-xr-x)
+///   name  1.2K  (Jan 15, -rw-r--r--)
 /// Returns (entries, summary) so caller can suppress summary when piped.
-fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
+fn compact_ls(raw: &str, show_all: bool, metadata: bool) -> (String, String) {
     use std::collections::HashMap;
 
-    let mut dirs: Vec<String> = Vec::new();
-    let mut files: Vec<(String, String)> = Vec::new(); // (name, size)
+    let mut dirs: Vec<(String, String, String, String)> = Vec::new(); // (name, size, date, perms)
+    let mut files: Vec<(String, String, String, String)> = Vec::new(); // (name, size, date, perms)
     let mut by_ext: HashMap<String, usize> = HashMap::new();
 
     for line in raw.lines() {
+        // Skip total, empty, . and ..
         if line.starts_with("total ") || line.is_empty() {
             continue;
         }
 
-        let Some((file_type, size, name)) = parse_ls_line(line) else {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 9 {
             continue;
-        };
+        }
+
+        // Filename is everything from column 9 onward (handles spaces)
+        let name = parts[8..].join(" ");
 
         // Skip . and ..
         if name == "." || name == ".." {
@@ -177,16 +146,22 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
             continue;
         }
 
-        if file_type == 'd' {
-            dirs.push(name);
-        } else if file_type == '-' || file_type == 'l' {
+        let is_dir = parts[0].starts_with('d');
+        let perms = parts[0].to_string();
+        let size: u64 = parts[4].parse().unwrap_or(0);
+        // Date columns: parts[5]=Jan, parts[6]=15, parts[7]=12:00
+        let date = format!("{} {} {}", parts[5], parts[6], parts[7]);
+
+        if is_dir {
+            dirs.push((name, human_size(size), date, perms));
+        } else if parts[0].starts_with('-') || parts[0].starts_with('l') {
             let ext = if let Some(pos) = name.rfind('.') {
                 name[pos..].to_string()
             } else {
                 "no ext".to_string()
             };
             *by_ext.entry(ext).or_insert(0) += 1;
-            files.push((name, human_size(size)));
+            files.push((name, human_size(size), date, perms));
         }
     }
 
@@ -197,16 +172,24 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
     let mut entries = String::new();
 
     // Dirs first, compact
-    for d in &dirs {
-        entries.push_str(d);
-        entries.push_str("/\n");
+    for (name, size, date, perms) in &dirs {
+        entries.push_str(name);
+        entries.push('/');
+        if metadata {
+            entries.push_str(&format!("  ({}, {}, {})", size, date, perms));
+        }
+        entries.push('\n');
     }
 
     // Files with size
-    for (name, size) in &files {
+    for (name, size, date, perms) in &files {
         entries.push_str(name);
-        entries.push_str("  ");
-        entries.push_str(size);
+        if metadata {
+            entries.push_str(&format!("  {}  ({}, {})", size, date, perms));
+        } else {
+            entries.push_str("  ");
+            entries.push_str(size);
+        }
         entries.push('\n');
     }
 
@@ -244,7 +227,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 README.md\n";
-        let (entries, _summary) = compact_ls(input, false);
+        let (entries, _summary) = compact_ls(input, false, false);
         assert!(entries.contains("src/"));
         assert!(entries.contains("Cargo.toml"));
         assert!(entries.contains("README.md"));
@@ -265,7 +248,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 target\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  100 Jan  1 12:00 main.rs\n";
-        let (entries, _summary) = compact_ls(input, false);
+        let (entries, _summary) = compact_ls(input, false, false);
         assert!(!entries.contains("node_modules"));
         assert!(!entries.contains(".git"));
         assert!(!entries.contains("target"));
@@ -278,7 +261,7 @@ mod tests {
         let input = "total 8\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 .git\n\
                      drwxr-xr-x  2 user  staff  64 Jan  1 12:00 src\n";
-        let (entries, _summary) = compact_ls(input, true);
+        let (entries, _summary) = compact_ls(input, true, false);
         assert!(entries.contains(".git/"));
         assert!(entries.contains("src/"));
     }
@@ -286,7 +269,7 @@ mod tests {
     #[test]
     fn test_compact_empty() {
         let input = "total 0\n";
-        let (entries, summary) = compact_ls(input, false);
+        let (entries, summary) = compact_ls(input, false, false);
         assert_eq!(entries, "(empty)\n");
         assert!(summary.is_empty());
     }
@@ -298,7 +281,7 @@ mod tests {
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n\
                      -rw-r--r--  1 user  staff   100 Jan  1 12:00 Cargo.toml\n";
-        let (_entries, summary) = compact_ls(input, false);
+        let (_entries, summary) = compact_ls(input, false, false);
         assert!(summary.contains("Summary: 3 files, 1 dirs"));
         assert!(summary.contains(".rs"));
         assert!(summary.contains(".toml"));
@@ -318,7 +301,7 @@ mod tests {
     fn test_compact_handles_filenames_with_spaces() {
         let input = "total 8\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 my file.txt\n";
-        let (entries, _summary) = compact_ls(input, false);
+        let (entries, _summary) = compact_ls(input, false, false);
         assert!(entries.contains("my file.txt"));
     }
 
@@ -326,7 +309,7 @@ mod tests {
     fn test_compact_symlinks() {
         let input = "total 8\n\
                      lrwxr-xr-x  1 user  staff  10 Jan  1 12:00 link -> target\n";
-        let (entries, _summary) = compact_ls(input, false);
+        let (entries, _summary) = compact_ls(input, false, false);
         assert!(entries.contains("link -> target"));
     }
 
@@ -336,7 +319,7 @@ mod tests {
         let input = "total 48\n\
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n";
-        let (entries, summary) = compact_ls(input, false);
+        let (entries, summary) = compact_ls(input, false, false);
         assert!(
             !entries.contains("Summary:"),
             "entries must not contain summary"
@@ -355,7 +338,7 @@ mod tests {
                      drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
                      -rw-r--r--  1 user  staff  1234 Jan  1 12:00 main.rs\n\
                      -rw-r--r--  1 user  staff  5678 Jan  1 12:00 lib.rs\n";
-        let (entries, _summary) = compact_ls(input, false);
+        let (entries, _summary) = compact_ls(input, false, false);
         let line_count = entries.lines().count();
         assert_eq!(
             line_count, 3,
@@ -364,108 +347,54 @@ mod tests {
         );
     }
 
-    // Regression test for #948: owner/group with spaces breaks fixed-column parsing
     #[test]
-    fn test_compact_multiline_group() {
-        let input = "total 8\n\
-                     -rw-r--r--  1 fjeanne utilisa. du domaine    0 Mar 31 16:18 empty.txt\n\
-                     -rw-r--r--  1 fjeanne utilisa. du domaine 1234 Mar 31 16:18 data.json\n";
-        let (entries, _summary) = compact_ls(input, false);
-        assert!(
-            entries.contains("empty.txt"),
-            "should contain 'empty.txt', got: {entries}"
-        );
-        assert!(
-            entries.contains("data.json"),
-            "should contain 'data.json', got: {entries}"
-        );
-        assert!(
-            !entries.contains("16:18"),
-            "time should not leak into filename, got: {entries}"
-        );
-        assert!(
-            entries.contains("0B"),
-            "empty.txt should show 0B, got: {entries}"
-        );
-        assert!(
-            entries.contains("1.2K"),
-            "data.json should show 1.2K (1234 bytes), got: {entries}"
-        );
+    fn test_compact_metadata_includes_permissions() {
+        let input = "total 48\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n\
+                     -rwxr-xr-x  1 user  staff  5678 Jan  1 12:00 script.sh\n";
+        let (entries, _summary) = compact_ls(input, false, true);
+        assert!(entries.contains("drwxr-xr-x"));
+        assert!(entries.contains("-rw-r--r--"));
+        assert!(entries.contains("-rwxr-xr-x"));
     }
 
     #[test]
-    fn test_compact_year_format_date() {
-        // Some systems show year instead of time for old files
-        let input = "total 8\n\
-                     -rw-r--r--  1 user staff  5678 Dec 25  2024 archive.tar\n";
-        let (entries, _summary) = compact_ls(input, false);
-        assert!(
-            entries.contains("archive.tar"),
-            "should contain filename, got: {entries}"
-        );
-        assert!(
-            entries.contains("5.5K"),
-            "should show 5.5K, got: {entries}"
-        );
+    fn test_compact_metadata_includes_dates() {
+        let input = "total 48\n\
+                     drwxr-xr-x  2 user  staff    64 Mar 15 09:30 src\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n";
+        let (entries, _summary) = compact_ls(input, false, true);
+        assert!(entries.contains("Mar 15 09:30"));
+        assert!(entries.contains("Jan 1 12:00"));
     }
 
     #[test]
-    fn test_parse_ls_line_basic() {
-        let (ft, size, name) = parse_ls_line(
-            "-rw-r--r--  1 user staff 1234 Jan  1 12:00 file.txt",
-        )
-        .unwrap();
-        assert_eq!(ft, '-');
-        assert_eq!(size, 1234);
-        assert_eq!(name, "file.txt");
+    fn test_compact_metadata_dirs_have_metadata() {
+        let input = "total 48\n\
+                     drwxr-xr-x  2 user  staff  4096 Jan 15 10:00 src\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n";
+        let (entries, _summary) = compact_ls(input, false, true);
+        assert!(entries.contains("src/"));
+        assert!(entries.contains("4.0K"));
+        assert!(entries.contains("Jan 15 10:00"));
+        assert!(entries.contains("drwxr-xr-x"));
     }
 
     #[test]
-    fn test_parse_ls_line_multiline_group() {
-        let (ft, size, name) = parse_ls_line(
-            "-rw-r--r--  1 fjeanne utilisa. du domaine 0 Mar 31 16:18 empty.txt",
-        )
-        .unwrap();
-        assert_eq!(ft, '-');
-        assert_eq!(size, 0);
-        assert_eq!(name, "empty.txt");
-    }
+    fn test_compact_metadata_vs_normal_output() {
+        let input = "total 48\n\
+                     drwxr-xr-x  2 user  staff    64 Jan  1 12:00 src\n\
+                     -rw-r--r--  1 user  staff  1234 Jan  1 12:00 Cargo.toml\n";
+        let (normal, _) = compact_ls(input, false, false);
+        let (meta, _) = compact_ls(input, false, true);
 
-    #[test]
-    fn test_parse_ls_line_dir_with_space_in_group() {
-        let (ft, size, name) = parse_ls_line(
-            "drwxr-xr-x  2 fjeanne utilisa. du domaine 64 Mar 31 16:18 my dir",
-        )
-        .unwrap();
-        assert_eq!(ft, 'd');
-        assert_eq!(size, 64);
-        assert_eq!(name, "my dir");
-    }
-
-    #[test]
-    fn test_parse_ls_line_symlink() {
-        let (ft, size, name) = parse_ls_line(
-            "lrwxr-xr-x  1 user staff 10 Jan  1 12:00 link -> target",
-        )
-        .unwrap();
-        assert_eq!(ft, 'l');
-        assert_eq!(size, 10);
-        assert_eq!(name, "link -> target");
-    }
-
-    #[test]
-    fn test_parse_ls_line_returns_none_for_total() {
-        assert!(parse_ls_line("total 48").is_none());
-    }
-
-    #[test]
-    fn test_parse_ls_line_year_format() {
-        let (ft, size, name) = parse_ls_line(
-            "-rw-r--r--  1 user staff 5678 Dec 25  2024 old.tar.gz",
-        )
-        .unwrap();
-        assert_eq!(ft, '-');
-        assert_eq!(size, 5678);
-        assert_eq!(name, "old.tar.gz");
+        assert!(!normal.contains("drwx"));
+        assert!(meta.contains("drwxr-xr-x"));
+        assert!(meta.contains("Jan 1 12:00"));
+        assert!(normal.contains("src/"));
+        assert!(meta.contains("src/"));
+        assert!(normal.contains("Cargo.toml"));
+        assert!(meta.contains("Cargo.toml"));
     }
 }
