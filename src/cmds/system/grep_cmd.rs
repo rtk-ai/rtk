@@ -16,6 +16,7 @@ pub fn run(
     max_results: usize,
     context_only: bool,
     file_type: Option<&str>,
+    pcre2: bool,
     extra_args: &[String],
     verbose: u8,
 ) -> Result<i32> {
@@ -39,11 +40,7 @@ pub fn run(
         rg_cmd.arg("--type").arg(ft);
     }
 
-    for arg in extra_args {
-        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
-        if arg == "-r" || arg == "--recursive" {
-            continue;
-        }
+    for arg in rg_extra_args(extra_args, pcre2) {
         rg_cmd.arg(arg);
     }
 
@@ -183,6 +180,23 @@ fn has_format_flag(extra_args: &[String]) -> bool {
     })
 }
 
+fn rg_extra_args(extra_args: &[String], pcre2: bool) -> Vec<String> {
+    let mut args = Vec::with_capacity(extra_args.len() + usize::from(pcre2));
+    if pcre2 {
+        args.push("--pcre2".to_string());
+    }
+
+    for arg in extra_args {
+        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
+        if arg == "-r" || arg == "--recursive" {
+            continue;
+        }
+        args.push(arg.clone());
+    }
+
+    args
+}
+
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
     let trimmed = line.trim();
 
@@ -302,12 +316,16 @@ mod tests {
     #[test]
     fn test_recursive_flag_stripped() {
         let extra_args: Vec<String> = vec!["-r".to_string(), "-i".to_string()];
-        let filtered: Vec<&String> = extra_args
-            .iter()
-            .filter(|a| *a != "-r" && *a != "--recursive")
-            .collect();
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0], "-i");
+        assert_eq!(rg_extra_args(&extra_args, false), vec!["-i"]);
+    }
+
+    #[test]
+    fn test_pcre2_flag_is_forwarded_to_rg() {
+        let extra_args: Vec<String> = vec!["-i".to_string(), "--glob".to_string(), "*.rs".to_string()];
+        assert_eq!(
+            rg_extra_args(&extra_args, true),
+            vec!["--pcre2", "-i", "--glob", "*.rs"]
+        );
     }
 
     // --- truncation accuracy ---
