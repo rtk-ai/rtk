@@ -34,6 +34,49 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .map(|s| s.as_str())
         .collect();
 
+    // Flags that change ls output format enough that our `ls -la` parser breaks.
+    // For these, fall back to a raw passthrough so the user still gets the flag's behavior.
+    // -1 one-per-line, -d dir only, -F classify suffixes, -C multi-column,
+    // -m comma-separated, -x cross-sorted, -i inode, -p trailing slash on dirs
+    let incompatible_flags = flags.iter().any(|f| {
+        if f.starts_with("--") {
+            return false;
+        }
+        let stripped = f.trim_start_matches('-');
+        stripped.contains('1')
+            || stripped.contains('d')
+            || stripped.contains('F')
+            || stripped.contains('C')
+            || stripped.contains('m')
+            || stripped.contains('x')
+            || stripped.contains('i')
+            || stripped.contains('p')
+    });
+
+    if incompatible_flags {
+        let mut raw_cmd = resolved_command("ls");
+        for flag in &flags {
+            raw_cmd.arg(flag);
+        }
+        if paths.is_empty() {
+            raw_cmd.arg(".");
+        } else {
+            for p in &paths {
+                raw_cmd.arg(p);
+            }
+        }
+        let output = raw_cmd.output()?;
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        if !output.status.success() {
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+        return Ok(output.status.code().unwrap_or(1));
+    }
+
+    let is_recursive = flags.iter().any(|f| {
+        (!f.starts_with("--") && f.trim_start_matches('-').contains('R')) || *f == "--recursive"
+    });
+
     let mut cmd = resolved_command("ls");
     cmd.arg("-la");
     for flag in &flags {
@@ -72,7 +115,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "ls",
         &format!("-la {}", target_display),
         |raw| {
-            let (entries, summary) = compact_ls(raw, show_all);
+            let (entries, summary) = if is_recursive {
+                compact_ls_recursive(raw, show_all)
+            } else {
+                compact_ls(raw, show_all)
+            };
 
             // Only show summary in interactive mode (not when piped)
             let is_tty = std::io::stdout().is_terminal();
@@ -230,6 +277,114 @@ fn compact_ls(raw: &str, show_all: bool) -> (String, String) {
     summary.push('\n');
 
     (entries, summary)
+}
+
+/// Parse `ls -laR` output into hierarchical format.
+///
+/// `ls -laR` emits sections separated by blank lines, where each section is
+/// preceded by `path/to/dir:` (except the first which corresponds to the target).
+/// We reuse `compact_ls` for each section and prefix every section with its
+/// directory header so the LLM can tell where each file lives.
+fn compact_ls_recursive(raw: &str, show_all: bool) -> (String, String) {
+    let mut entries = String::new();
+    let mut total_files = 0usize;
+    let mut total_dirs = 0usize;
+    let mut first_section = true;
+
+    // Split on blank lines: each section is [header:, total N, listing lines...].
+    // The very first section has no header (it's the target directory itself).
+    let mut section_lines: Vec<&str> = Vec::new();
+    let mut section_header: Option<String> = None;
+
+    for line in raw.lines() {
+        if line.is_empty() {
+            // End of section — emit what we have
+            if !section_lines.is_empty() {
+                let section_raw = section_lines.join("\n");
+                let (section_entries, _summary) = compact_ls(&section_raw, show_all);
+                emit_section(
+                    &mut entries,
+                    &section_header,
+                    &section_entries,
+                    &mut total_files,
+                    &mut total_dirs,
+                    first_section,
+                );
+                first_section = false;
+                section_lines.clear();
+                section_header = None;
+            }
+        } else if line.ends_with(':')
+            && !line.starts_with("total ")
+            && section_lines.is_empty()
+            && !first_section
+        {
+            // Header line for a subsequent section
+            section_header = Some(line.trim_end_matches(':').to_string());
+        } else if line.ends_with(':') && first_section {
+            // First section may or may not have a header depending on arg count
+            section_header = Some(line.trim_end_matches(':').to_string());
+        } else {
+            section_lines.push(line);
+        }
+    }
+
+    // Flush last section
+    if !section_lines.is_empty() {
+        let section_raw = section_lines.join("\n");
+        let (section_entries, _summary) = compact_ls(&section_raw, show_all);
+        emit_section(
+            &mut entries,
+            &section_header,
+            &section_entries,
+            &mut total_files,
+            &mut total_dirs,
+            first_section,
+        );
+    }
+
+    let summary = format!(
+        "\nSummary: {} files, {} dirs (recursive)\n",
+        total_files, total_dirs
+    );
+    (entries, summary)
+}
+
+fn emit_section(
+    out: &mut String,
+    header: &Option<String>,
+    section_entries: &str,
+    total_files: &mut usize,
+    total_dirs: &mut usize,
+    is_first: bool,
+) {
+    if let Some(path) = header {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(path);
+        out.push_str(":\n");
+    } else if !is_first {
+        out.push('\n');
+    }
+
+    for line in section_entries.lines() {
+        if line == "(empty)" {
+            continue;
+        }
+        // Count entries for summary
+        if line.ends_with('/') {
+            *total_dirs += 1;
+        } else if !line.is_empty() {
+            *total_files += 1;
+        }
+        // Indent children under a header
+        if header.is_some() {
+            out.push_str("  ");
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
 }
 
 #[cfg(test)]
@@ -467,5 +622,62 @@ mod tests {
         assert_eq!(ft, '-');
         assert_eq!(size, 5678);
         assert_eq!(name, "old.tar.gz");
+    }
+
+    #[test]
+    fn test_compact_ls_recursive_preserves_hierarchy() {
+        // ls -laR emits sections separated by blank lines, each prefixed with "path:".
+        // The LLM must be able to tell which files live in which directory, so
+        // subsection headers and indentation are both required.
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 ..\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 group-a\n\
+                     -rw-r--r--  1 user staff   7 Jan  1 12:00 readme.md\n\
+                     \n\
+                     /tmp/test/group-a:\n\
+                     total 16\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 ..\n\
+                     -rw-r--r--  1 user staff   8 Jan  1 12:00 details.md\n";
+        let (entries, summary) = compact_ls_recursive(input, false);
+        // Top-level entries present
+        assert!(entries.contains("group-a/"));
+        assert!(entries.contains("readme.md"));
+        // Subsection header present
+        assert!(
+            entries.contains("/tmp/test/group-a:"),
+            "recursive output must preserve subsection headers, got:\n{}",
+            entries
+        );
+        // Children indented under header
+        assert!(
+            entries.contains("  details.md"),
+            "children must be indented under their directory header, got:\n{}",
+            entries
+        );
+        assert!(summary.contains("recursive"));
+    }
+
+    #[test]
+    fn test_compact_ls_recursive_empty_subdir() {
+        // Empty subdirectory should still show its header but no children.
+        let input = "total 8\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 empty-dir\n\
+                     \n\
+                     /tmp/test/empty-dir:\n\
+                     total 0\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 .\n\
+                     drwxr-xr-x  2 user staff  64 Jan  1 12:00 ..\n";
+        let (entries, _summary) = compact_ls_recursive(input, false);
+        assert!(entries.contains("empty-dir/"));
+        assert!(entries.contains("/tmp/test/empty-dir:"));
+        // "(empty)" marker from compact_ls must be suppressed — an empty section
+        // header is enough; the "(empty)" literal would confuse the LLM.
+        assert!(
+            !entries.contains("(empty)"),
+            "empty sections should not emit (empty) marker in recursive mode, got:\n{}",
+            entries
+        );
     }
 }
