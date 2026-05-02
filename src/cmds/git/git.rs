@@ -91,8 +91,16 @@ fn normalize_diff_args(args: &[String]) -> Vec<String> {
 /// 1. Explicit path prefixes (`.`, `~`) → always a path, no filesystem check needed.
 /// 2. Contains path separator (`/`, `\`) → use `path_exists` to distinguish branch names
 ///    (e.g. `feature/auth`) from real paths (e.g. `src/main.rs`).
-/// 3. Bare word with no separator → never a path (avoids injecting `--` when a file
-///    happens to share a name with a branch or ref, e.g. a file named `main`).
+/// 3. Bare word with a mid-string `.` (looks like a filename with extension, e.g.
+///    `package.json`, `playwright.config.ts`) → use `path_exists` to distinguish
+///    refs/tags (e.g. `v1.2.3`) from real files. Required for issue #1669: when a
+///    user-passed `--` is dropped by clap and the file list mixes bare-word-with-
+///    extension args (`package.json`) with explicit-path args (`.harness/foo.yaml`),
+///    rule 1 alone places `--` after the bare-word-with-extension args, leaving them
+///    misinterpreted as revisions.
+/// 4. Bare word with no separator and no `.` → never a path (avoids injecting `--`
+///    when a file happens to share a name with a branch or ref, e.g. a file named
+///    `main`).
 fn normalize_diff_args_impl<F>(args: &[String], path_exists: F) -> Vec<String>
 where
     F: Fn(&str) -> bool,
@@ -114,7 +122,14 @@ where
         if arg.contains('/') || arg.contains('\\') {
             return path_exists(arg);
         }
-        // Bare word (no separator, no special prefix) — never inject `--`
+        // Bare word with mid-string `.` (looks like filename with extension) —
+        // use filesystem check to distinguish refs/tags (v1.2.3) from real
+        // files (package.json). The `.` must not be at position 0 because
+        // that prefix is already handled by rule 1 (.gitignore as dotfile).
+        if arg.find('.').is_some_and(|i| i > 0) {
+            return path_exists(arg);
+        }
+        // Plain bare word (no separator, no `.`, no special prefix) — never inject `--`
         // This avoids misidentifying a ref/branch as a path even if a same-named
         // file happens to exist on disk.
         false
@@ -2072,6 +2087,80 @@ mod tests {
             normalize_diff_args_impl(&args, exists_mock(&["main"])),
             args,
             "bare words must never trigger -- injection even when a same-named file exists"
+        );
+    }
+
+    /// Issue #1669: bare-word-with-extension that exists as a file → inject `--`.
+    /// `package.json` looks like a filename, not a ref. Filesystem check confirms.
+    #[test]
+    fn test_normalize_diff_args_bare_word_with_extension_treated_as_path() {
+        let args = vec!["package.json".to_string()];
+        let normalized = normalize_diff_args_impl(&args, exists_mock(&["package.json"]));
+        assert_eq!(
+            normalized,
+            vec!["--".to_string(), "package.json".to_string()],
+            "bare word with extension that exists on disk must trigger -- injection"
+        );
+    }
+
+    /// Bare-word-with-extension that does NOT exist as a file → no injection.
+    /// `v1.2.3` is a typical version tag pattern; without filesystem evidence it
+    /// must remain a ref candidate.
+    #[test]
+    fn test_normalize_diff_args_bare_word_with_extension_no_injection_when_not_file() {
+        let args = vec!["v1.2.3".to_string()];
+        assert_eq!(
+            normalize_diff_args_impl(&args, exists_mock(&[])),
+            args,
+            "bare word with dots that doesn't exist on disk must remain a ref candidate"
+        );
+    }
+
+    /// Issue #1669 reporter's exact case: clap dropped `--` and the arg list mixes
+    /// bare-word-with-extension files (`package.json`, `playwright.config.ts`) with
+    /// an explicit-path file (`.harness/e2e_pipeline.yaml`) and slash-path files.
+    /// `--` must be injected at index 0, before any path-like arg.
+    #[test]
+    fn test_normalize_diff_args_mixed_bare_extension_and_explicit_path() {
+        let args = vec![
+            "package.json".to_string(),
+            "playwright.config.ts".to_string(),
+            ".harness/e2e_pipeline.yaml".to_string(),
+            "e2e-tests/config/loadEnv.ts".to_string(),
+            "e2e-tests/config/test.env".to_string(),
+        ];
+        let normalized = normalize_diff_args_impl(
+            &args,
+            exists_mock(&[
+                "package.json",
+                "playwright.config.ts",
+                ".harness/e2e_pipeline.yaml",
+                "e2e-tests/config/loadEnv.ts",
+                "e2e-tests/config/test.env",
+            ]),
+        );
+        assert_eq!(
+            normalized,
+            vec![
+                "--".to_string(),
+                "package.json".to_string(),
+                "playwright.config.ts".to_string(),
+                ".harness/e2e_pipeline.yaml".to_string(),
+                "e2e-tests/config/loadEnv.ts".to_string(),
+                "e2e-tests/config/test.env".to_string(),
+            ],
+            "-- must be injected at the leading bare-word-with-extension, not the first explicit path"
+        );
+    }
+
+    /// Ref before bare-word-with-extension file: ["HEAD", "Cargo.toml"] → inject after HEAD.
+    #[test]
+    fn test_normalize_diff_args_ref_before_bare_word_extension() {
+        let args = vec!["HEAD".to_string(), "Cargo.toml".to_string()];
+        let normalized = normalize_diff_args_impl(&args, exists_mock(&["Cargo.toml"]));
+        assert_eq!(
+            normalized,
+            vec!["HEAD".to_string(), "--".to_string(), "Cargo.toml".to_string()]
         );
     }
 
