@@ -27,7 +27,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
-    match registry::rewrite_command_with_prefixes(cmd, &excluded, &transparent_prefixes) {
+    match registry::rewrite_command(cmd, &excluded, &transparent_prefixes) {
         Some(rewritten) => match verdict {
             PermissionVerdict::Allow => {
                 print!("{}", rewritten);
@@ -53,20 +53,24 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn rewrite_command(cmd: &str) -> Option<String> {
+        registry::rewrite_command(cmd, &[], &[])
+    }
+
     #[test]
     fn test_run_supported_command_succeeds() {
-        assert!(registry::rewrite_command("git status", &[]).is_some());
+        assert!(rewrite_command("git status").is_some());
     }
 
     #[test]
     fn test_run_unsupported_returns_none() {
-        assert!(registry::rewrite_command("htop", &[]).is_none());
+        assert!(rewrite_command("htop").is_none());
     }
 
     #[test]
     fn test_run_already_rtk_returns_some() {
         assert_eq!(
-            registry::rewrite_command("rtk git status", &[]),
+            rewrite_command("rtk git status"),
             Some("rtk git status".into())
         );
     }
@@ -148,7 +152,7 @@ mod tests {
 
             // Verify the rewrite exists (so the hook would output it),
             // but the exit code forces user confirmation.
-            assert!(registry::rewrite_command("git status", &[]).is_some());
+            assert!(registry::rewrite_command("git status", &[], &[]).is_some());
             assert_eq!(expected_exit_code(&verdict), 3);
         }
 
