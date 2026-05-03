@@ -102,6 +102,10 @@ struct TomlFilterDef {
     tail_lines: Option<usize>,
     max_lines: Option<usize>,
     on_empty: Option<String>,
+    /// When true, stderr is captured and merged with stdout before filtering.
+    /// Use for tools like liquibase that emit banners/logs to stderr.
+    #[serde(default)]
+    filter_stderr: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +149,8 @@ pub struct CompiledFilter {
     tail_lines: Option<usize>,
     pub max_lines: Option<usize>,
     on_empty: Option<String>,
+    /// When true, the runner should capture stderr and merge it with stdout.
+    pub filter_stderr: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +398,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         tail_lines: def.tail_lines,
         max_lines: def.max_lines,
         on_empty: def.on_empty,
+        filter_stderr: def.filter_stderr,
     })
 }
 
@@ -1571,6 +1578,7 @@ match_command = "^make\\b"
             "hadolint",
             "helm",
             "iptables",
+            "liquibase",
             "make",
             "markdownlint",
             "mix-compile",
@@ -1614,8 +1622,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            57,
-            "Expected exactly 57 built-in filters, got {}. \
+            58,
+            "Expected exactly 58 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1672,11 +1680,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 58 existing filters still present + 1 new = 59
+        // All 59 existing filters still present + 1 new = 60
         assert_eq!(
             filters.len(),
-            58,
-            "Expected 58 filters after concat (58 built-in + 1 new)"
+            59,
+            "Expected 60 filters after concat (58 built-in + 1 new)"
         );
 
         // New filter is discoverable

@@ -70,11 +70,11 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                     .is_some_and(|&nc| nc.is_ascii_alphabetic() || nc == '_')
                 {
                     let mut name = String::from("$");
-                    while chars
-                        .peek()
-                        .is_some_and(|&nc| nc.is_ascii_alphanumeric() || nc == '_')
-                    {
-                        let nc = chars.next().unwrap();
+                    while let Some(&nc) = chars.peek() {
+                        if !nc.is_ascii_alphanumeric() && nc != '_' {
+                            break;
+                        }
+                        chars.next();
                         byte_pos += nc.len_utf8();
                         name.push(nc);
                     }
@@ -107,7 +107,8 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 let start = byte_pos;
                 byte_pos += char_len;
                 if chars.peek() == Some(&'|') {
-                    byte_pos += chars.next().unwrap().len_utf8();
+                    chars.next();
+                    byte_pos += 1;
                     tokens.push(ParsedToken {
                         kind: TokenKind::Operator,
                         value: "||".into(),
@@ -137,18 +138,21 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 let start = byte_pos;
                 byte_pos += char_len;
                 if chars.peek() == Some(&'&') {
-                    byte_pos += chars.next().unwrap().len_utf8();
+                    chars.next();
+                    byte_pos += 1;
                     tokens.push(ParsedToken {
                         kind: TokenKind::Operator,
                         value: "&&".into(),
                         offset: start,
                     });
                 } else if chars.peek() == Some(&'>') {
-                    byte_pos += chars.next().unwrap().len_utf8();
+                    chars.next();
+                    byte_pos += 1;
                     let mut val = String::from("&>");
                     if chars.peek() == Some(&'>') {
+                        chars.next();
+                        byte_pos += 1;
                         val.push('>');
-                        byte_pos += chars.next().unwrap().len_utf8();
                     }
                     tokens.push(ParsedToken {
                         kind: TokenKind::Redirect,
@@ -181,17 +185,19 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 val.push('>');
                 byte_pos += char_len;
                 if chars.peek() == Some(&'>') {
+                    chars.next();
+                    byte_pos += 1;
                     val.push('>');
-                    byte_pos += chars.next().unwrap().len_utf8();
                 }
                 if chars.peek() == Some(&'&') {
+                    chars.next();
+                    byte_pos += 1;
                     val.push('&');
-                    byte_pos += chars.next().unwrap().len_utf8();
-                    while chars
-                        .peek()
-                        .is_some_and(|&c| c.is_ascii_digit() || c == '-')
-                    {
-                        let nc = chars.next().unwrap();
+                    while let Some(&nc) = chars.peek() {
+                        if !nc.is_ascii_digit() && nc != '-' {
+                            break;
+                        }
+                        chars.next();
                         val.push(nc);
                         byte_pos += nc.len_utf8();
                     }
@@ -209,8 +215,9 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 let mut val = String::from("<");
                 byte_pos += char_len;
                 if chars.peek() == Some(&'<') {
+                    chars.next();
+                    byte_pos += 1;
                     val.push('<');
-                    byte_pos += chars.next().unwrap().len_utf8();
                 }
                 tokens.push(ParsedToken {
                     kind: TokenKind::Redirect,
@@ -251,7 +258,54 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
     }
 }
 
-#[allow(dead_code)]
+/// Split a shell command on operators (`&&`, `||`, `;`) and optionally pipes (`|`),
+/// respecting quoted strings via the lexer.
+///
+/// When `stop_at_pipe` is true, returns only segments before the first `|`
+/// (used by command rewriting — only the left side of a pipe gets rewritten).
+/// When false, splits through pipes too (used by permission checking —
+/// every segment must be validated).
+pub fn split_on_operators(cmd: &str, stop_at_pipe: bool) -> Vec<&str> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    let tokens = tokenize(trimmed);
+    let mut results = Vec::new();
+    let mut seg_start: usize = 0;
+
+    for tok in &tokens {
+        match tok.kind {
+            TokenKind::Operator => {
+                let segment = trimmed[seg_start..tok.offset].trim();
+                if !segment.is_empty() {
+                    results.push(segment);
+                }
+                seg_start = tok.offset + tok.value.len();
+            }
+            TokenKind::Pipe => {
+                let segment = trimmed[seg_start..tok.offset].trim();
+                if !segment.is_empty() {
+                    results.push(segment);
+                }
+                if stop_at_pipe {
+                    return results;
+                }
+                seg_start = tok.offset + tok.value.len();
+            }
+            _ => {}
+        }
+    }
+
+    let tail = trimmed[seg_start..].trim();
+    if !tail.is_empty() {
+        results.push(tail);
+    }
+
+    results
+}
+
 pub fn strip_quotes(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() >= 2
@@ -861,26 +915,6 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_quotes_double() {
-        assert_eq!(strip_quotes("\"hello\""), "hello");
-    }
-
-    #[test]
-    fn test_strip_quotes_single() {
-        assert_eq!(strip_quotes("'hello'"), "hello");
-    }
-
-    #[test]
-    fn test_strip_quotes_none() {
-        assert_eq!(strip_quotes("hello"), "hello");
-    }
-
-    #[test]
-    fn test_strip_quotes_mismatched() {
-        assert_eq!(strip_quotes("\"hello'"), "\"hello'");
-    }
-
-    #[test]
     fn test_shell_split_simple() {
         assert_eq!(
             shell_split("head -50 file.php"),
@@ -945,5 +979,54 @@ mod tests {
     #[test]
     fn test_shell_split_multiple_spaces() {
         assert_eq!(shell_split("a   b   c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_strip_quotes_double() {
+        assert_eq!(strip_quotes("\"hello\""), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_single() {
+        assert_eq!(strip_quotes("'hello'"), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_none() {
+        assert_eq!(strip_quotes("hello"), "hello");
+    }
+
+    #[test]
+    fn test_strip_quotes_mismatched() {
+        assert_eq!(strip_quotes("\"hello'"), "\"hello'");
+    }
+
+    #[test]
+    fn test_split_on_operators_stop_at_pipe() {
+        assert_eq!(split_on_operators("a | b | c", true), vec!["a"]);
+        assert_eq!(split_on_operators("a && b | c", true), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_split_on_operators_through_pipes() {
+        assert_eq!(split_on_operators("a | b | c", false), vec!["a", "b", "c"]);
+        assert_eq!(
+            split_on_operators("a && b | c ; d", false),
+            vec!["a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn test_split_on_operators_quoted() {
+        assert_eq!(
+            split_on_operators(r#"echo "a && b" && cargo test"#, false),
+            vec![r#"echo "a && b""#, "cargo test"]
+        );
+    }
+
+    #[test]
+    fn test_split_on_operators_empty() {
+        assert!(split_on_operators("", false).is_empty());
+        assert!(split_on_operators("  ", true).is_empty());
     }
 }

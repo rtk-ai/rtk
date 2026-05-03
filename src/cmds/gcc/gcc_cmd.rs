@@ -3,7 +3,7 @@ use crate::core::utils::{resolved_command, strip_ansi};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 
-pub fn run(compiler: &str, args: &[String], verbose: u8) -> Result<()> {
+pub fn run(compiler: &str, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     let mut cmd = resolved_command(compiler);
@@ -31,10 +31,11 @@ pub fn run(compiler: &str, args: &[String], verbose: u8) -> Result<()> {
 
     timer.track(compiler, &format!("rtk {}", compiler), &raw, &filtered);
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-    Ok(())
+    Ok(if output.status.success() {
+        0
+    } else {
+        output.status.code().unwrap_or(1)
+    })
 }
 
 /// Severity level of a gcc diagnostic.

@@ -1,6 +1,6 @@
 # Built-in Filters
 
-> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview
+> See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 
 Each `.toml` file in this directory defines one filter and its inline tests.
 Files are concatenated alphabetically by `build.rs` into a single TOML blob embedded in the binary.
@@ -51,6 +51,7 @@ expected = "expected filtered output"
 | `description` | string | Human-readable description |
 | `match_command` | regex | Matches the command string (e.g. `"^docker\\s+inspect"`) |
 | `strip_ansi` | bool | Strip ANSI escape codes before processing |
+| `filter_stderr` | bool | Capture and merge stderr into stdout before filtering (use for tools like liquibase that emit banners to stderr) |
 | `strip_lines_matching` | regex[] | Drop lines matching any regex |
 | `keep_lines_matching` | regex[] | Keep only lines matching at least one regex |
 | `replace` | array | Regex substitutions (`{ pattern, replacement }`) |
@@ -64,3 +65,58 @@ expected = "expected filtered output"
 
 Use the command name as the filename: `terraform-plan.toml`, `docker-inspect.toml`, `mix-compile.toml`.
 For commands with subcommands, prefer `<cmd>-<subcommand>.toml` over grouping multiple filters in one file.
+
+## Build and runtime pipeline
+
+How a `.toml` file goes from contributor → binary → filtered output.
+
+```mermaid
+flowchart TD
+    A[["src/filters/my-tool.toml\n(new file)"]] --> B
+
+    subgraph BUILD ["cargo build"]
+        B["build.rs\n1. ls src/filters/*.toml\n2. sort alphabetically\n3. concat → BUILTIN_TOML"] --> C
+        C{"TOML valid?\nDuplicate names?"} -->|"fail"| D[["Build fails\nerror points to bad file"]]
+        C -->|"ok"| E[["OUT_DIR/builtin_filters.toml\n(generated)"]]
+        E --> F["rustc embeds via include_str!"]
+        F --> G[["rtk binary\nBUILTIN_TOML embedded"]]
+    end
+
+    subgraph TESTS ["cargo test"]
+        H["test_builtin_filter_count\nassert_eq!(filters.len(), N)"] -->|"wrong count"| I[["FAIL"]]
+        J["test_builtin_all_filters_present\nassert!(names.contains('my-tool'))"] -->|"name missing"| K[["FAIL"]]
+        L["test_builtin_all_filters_have_inline_tests\nassert!(tested.contains(name))"] -->|"no tests"| M[["FAIL"]]
+    end
+
+    subgraph RUNTIME ["rtk my-tool args"]
+        R["TomlFilterRegistry::load()\n1. .rtk/filters.toml\n2. ~/.config/rtk/filters.toml\n3. BUILTIN_TOML\n4. passthrough"] --> S
+        S{"match_command\nmatches?"} -->|"no match"| T[["exec raw (passthrough)"]]
+        S -->|"match"| U["exec command\ncapture stdout"]
+        U --> V["8-stage pipeline\nstrip_ansi → replace → match_output\n→ strip/keep_lines → truncate\n→ tail_lines → max_lines → on_empty"]
+        V --> W[["print filtered output + exit code"]]
+    end
+
+    G --> H & J & L & R
+```
+
+## Filter lookup priority
+
+```mermaid
+flowchart LR
+    CMD["rtk my-tool args"] --> P1
+    P1{"1. .rtk/filters.toml\n(project-local)"}
+    P1 -->|"match"| WIN["apply filter"]
+    P1 -->|"no match"| P2
+    P2{"2. ~/.config/rtk/filters.toml\n(user-global)"}
+    P2 -->|"match"| WIN
+    P2 -->|"no match"| P3
+    P3{"3. BUILTIN_TOML\n(binary)"}
+    P3 -->|"match"| WIN
+    P3 -->|"no match"| P4[["exec raw (passthrough)"]]
+```
+
+First match wins. A project filter with the same name as a built-in shadows the built-in and triggers a warning:
+
+```
+[rtk] warning: filter 'make' is shadowing a built-in filter
+```

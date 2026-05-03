@@ -56,9 +56,26 @@ impl ClaudeProvider {
     }
 
     /// Encode a filesystem path to Claude Code's directory name format.
-    /// `/Users/foo/bar` → `-Users-foo-bar`
+    ///
+    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
+    /// with `-` when computing the project directory slug under `~/.claude/projects/`.
+    ///
+    /// `/Users/foo/bar`          → `-Users-foo-bar`
+    /// `/Users/first.last/bar`   → `-Users-first-last-bar`
+    /// `/home/chris/2_project`   → `-home-chris-2-project`
+    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        path.replace('/', "-")
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\'];
+
+        path.chars()
+            .map(|c| {
+                if !c.is_ascii() || SANITIZED_CHARS.contains(&c) {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect()
     }
 }
 
@@ -334,6 +351,54 @@ mod tests {
         assert_eq!(
             ClaudeProvider::encode_project_path("/Users/foo/bar/"),
             "-Users-foo-bar-"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_dot_in_username() {
+        // Claude Code replaces both '/' and '.' with '-'.
+        // A cwd like /Users/first.last must produce the same slug as
+        // Claude's projects directory (-Users-first-last), otherwise
+        // `rtk discover` finds zero sessions for that project.
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/first.last/my-project"),
+            "-Users-first-last-my-project"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_multiple_dots() {
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/a.b.c/proj"),
+            "-Users-a-b-c-proj"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_underscore() {
+        // Claude Code also replaces '_' with '-' (https://github.com/anthropics/claude-code/issues/24067)
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/chris/2_project-files/proj"),
+            "-home-chris-2-project-files-proj"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_non_ascii() {
+        // Non-ASCII characters are each replaced with '-' (https://github.com/anthropics/claude-code/issues/40946)
+        // '/home/user/' + '外' + '主' + '/app' -> '-home-user' + '-' + '-' + '-' + '-' + 'app'
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/user/\u{5916}\u{4e3b}/app"),
+            "-home-user----app"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_windows() {
+        // Windows backslashes are also replaced with '-'
+        assert_eq!(
+            ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
+            "C:-Users-foo-bar"
         );
     }
 

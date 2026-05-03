@@ -1,10 +1,11 @@
 //! Runs a command and produces a heuristic summary of its output.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::truncate;
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Run a command and provide a heuristic summary
 pub fn run(command: &str, verbose: u8) -> Result<i32> {
@@ -14,31 +15,23 @@ pub fn run(command: &str, verbose: u8) -> Result<i32> {
         eprintln!("Running and summarizing: {}", command);
     }
 
-    let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", command]);
+        c
     } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute command")?;
+        let mut c = Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
+    let result = exec_capture(&mut cmd).context("Failed to execute command")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, command);
-
-    let summary = summarize_output(&raw, command, output.status.success());
+    let summary = summarize_output(&raw, command, result.success());
     println!("{}", summary);
     timer.track(command, "rtk summary", &raw, &summary);
-    Ok(exit_code)
+    Ok(result.exit_code)
 }
 
 fn summarize_output(output: &str, command: &str, success: bool) -> String {

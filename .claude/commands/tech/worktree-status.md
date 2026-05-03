@@ -1,6 +1,7 @@
 ---
 model: haiku
 description: Worktree Cargo Check Status
+argument-hint: "<branch-name>"
 ---
 
 # Worktree Status Check

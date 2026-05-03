@@ -1,8 +1,10 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
 use crate::core::runner;
+use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::OnceLock;
@@ -67,6 +69,216 @@ fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<Str
     result
 }
 
+// --- Stream handlers ---
+
+struct CargoBuildHandler {
+    compiled: usize,
+    warnings: usize,
+    error_count: usize,
+    finished_line: Option<String>,
+}
+
+impl CargoBuildHandler {
+    fn new() -> Self {
+        Self {
+            compiled: 0,
+            warnings: 0,
+            error_count: 0,
+            finished_line: None,
+        }
+    }
+}
+
+impl BlockHandler for CargoBuildHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Compiling") || trimmed.starts_with("Checking") {
+            self.compiled += 1;
+            return true;
+        }
+        if trimmed.starts_with("Downloading") || trimmed.starts_with("Downloaded") {
+            return true;
+        }
+        if trimmed.starts_with("Finished") {
+            self.finished_line = Some(trimmed.to_string());
+            return true;
+        }
+        if line.starts_with("warning:")
+            && line.contains("generated")
+            && line.contains("warning")
+        {
+            return true;
+        }
+        if (line.starts_with("error:") || line.starts_with("error["))
+            && (line.contains("aborting due to") || line.contains("could not compile"))
+        {
+            return true;
+        }
+        false
+    }
+
+    fn is_block_start(&mut self, line: &str) -> bool {
+        if line.starts_with("error[") || line.starts_with("error:") {
+            self.error_count += 1;
+            return true;
+        }
+        if line.starts_with("warning:") || line.starts_with("warning[") {
+            self.warnings += 1;
+            return true;
+        }
+        false
+    }
+
+    fn is_block_continuation(&mut self, line: &str, block: &[String]) -> bool {
+        !(line.trim().is_empty() && block.len() > 3)
+    }
+
+    fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
+        if self.error_count == 0 && self.warnings == 0 {
+            let mut s = format!("cargo build ({} crates compiled)", self.compiled);
+            if let Some(ref finished) = self.finished_line {
+                s = format!("{}\n{}", s, finished);
+            }
+            Some(format!("{}\n", s))
+        } else {
+            Some(format!(
+                "═══════════════════════════════════════\ncargo build: {} errors, {} warnings ({} crates)\n",
+                self.error_count, self.warnings, self.compiled
+            ))
+        }
+    }
+}
+
+struct CargoTestHandler {
+    in_failure_section: bool,
+    in_failure_names: bool,
+    summary_lines: Vec<String>,
+    has_compile_errors: bool,
+}
+
+impl CargoTestHandler {
+    fn new() -> Self {
+        Self {
+            in_failure_section: false,
+            in_failure_names: false,
+            summary_lines: Vec::new(),
+            has_compile_errors: false,
+        }
+    }
+}
+
+impl BlockHandler for CargoTestHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Compiling")
+            || trimmed.starts_with("Downloading")
+            || trimmed.starts_with("Downloaded")
+            || trimmed.starts_with("Finished")
+        {
+            return true;
+        }
+        if line.starts_with("running ") {
+            return true;
+        }
+        if line.starts_with("test ") && line.ends_with("... ok") {
+            return true;
+        }
+        // Track compile errors for fallback
+        if trimmed.starts_with("error[") || trimmed.starts_with("error:") {
+            self.has_compile_errors = true;
+        }
+        // "failures:" toggles section state
+        if line == "failures:" {
+            if self.in_failure_section {
+                // Second "failures:" = list of failure names — skip them
+                self.in_failure_names = true;
+            }
+            self.in_failure_section = true;
+            return true;
+        }
+        // Skip the failure name listing section
+        if self.in_failure_names {
+            if line.starts_with("test result:") {
+                self.in_failure_names = false;
+                self.in_failure_section = false;
+                self.summary_lines.push(line.to_string());
+                return true;
+            }
+            return true;
+        }
+        if line.starts_with("test result:") {
+            self.summary_lines.push(line.to_string());
+            self.in_failure_section = false;
+            return true;
+        }
+        false
+    }
+
+    fn is_block_start(&mut self, line: &str) -> bool {
+        self.in_failure_section && line.starts_with("---- ")
+    }
+
+    fn is_block_continuation(&mut self, line: &str, _block: &[String]) -> bool {
+        self.in_failure_section && !line.starts_with("---- ")
+    }
+
+    fn format_summary(&self, _exit_code: i32, raw: &str) -> Option<String> {
+        if self.summary_lines.is_empty() && self.has_compile_errors {
+            let build_filtered = filter_cargo_build(raw);
+            if build_filtered.starts_with("cargo build:") {
+                return Some(format!(
+                    "{}\n",
+                    build_filtered.replacen("cargo build:", "cargo test:", 1)
+                ));
+            }
+            // Fallback: last 5 meaningful lines
+            let meaningful: Vec<&str> = raw
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("Compiling"))
+                .collect();
+            let last5: Vec<&str> = meaningful.iter().rev().take(5).rev().copied().collect();
+            return Some(format!("{}\n", last5.join("\n")));
+        }
+
+        // No failures emitted — aggregate pass results
+        let mut aggregated: Option<AggregatedTestResult> = None;
+        let mut all_parsed = true;
+
+        for line in &self.summary_lines {
+            if let Some(parsed) = AggregatedTestResult::parse_line(line) {
+                if let Some(ref mut agg) = aggregated {
+                    agg.merge(&parsed);
+                } else {
+                    aggregated = Some(parsed);
+                }
+            } else {
+                all_parsed = false;
+                break;
+            }
+        }
+
+        if all_parsed {
+            if let Some(agg) = aggregated {
+                if agg.suites > 0 {
+                    return Some(format!("{}\n", agg.format_compact()));
+                }
+            }
+        }
+
+        // Fallback: show raw summary lines
+        if !self.summary_lines.is_empty() {
+            let mut s = String::new();
+            for line in &self.summary_lines {
+                s.push_str(line);
+                s.push('\n');
+            }
+            return Some(s);
+        }
+
+        None
+    }
+}
+
 /// Generic cargo command runner with filtering.
 /// Builds the Command with restored `--` separator, then delegates to shared runner.
 fn run_cargo_filtered<F>(
@@ -99,12 +311,49 @@ where
     )
 }
 
+fn run_cargo_streamed(
+    subcommand: &str,
+    args: &[String],
+    verbose: u8,
+    filter: Box<dyn StreamFilter>,
+) -> Result<i32> {
+    let mut cmd = resolved_command("cargo");
+    cmd.arg(subcommand);
+
+    let restored_args = restore_double_dash(args);
+    for arg in &restored_args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: cargo {} {}", subcommand, restored_args.join(" "));
+    }
+
+    runner::run_streamed(
+        cmd,
+        &format!("cargo {}", subcommand),
+        &restored_args.join(" "),
+        filter,
+        runner::RunOptions::with_tee(&format!("cargo_{}", subcommand)),
+    )
+}
+
 fn run_build(args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("build", args, verbose, filter_cargo_build)
+    run_cargo_streamed(
+        "build",
+        args,
+        verbose,
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::new())),
+    )
 }
 
 fn run_test(args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("test", args, verbose, filter_cargo_test)
+    run_cargo_streamed(
+        "test",
+        args,
+        verbose,
+        Box::new(BlockStreamFilter::new(CargoTestHandler::new())),
+    )
 }
 
 fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
@@ -112,7 +361,12 @@ fn run_clippy(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_check(args: &[String], verbose: u8) -> Result<i32> {
-    run_cargo_filtered("check", args, verbose, filter_cargo_build)
+    run_cargo_streamed(
+        "check",
+        args,
+        verbose,
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::new())),
+    )
 }
 
 fn run_install(args: &[String], verbose: u8) -> Result<i32> {
@@ -461,12 +715,10 @@ fn filter_cargo_nextest(output: &str) -> String {
             .and_then(|m| m.as_str().parse().ok())
             .unwrap_or(0);
 
-        let binary_text = if binaries == 1 {
-            "1 binary".to_string()
-        } else if binaries > 1 {
-            format!("{} binaries", binaries)
-        } else {
-            String::new()
+        let binary_text = match binaries.cmp(&1) {
+            Ordering::Greater => format!("{} binaries", binaries),
+            Ordering::Equal => "1 binary".to_string(),
+            Ordering::Less => String::new(),
         };
 
         if failed == 0 {
@@ -537,100 +789,57 @@ fn filter_cargo_nextest(output: &str) -> String {
     String::new()
 }
 
-/// Filter cargo build/check output - strip "Compiling"/"Checking" lines, keep errors + summary
 fn filter_cargo_build(output: &str) -> String {
-    let mut errors: Vec<String> = Vec::new();
-    let mut warnings = 0;
-    let mut error_count = 0;
-    let mut compiled = 0;
-    let mut in_error = false;
-    let mut current_error = Vec::new();
-    let mut finished_line: Option<String> = None;
+    let mut handler = CargoBuildHandler::new();
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    let mut current_block: Vec<String> = Vec::new();
+    let mut in_block = false;
 
     for line in output.lines() {
-        if line.trim_start().starts_with("Compiling") || line.trim_start().starts_with("Checking") {
-            compiled += 1;
+        if handler.should_skip(line) {
             continue;
         }
-        if line.trim_start().starts_with("Downloading")
-            || line.trim_start().starts_with("Downloaded")
-        {
-            continue;
-        }
-        if line.trim_start().starts_with("Finished") {
-            finished_line = Some(line.trim_start().to_string());
-            continue;
-        }
-
-        // Detect error/warning blocks
-        if line.starts_with("error[") || line.starts_with("error:") {
-            // Skip "error: aborting due to" summary lines
-            if line.contains("aborting due to") || line.contains("could not compile") {
-                continue;
+        if handler.is_block_start(line) {
+            if in_block && !current_block.is_empty() {
+                blocks.push(std::mem::take(&mut current_block));
             }
-            if in_error && !current_error.is_empty() {
-                errors.push(current_error.join("\n"));
-                current_error.clear();
-            }
-            error_count += 1;
-            in_error = true;
-            current_error.push(line.to_string());
-        } else if line.starts_with("warning:")
-            && line.contains("generated")
-            && line.contains("warning")
-        {
-            // "warning: `crate` generated N warnings" summary line
-            continue;
-        } else if line.starts_with("warning:") || line.starts_with("warning[") {
-            if in_error && !current_error.is_empty() {
-                errors.push(current_error.join("\n"));
-                current_error.clear();
-            }
-            warnings += 1;
-            in_error = true;
-            current_error.push(line.to_string());
-        } else if in_error {
-            if line.trim().is_empty() && current_error.len() > 3 {
-                errors.push(current_error.join("\n"));
-                current_error.clear();
-                in_error = false;
+            in_block = true;
+            current_block.push(line.to_string());
+        } else if in_block {
+            if handler.is_block_continuation(line, &current_block) {
+                current_block.push(line.to_string());
             } else {
-                current_error.push(line.to_string());
+                blocks.push(std::mem::take(&mut current_block));
+                in_block = false;
             }
         }
     }
-
-    if !current_error.is_empty() {
-        errors.push(current_error.join("\n"));
+    if !current_block.is_empty() {
+        blocks.push(current_block);
     }
 
-    if error_count == 0 && warnings == 0 {
-        return if let Some(finished) = finished_line {
-            format!("cargo build ({} crates compiled)\n{}", compiled, finished)
-        } else {
-            format!("cargo build ({} crates compiled)", compiled)
-        };
+    if handler.error_count == 0 && handler.warnings == 0 {
+        let mut s = format!("cargo build ({} crates compiled)", handler.compiled);
+        if let Some(ref finished) = handler.finished_line {
+            s = format!("{}\n{}", s, finished);
+        }
+        return s;
     }
 
-    let mut result = String::new();
-    result.push_str(&format!(
-        "cargo build: {} errors, {} warnings ({} crates)\n",
-        error_count, warnings, compiled
-    ));
-    result.push_str("═══════════════════════════════════════\n");
-
-    for (i, err) in errors.iter().enumerate().take(15) {
-        result.push_str(err);
+    let mut result = format!(
+        "cargo build: {} errors, {} warnings ({} crates)\n═══════════════════════════════════════\n",
+        handler.error_count, handler.warnings, handler.compiled
+    );
+    for (i, blk) in blocks.iter().enumerate().take(15) {
+        result.push_str(&blk.join("\n"));
         result.push('\n');
-        if i < errors.len() - 1 {
+        if i < blocks.len() - 1 {
             result.push('\n');
         }
     }
-
-    if errors.len() > 15 {
-        result.push_str(&format!("\n... +{} more issues\n", errors.len() - 15));
+    if blocks.len() > 15 {
+        result.push_str(&format!("\n... +{} more issues\n", blocks.len() - 15));
     }
-
     result.trim().to_string()
 }
 
@@ -732,8 +941,7 @@ impl AggregatedTestResult {
     }
 }
 
-/// Filter cargo test output - show failures + summary only
-fn filter_cargo_test(output: &str) -> String {
+pub(crate) fn filter_cargo_test(output: &str) -> String {
     let mut failures: Vec<String> = Vec::new();
     let mut summary_lines: Vec<String> = Vec::new();
     let mut in_failure_section = false;
@@ -862,50 +1070,62 @@ fn filter_cargo_test(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Filter cargo clippy output - group warnings by lint rule
+/// Filter cargo clippy output - show full error blocks, group warnings by lint rule
 fn filter_cargo_clippy(output: &str) -> String {
     let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
     let mut error_count = 0;
     let mut warning_count = 0;
-    let mut error_details: Vec<String> = Vec::new();
+    // Each entry is a full multi-line error block (headline + location + code context)
+    let mut error_blocks: Vec<Vec<String>> = Vec::new();
 
-    // Parse clippy output lines
-    // Format: "warning: description\n  --> file:line:col\n  |\n  | code\n"
     let mut current_rule = String::new();
+    let mut in_error = false;
+    let mut current_block: Vec<String> = Vec::new();
 
     for line in output.lines() {
-        // Skip compilation lines
+        // Skip compilation progress lines
         if line.trim_start().starts_with("Compiling")
             || line.trim_start().starts_with("Checking")
             || line.trim_start().starts_with("Downloading")
             || line.trim_start().starts_with("Downloaded")
             || line.trim_start().starts_with("Finished")
         {
+            if in_error && !current_block.is_empty() {
+                error_blocks.push(current_block.clone());
+                current_block.clear();
+                in_error = false;
+            }
             continue;
         }
 
-        // "warning: unused variable [unused_variables]" or "warning: description [clippy::rule_name]"
-        if (line.starts_with("warning:") || line.starts_with("warning["))
-            || (line.starts_with("error:") || line.starts_with("error["))
+        // Skip noise: summary counts and abort lines
+        if (line.contains("generated") && line.contains("warning"))
+            || line.contains("aborting due to")
+            || line.contains("could not compile")
         {
-            // Skip summary lines: "warning: `rtk` (bin) generated 5 warnings"
-            if line.contains("generated") && line.contains("warning") {
-                continue;
-            }
-            // Skip "error: aborting" / "error: could not compile"
-            if line.contains("aborting due to") || line.contains("could not compile") {
-                continue;
-            }
+            continue;
+        }
 
-            let is_error = line.starts_with("error");
-            if is_error {
+        let is_error_line = line.starts_with("error:") || line.starts_with("error[");
+        let is_warning_line = line.starts_with("warning:") || line.starts_with("warning[");
+
+        if is_error_line || is_warning_line {
+            // Flush any in-progress error block before starting a new diagnostic
+            if in_error && !current_block.is_empty() {
+                error_blocks.push(current_block.clone());
+                current_block.clear();
+            }
+            in_error = false;
+
+            if is_error_line {
                 error_count += 1;
-                error_details.push(truncate(line.trim(), 160));
+                in_error = true;
+                current_block.push(line.to_string());
             } else {
                 warning_count += 1;
             }
 
-            // Extract rule name from brackets
+            // Extract rule/error-code from brackets for warning grouping
             current_rule = if let Some(bracket_start) = line.rfind('[') {
                 if let Some(bracket_end) = line.rfind(']') {
                     line[bracket_start + 1..bracket_end].to_string()
@@ -913,8 +1133,7 @@ fn filter_cargo_clippy(output: &str) -> String {
                     line.to_string()
                 }
             } else {
-                // No bracket: use the message itself as the rule
-                let prefix = if is_error { "error: " } else { "warning: " };
+                let prefix = if is_error_line { "error: " } else { "warning: " };
                 line.strip_prefix(prefix).unwrap_or(line).to_string()
             };
         } else if line.trim_start().starts_with("--> ") {
@@ -925,7 +1144,27 @@ fn filter_cargo_clippy(output: &str) -> String {
                     .or_default()
                     .push(location);
             }
+            if in_error {
+                current_block.push(line.to_string());
+            }
+        } else if in_error {
+            if line.trim().is_empty() {
+                // Blank line terminates the error block
+                if !current_block.is_empty() {
+                    error_blocks.push(current_block.clone());
+                    current_block.clear();
+                }
+                in_error = false;
+            } else if current_block.len() < 15 {
+                // Collect code-context lines (|, ^, = note:, help:, etc.)
+                current_block.push(line.to_string());
+            }
         }
+    }
+
+    // Flush final error block
+    if in_error && !current_block.is_empty() {
+        error_blocks.push(current_block);
     }
 
     if error_count == 0 && warning_count == 0 {
@@ -939,18 +1178,21 @@ fn filter_cargo_clippy(output: &str) -> String {
     ));
     result.push_str("═══════════════════════════════════════\n");
 
-    if !error_details.is_empty() {
-        result.push_str("\nError details:\n");
-        for (idx, detail) in error_details.iter().take(5).enumerate() {
-            result.push_str(&format!("  {}. {}\n", idx + 1, detail));
+    // Show full error blocks so developers can see what needs fixing
+    if !error_blocks.is_empty() {
+        result.push_str("\nErrors:\n");
+        for block in error_blocks.iter().take(10) {
+            for block_line in block {
+                result.push_str(&format!("  {}\n", truncate(block_line, 160)));
+            }
+            result.push('\n');
         }
-        if error_details.len() > 5 {
-            result.push_str(&format!("  ... +{} more errors\n", error_details.len() - 5));
+        if error_blocks.len() > 10 {
+            result.push_str(&format!("  ... +{} more errors\n", error_blocks.len() - 10));
         }
-        result.push('\n');
     }
 
-    // Sort rules by frequency
+    // Sort warning rules by frequency
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
     rule_counts.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
@@ -1371,8 +1613,45 @@ warning: unused variable: `x` [unused_variables]
 "#;
         let result = filter_cargo_clippy(output);
         assert!(result.contains("cargo clippy: 1 errors, 1 warnings"));
-        assert!(result.contains("Error details:"));
+        assert!(result.contains("Errors:"));
         assert!(result.contains("struct literals are not allowed here"));
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_shows_full_error_block() {
+        // Full multi-line error block must be shown so the developer can debug
+        let output = r#"    Checking rtk v0.5.0
+error[E0308]: mismatched types
+ --> src/main.rs:10:5
+  |
+9 |     fn foo() -> i32 {
+  |                 --- expected `i32` because of return type
+10|     "hello"
+  |     ^^^^^^^ expected `i32`, found `&str`
+
+error: aborting due to 1 previous error
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(result.contains("cargo clippy: 1 errors, 0 warnings"), "got: {}", result);
+        assert!(result.contains("error[E0308]: mismatched types"), "got: {}", result);
+        assert!(result.contains("src/main.rs:10:5"), "got: {}", result);
+        assert!(result.contains("expected `i32`, found `&str`"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_multiple_errors_show_all_blocks() {
+        let output = r#"error[E0308]: mismatched types
+ --> src/foo.rs:5:3
+
+error[E0425]: cannot find value `x`
+ --> src/bar.rs:12:9
+
+error: aborting due to 2 previous errors
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(result.contains("2 errors"), "got: {}", result);
+        assert!(result.contains("src/foo.rs:5:3"), "got: {}", result);
+        assert!(result.contains("src/bar.rs:12:9"), "got: {}", result);
     }
 
     #[test]
@@ -1788,5 +2067,123 @@ error: test run failed
             "should fall back to raw summary: {}",
             result
         );
+    }
+
+    // --- Streaming handler tests ---
+
+    use crate::core::stream::tests::run_block_filter;
+
+    #[test]
+    fn test_cargo_build_stream_success() {
+        let input = "   Compiling libc v0.2.153\n   Compiling cfg-if v1.0.0\n   Compiling rtk v0.5.0\n    Finished dev [unoptimized + debuginfo] target(s) in 15.23s\n";
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::new());
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(result.contains("3 crates compiled"), "got: {}", result);
+        assert!(result.contains("Finished"), "got: {}", result);
+        assert!(!result.contains("Compiling"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_build_stream_errors() {
+        let input = r#"   Compiling rtk v0.5.0
+error[E0308]: mismatched types
+ --> src/main.rs:10:5
+  |
+10|     "hello"
+  |     ^^^^^^^ expected `i32`, found `&str`
+
+error: aborting due to 1 previous error
+"#;
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("E0308"), "got: {}", result);
+        assert!(result.contains("mismatched types"), "got: {}", result);
+        assert!(result.contains("1 errors"), "got: {}", result);
+        assert!(!result.contains("aborting"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_test_stream_all_pass() {
+        let input = r#"   Compiling rtk v0.5.0
+    Finished test [unoptimized + debuginfo] target(s) in 2.53s
+     Running target/debug/deps/rtk-abc123
+
+running 15 tests
+test utils::tests::test_truncate_short_string ... ok
+test utils::tests::test_truncate_long_string ... ok
+test utils::tests::test_strip_ansi_simple ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+"#;
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(
+            result.contains("cargo test: 15 passed (1 suite, 0.01s)"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("Compiling"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_test_stream_failures() {
+        let input = r#"running 5 tests
+test foo::test_a ... ok
+test foo::test_b ... FAILED
+test foo::test_c ... ok
+
+failures:
+
+---- foo::test_b stdout ----
+thread 'foo::test_b' panicked at 'assert_eq!(1, 2)'
+
+failures:
+    foo::test_b
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"#;
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("test_b"), "got: {}", result);
+        assert!(result.contains("panicked"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_cargo_test_stream_multi_suite() {
+        let input = r#"     Running unittests src/lib.rs (target/debug/deps/rtk-abc123)
+
+running 50 tests
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running unittests src/main.rs (target/debug/deps/rtk-def456)
+
+running 30 tests
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+"#;
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let result = run_block_filter(&mut f, input, 0);
+        assert!(
+            result.contains("cargo test: 80 passed (2 suites, 0.75s)"),
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_cargo_test_stream_compile_error() {
+        let input = r#"   Compiling rtk v0.31.0 (/workspace/projects/rtk)
+error[E0425]: cannot find value `missing_symbol` in this scope
+ --> tests/repro_compile_fail.rs:3:13
+  |
+3 |     let _ = missing_symbol;
+  |             ^^^^^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `rtk` (test "repro_compile_fail") due to 1 previous error
+"#;
+        let mut f = BlockStreamFilter::new(CargoTestHandler::new());
+        let result = run_block_filter(&mut f, input, 1);
+        assert!(result.contains("cargo test:"), "got: {}", result);
+        assert!(result.contains("1 errors"), "got: {}", result);
     }
 }
