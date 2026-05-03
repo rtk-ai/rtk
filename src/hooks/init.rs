@@ -250,10 +250,6 @@ pub fn run(
     }
 
     // Validation: Global-only features
-    if install_opencode && !global {
-        anyhow::bail!("OpenCode plugin is global-only. Use: rtk init -g --opencode");
-    }
-
     if install_cursor && !global {
         anyhow::bail!("Cursor hooks are global-only. Use: rtk init -g --agent cursor");
     }
@@ -274,7 +270,7 @@ pub fn run(
 
     // Mode selection (Claude Code / OpenCode)
     match (install_claude, install_opencode, claude_md, hook_only) {
-        (false, true, _, _) => run_opencode_only_mode(verbose)?,
+        (false, true, _, _) => run_opencode_only_mode(global, verbose)?,
         (true, opencode, true, _) => run_claude_md_mode(global, verbose, opencode)?,
         (true, opencode, false, true) => run_hook_only_mode(global, patch_mode, verbose, opencode)?,
         (true, opencode, false, false) => run_default_mode(global, patch_mode, verbose, opencode)?,
@@ -535,7 +531,14 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
 }
 
 /// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
-pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
+pub fn uninstall(
+    global: bool,
+    gemini: bool,
+    codex: bool,
+    cursor: bool,
+    opencode: bool,
+    verbose: u8,
+) -> Result<()> {
     if codex {
         return uninstall_codex(global, verbose);
     }
@@ -554,6 +557,20 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
             println!("\nRestart Cursor to apply changes.");
         } else {
             println!("RTK Cursor support was not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    if !global && opencode {
+        let removed = remove_opencode_plugin(false, verbose)?;
+        if removed.is_empty() {
+            println!("RTK OpenCode plugin was not installed in this project (nothing to remove)");
+        } else {
+            println!("RTK uninstalled (OpenCode project plugin):");
+            for path in &removed {
+                println!("  - OpenCode plugin: {}", path.display());
+            }
+            println!("\nRestart OpenCode to apply changes.");
         }
         return Ok(());
     }
@@ -631,7 +648,7 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     }
 
     // 5. Remove OpenCode plugin
-    let opencode_removed = remove_opencode_plugin(verbose)?;
+    let opencode_removed = remove_opencode_plugin(true, verbose)?;
     for path in opencode_removed {
         removed.push(format!("OpenCode plugin: {}", path.display()));
     }
@@ -896,7 +913,7 @@ fn run_default_mode(
     write_if_changed(&rtk_md_path, RTK_SLIM, RTK_MD, verbose)?;
 
     let opencode_plugin_path = if install_opencode {
-        let path = prepare_opencode_plugin_path()?;
+        let path = prepare_opencode_plugin_path(true)?;
         ensure_opencode_plugin_installed(&path, verbose)?;
         Some(path)
     } else {
@@ -1129,7 +1146,7 @@ fn run_hook_only_mode(
     migrate_old_hook_script(verbose);
 
     let opencode_plugin_path = if install_opencode {
-        let path = prepare_opencode_plugin_path()?;
+        let path = prepare_opencode_plugin_path(true)?;
         ensure_opencode_plugin_installed(&path, verbose)?;
         Some(path)
     } else {
@@ -1241,7 +1258,7 @@ fn run_claude_md_mode(global: bool, verbose: u8, install_opencode: bool) -> Resu
 
     if global {
         if install_opencode {
-            let opencode_plugin_path = prepare_opencode_plugin_path()?;
+            let opencode_plugin_path = prepare_opencode_plugin_path(true)?;
             ensure_opencode_plugin_installed(&opencode_plugin_path, verbose)?;
             println!(
                 "[ok] OpenCode plugin installed: {}",
@@ -1757,18 +1774,21 @@ fn codex_rtk_md_ref(codex_dir: &Path) -> String {
     format!("@{}", codex_dir.join(RTK_MD).display())
 }
 
-fn resolve_opencode_dir() -> Result<PathBuf> {
-    resolve_home_subdir(".config/opencode")
+fn resolve_opencode_dir(global: bool) -> Result<PathBuf> {
+    if global {
+        return resolve_home_subdir(".config/opencode");
+    }
+    Ok(std::env::current_dir()?.join(".opencode"))
 }
 
-/// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
+/// Return OpenCode plugin path.
 fn opencode_plugin_path(opencode_dir: &Path) -> PathBuf {
     opencode_dir.join("plugins").join("rtk.ts")
 }
 
 /// Prepare OpenCode plugin directory and return install path
-fn prepare_opencode_plugin_path() -> Result<PathBuf> {
-    let opencode_dir = resolve_opencode_dir()?;
+fn prepare_opencode_plugin_path(global: bool) -> Result<PathBuf> {
+    let opencode_dir = resolve_opencode_dir(global)?;
     let path = opencode_plugin_path(&opencode_dir);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
@@ -1787,8 +1807,8 @@ fn ensure_opencode_plugin_installed(path: &Path, verbose: u8) -> Result<bool> {
 }
 
 /// Remove OpenCode plugin file
-fn remove_opencode_plugin(verbose: u8) -> Result<Vec<PathBuf>> {
-    let opencode_dir = resolve_opencode_dir()?;
+fn remove_opencode_plugin(global: bool, verbose: u8) -> Result<Vec<PathBuf>> {
+    let opencode_dir = resolve_opencode_dir(global)?;
     let path = opencode_plugin_path(&opencode_dir);
     let mut removed = Vec::new();
 
@@ -2229,15 +2249,34 @@ fn show_claude_config() -> Result<()> {
     }
 
     // Check OpenCode plugin
-    if let Ok(opencode_dir) = resolve_opencode_dir() {
-        let plugin = opencode_plugin_path(&opencode_dir);
-        if plugin.exists() {
-            println!("[ok] OpenCode: plugin installed ({})", plugin.display());
-        } else {
-            println!("[--] OpenCode: plugin not found");
+    let global_opencode = resolve_opencode_dir(true)
+        .ok()
+        .map(|dir| opencode_plugin_path(&dir));
+    let local_opencode = resolve_opencode_dir(false)
+        .ok()
+        .map(|dir| opencode_plugin_path(&dir));
+    match (global_opencode, local_opencode) {
+        (Some(global_plugin), Some(local_plugin)) => {
+            let mut found = false;
+            if global_plugin.exists() {
+                println!(
+                    "[ok] OpenCode (global): plugin installed ({})",
+                    global_plugin.display()
+                );
+                found = true;
+            }
+            if local_plugin.exists() {
+                println!(
+                    "[ok] OpenCode (local): plugin installed ({})",
+                    local_plugin.display()
+                );
+                found = true;
+            }
+            if !found {
+                println!("[--] OpenCode: plugin not found");
+            }
         }
-    } else {
-        println!("[--] OpenCode: config dir not found");
+        _ => println!("[--] OpenCode: plugin path unavailable"),
     }
 
     // Check Cursor hooks
@@ -2302,7 +2341,8 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
     println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
-    println!("  rtk init -g --opencode      # OpenCode plugin only");
+    println!("  rtk init --opencode         # OpenCode plugin (project) only");
+    println!("  rtk init -g --opencode      # OpenCode plugin (global) only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
     Ok(())
@@ -2364,10 +2404,13 @@ fn show_codex_config() -> Result<()> {
     Ok(())
 }
 
-fn run_opencode_only_mode(verbose: u8) -> Result<()> {
-    let opencode_plugin_path = prepare_opencode_plugin_path()?;
+fn run_opencode_only_mode(global: bool, verbose: u8) -> Result<()> {
+    let opencode_plugin_path = prepare_opencode_plugin_path(global)?;
     ensure_opencode_plugin_installed(&opencode_plugin_path, verbose)?;
-    println!("\nOpenCode plugin installed (global).\n");
+    println!(
+        "\nOpenCode plugin installed ({}).\n",
+        if global { "global" } else { "project" }
+    );
     println!("  OpenCode: {}", opencode_plugin_path.display());
     println!("  Restart OpenCode. Test with: git status\n");
     Ok(())
