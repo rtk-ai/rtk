@@ -4,6 +4,7 @@ use crate::core::config;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
+use std::io::IsTerminal;
 use std::process::Stdio;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
@@ -149,8 +150,13 @@ fn run_diff(
     // Check if user wants compact diff (default RTK behavior)
     let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
 
-    if wants_stat || !wants_compact {
-        // User wants stat or explicitly no compacting - pass through directly
+    // When stdout is piped (not a terminal), output raw diff for pipe compatibility.
+    // Tools like `git apply`, `git am`, and `patch` require a clean unified diff
+    // without RTK's diffstat header or compact format.
+    let stdout_is_tty = std::io::stdout().is_terminal();
+
+    if wants_stat || !wants_compact || !stdout_is_tty {
+        // User wants stat, explicitly no compacting, OR stdout is piped — pass through directly
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
         for arg in args {
@@ -167,7 +173,9 @@ fn run_diff(
             return Ok(result.exit_code);
         }
 
-        println!("{}", result.stdout.trim());
+        // Preserve exact bytes (no trim) so piped consumers like `git apply`
+        // receive a clean unified diff. Trimming would corrupt patch terminators.
+        print!("{}", result.stdout);
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
@@ -2782,6 +2790,35 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Expected '50 lines truncated' (150 - 100 = 50), got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_compact_diff_safe_for_pipe_consumers() {
+        // compact_diff reformats a unified diff but must NOT emit diffstat-style lines
+        // (e.g. "main.rs | 3 +++") or "files changed" summaries to stdout.
+        // The actual piped-vs-terminal routing lives in run_diff (guarded by is_terminal),
+        // but this verifies compact_diff itself is safe output for piped consumers.
+        let diff = "diff --git a/src/main.rs b/src/main.rs\n\
+                    --- a/src/main.rs\n\
+                    +++ b/src/main.rs\n\
+                    @@ -1,3 +1,4 @@\n \
+                    fn main() {\n\
+                    +    println!(\"hello\");\n\
+                         println!(\"world\");\n \
+                    }\n";
+        let result = compact_diff(diff, 500);
+        // Must not contain diffstat-style lines (e.g. "main.rs | 1 +")
+        assert!(
+            !result.lines().any(|l| l.contains(" | ") && l.contains("+++")),
+            "compact_diff must not emit diffstat lines: {result}"
+        );
+        // Must not contain "files changed" summary
+        assert!(
+            !result.contains("files changed"),
+            "compact_diff must not emit files-changed summary: {result}"
+        );
+        // Must contain the actual change
+        assert!(result.contains("main.rs"), "Expected file name in output: {result}");
     }
 
     #[test]
