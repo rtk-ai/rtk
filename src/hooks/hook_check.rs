@@ -4,7 +4,6 @@ use super::constants::{
     CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
     SETTINGS_JSON,
 };
-#[cfg(test)]
 use super::constants::{CODEX_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, OPENCODE_PLUGIN_PATH};
 use crate::core::constants::RTK_DATA_DIR;
 use std::path::PathBuf;
@@ -31,6 +30,13 @@ pub fn status() -> HookStatus {
         Some(h) => h,
         None => return HookStatus::Ok,
     };
+    status_for_home(&home)
+}
+
+fn status_for_home(home: &std::path::Path) -> HookStatus {
+    if other_integration_installed(&home) {
+        return HookStatus::Ok;
+    }
     let claude_dir = home.join(CLAUDE_DIR);
     if !claude_dir.exists() {
         return HookStatus::Ok;
@@ -135,7 +141,6 @@ pub fn parse_hook_version(content: &str) -> u8 {
     0 // No version tag = version 0 (outdated)
 }
 
-#[cfg(test)]
 fn other_integration_installed(home: &std::path::Path) -> bool {
     let paths = [
         home.join(OPENCODE_PLUGIN_PATH),
@@ -263,6 +268,22 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(CODEX_DIR)).unwrap();
         std::fs::create_dir_all(tmp.path().join(GEMINI_DIR)).unwrap();
         assert!(!other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_status_ok_when_codex_installed_without_claude() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(CODEX_DIR).join("AGENTS.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"agents").unwrap();
+        assert_eq!(status_for_home(tmp.path()), HookStatus::Ok);
+    }
+
+    #[test]
+    fn test_status_missing_when_claude_present_without_hook() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join(CLAUDE_DIR)).unwrap();
+        assert_eq!(status_for_home(tmp.path()), HookStatus::Missing);
     }
 
     #[test]
