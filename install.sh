@@ -99,6 +99,9 @@ install() {
     fi
 
     info "Extracting..."
+    if tar -tf "$ARCHIVE" | grep -qE '\.\./|\./|\.\.$'; then
+        error "Blocked: path traversal attempt detected in archive"
+    fi
     tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
 
     mkdir -p "$INSTALL_DIR"
