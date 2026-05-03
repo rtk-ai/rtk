@@ -270,34 +270,18 @@ fn extract_outdated_text(output: &str) -> Option<DependencyState> {
     }
 }
 
-/// Validates npm package name according to official rules
-fn is_valid_package_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 214 {
-        return false;
-    }
-
-    // No path traversal
-    if name.contains("..") {
-        return false;
-    }
-
-    // Only safe characters
-    name.chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '@' | '/' | '-' | '_' | '.'))
-}
-
 #[derive(Debug, Clone)]
 pub enum PnpmCommand {
     List { depth: usize },
     Outdated,
-    Install { packages: Vec<String> },
+    Install,
 }
 
 pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         PnpmCommand::List { depth } => run_list(depth, args, verbose),
         PnpmCommand::Outdated => run_outdated(args, verbose),
-        PnpmCommand::Install { packages } => run_install(&packages, args, verbose),
+        PnpmCommand::Install => run_install(args, verbose),
     }
 }
 
@@ -404,25 +388,11 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<i32> {
+fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-
-    // Validate package names to prevent command injection
-    for pkg in packages {
-        if !is_valid_package_name(pkg) {
-            anyhow::bail!(
-                "Invalid package name: '{}' (contains unsafe characters)",
-                pkg
-            );
-        }
-    }
 
     let mut cmd = resolved_command("pnpm");
     cmd.arg("install");
-
-    for pkg in packages {
-        cmd.arg(pkg);
-    }
 
     for arg in args {
         cmd.arg(arg);
@@ -445,8 +415,8 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<i32>
     println!("{}", filtered);
 
     timer.track(
-        &format!("pnpm install {}", packages.join(" ")),
-        &format!("rtk pnpm install {}", packages.join(" ")),
+        &format!("pnpm install"),
+        &format!("rtk pnpm install"),
         &combined,
         &filtered,
     );
@@ -540,14 +510,6 @@ mod tests {
         let data = result.unwrap();
         assert_eq!(data.outdated_count, 1);
         assert_eq!(data.dependencies[0].name, "express");
-    }
-
-    #[test]
-    fn test_package_name_validation() {
-        assert!(is_valid_package_name("lodash"));
-        assert!(is_valid_package_name("@clerk/express"));
-        assert!(!is_valid_package_name("../../../etc/passwd"));
-        assert!(!is_valid_package_name("lodash; rm -rf /"));
     }
 
     #[test]

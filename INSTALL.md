@@ -296,9 +296,9 @@ rtk git push          # → "ok ✓ main"
 
 ### Pnpm (fork only)
 ```bash
-rtk pnpm list         # Dependency tree (-70% tokens)
-rtk pnpm outdated     # Available updates (-80-90%)
-rtk pnpm install pkg  # Silent installation
+rtk pnpm list     # Dependency tree (-70% tokens)
+rtk pnpm outdated # Available updates (-80-90%)
+rtk pnpm install  # Silent installation
 ```
 
 ### Tests

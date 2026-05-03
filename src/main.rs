@@ -870,8 +870,6 @@ enum PnpmCommands {
     },
     /// Install packages (filter progress bars)
     Install {
-        /// Packages to install
-        packages: Vec<String>,
         /// Additional pnpm arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1585,8 +1583,8 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Install { packages, args } => pnpm_cmd::run(
-                    pnpm_cmd::PnpmCommand::Install { packages },
+                PnpmCommands::Install { args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Install,
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
