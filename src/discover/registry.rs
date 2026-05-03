@@ -396,7 +396,7 @@ fn split_env_prefix(cmd: &str) -> (&str, &str) {
     let stripped = ENV_PREFIX.replace(trimmed, "");
     let prefix_len = trimmed.len() - stripped.len();
     let prefix_part = &trimmed[..prefix_len];
-    let rest = trimmed[prefix_len..].trim_start();
+    let rest = trimmed[prefix_len..].trim();
     (prefix_part, rest)
 }
 
@@ -446,32 +446,21 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
 /// For pipes (`|`), only rewrites the left-hand command (pipe targets stay raw),
 /// but continues rewriting segments after subsequent `&&`/`||`/`;` operators.
-/// Back-compat entry point preserved for call sites (including the ~150
-/// existing unit tests in this module) that never needed wrapper-prefix
-/// stripping. New production callers should prefer
-/// [`rewrite_command_with_prefixes`].
-#[allow(dead_code)]
-pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
-    rewrite_command_with_prefixes(cmd, excluded, &[])
-}
-
-/// Like [`rewrite_command`] but also strips user-configured transparent wrapper
-/// prefixes (`[hooks].transparent_prefixes` in `config.toml`) before routing.
+/// Also strips user-configured transparent wrapper prefixes
+/// (`[hooks].transparent_prefixes` in `config.toml`) before routing.
 ///
 /// A transparent prefix is a wrapper command that doesn't change *what* is
-/// being run, only *how* it's run — e.g. `direnv exec .`, `nix develop
-/// --command`, `docker exec <container>`, `poetry run`, or `bundle exec`.
-/// Stripping it lets the inner command match a filter; the prefix is then
-/// re-prepended to the rewrite. The built-in [`SHELL_PREFIX_BUILTINS`]
-/// (`noglob`, `command`, `builtin`, `exec`, `nocorrect`) are always applied
-/// in addition to user-configured prefixes.
+/// being run, only *how* it's run — e.g. `docker exec mycontainer`,
+/// `direnv exec .`, `poetry run`, or `bundle exec`. Stripping it lets the inner
+/// command match a filter; the prefix is then re-prepended to the rewrite. The
+/// built-in [`SHELL_PREFIX_BUILTINS`] (`noglob`, `command`, `builtin`, `exec`,
+/// `nocorrect`) are always applied in addition to user-configured prefixes.
 ///
-/// Matching is whole-word: a prefix `"foo bar"` matches a command starting
-/// with `"foo bar "` (or equal to `"foo bar"`), not `"foobarbaz"`. Matching
-/// is literal, not pattern-based: `docker exec <container>` is just an example
-/// shape, not a wildcard. To match `docker exec app git status`, configure the
-/// exact concrete prefix `docker exec app`.
-pub fn rewrite_command_with_prefixes(
+/// Matching is strict: a configured prefix `"foo bar"` matches a command that
+/// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
+/// else. Matching is literal, not pattern-based: configure the exact concrete
+/// prefix you use.
+pub fn rewrite_command(
     cmd: &str,
     excluded: &[String],
     transparent_prefixes: &[String],
@@ -673,7 +662,7 @@ fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
                         "rtk: warning: invalid exclude_commands pattern '{}': {}",
                         pattern, e
                     );
-                    ExcludePattern::Prefix(pattern.clone())
+                    ExcludePattern::Prefix(trimmed.to_string())
                 }
             })
         })
@@ -688,8 +677,9 @@ fn normalize_transparent_prefixes(prefixes: &[String]) -> Vec<String> {
         .map(str::to_string)
         .collect();
 
-    normalized.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    normalized.sort();
     normalized.dedup();
+    normalized.sort_unstable_by_key(|prefix| std::cmp::Reverse(prefix.len()));
     normalized
 }
 
@@ -725,15 +715,17 @@ fn rewrite_segment_inner(
 
     let (env_prefix, rest_after_env) = split_env_prefix(trimmed);
     if !env_prefix.is_empty() {
-        let rewritten =
-            rewrite_segment_inner(rest_after_env, excluded, transparent_prefixes, depth + 1)?;
-        if has_rtk_disabled_prefix(trimmed) {
+        // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
+        // #508: warn on stderr so agents learn to stop overusing it
+        if env_prefix.contains("RTK_DISABLED=") {
             eprintln!(
                 "[rtk] RTK_DISABLED=1 detected — skipping filter for this command. \
                  Remove RTK_DISABLED=1 to restore token savings."
             );
             return None;
         }
+        let rewritten =
+            rewrite_segment_inner(rest_after_env, excluded, transparent_prefixes, depth + 1)?;
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
@@ -747,19 +739,15 @@ fn rewrite_segment_inner(
         }
     }
 
-    // User-configured wrapper prefixes (e.g. `shadowenv exec --`). Same
+    // User-configured wrapper prefixes (e.g. `docker exec mycontainer`). Same
     // strip-recurse-reprepend contract as the builtin list above.
     for prefix in transparent_prefixes {
-        let p = prefix.trim();
-        if p.is_empty() {
-            continue;
-        }
-        if let Some(rest) = strip_word_prefix(trimmed, p) {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
                 return None;
             }
             return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
-                .map(|rewritten| format!("{} {}", p, rewritten));
+                .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -802,9 +790,7 @@ fn rewrite_segment_inner(
     // Find the matching rule (rtk_cmd values are unique across all rules)
     let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
 
-    let cmd_clean = cmd_part;
-
-    if let Some(parts) = parse_golangci_run_parts(cmd_clean) {
+    if let Some(parts) = parse_golangci_run_parts(cmd_part) {
         let rewritten = if parts.global_segment.is_empty() {
             format!("rtk golangci-lint {}", parts.run_segment)
         } else {
@@ -819,7 +805,7 @@ fn rewrite_segment_inner(
     // #196: gh with --json/--jq/--template produces structured output that
     // rtk gh would corrupt — skip rewrite so the caller gets raw JSON.
     if rule.rtk_cmd == "rtk gh" {
-        let args_lower = cmd_clean.to_lowercase();
+        let args_lower = cmd_part.to_lowercase();
         if args_lower.contains("--json")
             || args_lower.contains("--jq")
             || args_lower.contains("--template")
@@ -830,7 +816,7 @@ fn rewrite_segment_inner(
 
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
-        if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
+        if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
             let rewritten = if rest.is_empty() {
                 format!("{}{}", rule.rtk_cmd, redirect_suffix)
             } else {
@@ -862,6 +848,10 @@ fn strip_word_prefix<'a>(cmd: &'a str, prefix: &str) -> Option<&'a str> {
 mod tests {
     use super::super::report::RtkStatus;
     use super::*;
+
+    fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
+        super::rewrite_command(cmd, excluded, &[])
+    }
 
     #[test]
     fn test_classify_git_status() {
@@ -3590,7 +3580,7 @@ mod tests {
     fn test_transparent_prefix_strips_and_reprepends() {
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("shadowenv exec -- git status", &[], &prefixes),
+            super::rewrite_command("shadowenv exec -- git status", &[], &prefixes),
             Some("shadowenv exec -- rtk git status".into())
         );
     }
@@ -3599,7 +3589,7 @@ mod tests {
     fn test_transparent_prefix_with_test_runner() {
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("shadowenv exec -- cargo test", &[], &prefixes),
+            super::rewrite_command("shadowenv exec -- cargo test", &[], &prefixes),
             Some("shadowenv exec -- rtk cargo test".into())
         );
     }
@@ -3608,7 +3598,7 @@ mod tests {
     fn test_transparent_prefix_unknown_inner_returns_none() {
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("shadowenv exec -- htop", &[], &prefixes),
+            super::rewrite_command("shadowenv exec -- htop", &[], &prefixes),
             None
         );
     }
@@ -3617,7 +3607,7 @@ mod tests {
     fn test_transparent_prefix_not_matched_is_passthrough() {
         // Without the prefix configured, the wrapper breaks routing.
         assert_eq!(
-            rewrite_command_with_prefixes("shadowenv exec -- git status", &[], &[]),
+            super::rewrite_command("shadowenv exec -- git status", &[], &[]),
             None
         );
     }
@@ -3628,7 +3618,7 @@ mod tests {
         // user layer strips shadowenv exec --, inner `git status` routes.
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("noglob shadowenv exec -- git status", &[], &prefixes),
+            super::rewrite_command("noglob shadowenv exec -- git status", &[], &prefixes),
             Some("noglob shadowenv exec -- rtk git status".into())
         );
     }
@@ -3637,7 +3627,7 @@ mod tests {
     fn test_transparent_prefix_composed_with_env_prefix() {
         let prefixes = vec!["bundle exec".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("RAILS_ENV=test bundle exec git status", &[], &prefixes),
+            super::rewrite_command("RAILS_ENV=test bundle exec git status", &[], &prefixes),
             Some("RAILS_ENV=test bundle exec rtk git status".into())
         );
     }
@@ -3654,8 +3644,22 @@ mod tests {
     fn test_transparent_prefix_multiple_configured() {
         let prefixes = vec!["shadowenv exec --".to_string(), "direnv exec .".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("direnv exec . git status", &[], &prefixes),
+            super::rewrite_command("direnv exec . git status", &[], &prefixes),
             Some("direnv exec . rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_transparent_prefixes_normalize_once() {
+        let prefixes = vec![
+            "  docker exec mycontainer  ".to_string(),
+            "".to_string(),
+            "docker".to_string(),
+            "docker exec mycontainer".to_string(),
+        ];
+        assert_eq!(
+            normalize_transparent_prefixes(&prefixes),
+            vec!["docker exec mycontainer".to_string(), "docker".to_string()]
         );
     }
 
@@ -3663,7 +3667,7 @@ mod tests {
     fn test_transparent_prefix_overlapping_entries_use_longest_match() {
         let prefixes = vec!["docker".to_string(), "docker exec app".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("docker exec app git status", &[], &prefixes),
+            super::rewrite_command("docker exec app git status", &[], &prefixes),
             Some("docker exec app rtk git status".into())
         );
     }
@@ -3673,7 +3677,7 @@ mod tests {
         // A prefix `"foo"` must NOT match `"foobar git status"`.
         let prefixes = vec!["foo".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("foobar git status", &[], &prefixes),
+            super::rewrite_command("foobar git status", &[], &prefixes),
             None
         );
     }
@@ -3682,7 +3686,7 @@ mod tests {
     fn test_transparent_prefix_empty_rest_returns_none() {
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("shadowenv exec --", &[], &prefixes),
+            super::rewrite_command("shadowenv exec --", &[], &prefixes),
             None
         );
     }
@@ -3692,7 +3696,7 @@ mod tests {
         // A blank entry in the config should not cause spurious matches or panics.
         let prefixes = vec!["".to_string(), "   ".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("git status", &[], &prefixes),
+            super::rewrite_command("git status", &[], &prefixes),
             Some("rtk git status".into())
         );
     }
@@ -3702,7 +3706,7 @@ mod tests {
         // Each segment of `&&` / `;` should independently get prefix-stripped.
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes(
+            super::rewrite_command(
                 "shadowenv exec -- git status && shadowenv exec -- cargo test",
                 &[],
                 &prefixes
@@ -3718,7 +3722,7 @@ mod tests {
         let prefixes = vec!["shadowenv exec --".to_string()];
         let excluded = vec!["git".to_string()];
         assert_eq!(
-            rewrite_command_with_prefixes("shadowenv exec -- git status", &excluded, &prefixes),
+            super::rewrite_command("shadowenv exec -- git status", &excluded, &prefixes),
             None
         );
     }
@@ -3735,7 +3739,7 @@ mod tests {
         cmd.push_str("git status");
         // Doesn't matter exactly what it returns — just that it doesn't stack-
         // overflow or loop forever. Exercise the code path.
-        let _ = rewrite_command_with_prefixes(&cmd, &[], &prefixes);
+        let _ = super::rewrite_command(&cmd, &[], &prefixes);
     }
 
     #[test]

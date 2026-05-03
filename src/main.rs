@@ -2126,12 +2126,12 @@ fn run_cli() -> Result<i32> {
                 0
             }
             HookCommands::Check { agent: _, command } => {
-                use crate::discover::registry::rewrite_command_with_prefixes;
+                use crate::discover::registry::rewrite_command;
                 let raw = command.join(" ");
                 let (excluded, transparent_prefixes) = crate::core::config::Config::load()
                     .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
                     .unwrap_or_default();
-                match rewrite_command_with_prefixes(&raw, &excluded, &transparent_prefixes) {
+                match rewrite_command(&raw, &excluded, &transparent_prefixes) {
                     Some(rewritten) => {
                         println!("{}", rewritten);
                         0
@@ -2729,6 +2729,30 @@ mod tests {
             } => {
                 assert_eq!(agent, "gemini");
                 assert_eq!(command, vec!["cargo", "test"]);
+            }
+            _ => panic!("Expected Hook Check command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_check_preserves_double_dash_in_command() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "hook",
+            "check",
+            "shadowenv",
+            "exec",
+            "--",
+            "git",
+            "status",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Hook {
+                command: HookCommands::Check { agent, command },
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(command, vec!["shadowenv", "exec", "--", "git", "status"]);
             }
             _ => panic!("Expected Hook Check command"),
         }
