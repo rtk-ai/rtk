@@ -1405,6 +1405,69 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ─── Kiro CLI support ───────────────────────────────────────────
+
+const KIRO_RULES: &str = include_str!("../../hooks/kiro/rules.md");
+
+pub fn run_kiro_mode(global: bool, verbose: u8) -> Result<()> {
+    let base = if global {
+        dirs::home_dir().context("Cannot determine home directory")?
+    } else {
+        std::env::current_dir().context("Cannot determine current directory")?
+    };
+    run_kiro_mode_at(&base, verbose)
+}
+
+fn run_kiro_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
+    let kiro_dir = base_dir.join(".kiro");
+
+    // 1. Install steering file
+    let steering_dir = kiro_dir.join("steering");
+    fs::create_dir_all(&steering_dir).context("Failed to create .kiro/steering directory")?;
+    let rules_path = steering_dir.join("rtk-rules.md");
+    write_if_changed(&rules_path, KIRO_RULES, "Kiro CLI steering rules", verbose)?;
+
+    // 2. Install agent config with preToolUse hook
+    let agents_dir = kiro_dir.join("agents");
+    fs::create_dir_all(&agents_dir).context("Failed to create .kiro/agents directory")?;
+    let agent_config = serde_json::json!({
+        "name": "rtk-hook",
+        "description": "RTK token savings hook — blocks non-rtk commands with suggestions",
+        "hooks": {
+            "preToolUse": [
+                {
+                    "matcher": "execute_bash",
+                    "command": "rtk hook kiro"
+                },
+                {
+                    "matcher": "shell",
+                    "command": "rtk hook kiro"
+                }
+            ]
+        }
+    });
+    let agent_path = agents_dir.join("rtk-hook.json");
+    let agent_content = serde_json::to_string_pretty(&agent_config).unwrap();
+    write_if_changed(
+        &agent_path,
+        &agent_content,
+        "Kiro CLI agent config",
+        verbose,
+    )?;
+
+    let scope = if base_dir == dirs::home_dir().unwrap_or_default() {
+        "global"
+    } else {
+        "project"
+    };
+    println!("\nKiro CLI RTK integration installed ({scope}).\n");
+    println!("  Steering: {}", rules_path.display());
+    println!("  Agent config: {}", agent_path.display());
+    println!("  Restart Kiro CLI. Test with: git status\n");
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -2955,6 +3018,50 @@ More notes
         run_antigravity_mode_at(temp.path(), 0).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_kiro_mode_creates_steering_file() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), 0).unwrap();
+
+        let rules_path = temp.path().join(".kiro/steering/rtk-rules.md");
+        assert!(rules_path.exists(), "Steering file should be created");
+        let content = fs::read_to_string(&rules_path).unwrap();
+        assert!(content.contains("RTK"), "Steering file should contain RTK");
+    }
+
+    #[test]
+    fn test_kiro_mode_creates_agent_config() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), 0).unwrap();
+
+        let agent_path = temp.path().join(".kiro/agents/rtk-hook.json");
+        assert!(agent_path.exists(), "Agent config should be created");
+        let content = fs::read_to_string(&agent_path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["name"], "rtk-hook");
+        assert!(v["hooks"]["preToolUse"].is_array());
+    }
+
+    #[test]
+    fn test_kiro_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), 0).unwrap();
+
+        let rules = temp.path().join(".kiro/steering/rtk-rules.md");
+        let agent = temp.path().join(".kiro/agents/rtk-hook.json");
+        let first_rules = fs::read_to_string(&rules).unwrap();
+        let first_agent = fs::read_to_string(&agent).unwrap();
+
+        run_kiro_mode_at(temp.path(), 0).unwrap();
+        let second_rules = fs::read_to_string(&rules).unwrap();
+        let second_agent = fs::read_to_string(&agent).unwrap();
+        assert_eq!(first_rules, second_rules, "Idempotent: steering unchanged");
+        assert_eq!(
+            first_agent, second_agent,
+            "Idempotent: agent config unchanged"
+        );
     }
 
     #[test]

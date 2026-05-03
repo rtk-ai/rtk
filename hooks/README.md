@@ -40,6 +40,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
+- **[`kiro/`](kiro/README.md)** — Steering file + agent config with `preToolUse` deny-with-suggestion hook, `~/.kiro/` location
 
 ## Supported Agents
 
@@ -54,6 +55,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
+| Kiro CLI | Steering + Rust binary (`rtk hook kiro`) | Deny-with-suggestion | No (agent retries) |
 
 ## JSON Formats by Agent
 
@@ -155,6 +157,21 @@ if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
 }
 ```
+
+### Kiro CLI (Rust Binary)
+
+**Input** (stdin):
+```json
+{
+  "hook_event_name": "preToolUse",
+  "tool_name": "shell",
+  "tool_input": { "command": "git status" }
+}
+```
+
+**Output** (deny-with-suggestion — no `updatedInput` support):
+- Exit 0: Allow (command already uses rtk, or no RTK equivalent)
+- Exit 2 + stderr: `Command should use rtk for token savings. Use: rtk git status`
 
 ## Command Rewrite Registry
 
