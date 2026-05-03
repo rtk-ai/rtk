@@ -437,12 +437,44 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
     (cmd_part, redir_part)
 }
 
+/// Optional knobs for `rewrite_command_with_options`. Default values reproduce
+/// the historical behavior of `rewrite_command(cmd, excluded)`.
+#[derive(Debug, Default, Clone)]
+pub struct RewriteOptions {
+    /// URL substring markers that opt-out `curl` invocations from being
+    /// rewritten to `rtk curl … | rtk json --schema`. See
+    /// `crate::core::config::CurlConfig::bypass_url_markers`.
+    pub curl_bypass_url_markers: Vec<String>,
+}
+
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
 ///
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
 /// For pipes (`|`), only rewrites the left-hand command (pipe targets stay raw),
 /// but continues rewriting segments after subsequent `&&`/`||`/`;` operators.
+///
+/// Reads `[curl] bypass_url_markers` from `config.toml` to decide whether a
+/// `curl` segment should be passed through unchanged. For explicit control
+/// over that list (e.g. in tests), use `rewrite_command_with_options`.
 pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
+    let opts = RewriteOptions {
+        curl_bypass_url_markers: crate::core::config::Config::load()
+            .map(|c| c.curl.bypass_url_markers)
+            .unwrap_or_default(),
+    };
+    rewrite_command_with_options(cmd, excluded, &opts)
+}
+
+/// Same as `rewrite_command`, but lets the caller supply `RewriteOptions`
+/// directly instead of reading from the on-disk config. Tests use this to
+/// pin a specific `curl_bypass_url_markers` set without touching the user's
+/// config file; production callers that already have config in hand can
+/// avoid a second `Config::load()` round-trip.
+pub fn rewrite_command_with_options(
+    cmd: &str,
+    excluded: &[String],
+    opts: &RewriteOptions,
+) -> Option<String> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return None;
@@ -466,11 +498,15 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, &compiled)
+    rewrite_compound(trimmed, &compiled, &opts.curl_bypass_url_markers)
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
-fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
+fn rewrite_compound(
+    cmd: &str,
+    excluded: &[ExcludePattern],
+    curl_bypass: &[String],
+) -> Option<String> {
     let tokens = tokenize(cmd);
     let mut result = String::with_capacity(cmd.len() + 32);
     let mut any_changed = false;
@@ -483,7 +519,8 @@ fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
         match tok.kind {
             TokenKind::Operator => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+                let rewritten = rewrite_segment(seg, excluded, curl_bypass)
+                    .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -513,7 +550,8 @@ fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
-                    rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string())
+                    rewrite_segment(seg, excluded, curl_bypass)
+                        .unwrap_or_else(|| seg.to_string())
                 };
                 if rewritten != seg {
                     any_changed = true;
@@ -541,7 +579,8 @@ fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
             }
             TokenKind::Shellism if tok.value == "&" => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+                let rewritten = rewrite_segment(seg, excluded, curl_bypass)
+                    .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -557,7 +596,8 @@ fn rewrite_compound(cmd: &str, excluded: &[ExcludePattern]) -> Option<String> {
     }
 
     let seg = cmd[seg_start..].trim();
-    let rewritten = rewrite_segment(seg, excluded).unwrap_or_else(|| seg.to_string());
+    let rewritten =
+        rewrite_segment(seg, excluded, curl_bypass).unwrap_or_else(|| seg.to_string());
     if rewritten != seg {
         any_changed = true;
     }
@@ -638,8 +678,12 @@ fn compile_exclude_patterns(patterns: &[String]) -> Vec<ExcludePattern> {
         .collect()
 }
 
-fn rewrite_segment(seg: &str, excluded: &[ExcludePattern]) -> Option<String> {
-    rewrite_segment_inner(seg, excluded, 0)
+fn rewrite_segment(
+    seg: &str,
+    excluded: &[ExcludePattern],
+    curl_bypass: &[String],
+) -> Option<String> {
+    rewrite_segment_inner(seg, excluded, curl_bypass, 0)
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
@@ -649,7 +693,12 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
     })
 }
 
-fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -> Option<String> {
+fn rewrite_segment_inner(
+    seg: &str,
+    excluded: &[ExcludePattern],
+    curl_bypass: &[String],
+    depth: usize,
+) -> Option<String> {
     let trimmed = seg.trim();
     if trimmed.is_empty() {
         return None;
@@ -664,7 +713,7 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
             if rest.is_empty() {
                 return None;
             }
-            return match rewrite_segment_inner(rest, excluded, depth + 1) {
+            return match rewrite_segment_inner(rest, excluded, curl_bypass, depth + 1) {
                 Some(rewritten) => Some(format!("{} {}", prefix, rewritten)),
                 None => None,
             };
@@ -746,6 +795,22 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
             || args_lower.contains("--jq")
             || args_lower.contains("--template")
         {
+            return None;
+        }
+    }
+
+    // `rtk curl` pipes responses through `rtk json --schema`, which produces
+    // field-type literals (`field: int`, `field: string`) and a `(N)`
+    // array-length suffix. That's a token-savings win for arbitrary
+    // third-party APIs, but actively breaks downstream JSON parsing (jq,
+    // python `json.load`, agent-side filtering) for private/internal APIs
+    // whose responses are consumed as raw JSON.
+    //
+    // Skip the rewrite when the URL contains any user-configured marker.
+    // Empty list = unchanged historical behavior (every curl gets rewritten).
+    // Configure via `[curl] bypass_url_markers` in `~/.config/rtk/config.toml`.
+    if rule.rtk_cmd == "rtk curl" && !curl_bypass.is_empty() {
+        if curl_bypass.iter().any(|marker| cmd_clean.contains(marker)) {
             return None;
         }
     }
@@ -3007,6 +3072,153 @@ mod tests {
     fn test_rewrite_empty_excludes_rewrites_curl() {
         let excluded: Vec<String> = vec![];
         assert!(rewrite_command("curl https://api.example.com", &excluded).is_some());
+    }
+
+    // `[curl] bypass_url_markers` lets users opt private / internal JSON APIs
+    // out of the `rtk curl … --schema` rewrite when the rewritten output would
+    // break a downstream parser. Tests below pass markers explicitly via
+    // `rewrite_command_with_options` so behavior is independent of the on-disk
+    // user config.
+    fn curl_bypass_opts(markers: &[&str]) -> RewriteOptions {
+        RewriteOptions {
+            curl_bypass_url_markers: markers.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_curl_bypasses_localhost_marker() {
+        // curl to a configured localhost API returns None (no rewrite), so the
+        // original curl runs verbatim and the caller gets real JSON instead of
+        // schema-mode literals.
+        let opts = curl_bypass_opts(&["localhost:3300/"]);
+        assert_eq!(
+            rewrite_command_with_options(
+                "curl http://localhost:3300/api/change-requests",
+                &[],
+                &opts
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_curl_bypasses_loopback_marker() {
+        // Loopback variant — separate marker entry.
+        let opts = curl_bypass_opts(&["127.0.0.1:3300/"]);
+        assert_eq!(
+            rewrite_command_with_options(
+                "curl -s http://127.0.0.1:3300/api/health",
+                &[],
+                &opts
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_curl_bypasses_post_with_headers_and_payload() {
+        // Real-world POST variant: -X POST, -H header, -d body. Bypass must
+        // trigger regardless of curl flag positioning, since markers are a
+        // substring match against the full segment.
+        let opts = curl_bypass_opts(&["localhost:3300/"]);
+        assert_eq!(
+            rewrite_command_with_options(
+                "curl -s -X POST -H 'x-api-key: foo' -d '{}' http://localhost:3300/api/session-ack",
+                &[],
+                &opts
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_curl_bypasses_https_hostname_marker() {
+        // Hostname-based marker (e.g. an internal Tailscale or VPN-only API).
+        let opts = curl_bypass_opts(&["//api.internal.example/"]);
+        assert_eq!(
+            rewrite_command_with_options(
+                "curl https://api.internal.example/v1/projects",
+                &[],
+                &opts
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_curl_bypasses_multiple_markers() {
+        // Multiple markers act as OR — any matching substring bypasses.
+        let opts = curl_bypass_opts(&["localhost:8090/", "localhost:11434/"]);
+        assert_eq!(
+            rewrite_command_with_options("curl http://localhost:8090/v1/models", &[], &opts),
+            None
+        );
+        assert_eq!(
+            rewrite_command_with_options("curl http://localhost:11434/api/tags", &[], &opts),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_curl_default_empty_bypass_still_rewrites() {
+        // Default behavior — empty bypass markers — leaves the historical
+        // rewrite-everything semantics intact. This is the core upstream
+        // contract: opt-in only, no behavior change for users who haven't
+        // configured anything.
+        let opts = RewriteOptions::default();
+        assert_eq!(
+            rewrite_command_with_options(
+                "curl http://localhost:3300/api/change-requests",
+                &[],
+                &opts
+            ),
+            Some("rtk curl http://localhost:3300/api/change-requests".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_curl_still_rewrites_unmatched_url() {
+        // Third-party / unconfigured URL is not in the marker list, so the
+        // rtk curl rewrite still fires. Token-savings premise preserved for
+        // everyone except the user's own opt-in endpoints.
+        let opts = curl_bypass_opts(&["localhost:3300/"]);
+        assert_eq!(
+            rewrite_command_with_options("curl https://api.github.com/repos/foo/bar", &[], &opts),
+            Some("rtk curl https://api.github.com/repos/foo/bar".into())
+        );
+        assert_eq!(
+            rewrite_command_with_options("curl https://example.com/api/data", &[], &opts),
+            Some("rtk curl https://example.com/api/data".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_curl_marker_is_port_specific() {
+        // Subtle: localhost on a port NOT in the marker list (e.g. someone
+        // running a third-party JSON server on :4000) STILL gets rewritten.
+        // The bypass is intentionally narrow — markers include port to keep
+        // collateral surface small.
+        let opts = curl_bypass_opts(&["localhost:3300/"]);
+        assert_eq!(
+            rewrite_command_with_options("curl http://localhost:4000/api/foo", &[], &opts),
+            Some("rtk curl http://localhost:4000/api/foo".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_with_bypassed_curl_skips_only_that_segment() {
+        // In a compound command, the bypassed-curl segment passes through
+        // unchanged but other rewritable segments (git status) still get
+        // rewritten. Confirms the bypass is per-segment, not all-or-nothing.
+        let opts = curl_bypass_opts(&["localhost:3300/"]);
+        assert_eq!(
+            rewrite_command_with_options(
+                "git status && curl http://localhost:3300/api/change-requests",
+                &[],
+                &opts
+            ),
+            Some("rtk git status && curl http://localhost:3300/api/change-requests".into())
+        );
     }
 
     #[test]
