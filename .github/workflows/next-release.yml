@@ -36,7 +36,7 @@ jobs:
           ISSUE_REFS=""
           if [ -n "$PR_BODY" ]; then
             ISSUE_REFS=$(echo "$PR_BODY" \
-              | grep -oiE '(closes|fixes|resolves)\s+#[0-9]+|https://github\.com/[^/]+/[^/]+/issues/[0-9]+' \
+              | grep -oiE '(closes|fixes|resolves):?\s+#[0-9]+|https://github\.com/[^/]+/[^/]+/issues/[0-9]+' \
               | grep -oE '#[0-9]+|issues/[0-9]+' \
               | sed 's|issues/|#|' \
               | sort -u \
