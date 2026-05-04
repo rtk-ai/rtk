@@ -1,0 +1,28 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+Microsoft (R) Build Engine version 17.8.3+195e7f5a3 for .NET
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Build started 4/9/2026 10:00:00 AM.
+1>Project "tempconsole.csproj" on node 1 (Build target(s)).
+1>InitializeSourceControlInformation:
+  Microsoft.Build.Tasks.Git.LocateRepository
+  Skipping source control properties because the project is not in a git repository.
+1>InitializeSourceRootMappedPaths:
+  Microsoft.Build.Tasks.Git.SetEmbeddedSourceRoots
+1>_GenerateSourceLinkFile:
+  Microsoft.SourceLink.Common.GenerateSourceLinkFile
+1>CoreCompile:
+  C:\Program Files\dotnet\sdk\8.0.303\Roslyn\bincore\csc.dll /noconfig /unsafe- /checked- /nostdlib+ /errorreport:prompt /warn:8 /define:TRACE;DEBUG;NET;NET8_0;NETCOREAPP /errorlog:obj/Debug/net8.0/tempconsole.GeneratedMSBuildEditorConfig.editorconfig /optimize- /out:obj/Debug/net8.0/tempconsole.dll Program.cs
+  Program.cs(4,6): error CS1001: Identifier expected [tempconsole.csproj]
+  Program.cs(4,6): error CS1002: ; expected [tempconsole.csproj]
+1>Done Building Project "tempconsole.csproj" (Build target(s)) -- FAILED.
+
+Build FAILED.
+
+Program.cs(4,6): error CS1001: Identifier expected [tempconsole.csproj]
+Program.cs(4,6): error CS1002: ; expected [tempconsole.csproj]
+    0 Warning(s)
+    2 Error(s)
+
+Time Elapsed 00:00:00.69

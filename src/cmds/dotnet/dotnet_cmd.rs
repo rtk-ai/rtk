@@ -208,7 +208,7 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         _ => raw.clone(),
     };
 
-    // Always use the filtered summary — it already includes errors and warnings.
+    // For build/test/restore, filtered already includes errors and warnings.
     // Prepending raw stdout on failure was producing more tokens than the original
     // command output, defeating the purpose of RTK filtering (issue #914).
     println!("{}", filtered);
@@ -1430,22 +1430,8 @@ mod tests {
             duration_text: Some("00:00:00.69".to_string()),
         };
         let filtered = format_build_output(&summary, Path::new("/tmp/build.binlog"));
-        // Simulated raw output — realistic dotnet build failure output (215 tokens per issue report)
-        let raw_stdout = "  Determining projects to restore...\n\
-              All projects are up-to-date for restore.\n\
-            Build started 4/9/2026 10:00:00 AM.\n\
-            1>Project \"tempconsole.csproj\" on node 1 (Build target(s)).\n\
-            1>CoreCompile:\n\
-            1>  C:\\Program Files\\dotnet\\sdk\\8.0.303\\Roslyn\\bincore\\csc.dll Program.cs\n\
-            Program.cs(4,6): error CS1001: Identifier expected [tempconsole.csproj]\n\
-            Program.cs(4,6): error CS1002: ; expected [tempconsole.csproj]\n\
-            1>Done Building Project \"tempconsole.csproj\" (Build target(s)) -- FAILED.\n\
-            Build FAILED.\n\
-            Program.cs(4,6): error CS1001: Identifier expected [tempconsole.csproj]\n\
-            Program.cs(4,6): error CS1002: ; expected [tempconsole.csproj]\n\
-                0 Warning(s)\n\
-                2 Error(s)\n\
-            Time Elapsed 00:00:00.69";
+        // Real captured `dotnet build` failure output (per .claude/rules/cli-testing.md)
+        let raw_stdout = include_str!("../../../tests/fixtures/dotnet/build_failure_raw.txt");
 
         // The filtered summary must save >=60% tokens vs raw (project standard)
         let count_tokens = |s: &str| s.split_whitespace().count();
@@ -1459,11 +1445,80 @@ mod tests {
         // The filtered summary must contain error info (not empty)
         assert!(filtered.contains("CS1001"), "Filtered must include error code");
         assert!(filtered.contains("fail dotnet build"), "Filtered must include status");
-        // Prepending raw to filtered would exceed raw alone — this is what we fixed
-        let buggy_output = format!("{}\n\n{}", raw_stdout.trim(), filtered);
+        // #914 regression guard: filtered must always be cheaper than raw, so
+        // any code path that emits filtered alone is guaranteed cheaper than
+        // raw alone. The buggy path (raw + filtered) is provably worse than
+        // both — that's the bug we removed.
         assert!(
-            buggy_output.len() > raw_stdout.len(),
-            "Prepending raw+filtered is always longer than raw alone"
+            count_tokens(&filtered) < count_tokens(raw_stdout),
+            "filtered must compress vs raw — if violated, even emitting filtered alone \
+             is worse than emitting raw, which is the #914 class of bug"
+        );
+    }
+
+    /// Regression for #914 on `dotnet test` failure path: the println!() at
+    /// dotnet_cmd.rs:219 is shared with build/restore, so test must also be
+    /// covered to prevent a future regression where raw stdout is prepended.
+    #[test]
+    fn test_format_test_output_on_failure_is_more_concise_than_raw() {
+        let summary = binlog::TestSummary {
+            passed: 10,
+            failed: 1,
+            skipped: 0,
+            total: 11,
+            project_count: 1,
+            failed_tests: vec![binlog::FailedTest {
+                name: "MyTests.ShouldFail".to_string(),
+                details: vec!["Assert.Equal failure: Expected 2, Actual 3".to_string()],
+            }],
+            duration_text: Some("1 s".to_string()),
+        };
+        let filtered = format_test_output(&summary, &[], &[], Path::new("/tmp/test.binlog"));
+        let raw_stdout = include_str!("../../../tests/fixtures/dotnet/test_failed.txt");
+
+        let count_tokens = |s: &str| s.split_whitespace().count();
+        assert!(!filtered.is_empty(), "Filtered must not be empty on failure");
+        assert!(filtered.contains("MyTests.ShouldFail"));
+        // #914 regression guard: filtered alone must compress vs raw.
+        assert!(
+            count_tokens(&filtered) < count_tokens(raw_stdout),
+            "filtered must compress vs raw — if violated, the println!() emit is \
+             worse than raw alone, which is the #914 class of bug (test path)"
+        );
+    }
+
+    /// Regression for #914 on `dotnet restore` failure path. Same shared
+    /// println!() at dotnet_cmd.rs:219 — test guards against regression.
+    /// Uses a real `dotnet restore` failure (NU1101 nuget package-not-found),
+    /// not a build/MSBuild fixture, so the savings ratio is meaningful for
+    /// the restore code path specifically.
+    #[test]
+    fn test_format_restore_output_on_failure_is_more_concise_than_raw() {
+        let summary = binlog::RestoreSummary {
+            restored_projects: 2,
+            warnings: 0,
+            errors: 1,
+            duration_text: Some("00:00:01.00".to_string()),
+        };
+        let errors = vec![binlog::BinlogIssue {
+            code: "NU1101".to_string(),
+            file: "tempconsole.csproj".to_string(),
+            line: 0,
+            column: 0,
+            message: "Unable to find package Foo".to_string(),
+        }];
+        let filtered =
+            format_restore_output(&summary, &errors, &[], Path::new("/tmp/restore.binlog"));
+        let raw_stdout = include_str!("../../../tests/fixtures/dotnet/restore_failure_raw.txt");
+
+        let count_tokens = |s: &str| s.split_whitespace().count();
+        assert!(!filtered.is_empty(), "Filtered must not be empty on failure");
+        assert!(filtered.starts_with("fail dotnet restore"));
+        // #914 regression guard: filtered alone must compress vs raw.
+        assert!(
+            count_tokens(&filtered) < count_tokens(raw_stdout),
+            "filtered must compress vs raw — if violated, the println!() emit is \
+             worse than raw alone, which is the #914 class of bug (restore path)"
         );
     }
 
