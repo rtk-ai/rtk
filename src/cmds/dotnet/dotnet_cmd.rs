@@ -524,6 +524,7 @@ fn build_effective_dotnet_args(
                 // after the -- separator. Works for MSTest/TUnit which bundle TrxReport.
                 // For xUnit v3 without Microsoft.Testing.Extensions.TrxReport, this causes
                 // an "Unknown option" error — informative, tells user to add the package.
+                // See xunit/xunit#3456 for the package addition.
                 if !has_report_trx_arg(args) {
                     effective.extend(inject_report_trx_into_args(args));
                 } else {
