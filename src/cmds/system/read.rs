@@ -418,4 +418,77 @@ fn main() {{
             "fix must report 0 savings when content wasn't actually compressed, got {fixed_savings}"
         );
     }
+
+    /// End-to-end regression: drive the real `run()` path, then read what was
+    /// actually persisted to the SQLite tracking DB. Catches the class of
+    /// regression where someone rewires `pick_tracking_output(Some(&windowed), …)`
+    /// — the unit tests above pass `Some(&filtered)` directly so they would not.
+    #[test]
+    fn test_run_does_not_inflate_savings_with_max_lines_e2e() {
+        use rusqlite::Connection;
+        use std::env;
+        use std::sync::Mutex;
+        // Serialize against any other test that mutates RTK_DB_PATH (see
+        // tracking.rs::test_db_path_env_and_default for the same pattern).
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        // Don't recover a poisoned guard: poison means a prior test panicked
+        // while RTK_DB_PATH was set, and proceeding here would leak that env
+        // var into our run(). Propagate the original panic instead.
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let tmpdir = tempfile::tempdir().expect("create tempdir");
+        let db_path = tmpdir.path().join("rtk_e2e.db");
+
+        let mut input = NamedTempFile::with_suffix(".txt").expect("create tempfile");
+        // 1000 plain text lines — `Language::Unknown` filter is identity, so
+        // any reported savings can only come from a tracking-baseline bug.
+        let big: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        input.write_all(big.as_bytes()).expect("write tempfile");
+        let input_path = input.path().to_path_buf();
+
+        let prev_db = env::var("RTK_DB_PATH").ok();
+        env::set_var("RTK_DB_PATH", &db_path);
+
+        let result = run(
+            &input_path,
+            FilterLevel::Minimal,
+            Some(5), // --max-lines 5: keep 5/1000 lines
+            None,
+            false,
+            0,
+        );
+
+        match prev_db {
+            Some(v) => env::set_var("RTK_DB_PATH", v),
+            None => env::remove_var("RTK_DB_PATH"),
+        }
+        result.expect("run() must succeed");
+
+        // Inspect what `timer.track()` persisted. If `pick_tracking_output`
+        // is wired to the truncated buffer, output_tokens collapses to ~5
+        // lines and saved_tokens explodes — the #1045 regression.
+        let conn = Connection::open(&db_path).expect("open tracking DB");
+        let (input_tokens, output_tokens, saved_tokens): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens, saved_tokens
+                 FROM commands ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("at least one row recorded");
+
+        // Filter is identity for plain text → tracking baseline must equal
+        // input. Tolerate small drift from line-numbering / formatting.
+        let drift = (input_tokens - output_tokens).abs();
+        assert!(
+            drift < 50,
+            "Expected near-zero savings on identity filter, got input={input_tokens} \
+             output={output_tokens} saved={saved_tokens} drift={drift}. \
+             A large drift means run() is tracking the truncated buffer (the #1045 bug)."
+        );
+        assert!(
+            saved_tokens.abs() < 50,
+            "saved_tokens must be near-zero when no compression happened, got {saved_tokens}"
+        );
+    }
 }
