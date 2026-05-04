@@ -51,13 +51,9 @@ impl TokenFormatter for TestResult {
             lines.push(String::new());
             for (idx, failure) in self.failures.iter().enumerate().take(5) {
                 lines.push(format!("{}. {}", idx + 1, failure.test_name));
-                let error_preview: String = failure
-                    .error_message
-                    .lines()
-                    .take(2)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                lines.push(format!("   {}", error_preview));
+                for line in failure.error_message.lines() {
+                    lines.push(format!("   {}", line));
+                }
             }
 
             if self.failures.len() > 5 {
@@ -105,7 +101,7 @@ impl TokenFormatter for TestResult {
 
     fn format_ultra(&self) -> String {
         format!(
-            "✓{} ✗{} ⊘{} ({}ms)",
+            "[ok]{} [x]{} [skip]{} ({}ms)",
             self.passed,
             self.failed,
             self.skipped,
@@ -114,88 +110,10 @@ impl TokenFormatter for TestResult {
     }
 }
 
-impl TokenFormatter for LintResult {
-    fn format_compact(&self) -> String {
-        let mut lines = vec![format!(
-            "Errors: {} | Warnings: {} | Files: {}",
-            self.errors, self.warnings, self.files_with_issues
-        )];
-
-        if !self.issues.is_empty() {
-            // Group by rule_id
-            let mut by_rule: std::collections::HashMap<String, Vec<&LintIssue>> =
-                std::collections::HashMap::new();
-            for issue in &self.issues {
-                by_rule
-                    .entry(issue.rule_id.clone())
-                    .or_default()
-                    .push(issue);
-            }
-
-            let mut rules: Vec<_> = by_rule.iter().collect();
-            rules.sort_by_key(|(_, issues)| std::cmp::Reverse(issues.len()));
-
-            lines.push(String::new());
-            for (rule, issues) in rules.iter().take(5) {
-                lines.push(format!("{}: {} occurrences", rule, issues.len()));
-                for issue in issues.iter().take(2) {
-                    lines.push(format!("  {}:{}", issue.file_path, issue.line));
-                }
-            }
-
-            if by_rule.len() > 5 {
-                lines.push(format!("\n... +{} more rule violations", by_rule.len() - 5));
-            }
-        }
-
-        lines.join("\n")
-    }
-
-    fn format_verbose(&self) -> String {
-        let mut lines = vec![format!(
-            "Total issues: {} ({} errors, {} warnings) in {} files",
-            self.total_issues, self.errors, self.warnings, self.files_with_issues
-        )];
-
-        if !self.issues.is_empty() {
-            lines.push("\nIssues:".to_string());
-            for issue in self.issues.iter().take(20) {
-                let severity_symbol = match issue.severity {
-                    LintSeverity::Error => "✗",
-                    LintSeverity::Warning => "⚠",
-                    LintSeverity::Info => "ℹ",
-                };
-                lines.push(format!(
-                    "{} {}:{}:{} [{}] {}",
-                    severity_symbol,
-                    issue.file_path,
-                    issue.line,
-                    issue.column,
-                    issue.rule_id,
-                    issue.message
-                ));
-            }
-
-            if self.issues.len() > 20 {
-                lines.push(format!("\n... +{} more issues", self.issues.len() - 20));
-            }
-        }
-
-        lines.join("\n")
-    }
-
-    fn format_ultra(&self) -> String {
-        format!(
-            "✗{} ⚠{} 📁{}",
-            self.errors, self.warnings, self.files_with_issues
-        )
-    }
-}
-
 impl TokenFormatter for DependencyState {
     fn format_compact(&self) -> String {
         if self.outdated_count == 0 {
-            return "All packages up-to-date ✓".to_string();
+            return "All packages up-to-date".to_string();
         }
 
         let mut lines = vec![format!(
@@ -251,86 +169,91 @@ impl TokenFormatter for DependencyState {
     }
 
     fn format_ultra(&self) -> String {
-        format!("📦{} ⬆️{}", self.total_packages, self.outdated_count)
+        format!("pkg:{} ^{}", self.total_packages, self.outdated_count)
     }
 }
 
-impl TokenFormatter for BuildOutput {
-    fn format_compact(&self) -> String {
-        let status = if self.success { "✓" } else { "✗" };
-        let mut lines = vec![format!(
-            "{} Build: {} errors, {} warnings",
-            status, self.errors, self.warnings
-        )];
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::types::{TestFailure, TestResult};
 
-        if !self.bundles.is_empty() {
-            let total_size: u64 = self.bundles.iter().map(|b| b.size_bytes).sum();
-            lines.push(format!(
-                "Bundles: {} ({:.1} KB)",
-                self.bundles.len(),
-                total_size as f64 / 1024.0
-            ));
+    fn make_failure(name: &str, error: &str) -> TestFailure {
+        TestFailure {
+            test_name: name.to_string(),
+            file_path: "tests/e2e.spec.ts".to_string(),
+            error_message: error.to_string(),
+            stack_trace: None,
         }
-
-        if !self.routes.is_empty() {
-            lines.push(format!("Routes: {}", self.routes.len()));
-        }
-
-        if let Some(duration) = self.duration_ms {
-            lines.push(format!("Time: {}ms", duration));
-        }
-
-        lines.join("\n")
     }
 
-    fn format_verbose(&self) -> String {
-        let status = if self.success { "Success" } else { "Failed" };
-        let mut lines = vec![format!(
-            "Build {}: {} errors, {} warnings",
-            status, self.errors, self.warnings
-        )];
-
-        if !self.bundles.is_empty() {
-            lines.push("\nBundles:".to_string());
-            for bundle in &self.bundles {
-                let gzip_info = bundle
-                    .gzip_size_bytes
-                    .map(|gz| format!(" (gzip: {:.1} KB)", gz as f64 / 1024.0))
-                    .unwrap_or_default();
-                lines.push(format!(
-                    "  {}: {:.1} KB{}",
-                    bundle.name,
-                    bundle.size_bytes as f64 / 1024.0,
-                    gzip_info
-                ));
-            }
+    fn make_result(passed: usize, failures: Vec<TestFailure>) -> TestResult {
+        TestResult {
+            total: passed + failures.len(),
+            passed,
+            failed: failures.len(),
+            skipped: 0,
+            duration_ms: Some(1500),
+            failures,
         }
-
-        if !self.routes.is_empty() {
-            lines.push("\nRoutes:".to_string());
-            for route in self.routes.iter().take(10) {
-                lines.push(format!("  {}: {:.1} KB", route.path, route.size_kb));
-            }
-            if self.routes.len() > 10 {
-                lines.push(format!("  ... +{} more routes", self.routes.len() - 10));
-            }
-        }
-
-        if let Some(duration) = self.duration_ms {
-            lines.push(format!("\nDuration: {}ms", duration));
-        }
-
-        lines.join("\n")
     }
 
-    fn format_ultra(&self) -> String {
-        let status = if self.success { "✓" } else { "✗" };
-        format!(
-            "{} ✗{} ⚠{} ({}ms)",
-            status,
-            self.errors,
-            self.warnings,
-            self.duration_ms.unwrap_or(0)
-        )
+    // RED: format_compact must show the full error message, not just 2 lines.
+    // Playwright errors contain the expected/received diff and call log starting
+    // at line 3+. Truncating to 2 lines leaves the agent with no debug info.
+    #[test]
+    fn test_compact_shows_full_error_message() {
+        let error = "Error: expect(locator).toHaveText(expected)\n\nExpected: 'Submit'\nReceived: 'Loading'\n\nCall log:\n  - waiting for getByRole('button', { name: 'Submit' })";
+        let result = make_result(5, vec![make_failure("should click submit", error)]);
+
+        let output = result.format_compact();
+
+        assert!(
+            output.contains("Expected: 'Submit'"),
+            "format_compact must preserve expected/received diff\nGot:\n{output}"
+        );
+        assert!(
+            output.contains("Received: 'Loading'"),
+            "format_compact must preserve received value\nGot:\n{output}"
+        );
+        assert!(
+            output.contains("Call log:"),
+            "format_compact must preserve call log\nGot:\n{output}"
+        );
+    }
+
+    // RED: summary line stays compact regardless of failure detail
+    #[test]
+    fn test_compact_summary_line_is_concise() {
+        let result = make_result(28, vec![make_failure("test", "some error")]);
+        let output = result.format_compact();
+        let first_line = output.lines().next().unwrap_or("");
+        assert!(
+            first_line.contains("28") && first_line.contains("1"),
+            "First line must show pass/fail counts, got: {first_line}"
+        );
+    }
+
+    // RED: all-pass output stays compact (no failure detail bloat)
+    #[test]
+    fn test_compact_all_pass_is_one_line() {
+        let result = make_result(10, vec![]);
+        let output = result.format_compact();
+        assert!(
+            output.lines().count() <= 3,
+            "All-pass output should be compact, got {} lines:\n{output}",
+            output.lines().count()
+        );
+    }
+
+    // RED: error_message with only 1 line still works (no trailing noise)
+    #[test]
+    fn test_compact_single_line_error_no_trailing_noise() {
+        let result = make_result(0, vec![make_failure("should work", "Timeout exceeded")]);
+        let output = result.format_compact();
+        assert!(
+            output.contains("Timeout exceeded"),
+            "Single-line error must appear\nGot:\n{output}"
+        );
     }
 }

@@ -7,11 +7,20 @@ on:
         description: 'Tag to release'
         required: true
         type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       tag:
         description: 'Tag to release (e.g., v0.1.0)'
         required: true
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -156,6 +165,13 @@ jobs:
     needs: [build, build-deb, build-rpm]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -198,12 +214,13 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.version }}
           files: release/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: ${{ inputs.prerelease }}
+          token: ${{ steps.app-token.outputs.token }}
 
   notify-discord:
     name: Notify Discord
     needs: [release]
+    if: ${{ !inputs.prerelease }}
     runs-on: ubuntu-latest
     steps:
       - name: Get version
@@ -237,6 +254,7 @@ jobs:
   homebrew:
     name: Update Homebrew formula
     needs: [release]
+    if: ${{ !inputs.prerelease }}
     runs-on: ubuntu-latest
     steps:
       - name: Get version

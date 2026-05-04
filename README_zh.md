@@ -10,7 +10,7 @@
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://discord.gg/gFwRPEKq4p"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
+  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
 
@@ -18,8 +18,8 @@
   <a href="https://www.rtk-ai.app">官网</a> &bull;
   <a href="#安装">安装</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">故障排除</a> &bull;
-  <a href="ARCHITECTURE.md">架构</a> &bull;
-  <a href="https://discord.gg/gFwRPEKq4p">Discord</a>
+  <a href="docs/contributing/ARCHITECTURE.md">架构</a> &bull;
+  <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
 <p align="center">
@@ -122,10 +122,11 @@ rtk git push                    # -> "ok main"
 
 ### 测试
 ```bash
-rtk test cargo test             # 仅显示失败（-90%）
-rtk vitest run                  # Vitest 紧凑输出
+rtk jest                        # Jest 紧凑输出
+rtk vitest                      # Vitest 紧凑输出
 rtk pytest                      # Python 测试（-90%）
 rtk go test                     # Go 测试（-90%）
+rtk test <cmd>                  # 仅显示失败（-90%）
 ```
 
 ### 构建 & 检查
@@ -154,14 +155,18 @@ rtk discover                    # 发现遗漏的节省机会
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 解决常见问题
 - **[INSTALL.md](INSTALL.md)** - 详细安装指南
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - 技术架构
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 技术架构
 
 ## 贡献
 
 欢迎贡献！请在 [GitHub](https://github.com/rtk-ai/rtk) 上提交 issue 或 PR。
 
-加入 [Discord](https://discord.gg/pvHdzAec) 社区。
+加入 [Discord](https://discord.gg/RySmvNF5kF) 社区。
 
 ## 许可证
 
 MIT 许可证 - 详见 [LICENSE](LICENSE)。
+
+## 免责声明
+
+详见 [DISCLAIMER.md](DISCLAIMER.md)。

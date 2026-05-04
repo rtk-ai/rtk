@@ -10,7 +10,7 @@
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://discord.gg/gFwRPEKq4p"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
+  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
 </p>
 
@@ -18,8 +18,8 @@
   <a href="https://www.rtk-ai.app">Site web</a> &bull;
   <a href="#installation">Installer</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Depannage</a> &bull;
-  <a href="ARCHITECTURE.md">Architecture</a> &bull;
-  <a href="https://discord.gg/gFwRPEKq4p">Discord</a>
+  <a href="docs/contributing/ARCHITECTURE.md">Architecture</a> &bull;
+  <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
 <p align="center">
@@ -135,11 +135,12 @@ rtk git push                    # -> "ok main"
 
 ### Tests
 ```bash
-rtk test cargo test             # Echecs uniquement (-90%)
-rtk vitest run                  # Vitest compact
+rtk jest                        # Jest compact
+rtk vitest                      # Vitest compact
 rtk pytest                      # Tests Python (-90%)
 rtk go test                     # Tests Go (-90%)
 rtk cargo test                  # Tests Cargo (-90%)
+rtk test <cmd>                  # Echecs uniquement (-90%)
 ```
 
 ### Build & Lint
@@ -184,14 +185,18 @@ mode = "failures"
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resoudre les problemes courants
 - **[INSTALL.md](INSTALL.md)** - Guide d'installation detaille
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Architecture technique
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Architecture technique
 
 ## Contribuer
 
 Les contributions sont les bienvenues ! Ouvrez une issue ou une PR sur [GitHub](https://github.com/rtk-ai/rtk).
 
-Rejoignez la communaute sur [Discord](https://discord.gg/pvHdzAec).
+Rejoignez la communaute sur [Discord](https://discord.gg/RySmvNF5kF).
 
 ## Licence
 
 Licence MIT - voir [LICENSE](LICENSE) pour les details.
+
+## Avertissement
+
+Voir [DISCLAIMER.md](DISCLAIMER.md).

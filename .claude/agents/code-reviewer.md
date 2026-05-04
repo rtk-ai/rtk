@@ -14,13 +14,15 @@ Prevent bugs, performance regressions, and token savings failures before they re
 ## RTK Architecture Context
 
 ```
-main.rs (Commands enum + routing)
-  → *_cmd.rs modules (filter logic)
-  → tracking.rs (SQLite, token metrics)
-  → utils.rs (shared helpers)
-  → tee.rs (failure recovery)
-  → config.rs (user config)
-  → filter.rs (language-aware filtering)
+src/main.rs (Commands enum + routing)
+  → src/cmds/**/*_cmd.rs (filter logic, organized by ecosystem)
+  → src/core/tracking.rs (SQLite, token metrics)
+  → src/core/utils.rs (shared helpers)
+  → src/core/tee.rs (failure recovery)
+  → src/core/config.rs (user config)
+  → src/core/filter.rs (language-aware filtering)
+  → src/hooks/ (init, rewrite, verify, trust)
+  → src/analytics/ (gain, cc_economics, ccusage)
 ```
 
 **Non-negotiable constraints:**
@@ -32,10 +34,11 @@ main.rs (Commands enum + routing)
 ## Review Process
 
 1. **Context**: Identify which module changed, what command it affects, token savings claim
-2. **Static patterns**: Check for RTK anti-patterns (unwrap, non-lazy regex, async)
-3. **Token savings**: Verify savings claim is tested with real fixture
-4. **Cross-platform**: Shell escaping, path separators, ANSI codes
-5. **Structured feedback**: 🔴 Critical → 🟡 Important → 🟢 Suggestions
+2. **Call-site analysis**: Trace ALL callers of modified functions, list every input variant, verify each has a test
+3. **Static patterns**: Check for RTK anti-patterns (unwrap, non-lazy regex, async)
+4. **Token savings**: Verify savings claim is tested with real fixture
+5. **Cross-platform**: Shell escaping, path separators, ANSI codes
+6. **Structured feedback**: 🔴 Critical → 🟡 Important → 🟢 Suggestions
 
 ## RTK-Specific Red Flags
 
@@ -198,6 +201,29 @@ fix_here
 | 🔴 | file.rs | 45 | lazy_static! |
 ```
 
+## Call-Site Analysis (🔴 MANDATORY)
+
+When reviewing a function change, **always trace upstream to every call site** and verify that all input variants are tested.
+
+**Why this rule exists:** PR #546 modified `filter_log_output()` to split on `---END---` markers, but only tested the code path where RTK injects those markers. The other path (`--oneline`, `--pretty`, `--format`) never has `---END---` markers — the entire output became a single block, dropping all but 2 commits. This shipped to develop and was only caught during release review.
+
+**Process:**
+1. For every modified function, grep all call sites: `Grep pattern="function_name(" type="rust"`
+2. For each call site, identify the `if/else` or `match` branch that leads to it
+3. List every distinct input shape the function can receive
+4. Verify a test exists for EACH input shape — not just the happy path
+5. If a test is missing, flag it as 🔴 Critical
+
+**Example (git log):**
+```
+run_log() has 2 paths:
+  - has_format_flag=false → injects ---END--- → filter_log_output sees blocks
+  - has_format_flag=true  → no ---END---      → filter_log_output sees raw lines
+Both paths MUST have tests.
+```
+
+**Rule of thumb:** If a function's caller has an `if/else` that changes the data flowing in, each branch needs its own test in the callee.
+
 ## Adversarial Questions for RTK
 
 1. **Savings**: If I run `count_tokens(input)` vs `count_tokens(output)` — is savings ≥60%?
@@ -207,6 +233,7 @@ fix_here
 5. **Cross-platform**: Will this regex work on Windows CRLF output?
 6. **ANSI**: Does the filter handle ANSI escape codes in input?
 7. **Fixture**: Is the test using real output from the actual command?
+8. **Call sites**: Have ALL callers been traced? Does each input variant have a test?
 
 ## The New Dev Test (RTK variant)
 

@@ -28,8 +28,10 @@ Thumbs.db
 # Test artifacts
 *.cast.bak
 
-# Benchmark results
-scripts/benchmark/
+# Benchmark results (fixture data, not infra)
+scripts/benchmark/diff/
+scripts/benchmark/rtk/
+scripts/benchmark/unix/
 benchmark-report.md
 
 # SQLite databases
@@ -44,5 +46,5 @@ claudedocs
 .vitals/
 .worktrees/
 
-# icm
+# icm 
 .fastembed_cache/

@@ -101,6 +101,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "automod"
+version = "1.0.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8b5778837666541195063243828c5b6139221b47dc4ec3ba81738e532469ab1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -479,17 +490,6 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
-
-[[package]]
-name = "hostname"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-link",
-]
 
 [[package]]
 name = "iana-time-zone"
@@ -892,17 +892,19 @@ dependencies = [
 
 [[package]]
 name = "rtk"
-version = "0.28.2"
+version = "0.36.0"
 dependencies = [
  "anyhow",
+ "automod",
  "chrono",
  "clap",
  "colored",
  "dirs",
  "flate2",
- "hostname",
+ "getrandom 0.4.2",
  "ignore",
  "lazy_static",
+ "libc",
  "quick-xml",
  "regex",
  "rusqlite",
@@ -910,7 +912,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror",
  "toml",
  "ureq",
  "walkdir",
@@ -970,9 +971,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.9"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7df23109aa6c1567d1c575b9952556388da57401e4ace1d15f79eedad0d8f53"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",

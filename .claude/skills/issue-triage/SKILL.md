@@ -1,7 +1,14 @@
 ---
+name: issue-triage
 description: >
   Issue triage: audit open issues, categorize, detect duplicates, cross-ref PRs, risk assessment, post comments.
   Args: "all" for deep analysis of all, issue numbers to focus (e.g. "42 57"), "en"/"fr" for language, no arg = audit only in French.
+allowed-tools:
+  - Bash
+  - Read
+  - Grep
+effort: medium
+tags: [triage, issues, github, categorize, duplicates, risk]
 ---
 
 # Issue Triage
@@ -155,7 +162,16 @@ Si toujours ambigu, demander à l'utilisateur via `AskUserQuestion`.
 
 Après affichage du tableau de triage, copier dans le presse-papier :
 ```bash
-pbcopy <<'EOF'
+# Cross-platform clipboard
+clip() {
+  if command -v pbcopy &>/dev/null; then pbcopy
+  elif command -v xclip &>/dev/null; then xclip -selection clipboard
+  elif command -v wl-copy &>/dev/null; then wl-copy
+  else cat
+  fi
+}
+
+clip <<'EOF'
 {tableau de triage complet}
 EOF
 ```

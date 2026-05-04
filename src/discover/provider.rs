@@ -1,3 +1,6 @@
+//! Reads Claude Code session logs from disk and streams their command history.
+
+use crate::hooks::constants::CLAUDE_DIR;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
@@ -18,10 +21,15 @@ pub struct ExtractedCommand {
     /// Whether the tool_result indicated an error
     pub is_error: bool,
     /// Chronological sequence index within the session
+    #[allow(dead_code)]
     pub sequence_index: usize,
 }
 
-/// Trait for session providers (Claude Code, future: Cursor, Windsurf).
+/// Trait for session providers (Claude Code, OpenCode, etc.).
+///
+/// Note: Cursor Agent transcripts use a text-only format without structured
+/// tool_use/tool_result blocks, so command extraction is not possible.
+/// Use `rtk gain` to track savings for Cursor sessions instead.
 pub trait SessionProvider {
     fn discover_sessions(
         &self,
@@ -37,7 +45,7 @@ impl ClaudeProvider {
     /// Get the base directory for Claude Code projects.
     fn projects_dir() -> Result<PathBuf> {
         let home = dirs::home_dir().context("could not determine home directory")?;
-        let dir = home.join(".claude").join("projects");
+        let dir = home.join(CLAUDE_DIR).join("projects");
         if !dir.exists() {
             anyhow::bail!(
                 "Claude Code projects directory not found: {}\nMake sure Claude Code has been used at least once.",
@@ -48,9 +56,26 @@ impl ClaudeProvider {
     }
 
     /// Encode a filesystem path to Claude Code's directory name format.
-    /// `/Users/foo/bar` → `-Users-foo-bar`
+    ///
+    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
+    /// with `-` when computing the project directory slug under `~/.claude/projects/`.
+    ///
+    /// `/Users/foo/bar`          → `-Users-foo-bar`
+    /// `/Users/first.last/bar`   → `-Users-first-last-bar`
+    /// `/home/chris/2_project`   → `-home-chris-2-project`
+    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
     pub fn encode_project_path(path: &str) -> String {
-        path.replace('/', "-")
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\'];
+
+        path.chars()
+            .map(|c| {
+                if !c.is_ascii() || SANITIZED_CHARS.contains(&c) {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect()
     }
 }
 
@@ -330,6 +355,54 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_project_path_dot_in_username() {
+        // Claude Code replaces both '/' and '.' with '-'.
+        // A cwd like /Users/first.last must produce the same slug as
+        // Claude's projects directory (-Users-first-last), otherwise
+        // `rtk discover` finds zero sessions for that project.
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/first.last/my-project"),
+            "-Users-first-last-my-project"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_multiple_dots() {
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/a.b.c/proj"),
+            "-Users-a-b-c-proj"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_underscore() {
+        // Claude Code also replaces '_' with '-' (https://github.com/anthropics/claude-code/issues/24067)
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/chris/2_project-files/proj"),
+            "-home-chris-2-project-files-proj"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_non_ascii() {
+        // Non-ASCII characters are each replaced with '-' (https://github.com/anthropics/claude-code/issues/40946)
+        // '/home/user/' + '外' + '主' + '/app' -> '-home-user' + '-' + '-' + '-' + '-' + 'app'
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/user/\u{5916}\u{4e3b}/app"),
+            "-home-user----app"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_windows() {
+        // Windows backslashes are also replaced with '-'
+        assert_eq!(
+            ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
+            "C:-Users-foo-bar"
+        );
+    }
+
+    #[test]
     fn test_match_project_filter() {
         let encoded = ClaudeProvider::encode_project_path("/Users/foo/Sites/rtk");
         assert!(encoded.contains("rtk"));
@@ -347,7 +420,7 @@ mod tests {
         let cmds = provider.extract_commands(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0].command, "git commit --ammend");
-        assert_eq!(cmds[0].is_error, true);
+        assert!(cmds[0].is_error);
         assert!(cmds[0].output_content.is_some());
         assert_eq!(
             cmds[0].output_content.as_ref().unwrap(),
@@ -365,8 +438,8 @@ mod tests {
         let provider = ClaudeProvider;
         let cmds = provider.extract_commands(jsonl.path()).unwrap();
         assert_eq!(cmds.len(), 2);
-        assert_eq!(cmds[0].is_error, false);
-        assert_eq!(cmds[1].is_error, true);
+        assert!(!cmds[0].is_error);
+        assert!(cmds[1].is_error);
     }
 
     #[test]
