@@ -1,0 +1,7 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+[partial] dbt build: compile error  0.0s
+═══════════════════════════════════════
+     Model 'dummy_model_084' depends on a node named 'dummy_model_113_DELETE_ME' which was not found

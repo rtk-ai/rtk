@@ -1,0 +1,10 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+    Syntax error near line 198
+------------------------------
+195|           - not_null: *recent_date_filter
+196| broken_yaml: "this string has no closing quote
+------------------------------
+[full output: ~/Library/Application Support/rtk/tee/x.log]

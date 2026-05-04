@@ -1,0 +1,16 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+dbt test: 0/4 PASS  1 FAIL  2 ERR  1 WARN  15s
+═══════════════════════════════════════
+FAIL  temp_fail_DELETE_ME                       1 row
+      Got 1 result, configured to fail if != 0
+ERR   temp_err_DELETE_ME                      
+      Syntax error: Expected keyword JOIN but got ")" at [15:5]
+      compiled code at target/run/dummy_team_014/tests/temp_err_DELETE_ME.sql
+ERR   temp_pass_DELETE_ME                     
+      Query without FROM clause cannot have a WHERE clause at [11:17]
+      compiled code at target/run/dummy_team_014/tests/temp_pass_DELETE_ME.sql
+WARN  temp_warn_DELETE_ME                       1 row
+      Got 1 result, configured to warn if != 0

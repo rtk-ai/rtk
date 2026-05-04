@@ -1,0 +1,8 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+[partial] dbt run: 1/2 OK  1 ERR  0.0s
+═══════════════════════════════════════
+ERR  b                                         compile
+     Compilation Error: x
