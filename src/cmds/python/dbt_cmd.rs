@@ -11,7 +11,7 @@
 //!
 //! | Level    | Flag    | JSON path (run/test/build/...)                                                                | Light-filter path (compile/parse/...)                                          |
 //! |----------|---------|------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-//! | `v=0`    | default | Single-line header for all-pass; ERR/FAIL/WARN body capped at 3 lines; MainEncounteredError body = 1 actionable line; no `[bq]`/`[compiled]` footers. | Strips banners, `[WARNING]` blocks, `FutureWarning`/`DeprecationWarning`, `.venv/` lines, orphan Python imports, `dbt debug` info-block, content after a 2nd `------` row. |
+//! | `v=0`    | default | Single-line header for all-pass; ERR/FAIL/WARN body capped at 3 lines; MainEncounteredError body = 1 actionable line; no `[bq]`/`[compiled]` footers. Appends `(rtk -v shows warnings, -vvv for raw)` footer when the run succeeded but stripped warning content was detected (any `info.level == "warn"` event). | Strips banners, `[WARNING]` blocks, `FutureWarning`/`DeprecationWarning`, `.venv/` lines, orphan Python imports, `dbt debug` info-block, content after a 2nd `------` row. Appends the same `WARN_HINT` footer when stripped warnings exist and no error markers are present. |
 //! | `v=1`    | `-v`    | ERR/FAIL/WARN body cap widens to 20 lines; MainEncounteredError body up to 5 lines; `[bq] <console-url>` and `[compiled] <path>` footers appended per failing node; "Slow:" footer (>10s rows). | Keeps `[WARNING]` and deprecation blocks, `dbt debug` info-block, dashes-boundary tail content, orphan Python imports — strips only static banners (`Running with dbt=`, `Registered adapter:`, `Concurrency:`). |
 //! | `v=2`    | `-vv`   | Promotes injected `--log-level` from `info` to `debug` (more events flow); rendering rules same as `v=1`. | Same as `v=1` (level promotion does not affect light-filter input). |
 //! | `v=3+`   | `-vvv`  | Full passthrough — no flag injection, no filtering. Equivalent to `NORTK=1 dbt ...`. | Full passthrough — same. |
@@ -28,6 +28,12 @@ use crate::core::utils::{resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
+
+/// Footer appended to v=0 success summaries when stripped warning content
+/// was detected. Tells the LLM/user how to surface the suppressed lines —
+/// `-v` widens warn bodies to 20 lines and keeps `[WARNING]` blocks in the
+/// light-filter path; `-vvv` is full passthrough (no flag injection).
+const WARN_HINT: &str = "(rtk -v shows warnings, -vvv for raw)";
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     if verbose >= 3 {
@@ -270,6 +276,13 @@ struct ParsedStream {
     /// When false, the run was truncated (Ctrl-C, crashed reader, etc.) — summaries
     /// prepend `[partial]` to the header (R2 pick 7).
     terminator_seen: bool,
+    /// Total count of envelopes with `info.level == "warn"`. Covers
+    /// `RunResultWarning`/`RunResultWarningMessage` (test-warn severity), plus
+    /// deprecation-class events (`PropertyMovedToConfigDeprecation`,
+    /// `RefModelVersionDeprecation`, `DeprecationsSummary`, etc.) that the
+    /// summary builders otherwise drop. Used to gate the v=0 `WARN_HINT`
+    /// footer — the signal is "dbt emitted at least one warning we hid".
+    warn_event_count: usize,
 }
 
 fn parse_events(raw: &str) -> ParsedStream {
@@ -292,6 +305,9 @@ fn parse_events(raw: &str) -> ParsedStream {
         // dbt 1.x doesn't put a clean success/failure on LogModelResult.data;
         // the envelope's `info.level` is the truth: "info"|"warn" succeeded, "error" failed.
         let succeeded = envelope.info.level != "error";
+        if envelope.info.level == "warn" {
+            out.warn_event_count += 1;
+        }
         let info_msg = envelope.info.msg.clone();
         let parsed: Option<ParsedEvent> = match envelope.info.name.as_str() {
             "LogModelResult" => parse_data::<ModelResultData>(envelope.data).map(|mut m| {
@@ -424,6 +440,17 @@ fn leftover_passthrough(leftover: &[String]) -> Option<String> {
     None
 }
 
+/// True iff the v=0 `WARN_HINT` footer should be appended to a JSON-path summary.
+/// Fires only on success-shaped runs (no failures, no main_error) where dbt
+/// emitted at least one warn-level event we suppressed. On failure paths the
+/// existing tee + `[full output: ...]` hint covers recovery.
+fn should_emit_warn_hint(parsed: &ParsedStream, has_failures: bool, verbose: u8) -> bool {
+    verbose == 0
+        && !has_failures
+        && parsed.main_error.is_none()
+        && parsed.warn_event_count > 0
+}
+
 fn build_run_summary(parsed: &ParsedStream, verbose: u8, cmd_label: &str) -> String {
     let mut nodes: Vec<&ModelResultData> = Vec::new();
     let mut run_summary: Option<&RunSummaryData> = None;
@@ -484,6 +511,10 @@ fn build_run_summary(parsed: &ParsedStream, verbose: u8, cmd_label: &str) -> Str
                 &format!("{} skipped  {}", skipped, fmt_secs(elapsed)),
                 1,
             );
+        }
+        if should_emit_warn_hint(parsed, false, verbose) {
+            header.push('\n');
+            header.push_str(WARN_HINT);
         }
         return header;
     }
@@ -905,6 +936,10 @@ fn build_test_summary(parsed: &ParsedStream, verbose: u8) -> String {
                 1,
             );
         }
+        if should_emit_warn_hint(parsed, false, verbose) {
+            out.push('\n');
+            out.push_str(WARN_HINT);
+        }
         return out;
     }
 
@@ -1180,6 +1215,10 @@ fn build_build_summary(parsed: &ParsedStream, verbose: u8) -> String {
     out.push_str(&format!("  {}", fmt_secs(elapsed)));
 
     if !any_fail {
+        if should_emit_warn_hint(parsed, false, verbose) {
+            out.push('\n');
+            out.push_str(WARN_HINT);
+        }
         return out;
     }
 
@@ -1394,7 +1433,33 @@ fn light_filter(raw: &str, verbose: u8, subcmd: &str) -> String {
         }
     }
 
-    out.join("\n")
+    let mut joined = out.join("\n");
+    if verbose == 0 && light_filter_should_hint(raw) {
+        joined.push('\n');
+        joined.push_str(WARN_HINT);
+    }
+    joined
+}
+
+/// True iff the light-filter raw input has stripped warning content but no
+/// error indicators that would already trigger a tee + `[full output: ...]`
+/// recovery footer. ANSI codes are removed before substring checks because
+/// dbt wraps `[WARNING]` markers in color escapes (`[\x1b[33mWARNING\x1b[0m]`).
+fn light_filter_should_hint(raw: &str) -> bool {
+    let cleaned = strip_ansi(raw);
+    let has_warnings = cleaned.contains("[WARNING]")
+        || cleaned.contains("FutureWarning:")
+        || cleaned.contains("DeprecationWarning:");
+    if !has_warnings {
+        return false;
+    }
+    let has_error = cleaned.contains("Encountered an error")
+        || cleaned.contains("Compilation Error")
+        || cleaned.contains("Parsing Error")
+        || cleaned.contains("Database Error")
+        || cleaned.contains("Runtime Error")
+        || cleaned.contains("Syntax error");
+    !has_error
 }
 
 /// True iff `trimmed` is a "dashes row" — 20+ ASCII hyphens, nothing else.
@@ -1748,6 +1813,208 @@ mod tests {
         assert!(out.contains("0 nodes selected"));
         assert!(!out.contains("parse error"));
         assert!(!out.contains("compile error"));
+    }
+
+    // -- WARN_HINT footer (success-only discoverability) ---------------------------------
+
+    /// Inline NDJSON for the v=0 success-with-warnings JSON-path case. Mirrors a
+    /// real `dbt run` that completed successfully but emitted a deprecation
+    /// `level=warn` event — the scenario where the LLM, given only the v=0
+    /// summary, has no way to know warnings exist unless the hint is present.
+    /// Anonymization conventions match the rest of the fixtures
+    /// (`dummy_model_NNN`, `dummy_team_NNN`, `0000...` invocation IDs).
+    const FIXTURE_RUN_PASS_WITH_WARNINGS: &str = r#"{"info":{"name":"MainReportVersion","level":"info","msg":"Running with dbt=1.11.7"},"data":{}}
+{"info":{"name":"PropertyMovedToConfigDeprecation","level":"warn","msg":"[WARNING][PropertyMovedToConfigDeprecation]: Deprecated functionality"},"data":{"file":"dummy/path_017/dummy_model_086/schema.yml","key":"docs"}}
+{"info":{"name":"LogModelResult","level":"info","msg":"1 of 2 OK"},"data":{"node_info":{"node_name":"dummy_model_086","unique_id":"model.dummy_team_014.dummy_model_086"},"execution_time":2.4}}
+{"info":{"name":"LogModelResult","level":"info","msg":"2 of 2 OK"},"data":{"node_info":{"node_name":"dummy_model_174","unique_id":"model.dummy_team_014.dummy_model_174"},"execution_time":1.1}}
+{"info":{"name":"DeprecationsSummary","level":"warn","msg":"[WARNING][DeprecationsSummary]: 1 occurrence"},"data":{}}
+{"info":{"name":"FinishedRunningStats","level":"info","msg":"done"},"data":{"execution_time":3.5}}
+"#;
+
+    #[test]
+    fn test_warn_hint_appended_at_v0_when_warnings_present_and_no_failures() {
+        let parsed = parse_events(FIXTURE_RUN_PASS_WITH_WARNINGS);
+        assert!(
+            parsed.warn_event_count >= 1,
+            "fixture should emit at least one warn-level event"
+        );
+        let out = build_run_summary(&parsed, 0, "run");
+        assert!(out.starts_with("dbt run: 2/2 OK"));
+        assert!(
+            out.contains(WARN_HINT),
+            "expected WARN_HINT footer at v=0 with warnings, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_warn_hint_absent_at_v1_even_when_warnings_present() {
+        // At -v the user already opted into warnings via wider body caps and
+        // `[WARNING]` retention — the hint becomes redundant.
+        let parsed = parse_events(FIXTURE_RUN_PASS_WITH_WARNINGS);
+        let out = build_run_summary(&parsed, 1, "run");
+        assert!(
+            !out.contains(WARN_HINT),
+            "WARN_HINT must not appear at verbose>=1, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_warn_hint_absent_when_no_warnings() {
+        // Clean pass-only fixture has zero warn-level events — no hint.
+        let parsed = parse_events(FIXTURE_RUN_PASS);
+        assert_eq!(parsed.warn_event_count, 0);
+        let out = build_run_summary(&parsed, 0, "run");
+        assert!(!out.contains(WARN_HINT));
+    }
+
+    #[test]
+    fn test_warn_hint_absent_when_failures_present() {
+        // On any failure the existing tee + `[full output: ...]` recovery footer
+        // covers the LLM. WARN_HINT must not stack on top of that.
+        let parsed = parse_events(FIXTURE_RUN_FAIL);
+        let out = build_run_summary(&parsed, 0, "run");
+        assert!(!out.contains(WARN_HINT));
+    }
+
+    #[test]
+    fn test_warn_hint_absent_on_main_encountered_error() {
+        // Parse-time fail-fast — `main_error` set, total==0, takes the
+        // `render_main_error_summary` branch which never appends the hint.
+        let raw = r#"{"info":{"name":"PropertyMovedToConfigDeprecation","level":"warn","msg":"[WARNING]"},"data":{}}
+{"info":{"name":"MainEncounteredError","level":"error","msg":"Encountered an error:\nCompilation Error\n  bad"},"data":{}}
+"#;
+        let parsed = parse_events(raw);
+        assert!(parsed.warn_event_count >= 1);
+        assert!(parsed.main_error.is_some());
+        let out = build_run_summary(&parsed, 0, "run");
+        assert!(!out.contains(WARN_HINT));
+    }
+
+    #[test]
+    fn test_warn_hint_appended_in_test_summary_all_pass_with_warn_event() {
+        // `dbt test` that passed but emitted a deprecation warn-event (e.g. dbt
+        // surfacing a deprecated test config). Header is the all-pass shape.
+        let raw = r#"{"info":{"name":"PropertyMovedToConfigDeprecation","level":"warn","msg":"[WARNING]"},"data":{}}
+{"info":{"name":"LogTestResult","level":"info","msg":"PASS"},"data":{"node_info":{"node_name":"not_null_dummy_model_086_id","unique_id":"test.dummy_team_014.x"},"status":"pass","execution_time":0.4}}
+{"info":{"name":"FinishedRunningStats","level":"info","msg":"done"},"data":{"execution_time":0.5}}
+"#;
+        let parsed = parse_events(raw);
+        let out = build_test_summary(&parsed, 0);
+        assert!(out.starts_with("dbt test: 1/1 PASS"));
+        assert!(out.contains(WARN_HINT));
+    }
+
+    #[test]
+    fn test_warn_hint_appended_in_build_summary_all_pass_with_warn_event() {
+        let raw = r#"{"info":{"name":"PropertyMovedToConfigDeprecation","level":"warn","msg":"[WARNING]"},"data":{}}
+{"info":{"name":"LogModelResult","level":"info","msg":"OK"},"data":{"node_info":{"node_name":"dummy_model_086","unique_id":"model.dummy_team_014.dummy_model_086"},"execution_time":1.0}}
+{"info":{"name":"LogTestResult","level":"info","msg":"PASS"},"data":{"node_info":{"node_name":"not_null_dummy_model_086_id","unique_id":"test.dummy_team_014.x"},"status":"pass","execution_time":0.2}}
+{"info":{"name":"FinishedRunningStats","level":"info","msg":"done"},"data":{"execution_time":1.5}}
+"#;
+        let parsed = parse_events(raw);
+        let out = build_build_summary(&parsed, 0);
+        assert!(out.starts_with("dbt build:"));
+        assert!(out.contains(WARN_HINT));
+    }
+
+    #[test]
+    fn test_light_filter_hint_appended_at_v0_when_warnings_present() {
+        // dbt parse output containing a `[WARNING]` deprecation block (ANSI
+        // escapes preserved as dbt emits them). No error markers — hint fires.
+        let raw = "\u{1b}[0m23:42:42  Running with dbt=1.11.7\n\
+                   \u{1b}[0m23:42:58  [\u{1b}[33mWARNING\u{1b}[0m][PropertyMovedToConfigDeprecation]: Deprecated functionality\n\
+                   Found `docs` as a top-level property of `models[0]` in file\n\
+                   `dummy/path_017/dummy_model_086/schema.yml`. The\n\
+                   `docs` top-level property should be moved into the `config` of `models[0]`.\n\
+                   \u{1b}[0m23:43:04  Performance info: /path/to/project/dbt/target/perf_info.json\n";
+        let out = light_filter(raw, 0, "parse");
+        assert!(
+            out.contains(WARN_HINT),
+            "expected WARN_HINT in light_filter output, got:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_light_filter_hint_absent_when_error_marker_present() {
+        // Same warning content, but a parse error follows — tee will fire on
+        // the failing exit code, so the hint is suppressed to avoid stacking.
+        let raw = "\u{1b}[0m23:42:58  [\u{1b}[33mWARNING\u{1b}[0m][PropertyMovedToConfigDeprecation]: Deprecated functionality\n\
+                   `dummy/path_017/dummy_model_086/schema.yml`.\n\
+                   \u{1b}[0m23:42:59  Encountered an error:\nParsing Error\n  bad yaml\n";
+        let out = light_filter(raw, 0, "parse");
+        assert!(!out.contains(WARN_HINT));
+    }
+
+    #[test]
+    fn test_light_filter_hint_absent_at_v1() {
+        let raw = "23:42:58  [WARNING][PropertyMovedToConfigDeprecation]: Deprecated functionality\n\
+                   `dummy/path_017/dummy_model_086/schema.yml`.\n";
+        let out = light_filter(raw, 1, "parse");
+        assert!(!out.contains(WARN_HINT));
+    }
+
+    #[test]
+    fn test_warn_hint_fires_on_real_json_path_pass_fixtures() {
+        // Real anonymized captures from a 12k-model dbt project. Each is a
+        // successful run (no errors) that emitted deprecation/ref-version
+        // `level=warn` events — the production case where v=0 strips warnings
+        // and the LLM must be told they exist.
+        let cases: &[(&str, &str, &str)] = &[
+            ("dbt run", REAL_RUN_PASS, "run"),
+            ("dbt seed", REAL_SEED_PASS, "seed"),
+            ("dbt snapshot", REAL_SNAPSHOT_PASS, "snapshot"),
+        ];
+        for (label, raw, cmd_label) in cases {
+            let parsed = parse_events(raw);
+            assert!(
+                parsed.warn_event_count > 0,
+                "{}: real fixture should have warn events",
+                label
+            );
+            let out = build_run_summary(&parsed, 0, cmd_label);
+            assert!(
+                out.contains(WARN_HINT),
+                "{}: WARN_HINT must appear on real success-with-warnings fixture, got:\n{}",
+                label,
+                out
+            );
+            // -v must suppress it (user opted into seeing warnings inline).
+            let out_v = build_run_summary(&parsed, 1, cmd_label);
+            assert!(
+                !out_v.contains(WARN_HINT),
+                "{}: WARN_HINT must NOT appear at -v, got:\n{}",
+                label,
+                out_v
+            );
+        }
+    }
+
+    #[test]
+    fn test_warn_hint_fires_on_real_light_filter_pass_fixtures() {
+        // Real anonymized `dbt parse` and `dbt compile` captures. Both
+        // contain ~127 `[WARNING]` deprecation/ref-version blocks and no error
+        // markers — light-filter strips the warnings at v=0, hint must fire.
+        let cases: &[(&str, &str, &str)] = &[
+            ("dbt parse", REAL_PARSE, "parse"),
+            ("dbt compile", REAL_COMPILE, "compile"),
+        ];
+        for (label, raw, subcmd) in cases {
+            let out = light_filter(raw, 0, subcmd);
+            assert!(
+                out.contains(WARN_HINT),
+                "{}: WARN_HINT must appear in light-filter output for real success-with-warnings fixture",
+                label
+            );
+            let out_v = light_filter(raw, 1, subcmd);
+            assert!(
+                !out_v.contains(WARN_HINT),
+                "{}: WARN_HINT must NOT appear at -v in light-filter output",
+                label
+            );
+        }
     }
 
     // -- Helpers / regressions ------------------------------------------------------------
