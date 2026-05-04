@@ -29,6 +29,10 @@ rtk gain --all --format csv > savings.csv
 # Combined flags
 rtk gain --graph --history --quota    # Classic view with extras
 rtk gain --daily --weekly --monthly   # Multiple breakdowns
+
+# Reset all tracking data
+rtk gain --reset          # prompts [y/N] before deleting
+rtk gain --reset --yes    # skip prompt (CI/scripts)
 ```
 
 ## Command Options
@@ -50,6 +54,15 @@ rtk gain --daily --weekly --monthly   # Multiple breakdowns
 | `--history` | Recent 10 commands |
 | `--quota` | Monthly quota analysis (Pro/5x/20x tiers) |
 | `--tier <TIER>` | Quota tier: pro, 5x, 20x (default: 20x) |
+
+### Reset Flag
+
+| Flag | Description |
+|------|-------------|
+| `--reset` | Permanently delete all tracking data (commands + parse failures) |
+| `--yes` | Skip the confirmation prompt (for CI/scripts) |
+
+> **Warning**: `--reset` is irreversible. It clears both the `commands` and `parse_failures` tables atomically. A `[y/N]` confirmation prompt is shown by default. In non-interactive environments (piped stdin), it defaults to `N` unless `--yes` is passed.
 
 ### Export Formats
 

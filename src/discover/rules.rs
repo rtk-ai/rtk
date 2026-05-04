@@ -35,6 +35,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^glab\s+(mr|issue|ci|pipeline|api|release)",
+        rtk_cmd: "rtk glab",
+        rewrite_prefixes: &["glab"],
+        category: "GitLab",
+        savings_pct: 82.0,
+        subcmd_savings: &[("mr", 87.0), ("ci", 82.0), ("issue", 80.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
         rtk_cmd: "rtk cargo",
         rewrite_prefixes: &["cargo"],
@@ -53,7 +62,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)\s+",
+        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
