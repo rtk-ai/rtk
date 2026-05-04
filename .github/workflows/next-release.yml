@@ -22,8 +22,15 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_BODY: ${{ github.event.pull_request.body }}
           REPO: ${{ github.repository }}
+          ALLOWED_REPOS: "rtk-ai/rtk"
         run: |
           set -euo pipefail
+
+          URL_PATTERN=""
+          for repo in $ALLOWED_REPOS; do
+            URL_PATTERN="${URL_PATTERN}|https://github\\.com/${repo}/issues/[0-9]+"
+          done
+          URL_PATTERN="${URL_PATTERN#|}"
 
           if printf '%s' "$PR_TITLE" | grep -qiE '^feat'; then
             SECTION="Feats"
@@ -36,7 +43,7 @@ jobs:
           ISSUE_REFS=""
           if [ -n "$PR_BODY" ]; then
             ISSUE_REFS=$(echo "$PR_BODY" \
-              | grep -oiE '(closes|fixes|resolves)\s+#[0-9]+|https://github\.com/[^/]+/[^/]+/issues/[0-9]+' \
+              | grep -oiE "(closes|fixes|resolves):?\s+#[0-9]+|${URL_PATTERN}" \
               | grep -oE '#[0-9]+|issues/[0-9]+' \
               | sed 's|issues/|#|' \
               | sort -u \
