@@ -62,7 +62,11 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
+        // Mirrors NPM_SUBCOMMANDS in src/cmds/js/npm_cmd.rs — keep in sync. (#1148)
+        // (\s|$) prevents prefix collisions: "npm i" must not match "npm init" or "npm invoke"
+        // dist-tag must come before all single-letter alternatives so the engine
+        // can match the longer literal first; same reason run-script precedes run.
+        pattern: r"^npm\s+(run-script|run|exec|rum|urn|x|install|ci|uninstall|remove|rm|update|up|list|ls|outdated|init|create|publish|pack|link|audit|fund|explain|why|search|view|info|show|config|set|get|cache|prune|dedupe|doctor|help|version|prefix|root|bin|bugs|docs|home|repo|ping|whoami|token|profile|team|access|owner|deprecate|dist-tag|star|stars|login|logout|adduser|unpublish|pkg|diff|rebuild|test|i)(\s|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
