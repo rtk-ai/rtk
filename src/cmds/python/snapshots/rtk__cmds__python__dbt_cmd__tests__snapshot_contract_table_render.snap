@@ -1,0 +1,18 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+dbt build: 0/1 OK  1 ERR  1 skipped  28s
+═══════════════════════════════════════
+ERR  dummy_model_118                           contract
+     | column_name                | definition_type | contract_type | mismatch_reason       |
+     | -------------------------- | --------------- | ------------- | --------------------- |
+     | ghost_column_xyz_DELETE_ME |                 | STRING        | missing in definition |
+     > in macro assert_columns_equivalent (macros/relations/column/columns_spec_ddl.sql)
+     > called by macro default__get_assert_columns_equivalent (macros/relations/column/columns_spec_ddl.sql)
+     > called by macro get_assert_columns_equivalent (macros/relations/column/columns_spec_ddl.sql)
+     > called by macro bigquery__create_table_as (macros/adapters.sql)
+     > called by macro create_table_as (macros/relations/table/create.sql)
+     > called by macro statement (macros/etc/statement.sql)
+     > called by macro materialization_table_bigquery (macros/materializations/table.sql)
+     > called by model dummy_model_118 (models/sales/dummy_model_160/dummy_model_118/dummy_model_118_v1.sql)

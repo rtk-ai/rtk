@@ -1,0 +1,5 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+dbt run: 2/2 OK  4s

@@ -1,0 +1,7 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+dbt build: 1 models OK, 1/2 tests PASS, 1 test FAIL  4s
+═══════════════════════════════════════
+FAIL  unique_customers_id                       1 row

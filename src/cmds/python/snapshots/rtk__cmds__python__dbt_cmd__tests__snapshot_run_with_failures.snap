@@ -1,0 +1,9 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+dbt run: 1/2 OK  1 ERR  3s
+═══════════════════════════════════════
+ERR  dummy_model_174                           compile
+     Compilation Error: macro 'foo' undefined
+     in model dummy_model_174.sql line 12

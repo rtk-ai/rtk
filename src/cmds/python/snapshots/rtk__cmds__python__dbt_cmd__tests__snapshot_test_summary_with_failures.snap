@@ -1,0 +1,10 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+dbt test: 1/2 PASS  1 FAIL  1s
+═══════════════════════════════════════
+FAIL  unique_customers_id                       3 rows
+      select count(*) from (
+      select customer_id
+      from `dw.customers`

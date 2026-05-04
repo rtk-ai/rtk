@@ -1,0 +1,6 @@
+---
+source: src/cmds/python/dbt_cmd.rs
+expression: out
+---
+15:59:47  Encountered an error:
+Parsing Error
