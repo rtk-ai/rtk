@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
-use regex::Regex;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
+
+#[cfg(test)]
+use regex::Regex;
 
 pub trait StreamFilter {
     fn feed_line(&mut self, line: &str) -> Option<String>;
@@ -83,7 +85,7 @@ impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
     }
 }
 
-#[allow(dead_code)] // available for command modules; currently used in tests only
+#[cfg(test)] // available for command modules; currently used in tests only
 pub struct RegexBlockFilter {
     start_re: Regex,
     skip_prefixes: Vec<String>,
@@ -91,6 +93,7 @@ pub struct RegexBlockFilter {
     block_count: usize,
 }
 
+#[cfg(test)]
 impl RegexBlockFilter {
     pub fn new(tool_name: &str, start_pattern: &str) -> Self {
         Self {
@@ -103,13 +106,11 @@ impl RegexBlockFilter {
         }
     }
 
-    #[allow(dead_code)]
     pub fn skip_prefix(mut self, prefix: &str) -> Self {
         self.skip_prefixes.push(prefix.to_string());
         self
     }
 
-    #[allow(dead_code)]
     pub fn skip_prefixes(mut self, prefixes: &[&str]) -> Self {
         self.skip_prefixes
             .extend(prefixes.iter().map(|s| s.to_string()));
@@ -117,6 +118,7 @@ impl RegexBlockFilter {
     }
 }
 
+#[cfg(test)]
 impl BlockHandler for RegexBlockFilter {
     fn should_skip(&mut self, line: &str) -> bool {
         self.skip_prefixes.iter().any(|p| line.starts_with(p))
@@ -152,30 +154,9 @@ pub trait StdinFilter: Send {
     fn flush(&mut self) -> String;
 }
 
-#[allow(dead_code)] // test utility: wraps closures as StreamFilter
-pub struct LineFilter<F: FnMut(&str) -> Option<String>> {
-    f: F,
-}
-
-#[allow(dead_code)]
-impl<F: FnMut(&str) -> Option<String>> LineFilter<F> {
-    pub fn new(f: F) -> Self {
-        Self { f }
-    }
-}
-
-impl<F: FnMut(&str) -> Option<String>> StreamFilter for LineFilter<F> {
-    fn feed_line(&mut self, line: &str) -> Option<String> {
-        (self.f)(line)
-    }
-
-    fn flush(&mut self) -> String {
-        String::new()
-    }
-}
-
 pub enum FilterMode<'a> {
     Streaming(Box<dyn StreamFilter + 'a>),
+    #[allow(dead_code)]
     Buffered(Box<dyn Fn(&str) -> String + 'a>),
     CaptureOnly,
     Passthrough,
@@ -197,7 +178,7 @@ pub struct StreamResult {
 }
 
 impl StreamResult {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn success(&self) -> bool {
         self.exit_code == 0
     }
@@ -344,7 +325,7 @@ pub fn run_streaming(
                 };
                 if is_stderr {
                     if !capped_err {
-                        if raw_stderr.len() + line.len() + 1 <= RAW_CAP {
+                        if raw_stderr.len() + line.len() < RAW_CAP {
                             raw_stderr.push_str(&line);
                             raw_stderr.push('\n');
                         } else {
@@ -353,7 +334,7 @@ pub fn run_streaming(
                         }
                     }
                 } else if !capped_out {
-                    if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
+                    if raw_stdout.len() + line.len() < RAW_CAP {
                         raw_stdout.push_str(&line);
                         raw_stdout.push('\n');
                     } else {
@@ -394,7 +375,7 @@ pub fn run_streaming(
             let mut raw_err = String::new();
             let mut capped = false;
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if raw_err.len() + line.len() + 1 <= RAW_CAP {
+                if raw_err.len() + line.len() < RAW_CAP {
                     raw_err.push_str(&line);
                     raw_err.push('\n');
                 } else if !capped {
@@ -413,7 +394,7 @@ pub fn run_streaming(
                 FilterMode::Streaming(_) => unreachable!("handled by is_streaming branch"),
                 FilterMode::Buffered(filter_fn) => {
                     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                        if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
+                        if raw_stdout.len() + line.len() < RAW_CAP {
                             raw_stdout.push_str(&line);
                             raw_stdout.push('\n');
                         } else if !capped_out {
@@ -438,7 +419,7 @@ pub fn run_streaming(
                 }
                 FilterMode::CaptureOnly => {
                     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                        if raw_stdout.len() + line.len() + 1 <= RAW_CAP {
+                        if raw_stdout.len() + line.len() < RAW_CAP {
                             raw_stdout.push_str(&line);
                             raw_stdout.push('\n');
                         } else if !capped_out {
@@ -521,6 +502,26 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
 pub(crate) mod tests {
     use super::*;
     use std::process::Command;
+
+    struct LineFilter<F: FnMut(&str) -> Option<String>> {
+        f: F,
+    }
+
+    impl<F: FnMut(&str) -> Option<String>> LineFilter<F> {
+        pub fn new(f: F) -> Self {
+            Self { f }
+        }
+    }
+
+    impl<F: FnMut(&str) -> Option<String>> StreamFilter for LineFilter<F> {
+        fn feed_line(&mut self, line: &str) -> Option<String> {
+            (self.f)(line)
+        }
+
+        fn flush(&mut self) -> String {
+            String::new()
+        }
+    }
 
     #[test]
     fn test_exit_code_zero() {
