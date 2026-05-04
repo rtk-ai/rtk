@@ -980,58 +980,63 @@ fn format_issue(issue: &binlog::BinlogIssue, kind: &str) -> String {
 }
 
 fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> String {
+    // Binlog path omitted from output (temp file, already cleaned up)
     let status_icon = if summary.succeeded { "ok" } else { "fail" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
-    let mut out = String::new();
-
-    if !summary.errors.is_empty() {
-        out.push_str("Errors:\n");
-        for issue in summary.errors.iter().take(20) {
-            out.push_str(&format!("{}\n", format_issue(issue, "error")));
-        }
-        if summary.errors.len() > 20 {
-            out.push_str(&format!(
-                "  ... +{} more errors\n",
-                summary.errors.len() - 20
-            ));
-        }
-    }
-
+    let mut warnings = String::new();
     if !summary.warnings.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str("Warnings:\n");
+        warnings.push_str("Warnings:\n");
         for issue in summary.warnings.iter().take(10) {
-            out.push_str(&format!("{}\n", format_issue(issue, "warning")));
+            warnings.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
         if summary.warnings.len() > 10 {
-            out.push_str(&format!(
+            warnings.push_str(&format!(
                 "  ... +{} more warnings\n",
                 summary.warnings.len() - 10
             ));
         }
     }
 
-    if !out.is_empty() {
-        out.push_str("\n---------------------------------------\n");
+    let mut errors = String::new();
+    if !summary.errors.is_empty() {
+        errors.push_str("Errors:\n");
+        for issue in summary.errors.iter().take(20) {
+            errors.push_str(&format!("{}\n", format_issue(issue, "error")));
+        }
+        if summary.errors.len() > 20 {
+            errors.push_str(&format!(
+                "  ... +{} more errors\n",
+                summary.errors.len() - 20
+            ));
+        }
     }
+
+    let sep = if !warnings.is_empty() || !errors.is_empty() {
+        "---------------------------------------".to_string()
+    } else {
+        String::new()
+    };
 
     // Status line is emitted last so consumers that read the tail of the stream
     // (`| tail -N`, agent watch/monitor modes, bounded context windows) get a
     // definitive verdict. Mirrors native `dotnet build`, which ends with
     // `Build succeeded.` / `Build FAILED.`. See issue #1574.
-    out.push_str(&format!(
+    // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
+    let verdict = format!(
         "{} dotnet build: {} projects, {} errors, {} warnings ({})",
         status_icon,
         summary.project_count,
         summary.errors.len(),
         summary.warnings.len(),
         duration
-    ));
+    );
 
-    out
+    [warnings, errors, sep, verdict]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_test_output(
@@ -1073,59 +1078,60 @@ fn format_test_output(
         )
     };
 
-    let mut out = String::new();
-
+    // Binlog path omitted from output (temp file, already cleaned up)
+    let mut failed_tests_section = String::new();
     if has_failures && !summary.failed_tests.is_empty() {
-        out.push_str("Failed Tests:\n");
+        failed_tests_section.push_str("Failed Tests:\n");
         for failed in summary.failed_tests.iter().take(15) {
-            out.push_str(&format!("  {}\n", failed.name));
+            failed_tests_section.push_str(&format!("  {}\n", failed.name));
             for detail in &failed.details {
-                out.push_str(&format!("    {}\n", truncate(detail, 320)));
+                failed_tests_section.push_str(&format!("    {}\n", truncate(detail, 320)));
             }
-            out.push('\n');
+            failed_tests_section.push('\n');
         }
         if summary.failed_tests.len() > 15 {
-            out.push_str(&format!(
+            failed_tests_section.push_str(&format!(
                 "... +{} more failed tests\n",
                 summary.failed_tests.len() - 15
             ));
         }
     }
 
-    if !errors.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str("Errors:\n");
-        for issue in errors.iter().take(10) {
-            out.push_str(&format!("{}\n", format_issue(issue, "error")));
-        }
-        if errors.len() > 10 {
-            out.push_str(&format!("  ... +{} more errors\n", errors.len() - 10));
-        }
-    }
-
+    let mut warnings_section = String::new();
     if !warnings.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str("Warnings:\n");
+        warnings_section.push_str("Warnings:\n");
         for issue in warnings.iter().take(10) {
-            out.push_str(&format!("{}\n", format_issue(issue, "warning")));
+            warnings_section.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
         if warnings.len() > 10 {
-            out.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
+            warnings_section.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
         }
     }
 
-    if !out.is_empty() {
-        out.push_str("\n---------------------------------------\n");
+    let mut errors_section = String::new();
+    if !errors.is_empty() {
+        errors_section.push_str("Errors:\n");
+        for issue in errors.iter().take(10) {
+            errors_section.push_str(&format!("{}\n", format_issue(issue, "error")));
+        }
+        if errors.len() > 10 {
+            errors_section.push_str(&format!("  ... +{} more errors\n", errors.len() - 10));
+        }
     }
 
-    // Status line emitted last; see format_build_output (issue #1574).
-    out.push_str(&header);
+    let sep = if !failed_tests_section.is_empty() || !warnings_section.is_empty() || !errors_section.is_empty() {
+        "---------------------------------------".to_string()
+    } else {
+        String::new()
+    };
 
-    out
+    // Status line emitted last; see format_build_output (issue #1574).
+    // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
+    [failed_tests_section, warnings_section, errors_section, sep, header]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_restore_output(
@@ -1134,46 +1140,51 @@ fn format_restore_output(
     warnings: &[binlog::BinlogIssue],
     _binlog_path: &Path,
 ) -> String {
+    // Binlog path omitted from output (temp file, already cleaned up)
     let has_errors = summary.errors > 0;
     let status_icon = if has_errors { "fail" } else { "ok" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
-    let mut out = String::new();
-
-    if !errors.is_empty() {
-        out.push_str("Errors:\n");
-        for issue in errors.iter().take(20) {
-            out.push_str(&format!("{}\n", format_issue(issue, "error")));
-        }
-        if errors.len() > 20 {
-            out.push_str(&format!("  ... +{} more errors\n", errors.len() - 20));
-        }
-    }
-
+    let mut warnings_section = String::new();
     if !warnings.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str("Warnings:\n");
+        warnings_section.push_str("Warnings:\n");
         for issue in warnings.iter().take(10) {
-            out.push_str(&format!("{}\n", format_issue(issue, "warning")));
+            warnings_section.push_str(&format!("{}\n", format_issue(issue, "warning")));
         }
         if warnings.len() > 10 {
-            out.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
+            warnings_section.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
         }
     }
 
-    if !out.is_empty() {
-        out.push_str("\n---------------------------------------\n");
+    let mut errors_section = String::new();
+    if !errors.is_empty() {
+        errors_section.push_str("Errors:\n");
+        for issue in errors.iter().take(20) {
+            errors_section.push_str(&format!("{}\n", format_issue(issue, "error")));
+        }
+        if errors.len() > 20 {
+            errors_section.push_str(&format!("  ... +{} more errors\n", errors.len() - 20));
+        }
     }
 
+    let sep = if !warnings_section.is_empty() || !errors_section.is_empty() {
+        "---------------------------------------".to_string()
+    } else {
+        String::new()
+    };
+
     // Status line emitted last; see format_build_output (issue #1574).
-    out.push_str(&format!(
+    // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
+    let verdict = format!(
         "{} dotnet restore: {} projects, {} errors, {} warnings ({})",
         status_icon, summary.restored_projects, summary.errors, summary.warnings, duration
-    ));
+    );
 
-    out
+    [warnings_section, errors_section, sep, verdict]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
