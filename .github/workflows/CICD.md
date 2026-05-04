@@ -108,12 +108,42 @@ Trigger: push to master (only) | Concurrency: never cancelled
                      ┌────────────▼────────────┐
                      │ GitHub Release           │
                      │ (stable, "Latest" badge) │
-                     └──┬─────────┬─────────┬──┘
-                        │         │         │
-                        ▼         ▼         ▼
-                    Discord   Homebrew   latest
-                    notify    tap update  tag
+                     └┬────────┬────────┬─────┬┘
+                      │        │        │     │
+                      ▼        ▼        ▼     ▼
+                  Discord  Homebrew  latest  dispatch
+                  notify   tap upd.  tag    to bundlers
 ```
+
+## Post-release dispatch (cd.yml)
+
+Trigger: stable release created (after build-release completes)
+
+```
+     ┌──────────────────────────┐
+     │ build-release completed   │
+     │ (stable release exists)   │
+     └────────────┬─────────────┘
+                  │
+     ┌────────────▼─────────────┐
+     │ dispatch-to-pro           │
+     │                           │
+     │ GitHub App token          │
+     │ (APP_CLIENT_ID +          │
+     │  APP_PRIVATE_KEY)         │
+     └────────────┬─────────────┘
+                  │
+     ┌────────────▼─────────────┐
+     │ repository_dispatch       │
+     │ event_type: oss-release   │
+     │ payload: { tag: vX.Y.Z }  │
+     │                           │
+     │ → downstream repos        │
+     │   auto-bump dependency    │
+     └──────────────────────────┘
+```
+
+Downstream consumers automatically pick up new releases and bump their dependency.
 
 ## Manual release (release.yml)
 

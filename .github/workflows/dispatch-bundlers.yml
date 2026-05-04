@@ -1,0 +1,29 @@
+name: Dispatch to Bundlers
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'OSS tag to dispatch (e.g. v0.39.0)'
+        required: true
+        type: string
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: rtk-pro
+
+      - name: Dispatch oss-release event
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          gh api repos/rtk-ai/rtk-pro/dispatches \
+            -f event_type=oss-release \
+            -f "client_payload[tag]=$TAG_NAME"

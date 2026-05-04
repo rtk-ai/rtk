@@ -148,8 +148,32 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Update latest tag
+        env:
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -fa latest -m "Latest stable release (${{ needs.release-please.outputs.tag_name }})"
+          git tag -fa latest -m "Latest stable release ($TAG_NAME)"
           git push origin latest --force
+
+  dispatch-to-pro:
+    name: Dispatch to rtk-pro
+    needs: [release-please, build-release]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          repositories: rtk-pro
+
+      - name: Notify rtk-pro of new OSS release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          gh api repos/rtk-ai/rtk-pro/dispatches \
+            -f event_type=oss-release \
+            -f "client_payload[tag]=$TAG_NAME"

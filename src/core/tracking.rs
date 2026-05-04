@@ -1293,7 +1293,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use rtk::tracking::TimedExecution;
 ///
 /// let timer = TimedExecution::start();

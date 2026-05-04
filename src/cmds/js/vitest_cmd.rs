@@ -11,7 +11,11 @@ use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, extract_json_object, truncate_passthrough,
     FormatMode, OutputParser, ParseResult, TestFailure, TestResult, TokenFormatter,
 };
-use crate::Commands;
+/// Which JS test framework to run.
+pub enum JsTestFramework {
+    Vitest,
+    Jest,
+}
 
 /// Vitest JSON output structures (tool-specific format)
 #[derive(Debug, Deserialize)]
@@ -204,31 +208,22 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
+pub fn run_test(fw: JsTestFramework, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    let (framework, mut cmd) = match command {
-        Commands::Vitest { .. } => {
+    let (framework, mut cmd) = match fw {
+        JsTestFramework::Vitest => {
             let framework = "vitest";
             let mut cmd = package_manager_exec(framework);
-            cmd
-                // Force non-watch mode
-                .arg("run")
-                // Enable JSON structured output
-                .arg("--reporter=json");
+            cmd.arg("run").arg("--reporter=json");
             (framework, cmd)
         }
-        Commands::Jest { .. } => {
+        JsTestFramework::Jest => {
             let framework = "jest";
             let mut cmd = package_manager_exec(framework);
-            cmd
-                // Force non-watch mode
-                .arg("--no-watch")
-                // Enable JSON structured output
-                .arg("--json");
+            cmd.arg("--no-watch").arg("--json");
             (framework, cmd)
         }
-        _ => unreachable!(),
     };
 
     for arg in args {
