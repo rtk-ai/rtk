@@ -35,6 +35,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .collect();
 
     let mut cmd = resolved_command("ls");
+    // Force C locale so month names are in English (Jan-Dec),
+    // which the date regex expects. Non-English locales produce
+    // localized month names that break parsing.
+    cmd.env("LC_ALL", "C");
     cmd.arg("-la");
     for flag in &flags {
         if flag.starts_with("--") {
