@@ -979,8 +979,11 @@ fn format_issue(issue: &binlog::BinlogIssue, kind: &str) -> String {
     )
 }
 
+/// Format the build summary for stdout.
+///
+/// `_binlog_path` is intentionally unused — the binlog is a temporary file
+/// that has already been cleaned up by the time this runs.
 fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> String {
-    // Binlog path omitted from output (temp file, already cleaned up)
     let status_icon = if summary.succeeded { "ok" } else { "fail" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
@@ -1013,16 +1016,11 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     }
 
     let sep = if !warnings.is_empty() || !errors.is_empty() {
-        "---------------------------------------".to_string()
+        "---------------------------------------"
     } else {
-        String::new()
+        ""
     };
 
-    // Status line is emitted last so consumers that read the tail of the stream
-    // (`| tail -N`, agent watch/monitor modes, bounded context windows) get a
-    // definitive verdict. Mirrors native `dotnet build`, which ends with
-    // `Build succeeded.` / `Build FAILED.`. See issue #1574.
-    // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
     let verdict = format!(
         "{} dotnet build: {} projects, {} errors, {} warnings ({})",
         status_icon,
@@ -1032,13 +1030,22 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
         duration
     );
 
-    [warnings, errors, sep, verdict]
+    // Status line is emitted last so consumers that read the tail of the stream
+    // (`| tail -N`, agent watch/monitor modes, bounded context windows) get a
+    // definitive verdict. Mirrors native `dotnet build`, which ends with
+    // `Build succeeded.` / `Build FAILED.`. See issue #1574.
+    // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
+    [warnings, errors, sep.into(), verdict]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+/// Format the test summary for stdout.
+///
+/// `_binlog_path` is intentionally unused — the binlog is a temporary file
+/// that has already been cleaned up by the time this runs.
 fn format_test_output(
     summary: &binlog::TestSummary,
     errors: &[binlog::BinlogIssue],
@@ -1078,7 +1085,6 @@ fn format_test_output(
         )
     };
 
-    // Binlog path omitted from output (temp file, already cleaned up)
     let mut failed_tests_section = String::new();
     if has_failures && !summary.failed_tests.is_empty() {
         failed_tests_section.push_str("Failed Tests:\n");
@@ -1119,28 +1125,40 @@ fn format_test_output(
         }
     }
 
-    let sep = if !failed_tests_section.is_empty() || !warnings_section.is_empty() || !errors_section.is_empty() {
-        "---------------------------------------".to_string()
+    let sep = if !failed_tests_section.is_empty()
+        || !warnings_section.is_empty()
+        || !errors_section.is_empty()
+    {
+        "---------------------------------------"
     } else {
-        String::new()
+        ""
     };
 
     // Status line emitted last; see format_build_output (issue #1574).
     // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
-    [failed_tests_section, warnings_section, errors_section, sep, header]
+    [
+        failed_tests_section,
+        warnings_section,
+        errors_section,
+        sep.into(),
+        header,
+    ]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+/// Format the restore summary for stdout.
+///
+/// `_binlog_path` is intentionally unused — the binlog is a temporary file
+/// that has already been cleaned up by the time this runs.
 fn format_restore_output(
     summary: &binlog::RestoreSummary,
     errors: &[binlog::BinlogIssue],
     warnings: &[binlog::BinlogIssue],
     _binlog_path: &Path,
 ) -> String {
-    // Binlog path omitted from output (temp file, already cleaned up)
     let has_errors = summary.errors > 0;
     let status_icon = if has_errors { "fail" } else { "ok" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
@@ -1168,19 +1186,19 @@ fn format_restore_output(
     }
 
     let sep = if !warnings_section.is_empty() || !errors_section.is_empty() {
-        "---------------------------------------".to_string()
+        "---------------------------------------"
     } else {
-        String::new()
+        ""
     };
 
-    // Status line emitted last; see format_build_output (issue #1574).
-    // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
     let verdict = format!(
         "{} dotnet restore: {} projects, {} errors, {} warnings ({})",
         status_icon, summary.restored_projects, summary.errors, summary.warnings, duration
     );
 
-    [warnings_section, errors_section, sep, verdict]
+    // Status line emitted last; see format_build_output (issue #1574).
+    // Warnings before errors: errors survive `| tail -N` immediately above the verdict.
+    [warnings_section, errors_section, sep.into(), verdict]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
