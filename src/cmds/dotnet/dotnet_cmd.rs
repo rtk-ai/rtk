@@ -987,20 +987,6 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     let status_icon = if summary.succeeded { "ok" } else { "fail" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
-    let mut warnings = String::new();
-    if !summary.warnings.is_empty() {
-        warnings.push_str("Warnings:\n");
-        for issue in summary.warnings.iter().take(10) {
-            warnings.push_str(&format!("{}\n", format_issue(issue, "warning")));
-        }
-        if summary.warnings.len() > 10 {
-            warnings.push_str(&format!(
-                "  ... +{} more warnings\n",
-                summary.warnings.len() - 10
-            ));
-        }
-    }
-
     let mut errors = String::new();
     if !summary.errors.is_empty() {
         errors.push_str("Errors:\n");
@@ -1011,6 +997,20 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
             errors.push_str(&format!(
                 "  ... +{} more errors\n",
                 summary.errors.len() - 20
+            ));
+        }
+    }
+
+    let mut warnings = String::new();
+    if !summary.warnings.is_empty() {
+        warnings.push_str("Warnings:\n");
+        for issue in summary.warnings.iter().take(10) {
+            warnings.push_str(&format!("{}\n", format_issue(issue, "warning")));
+        }
+        if summary.warnings.len() > 10 {
+            warnings.push_str(&format!(
+                "  ... +{} more warnings\n",
+                summary.warnings.len() - 10
             ));
         }
     }
@@ -1103,17 +1103,6 @@ fn format_test_output(
         }
     }
 
-    let mut warnings_section = String::new();
-    if !warnings.is_empty() {
-        warnings_section.push_str("Warnings:\n");
-        for issue in warnings.iter().take(10) {
-            warnings_section.push_str(&format!("{}\n", format_issue(issue, "warning")));
-        }
-        if warnings.len() > 10 {
-            warnings_section.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
-        }
-    }
-
     let mut errors_section = String::new();
     if !errors.is_empty() {
         errors_section.push_str("Errors:\n");
@@ -1122,6 +1111,17 @@ fn format_test_output(
         }
         if errors.len() > 10 {
             errors_section.push_str(&format!("  ... +{} more errors\n", errors.len() - 10));
+        }
+    }
+
+    let mut warnings_section = String::new();
+    if !warnings.is_empty() {
+        warnings_section.push_str("Warnings:\n");
+        for issue in warnings.iter().take(10) {
+            warnings_section.push_str(&format!("{}\n", format_issue(issue, "warning")));
+        }
+        if warnings.len() > 10 {
+            warnings_section.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
         }
     }
 
@@ -1163,17 +1163,6 @@ fn format_restore_output(
     let status_icon = if has_errors { "fail" } else { "ok" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
-    let mut warnings_section = String::new();
-    if !warnings.is_empty() {
-        warnings_section.push_str("Warnings:\n");
-        for issue in warnings.iter().take(10) {
-            warnings_section.push_str(&format!("{}\n", format_issue(issue, "warning")));
-        }
-        if warnings.len() > 10 {
-            warnings_section.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
-        }
-    }
-
     let mut errors_section = String::new();
     if !errors.is_empty() {
         errors_section.push_str("Errors:\n");
@@ -1182,6 +1171,17 @@ fn format_restore_output(
         }
         if errors.len() > 20 {
             errors_section.push_str(&format!("  ... +{} more errors\n", errors.len() - 20));
+        }
+    }
+
+    let mut warnings_section = String::new();
+    if !warnings.is_empty() {
+        warnings_section.push_str("Warnings:\n");
+        for issue in warnings.iter().take(10) {
+            warnings_section.push_str(&format!("{}\n", format_issue(issue, "warning")));
+        }
+        if warnings.len() > 10 {
+            warnings_section.push_str(&format!("  ... +{} more warnings\n", warnings.len() - 10));
         }
     }
 
