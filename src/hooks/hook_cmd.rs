@@ -167,11 +167,8 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
     audit_log("rewrite", cmd, &rewritten);
 
     let output = json!({
-        "permissionDecision": "deny",
-        "permissionDecisionReason": format!(
-            "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
-            rewritten
-        )
+        "permissionDecision": "allow",
+        "modifiedArgs": { "command": rewritten }
     });
     let _ = writeln!(io::stdout(), "{output}");
     Ok(())
