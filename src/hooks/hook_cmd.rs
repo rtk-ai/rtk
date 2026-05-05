@@ -399,11 +399,23 @@ fn run_claude_inner(input: &str) -> Option<String> {
 
 // ── Cursor native hook ─────────────────────────────────────────
 
+/// Cursor on Windows ships hook payloads with one or more leading
+/// UTF-8 BOMs (`EF BB BF`, sometimes doubled), which serde_json
+/// refuses to parse. Strip them defensively so the rewrite path keeps
+/// working instead of silently returning `{}`.
+fn strip_leading_bom(input: &str) -> &str {
+    let mut s = input;
+    while let Some(rest) = s.strip_prefix('\u{feff}') {
+        s = rest;
+    }
+    s
+}
+
 /// Run the Cursor Agent hook natively.
 pub fn run_cursor() -> Result<()> {
     let input = read_stdin_limited()?;
 
-    let input = input.trim();
+    let input = strip_leading_bom(&input).trim();
     if input.is_empty() {
         let _ = writeln!(io::stdout(), "{{}}");
         return Ok(());
@@ -444,14 +456,20 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    let decision = match verdict {
-        PermissionVerdict::Allow => "allow",
-        _ => "ask",
-    };
+    // Cursor preToolUse currently enforces allow/deny only and can ignore
+    // updated_input when permission is "ask". Use "allow" for rewritten
+    // commands unless the command is explicitly denied above.
+    let decision = "allow";
 
     audit_log("rewrite", &cmd, &rewritten);
 
+    // `continue: true` mirrors the shape of every other Cursor hook
+    // (afterShellExecution, beforeSubmitPrompt, stop, ...). Cursor's
+    // preToolUse panel renders the JSON it received; without this field
+    // the panel collapses to `Output: {}` even though the rewrite ran,
+    // which makes the hook look broken to users.
     let output = json!({
+        "continue": true,
         "permission": decision,
         "updated_input": { "command": rewritten }
     });
@@ -471,6 +489,7 @@ fn run_cursor_inner_with_rules(
     ask_rules: &[String],
     allow_rules: &[String],
 ) -> String {
+    let input = strip_leading_bom(input);
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(_) => return "{}".to_string(),
@@ -492,11 +511,9 @@ fn run_cursor_inner_with_rules(
 
     match get_rewritten(&cmd) {
         Some(rewritten) => {
-            let decision = match verdict {
-                PermissionVerdict::Allow => "allow",
-                _ => "ask",
-            };
+            let decision = "allow";
             let output = json!({
+                "continue": true,
                 "permission": decision,
                 "updated_input": { "command": rewritten }
             });
@@ -777,10 +794,13 @@ mod tests {
     fn test_cursor_rewrite_flat_format() {
         let result = run_cursor_inner(&cursor_input("git status"));
         let v: Value = serde_json::from_str(&result).unwrap();
-        // Default permission (no explicit allow rule) → "ask"
-        assert_eq!(v["permission"], "ask");
+        // Cursor preToolUse expects allow/deny for rewrite application.
+        assert_eq!(v["permission"], "allow");
         assert_eq!(v["updated_input"]["command"], "rtk git status");
         assert!(v.get("hookSpecificOutput").is_none());
+        // `continue: true` keeps the Cursor preToolUse panel from collapsing
+        // to `Output: {}`; without it the rewrite is invisible to users.
+        assert_eq!(v["continue"], true);
     }
 
     #[test]
@@ -812,7 +832,66 @@ mod tests {
         let result = run_cursor_inner(&cursor_input("cargo test"));
         let v: Value = serde_json::from_str(&result).unwrap();
         assert!(v.get("hookSpecificOutput").is_none());
-        assert_eq!(v["permission"], "ask");
+        assert_eq!(v["permission"], "allow");
+        assert_eq!(v["continue"], true);
+    }
+
+    #[test]
+    fn test_cursor_compound_rewrite_includes_continue() {
+        let cmd = "cd \"/tmp/proj\" && git status";
+        let result = run_cursor_inner(&cursor_input(cmd));
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["continue"], true);
+        assert_eq!(v["permission"], "allow");
+        assert_eq!(
+            v["updated_input"]["command"],
+            "cd \"/tmp/proj\" && rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_cursor_strips_single_utf8_bom() {
+        // Some Cursor builds prepend a single UTF-8 BOM to hook stdin.
+        // serde_json rejects BOM-prefixed input, so without the strip
+        // the hook returned `{}` and the rewrite became a silent no-op.
+        let payload = cursor_input("git status");
+        let with_single_bom = format!("\u{feff}{}", payload);
+        let result = run_cursor_inner(&with_single_bom);
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["continue"], true);
+        assert_eq!(v["permission"], "allow");
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_cursor_strips_double_utf8_bom() {
+        // Cursor on Windows ships hook stdin with **two** leading
+        // UTF-8 BOMs (`EF BB BF EF BB BF`), confirmed via a stdin
+        // tracer wrapping `rtk hook cursor` on Cursor 3.2.x. This is
+        // the real-world payload shape the loop needs to survive.
+        let payload = cursor_input("git status");
+        let with_double_bom = format!("\u{feff}\u{feff}{}", payload);
+        let result = run_cursor_inner(&with_double_bom);
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["continue"], true);
+        assert_eq!(v["permission"], "allow");
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_strip_leading_bom_helper() {
+        // Direct unit test on the helper so future refactors can't
+        // regress the loop semantics without a clear failure signal.
+        assert_eq!(strip_leading_bom(""), "");
+        assert_eq!(strip_leading_bom("hello"), "hello");
+        assert_eq!(strip_leading_bom("\u{feff}hello"), "hello");
+        assert_eq!(strip_leading_bom("\u{feff}\u{feff}hello"), "hello");
+        assert_eq!(
+            strip_leading_bom("\u{feff}\u{feff}\u{feff}hello"),
+            "hello"
+        );
+        // BOM in the middle is preserved (not "leading").
+        assert_eq!(strip_leading_bom("a\u{feff}b"), "a\u{feff}b");
     }
 
     // --- Audit logging ---
