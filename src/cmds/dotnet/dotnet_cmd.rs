@@ -634,17 +634,15 @@ fn parse_global_json_mtp_mode(path: &Path) -> bool {
         .is_some_and(|r| r.eq_ignore_ascii_case("Microsoft.Testing.Platform"))
 }
 
-/// Checks whether the `global.json` closest to the current directory enables the .NET 10
+/// Checks whether the `global.json` closest to `start_dir` enables the .NET 10
 /// native MTP mode (`"test": { "runner": "Microsoft.Testing.Platform" }`).
-fn is_global_json_mtp_mode() -> bool {
-    let Ok(mut dir) = std::env::current_dir() else {
-        return false;
-    };
+fn is_global_json_mtp_mode_from(start_dir: &Path) -> bool {
+    let mut dir = start_dir.to_path_buf();
     loop {
         let path = dir.join("global.json");
         if path.exists() {
             let is_mtp = parse_global_json_mtp_mode(&path);
-            return is_mtp; // stop at first global.json found, regardless of result
+            return is_mtp;
         }
         if !dir.pop() {
             break;
@@ -652,6 +650,7 @@ fn is_global_json_mtp_mode() -> bool {
     }
     false
 }
+
 
 /// Detects which test runner mode the targeted project(s) use.
 ///
@@ -663,7 +662,14 @@ fn is_global_json_mtp_mode() -> bool {
 /// package). Parsing NuGet references to detect TrxReport availability is impractical due to
 /// central package management and MSBuild inheritance.
 fn detect_test_runner_mode(args: &[String]) -> TestRunnerMode {
-    if is_global_json_mtp_mode() {
+    let Ok(dir) = std::env::current_dir() else {
+        return TestRunnerMode::Classic;
+    };
+    detect_test_runner_mode_from(args, &dir)
+}
+
+fn detect_test_runner_mode_from(args: &[String], start_dir: &Path) -> TestRunnerMode {
+    if is_global_json_mtp_mode_from(start_dir) {
         return TestRunnerMode::MtpAfterSeparator;
     }
 
@@ -2284,6 +2290,62 @@ mod tests {
             .expect("write global.json");
 
         assert!(!parse_global_json_mtp_mode(&global_json));
+    }
+
+    #[test]
+    fn test_detect_test_runner_mode_global_json_returns_mtp_after_separator() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let global_json = temp_dir.path().join("global.json");
+        fs::write(
+            &global_json,
+            r#"{"sdk":{"version":"10.0.100"},"test":{"runner":"Microsoft.Testing.Platform"}}"#,
+        )
+        .expect("write global.json");
+
+        let args: Vec<String> = vec![];
+        assert_eq!(
+            detect_test_runner_mode_from(&args, temp_dir.path()),
+            TestRunnerMode::MtpAfterSeparator
+        );
+    }
+
+    #[test]
+    fn test_detect_test_runner_mode_global_json_priority_over_csproj() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let global_json = temp_dir.path().join("global.json");
+        fs::write(
+            &global_json,
+            r#"{"test":{"runner":"Microsoft.Testing.Platform"}}"#,
+        )
+        .expect("write global.json");
+
+        let csproj = temp_dir.path().join("Classic.Tests.csproj");
+        fs::write(
+            &csproj,
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+</Project>"#,
+        )
+        .expect("write csproj without MTP properties");
+
+        let args = vec![csproj.display().to_string()];
+        assert_eq!(
+            detect_test_runner_mode_from(&args, temp_dir.path()),
+            TestRunnerMode::MtpAfterSeparator
+        );
+    }
+
+    #[test]
+    fn test_detect_test_runner_mode_no_global_json_falls_back_to_classic() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+
+        let args: Vec<String> = vec![];
+        assert_eq!(
+            detect_test_runner_mode_from(&args, temp_dir.path()),
+            TestRunnerMode::Classic
+        );
     }
 
     #[test]
