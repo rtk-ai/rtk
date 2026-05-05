@@ -32,7 +32,7 @@ enum HookFormat {
     /// VS Code Copilot Chat / Claude Code: `tool_name` + `tool_input.command`, supports `updatedInput`.
     VsCode { command: String },
     /// GitHub Copilot CLI: camelCase `toolName` + `toolArgs` (JSON string), deny-with-suggestion only.
-    CopilotCli { command: String },
+    CopilotCli { command: String, tool_args: String },
     /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
     PassThrough,
 }
@@ -57,7 +57,7 @@ pub fn run_copilot() -> Result<()> {
 
     match detect_format(&v) {
         HookFormat::VsCode { command } => handle_vscode(&command),
-        HookFormat::CopilotCli { command } => handle_copilot_cli(&command),
+        HookFormat::CopilotCli { command, tool_args } => handle_copilot_cli(&command, &tool_args),
         HookFormat::PassThrough => Ok(()),
     }
 }
@@ -91,6 +91,7 @@ fn detect_format(v: &Value) -> HookFormat {
                     {
                         return HookFormat::CopilotCli {
                             command: cmd.to_string(),
+                            tool_args: tool_args_str.to_string(),
                         };
                     }
                 }
@@ -153,22 +154,31 @@ fn handle_vscode(cmd: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_copilot_cli(cmd: &str) -> Result<()> {
+fn handle_copilot_cli(cmd: &str, tool_args: &str) -> Result<()> {
     if permissions::check_command(cmd) == PermissionVerdict::Deny {
         audit_log("deny", cmd, "");
         return Ok(());
     }
-
+ 
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
         None => return Ok(()),
     };
-
+ 
     audit_log("rewrite", cmd, &rewritten);
-
+    
+    // Parse full toolArgs and preserve all fields, only modifying "command"
+    let modified_args = match serde_json::from_str::<Value>(tool_args) {
+        Ok(Value::Object(mut map)) => {
+            map.insert("command".into(), json!(rewritten));
+            Value::Object(map)
+        }
+        _ => json!({ "command": rewritten }),
+    };
+ 
     let output = json!({
         "permissionDecision": "allow",
-        "modifiedArgs": { "command": rewritten }
+        "modifiedArgs": modified_args
     });
     let _ = writeln!(io::stdout(), "{output}");
     Ok(())
