@@ -1,0 +1,19 @@
+> Task :app:testDebugUnitTest
+com.example.myapp.CalculatorTest > testAddition PASSED
+com.example.myapp.CalculatorTest > testSubtraction FAILED
+    java.lang.AssertionError: expected:<3> but was:<-1>
+        at org.junit.Assert.fail(Assert.java:89)
+        at org.junit.Assert.assertEquals(Assert.java:197)
+        at com.example.myapp.CalculatorTest.testSubtraction(CalculatorTest.kt:25)
+com.example.myapp.CalculatorTest > testMultiplication PASSED
+com.example.myapp.MainViewModelTest > loadDataSuccess PASSED
+com.example.myapp.MainViewModelTest > loadDataError FAILED
+    kotlin.NotImplementedError: An operation is not implemented: TODO
+        at com.example.myapp.MainViewModelTest.loadDataError(MainViewModelTest.kt:45)
+
+5 tests completed, 2 failed
+
+There were failing tests. See the report at: file:///Users/user/MyApp/app/build/reports/tests/testDebugUnitTest/index.html
+
+BUILD FAILED in 22s
+4 actionable tasks: 1 executed, 3 up-to-date

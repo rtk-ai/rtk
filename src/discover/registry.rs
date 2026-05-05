@@ -2866,6 +2866,98 @@ mod tests {
             Some("rtk npx svgo".to_string()),
         );
     }
+
+    // --- Gradle ---
+
+    #[test]
+    fn test_classify_gradlew() {
+        assert!(matches!(
+            classify_command("./gradlew assembleDebug"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_gradlew_no_dot_slash() {
+        assert!(matches!(
+            classify_command("gradlew build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_gradlew_bat() {
+        assert!(matches!(
+            classify_command("gradlew.bat clean"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_gradle() {
+        assert!(matches!(
+            classify_command("gradle build"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_gradlew() {
+        assert_eq!(
+            rewrite_command("./gradlew assembleDebug", &[]),
+            Some("rtk gradlew assembleDebug".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_no_dot_slash() {
+        assert_eq!(
+            rewrite_command("gradlew build", &[]),
+            Some("rtk gradlew build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_bat() {
+        assert_eq!(
+            rewrite_command("gradlew.bat clean", &[]),
+            Some("rtk gradlew clean".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradle() {
+        assert_eq!(
+            rewrite_command("gradle build", &[]),
+            Some("rtk gradlew build".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_gradlew_test_savings() {
+        assert_eq!(
+            classify_command("./gradlew test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk gradlew",
+                category: "Build",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
     // --- Compound operator edge cases ---
 
     #[test]
