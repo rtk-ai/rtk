@@ -9,7 +9,6 @@ strip_lines_matching = [
   "^Acquiring state lock",
   "^Releasing state lock",
 ]
-max_lines = 80
 on_empty = "terraform plan: no changes detected"
 
 [[tests.terraform-plan]]
