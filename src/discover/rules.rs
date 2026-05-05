@@ -573,7 +573,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^composer\s+(install|update|require)\b",
+        pattern: r"^composer\s+(?:(?:(?:-d|--working-dir)(?:=\S+|\s+\S+)|--profile|--ansi|--no-ansi|--no-interaction|--no-plugins|--no-scripts|--no-cache|--quiet|--verbose|-q|-v|-vv|-vvv)\s+)*(?:global\s+(?:(?:(?:-d|--working-dir)(?:=\S+|\s+\S+)|--profile|--ansi|--no-ansi|--no-interaction|--no-plugins|--no-scripts|--no-cache|--quiet|--verbose|-q|-v|-vv|-vvv)\s+)*)?(install|i|update|u|upgrade|require|r|licenses|show|info|fund|dump-autoload|dumpautoload|check-platform-reqs)\b",
         rtk_cmd: "rtk composer",
         rewrite_prefixes: &["composer"],
         category: "PackageManager",
