@@ -510,7 +510,7 @@ fn run_cursor_inner_with_rules(
 mod tests {
     use super::*;
 
-    fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
+    fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
         crate::discover::registry::rewrite_command(cmd, excluded, &[])
     }
 
@@ -612,26 +612,29 @@ mod tests {
     #[test]
     fn test_gemini_hook_uses_rewrite_command() {
         assert_eq!(
-            rewrite_command("git status", &[]),
+            rewrite_command_no_prefixes("git status", &[]),
             Some("rtk git status".into())
         );
         assert_eq!(
-            rewrite_command("cargo test", &[]),
+            rewrite_command_no_prefixes("cargo test", &[]),
             Some("rtk cargo test".into())
         );
         assert_eq!(
-            rewrite_command("rtk git status", &[]),
+            rewrite_command_no_prefixes("rtk git status", &[]),
             Some("rtk git status".into())
         );
-        assert_eq!(rewrite_command("cat <<EOF", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cat <<EOF", &[]), None);
     }
 
     #[test]
     fn test_gemini_hook_excluded_commands() {
         let excluded = vec!["curl".to_string()];
-        assert_eq!(rewrite_command("curl https://example.com", &excluded), None);
         assert_eq!(
-            rewrite_command("git status", &excluded),
+            rewrite_command_no_prefixes("curl https://example.com", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &excluded),
             Some("rtk git status".into())
         );
     }
@@ -639,7 +642,7 @@ mod tests {
     #[test]
     fn test_gemini_hook_env_prefix_preserved() {
         assert_eq!(
-            rewrite_command("RUST_LOG=debug cargo test", &[]),
+            rewrite_command_no_prefixes("RUST_LOG=debug cargo test", &[]),
             Some("RUST_LOG=debug rtk cargo test".into())
         );
     }
