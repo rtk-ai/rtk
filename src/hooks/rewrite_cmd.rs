@@ -53,24 +53,24 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn rewrite_command(cmd: &str) -> Option<String> {
+    fn rewrite_command_no_prefixes(cmd: &str) -> Option<String> {
         registry::rewrite_command(cmd, &[], &[])
     }
 
     #[test]
     fn test_run_supported_command_succeeds() {
-        assert!(rewrite_command("git status").is_some());
+        assert!(rewrite_command_no_prefixes("git status").is_some());
     }
 
     #[test]
     fn test_run_unsupported_returns_none() {
-        assert!(rewrite_command("htop").is_none());
+        assert!(rewrite_command_no_prefixes("htop").is_none());
     }
 
     #[test]
     fn test_run_already_rtk_returns_some() {
         assert_eq!(
-            rewrite_command("rtk git status"),
+            rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
         );
     }
