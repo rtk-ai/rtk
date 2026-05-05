@@ -500,7 +500,7 @@ fn build_effective_dotnet_args(
 
     // --nologo: skip for MTP mode — when global.json enables MTP, args may
     // pass directly to the MTP runtime which does not understand MSBuild/VSTest flags.
-    if runner_mode != TestRunnerMode::MtpVsTestBridge && !has_nologo_arg(args) {
+    if runner_mode != TestRunnerMode::MtpAfterSeparator && !has_nologo_arg(args) {
         effective.push("-nologo".to_string());
     }
 
@@ -519,7 +519,7 @@ fn build_effective_dotnet_args(
                 }
                 effective.extend(args.iter().cloned());
             }
-            TestRunnerMode::MtpVsTestBridge => {
+            TestRunnerMode::MtpAfterSeparator => {
                 // MTP mode (global.json or project-file properties): inject --report-trx
                 // after the -- separator. Works for MSTest/TUnit which bundle TrxReport.
                 // For xUnit v3 without Microsoft.Testing.Extensions.TrxReport, this causes
@@ -567,14 +567,14 @@ enum TestRunnerMode {
     /// `UseMicrosoftTestingPlatformRunner`, `TestingPlatformDotnetTestSupport`).
     /// `--logger trx` is silently ignored or breaks the run; inject `-- --report-trx`
     /// after the separator so it reaches the MTP runtime.
-    MtpVsTestBridge,
+    MtpAfterSeparator,
 }
 
 /// Which MTP-related property a single MSBuild file declares.
 #[derive(Debug, PartialEq)]
 enum MtpProjectKind {
     None,
-    VsTestBridge, // UseMicrosoftTestingPlatformRunner | UseTestingPlatformRunner | TestingPlatformDotnetTestSupport
+    MtpDetected, // UseMicrosoftTestingPlatformRunner | UseTestingPlatformRunner | TestingPlatformDotnetTestSupport
 }
 
 /// Scans a single MSBuild file (.csproj / .fsproj / .vbproj / Directory.Build.props) for
@@ -594,7 +594,7 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name_lower = e.local_name().as_ref().to_ascii_lowercase();
-                // All project-file MTP properties lead to VsTestBridge mode —
+                // All project-file MTP properties lead to MtpAfterSeparator mode —
                 // `--report-trx` must come after `--` separator.
                 inside_mtp_element = matches!(
                     name_lower.as_slice(),
@@ -606,7 +606,7 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
             Ok(Event::Text(e)) if inside_mtp_element => {
                 if let Ok(text) = e.unescape() {
                     if text.trim().eq_ignore_ascii_case("true") {
-                        return MtpProjectKind::VsTestBridge;
+                        return MtpProjectKind::MtpDetected;
                     }
                 }
             }
@@ -655,8 +655,8 @@ fn is_global_json_mtp_mode() -> bool {
 
 /// Detects which test runner mode the targeted project(s) use.
 ///
-/// Priority: global.json MTP > project-file/Directory.Build.props (MtpVsTestBridge) > Classic.
-/// Both global.json MTP and project-file MTP properties use VsTestBridge mode — inject
+/// Priority: global.json MTP > project-file/Directory.Build.props (MtpAfterSeparator) > Classic.
+/// Both global.json MTP and project-file MTP properties use MtpAfterSeparator mode — inject
 /// `-- --report-trx`. This works for MSTest/TUnit which bundle TrxReport, and for xUnit v3
 /// users who add `Microsoft.Testing.Extensions.TrxReport`. For xUnit v3 without the extension,
 /// `--report-trx` causes an "Unknown option" error which is informative (tells user to add the
@@ -664,13 +664,13 @@ fn is_global_json_mtp_mode() -> bool {
 /// central package management and MSBuild inheritance.
 fn detect_test_runner_mode(args: &[String]) -> TestRunnerMode {
     if is_global_json_mtp_mode() {
-        return TestRunnerMode::MtpVsTestBridge;
+        return TestRunnerMode::MtpAfterSeparator;
     }
 
     let found = scan_project_files_for_mtp(args);
 
-    if found == MtpProjectKind::VsTestBridge {
-        TestRunnerMode::MtpVsTestBridge
+    if found == MtpProjectKind::MtpDetected {
+        TestRunnerMode::MtpAfterSeparator
     } else {
         TestRunnerMode::Classic
     }
@@ -692,8 +692,8 @@ fn scan_project_files_for_mtp(args: &[String]) -> MtpProjectKind {
 
     if !explicit_projects.is_empty() {
         for p in &explicit_projects {
-            if scan_mtp_kind_in_file(Path::new(p)) == MtpProjectKind::VsTestBridge {
-                return MtpProjectKind::VsTestBridge;
+            if scan_mtp_kind_in_file(Path::new(p)) == MtpProjectKind::MtpDetected {
+                return MtpProjectKind::MtpDetected;
             }
         }
     } else {
@@ -704,9 +704,9 @@ fn scan_project_files_for_mtp(args: &[String]) -> MtpProjectKind {
                 if project_extensions
                     .iter()
                     .any(|ext| name_str.ends_with(&format!(".{ext}")))
-                    && scan_mtp_kind_in_file(&entry.path()) == MtpProjectKind::VsTestBridge
+                    && scan_mtp_kind_in_file(&entry.path()) == MtpProjectKind::MtpDetected
                 {
-                    return MtpProjectKind::VsTestBridge;
+                    return MtpProjectKind::MtpDetected;
                 }
             }
         }
@@ -717,8 +717,8 @@ fn scan_project_files_for_mtp(args: &[String]) -> MtpProjectKind {
         loop {
             let props = dir.join("Directory.Build.props");
             if props.exists() {
-                if scan_mtp_kind_in_file(&props) == MtpProjectKind::VsTestBridge {
-                    return MtpProjectKind::VsTestBridge;
+                if scan_mtp_kind_in_file(&props) == MtpProjectKind::MtpDetected {
+                    return MtpProjectKind::MtpDetected;
                 }
                 break;
             }
@@ -1970,7 +1970,7 @@ mod tests {
         )
         .expect("write csproj");
 
-        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::MtpDetected);
     }
 
     #[test]
@@ -1987,7 +1987,7 @@ mod tests {
         )
         .expect("write csproj");
 
-        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::MtpDetected);
     }
 
     #[test]
@@ -2041,7 +2041,7 @@ mod tests {
         )
         .expect("write csproj");
 
-        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::MtpDetected);
     }
 
     #[test]
@@ -2059,8 +2059,8 @@ mod tests {
         )
         .expect("write csproj");
 
-        // All project-file properties → VsTestBridge; global.json → VsTestBridge
-        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+        // All project-file properties → MtpAfterSeparator; global.json → MtpAfterSeparator
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::MtpDetected);
     }
 
     #[test]
@@ -2080,13 +2080,13 @@ mod tests {
         let args = vec![csproj.display().to_string()];
         assert_eq!(
             detect_test_runner_mode(&args),
-            TestRunnerMode::MtpVsTestBridge
+            TestRunnerMode::MtpAfterSeparator
         );
 
         let binlog_path = Path::new("/tmp/test.binlog");
         let injected = build_effective_dotnet_args("test", &args, binlog_path, None);
 
-        // MTP VsTestBridge → --report-trx injected after --, no VSTest --logger trx
+        // MTP MtpAfterSeparator → --report-trx injected after --, no VSTest --logger trx
         assert!(!injected.contains(&"--logger".to_string()));
         assert!(injected.contains(&"--report-trx".to_string()));
         assert!(injected.contains(&"--".to_string()));
@@ -2109,7 +2109,7 @@ mod tests {
         let args = vec![csproj.display().to_string()];
         assert_eq!(
             detect_test_runner_mode(&args),
-            TestRunnerMode::MtpVsTestBridge
+            TestRunnerMode::MtpAfterSeparator
         );
 
         let binlog_path = Path::new("/tmp/test.binlog");
@@ -2152,13 +2152,13 @@ mod tests {
         let args = vec![csproj.display().to_string()];
         assert_eq!(
             detect_test_runner_mode(&args),
-            TestRunnerMode::MtpVsTestBridge
+            TestRunnerMode::MtpAfterSeparator
         );
 
         let binlog_path = Path::new("/tmp/test.binlog");
         let injected = build_effective_dotnet_args("test", &args, binlog_path, None);
 
-        // VsTestBridge → inject -- --report-trx after user args
+        // MtpAfterSeparator → inject -- --report-trx after user args
         assert!(injected.contains(&"--".to_string()));
         assert!(injected.contains(&"--report-trx".to_string()));
         let sep_pos = injected.iter().position(|a| a == "--").unwrap();
@@ -2260,7 +2260,7 @@ mod tests {
         )
         .expect("write Directory.Build.props");
 
-        assert_eq!(scan_mtp_kind_in_file(&props), MtpProjectKind::VsTestBridge);
+        assert_eq!(scan_mtp_kind_in_file(&props), MtpProjectKind::MtpDetected);
     }
 
     #[test]
@@ -2622,9 +2622,9 @@ mod tests {
         .expect("write csproj");
 
         let args = vec![csproj.display().to_string()];
-        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::VsTestBridge);
+        assert_eq!(scan_mtp_kind_in_file(&csproj), MtpProjectKind::MtpDetected);
         assert!(
-            scan_project_files_for_mtp(&args) == MtpProjectKind::VsTestBridge,
+            scan_project_files_for_mtp(&args) == MtpProjectKind::MtpDetected,
             "Project with UseMicrosoftTestingPlatformRunner should have MTP properties"
         );
     }
@@ -2633,7 +2633,7 @@ mod tests {
     fn test_altinn_scenario_global_json_mtp_no_project_properties() {
         // Simulates the Altinn/altinn-register scenario:
         // global.json has MTP mode, but no project-file MTP properties.
-        // With MtpVsTestBridge, -- --report-trx is injected. Projects without
+        // With MtpAfterSeparator, -- --report-trx is injected. Projects without
         // Microsoft.Testing.Extensions.TrxReport will get "Unknown option" error,
         // which is informative — tells user to add the package.
 
