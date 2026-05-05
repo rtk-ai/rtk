@@ -5,6 +5,7 @@ pub const HOOKS_SUBDIR: &str = "hooks";
 pub const SETTINGS_JSON: &str = "settings.json";
 pub const SETTINGS_LOCAL_JSON: &str = "settings.local.json";
 pub const HOOKS_JSON: &str = "hooks.json";
+pub const CONFIG_TOML: &str = "config.toml";
 pub const PRE_TOOL_USE_KEY: &str = "PreToolUse";
 pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 

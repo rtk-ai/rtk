@@ -112,10 +112,10 @@ rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
 
 # 2. Restart your AI tool, then test
-git status  # Automatically rewritten to rtk git status
+git status  # Automatically rewritten or, for Codex, blocked with an RTK retry suggestion
 ```
 
-The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+Most hooks transparently rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Codex currently cannot apply hook-provided `updatedInput`, so RTK uses a deny-with-suggestion hook there: Codex sees `Rerun that as: rtk git status` and retries with the compact command.
 
 **Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
@@ -350,7 +350,7 @@ rtk git status
 
 ## Supported AI Tools
 
-RTK supports 12 AI coding tools. Each integration transparently rewrites shell commands to `rtk` equivalents for 60-90% token savings.
+RTK supports 12 AI coding tools. Most integrations transparently rewrite shell commands to `rtk` equivalents for 60-90% token savings; Codex uses deny-with-suggestion until its hook API supports in-place command updates.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -359,7 +359,7 @@ RTK supports 12 AI coding tools. Each integration transparently rewrites shell c
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
-| **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Codex** | `rtk init -g --codex` | PreToolUse hook (`rtk hook codex`) + AGENTS.md + RTK.md |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
