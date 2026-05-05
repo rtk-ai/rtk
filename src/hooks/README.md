@@ -90,6 +90,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 | Gemini CLI (rtk hook gemini) | No (allow/deny only) | allow (limitation — no ask mode in Gemini) |
 | Copilot CLI (rtk hook copilot) | No updatedInput | deny-with-suggestion (unchanged) |
 | Codex | ask parsed but no-op | allow (limitation — fails open) |
+| Qoder CLI (rtk hook qoder) | Yes | `permissionDecision: "ask"` — user prompted |
 
 ### Implementation
 
