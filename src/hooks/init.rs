@@ -1471,31 +1471,42 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
 
 const CRUSH_SKILL: &str = include_str!("../../hooks/crush/SKILL.md");
 
-pub fn run_crush_mode(verbose: u8) -> Result<()> {
-    run_crush_mode_at(&std::env::current_dir()?, verbose)
+pub fn run_crush_mode(global: bool, verbose: u8) -> Result<()> {
+    if global {
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
+        let target_dir = home.join(".agents/skills/rtk-awareness");
+        run_crush_mode_at(&target_dir, verbose, global)
+    } else {
+        let target_dir = std::env::current_dir()?.join(".agents/skills/rtk-awareness");
+        run_crush_mode_at(&target_dir, verbose, global)
+    }
 }
 
-fn run_crush_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
-    // Crush reads .agents/skills/ from the project root
-    let target_dir = base_dir.join(".agents/skills/rtk-awareness");
+fn run_crush_mode_at(target_dir: &Path, verbose: u8, global: bool) -> Result<()> {
     let skill_path = target_dir.join("SKILL.md");
 
     let existing = fs::read_to_string(&skill_path).unwrap_or_default();
     if existing.contains("RTK") || existing.contains("rtk") {
-        println!("\nRTK already configured for Crush in this project.\n");
-        println!("  Skill: .agents/skills/rtk-awareness/SKILL.md (already present)");
+        if global {
+            println!("\nRTK already configured for Crush globally.\n");
+        } else {
+            println!("\nRTK already configured for Crush in this project.\n");
+        }
+        println!("  Skill: {} (already present)", skill_path.display());
     } else {
-        fs::create_dir_all(&target_dir)
-            .context("Failed to create .agents/skills/rtk-awareness directory")?;
-        fs::write(&skill_path, CRUSH_SKILL)
-            .context("Failed to write .agents/skills/rtk-awareness/SKILL.md")?;
+        fs::create_dir_all(target_dir).context("Failed to create rtk-awareness skill directory")?;
+        fs::write(&skill_path, CRUSH_SKILL).context("Failed to write SKILL.md")?;
 
         if verbose > 0 {
-            eprintln!("Wrote .agents/skills/rtk-awareness/SKILL.md");
+            eprintln!("Wrote {}", skill_path.display());
         }
 
-        println!("\nRTK configured for Crush.\n");
-        println!("  Skill: .agents/skills/rtk-awareness/SKILL.md (installed)");
+        if global {
+            println!("\nRTK configured for Crush globally.\n");
+        } else {
+            println!("\nRTK configured for Crush.\n");
+        }
+        println!("  Skill: {} (installed)", skill_path.display());
     }
     println!("  Crush will now use rtk commands for token savings.");
     println!("  Test with: git status\n");
