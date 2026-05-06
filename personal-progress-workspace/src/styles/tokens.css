@@ -1,0 +1,15 @@
+:root {
+  color-scheme: dark;
+  --bg: #070b14;
+  --panel: #0e1626;
+  --panel-strong: #141f33;
+  --line: #25324a;
+  --text: #eef4ff;
+  --muted: #9fb0c8;
+  --blue: #38bdf8;
+  --green: #34d399;
+  --amber: #f59e0b;
+  --rose: #fb7185;
+  --violet: #a78bfa;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+}

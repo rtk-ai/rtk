@@ -4,6 +4,7 @@
 # Environment & Secrets
 .env
 .env.*
+!personal-progress-workspace/.env.example
 *.pem
 *.key
 *.crt
