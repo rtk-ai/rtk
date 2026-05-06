@@ -15,6 +15,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
+use cmds::nix::nix_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -716,6 +717,37 @@ enum Commands {
     #[command(name = "golangci-lint")]
     GolangciLint {
         /// Additional golangci-lint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Nix commands with compact output (build, develop, flake, shell, etc.)
+    Nix {
+        /// Nix arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// nix-build (legacy) with compact output
+    #[command(name = "nix-build")]
+    NixBuild {
+        /// nix-build arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// nix-shell (legacy) with compact output
+    #[command(name = "nix-shell")]
+    NixShell {
+        /// nix-shell arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// nix-env (legacy) with compact output
+    #[command(name = "nix-env")]
+    NixEnv {
+        /// nix-env arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2091,6 +2123,14 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
+
+        Commands::Nix { args } => nix_cmd::run(&args, cli.verbose)?,
+
+        Commands::NixBuild { args } => nix_cmd::run_legacy("nix-build", &args, cli.verbose)?,
+
+        Commands::NixShell { args } => nix_cmd::run_legacy("nix-shell", &args, cli.verbose)?,
+
+        Commands::NixEnv { args } => nix_cmd::run_legacy("nix-env", &args, cli.verbose)?,
 
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
