@@ -2,7 +2,7 @@
 
 use super::constants::NOISE_DIRS;
 use crate::core::runner::{self, RunOptions};
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -33,6 +33,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .filter(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .collect();
+
+    #[cfg(windows)]
+    {
+        if !tool_exists("ls") {
+            return super::ls_win::run_native(&paths, show_all);
+        }
+    }
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
