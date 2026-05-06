@@ -1467,6 +1467,42 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ─── Charmbracelet Crush support ──────────────────────────────
+
+const CRUSH_SKILL: &str = include_str!("../../hooks/crush/SKILL.md");
+
+pub fn run_crush_mode(verbose: u8) -> Result<()> {
+    run_crush_mode_at(&std::env::current_dir()?, verbose)
+}
+
+fn run_crush_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
+    // Crush reads .agents/skills/ from the project root
+    let target_dir = base_dir.join(".agents/skills/rtk-awareness");
+    let skill_path = target_dir.join("SKILL.md");
+
+    let existing = fs::read_to_string(&skill_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        println!("\nRTK already configured for Crush in this project.\n");
+        println!("  Skill: .agents/skills/rtk-awareness/SKILL.md (already present)");
+    } else {
+        fs::create_dir_all(&target_dir)
+            .context("Failed to create .agents/skills/rtk-awareness directory")?;
+        fs::write(&skill_path, CRUSH_SKILL)
+            .context("Failed to write .agents/skills/rtk-awareness/SKILL.md")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote .agents/skills/rtk-awareness/SKILL.md");
+        }
+
+        println!("\nRTK configured for Crush.\n");
+        println!("  Skill: .agents/skills/rtk-awareness/SKILL.md (installed)");
+    }
+    println!("  Crush will now use rtk commands for token savings.");
+    println!("  Test with: git status\n");
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
