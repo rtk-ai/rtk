@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Charmbracelet Crush
+    Crush,
 }
 
 #[derive(Parser)]
@@ -1783,6 +1785,11 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Crush) {
+                if global {
+                    anyhow::bail!("Crush is project-scoped. Use: rtk init --agent crush");
+                }
+                hooks::init::run_crush_mode(cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;

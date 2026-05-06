@@ -259,6 +259,216 @@ impl SessionProvider for ClaudeProvider {
     }
 }
 
+// ─── Crush Provider ──────────────────────────────────────────
+
+/// Prefix used to encode Crush session IDs as pseudo file paths.
+const CRUSH_PATH_PREFIX: &str = "crush:";
+
+/// Provider that reads Charmbracelet Crush session data from its SQLite database.
+///
+/// Crush stores conversations in `~/.local/share/crush/crush.db` (Linux) or the
+/// platform-appropriate XDG data directory. Each message's `parts` column holds a
+/// JSON array of Google genai `Part` objects where Bash tool invocations appear as
+/// `functionCall` entries and their results as `functionResponse` entries.
+pub struct CrushProvider {
+    db_path: PathBuf,
+}
+
+impl CrushProvider {
+    /// Create a new CrushProvider, resolving the Crush database path.
+    pub fn new() -> Result<Self> {
+        let data_dir = dirs::data_dir().context("could not determine XDG data directory")?;
+        let db_path = data_dir.join("crush").join("crush.db");
+        if !db_path.exists() {
+            anyhow::bail!(
+                "Crush database not found at {}\nMake sure Charmbracelet Crush has been used at least once.",
+                db_path.display()
+            );
+        }
+        Ok(Self { db_path })
+    }
+
+    /// Open a read-only connection to the Crush SQLite database.
+    fn open_db(&self) -> Result<rusqlite::Connection> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &self.db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .with_context(|| {
+            format!(
+                "failed to open Crush database at {}",
+                self.db_path.display()
+            )
+        })?;
+        Ok(conn)
+    }
+}
+
+#[cfg(test)]
+impl CrushProvider {
+    /// Test-only constructor that accepts a custom database path.
+    fn with_db(db_path: PathBuf) -> Self {
+        Self { db_path }
+    }
+}
+
+impl SessionProvider for CrushProvider {
+    fn discover_sessions(
+        &self,
+        _project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let conn = self.open_db()?;
+
+        let mut query = String::from("SELECT id FROM sessions WHERE 1=1");
+
+        // Apply time filter (created_at is Unix milliseconds)
+        if let Some(days) = since_days {
+            let cutoff_ms = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64)
+                .saturating_sub(days as i64 * 86_400_000);
+            query.push_str(&format!(" AND created_at >= {}", cutoff_ms));
+        }
+
+        query.push_str(" ORDER BY created_at DESC");
+
+        let mut stmt = conn
+            .prepare(&query)
+            .context("failed to query Crush sessions")?;
+
+        let sessions: Vec<PathBuf> = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                Ok(PathBuf::from(format!("{}{}", CRUSH_PATH_PREFIX, id)))
+            })
+            .context("failed to map Crush session rows")?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(sessions)
+    }
+
+    fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
+        let path_str = path.to_string_lossy();
+        let session_id = path_str
+            .strip_prefix(CRUSH_PATH_PREFIX)
+            .context("invalid crush session path")?;
+
+        let conn = self.open_db()?;
+
+        // Query messages for this session, ordered by creation time
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, role, parts FROM messages WHERE session_id = ?1 ORDER BY created_at ASC",
+            )
+            .context("failed to query Crush messages")?;
+
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .context("failed to map Crush message rows")?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Collect function calls (bash commands) and their responses
+        let mut pending_calls: Vec<(String, String, usize)> = Vec::new(); // (msg_id, command, seq)
+        let mut responses: std::collections::HashMap<String, (usize, String, bool)> =
+            std::collections::HashMap::new(); // (msg_id, output_len, output_content, is_error)
+        let mut commands: Vec<ExtractedCommand> = Vec::new();
+        let mut sequence_counter: usize = 0;
+
+        for (msg_id, role, parts_json) in &rows {
+            let parts: serde_json::Value = match serde_json::from_str(parts_json) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let parts_array = match parts.as_array() {
+                Some(a) => a,
+                None => continue,
+            };
+
+            match role.as_str() {
+                "user" | "model" => {
+                    for part in parts_array {
+                        // Look for functionResponse (bash output)
+                        if let Some(fr) = part.get("functionResponse") {
+                            if fr.get("name").and_then(|n| n.as_str()) == Some("bash") {
+                                let output = fr
+                                    .pointer("/response/output")
+                                    .and_then(|o| o.as_str())
+                                    .unwrap_or("");
+
+                                let exit_code = fr
+                                    .pointer("/response/exitCode")
+                                    .and_then(|c| c.as_i64())
+                                    .unwrap_or(0);
+
+                                let output_len = output.len();
+                                let is_error = exit_code != 0;
+                                let content_preview: String = output.chars().take(1000).collect();
+
+                                // Match to the most recent unmatched bash call from this message
+                                // (Crush typically pairs them by position within the same message)
+                                // For simplicity, just store by message ID and match later
+                                if let Some(last) = pending_calls.last() {
+                                    responses.insert(
+                                        last.0.clone(),
+                                        (output_len, content_preview, is_error),
+                                    );
+                                }
+                            }
+                        }
+
+                        // Look for functionCall (bash invocation)
+                        if let Some(fc) = part.get("functionCall") {
+                            if fc.get("name").and_then(|n| n.as_str()) == Some("bash") {
+                                if let Some(command) =
+                                    fc.pointer("/args/command").and_then(|c| c.as_str())
+                                {
+                                    pending_calls.push((
+                                        msg_id.to_string(),
+                                        command.to_string(),
+                                        sequence_counter,
+                                    ));
+                                    sequence_counter += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Match pending calls with responses
+        for (msg_id, command, sequence_index) in pending_calls {
+            let (output_len, output_content, is_error) = responses
+                .get(&msg_id)
+                .map(|(len, content, err)| (Some(*len), Some(content.clone()), *err))
+                .unwrap_or((None, None, false));
+
+            commands.push(ExtractedCommand {
+                command,
+                output_len,
+                session_id: session_id.to_string(),
+                output_content,
+                is_error,
+                sequence_index,
+            });
+        }
+
+        Ok(commands)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +667,302 @@ mod tests {
         assert_eq!(cmds[0].command, "first");
         assert_eq!(cmds[1].command, "second");
         assert_eq!(cmds[2].command, "third");
+    }
+
+    // ─── CrushProvider tests ───────────────────────────────────────
+
+    use rusqlite::params;
+
+    /// Create an in-memory SQLite DB with the Crush schema, populate it, and
+    /// return a `CrushProvider` backed by a temporary file. The `NamedTempFile`
+    /// must be kept alive for the provider to access the DB.
+    fn setup_crush_db(
+        sessions: &[(&str, &str, i64, i64)],
+        messages: &[(&str, &str, &str, &str)],
+    ) -> (CrushProvider, tempfile::NamedTempFile) {
+        let tf = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tf.path()).expect("failed to open temp sqlite db");
+
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                title TEXT NOT NULL,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                cost REAL NOT NULL DEFAULT 0.0,
+                updated_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                parts TEXT NOT NULL DEFAULT '[]',
+                model TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );",
+        )
+        .expect("failed to create schema");
+
+        for (id, title, created_at, updated_at) in sessions {
+            conn.execute(
+                "INSERT INTO sessions (id, title, message_count, created_at, updated_at)
+                 VALUES (?1, ?2, 0, ?3, ?4)",
+                params![id, title, created_at, updated_at],
+            )
+            .unwrap();
+        }
+
+        for (id, session_id, role, parts) in messages {
+            conn.execute(
+                "INSERT INTO messages (id, session_id, role, parts, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, 0)",
+                params![id, session_id, role, parts],
+            )
+            .unwrap();
+        }
+
+        let provider = CrushProvider::with_db(tf.path().to_path_buf());
+        (provider, tf)
+    }
+
+    /// Unix timestamp in milliseconds (now).
+    fn now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    #[test]
+    fn test_crush_discover_sessions() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(
+            &[
+                ("sess-001", "Fixing the login bug", now, now),
+                ("sess-002", "Refactoring the API", now - 86_400_000, now),
+                ("sess-003", "Planning sprint", now - 172_800_000, now),
+            ],
+            &[],
+        );
+
+        let sessions = provider.discover_sessions(None, None).unwrap();
+        assert_eq!(sessions.len(), 3);
+        // Should all use the crush: prefix
+        for s in &sessions {
+            assert!(s.to_string_lossy().starts_with("crush:"));
+        }
+    }
+
+    #[test]
+    fn test_crush_discover_sessions_since_days() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(
+            &[
+                ("sess-001", "Recent", now, now),
+                ("sess-002", "3 days ago", now - (3 * 86_400_000), now),
+                ("sess-003", "5 days ago", now - (5 * 86_400_000), now),
+            ],
+            &[],
+        );
+
+        // Filter to last 2 days: should only include sess-001
+        let sessions = provider.discover_sessions(None, Some(2)).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].to_string_lossy(), "crush:sess-001");
+    }
+
+    #[test]
+    fn test_crush_extract_commands_bash_with_output() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(
+            &[("sess-001", "Test session", now, now)],
+            &[
+                (
+                    "msg-001",
+                    "sess-001",
+                    "user",
+                    r#"[{"functionCall":{"name":"bash","args":{"command":"git status"}}}]"#,
+                ),
+                (
+                    "msg-002",
+                    "sess-001",
+                    "user",
+                    r#"[{"functionResponse":{"name":"bash","response":{"output":"On branch master\nnothing to commit","exitCode":0}}}]"#,
+                ),
+            ],
+        );
+
+        let session_path = PathBuf::from("crush:sess-001");
+        let cmds = provider.extract_commands(&session_path).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "git status");
+        assert_eq!(cmds[0].session_id, "sess-001");
+        assert!(!cmds[0].is_error);
+        assert_eq!(cmds[0].sequence_index, 0);
+        assert!(cmds[0].output_len.is_some());
+    }
+
+    #[test]
+    fn test_crush_extract_commands_error_exit_code() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(
+            &[("sess-001", "Test session", now, now)],
+            &[
+                (
+                    "msg-001",
+                    "sess-001",
+                    "user",
+                    r#"[{"functionCall":{"name":"bash","args":{"command":"cargo build --release"}}}]"#,
+                ),
+                (
+                    "msg-002",
+                    "sess-001",
+                    "user",
+                    r#"[{"functionResponse":{"name":"bash","response":{"output":"error: could not compile","exitCode":101}}}]"#,
+                ),
+            ],
+        );
+
+        let session_path = PathBuf::from("crush:sess-001");
+        let cmds = provider.extract_commands(&session_path).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].is_error);
+        assert_eq!(
+            cmds[0].output_content.as_deref(),
+            Some("error: could not compile")
+        );
+    }
+
+    #[test]
+    fn test_crush_extract_commands_multiple() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(
+            &[("sess-001", "Test session", now, now)],
+            &[
+                (
+                    "msg-001",
+                    "sess-001",
+                    "user",
+                    r#"[
+                        {"functionCall":{"name":"bash","args":{"command":"git status"}}},
+                        {"functionCall":{"name":"bash","args":{"command":"git diff"}}}
+                    ]"#,
+                ),
+                (
+                    "msg-002",
+                    "sess-001",
+                    "user",
+                    r#"[
+                        {"functionResponse":{"name":"bash","response":{"output":"clean","exitCode":0}}}
+                    ]"#,
+                ),
+            ],
+        );
+
+        let session_path = PathBuf::from("crush:sess-001");
+        let cmds = provider.extract_commands(&session_path).unwrap();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].command, "git status");
+        assert_eq!(cmds[0].sequence_index, 0);
+        assert_eq!(cmds[1].command, "git diff");
+        assert_eq!(cmds[1].sequence_index, 1);
+    }
+
+    #[test]
+    fn test_crush_extract_commands_non_bash_ignored() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(
+            &[("sess-001", "Test session", now, now)],
+            &[(
+                "msg-001",
+                "sess-001",
+                "user",
+                r#"[{"functionCall":{"name":"Read","args":{"file_path":"/tmp/foo"}}}]"#,
+            )],
+        );
+
+        let session_path = PathBuf::from("crush:sess-001");
+        let cmds = provider.extract_commands(&session_path).unwrap();
+        assert_eq!(cmds.len(), 0);
+    }
+
+    #[test]
+    fn test_crush_extract_commands_malformed_parts() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(
+            &[("sess-001", "Test session", now, now)],
+            &[
+                ("msg-001", "sess-001", "user", "this is not json"),
+                (
+                    "msg-002",
+                    "sess-001",
+                    "user",
+                    r#"[{"functionCall":{"name":"bash","args":{"command":"ls"}}}]"#,
+                ),
+            ],
+        );
+
+        let session_path = PathBuf::from("crush:sess-001");
+        let cmds = provider.extract_commands(&session_path).unwrap();
+        // msg-001 is skipped (malformed JSON), msg-002 yields one command
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].command, "ls");
+    }
+
+    #[test]
+    fn test_crush_extract_commands_invalid_session_path() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(&[("sess-001", "Test session", now, now)], &[]);
+
+        // Path without crush: prefix
+        let session_path = PathBuf::from("sess-001");
+        let result = provider.extract_commands(&session_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_crush_extract_commands_empty_session() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(&[("sess-001", "Test session", now, now)], &[]);
+
+        let session_path = PathBuf::from("crush:sess-001");
+        let cmds = provider.extract_commands(&session_path).unwrap();
+        assert_eq!(cmds.len(), 0);
+    }
+
+    #[test]
+    fn test_crush_project_filter_ignored() {
+        // Crush sessions table has no project_path column, so project_filter is
+        // always ignored (all sessions returned).
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(
+            &[
+                ("sess-001", "Project A", now, now),
+                ("sess-002", "Project B", now, now),
+            ],
+            &[],
+        );
+
+        let sessions = provider
+            .discover_sessions(Some("nonexistent"), None)
+            .unwrap();
+        // project_filter is ignored; all sessions should be returned
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[test]
+    fn test_crush_session_id_encoding() {
+        let now = now_ms();
+        let (provider, _tmp) = setup_crush_db(&[("abc-123-def", "Test session", now, now)], &[]);
+
+        let sessions = provider.discover_sessions(None, None).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0], PathBuf::from("crush:abc-123-def"));
     }
 }

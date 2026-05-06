@@ -40,6 +40,7 @@ Agent runs "cargo test"
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
+| Charmbracelet Crush | Skill file (prompt-level) | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
@@ -127,6 +128,14 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 ```
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
+
+### Charmbracelet Crush
+
+```bash
+rtk init --agent crush    # creates .agents/skills/rtk-awareness/SKILL.md in current project
+```
+
+Crush reads `.agents/skills/` as skill files. RTK installs an `rtk-awareness` skill that instructs Crush to prefix shell commands with `rtk` for token optimization.
 
 ### Mistral Vibe (planned)
 
