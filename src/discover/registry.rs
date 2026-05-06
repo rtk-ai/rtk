@@ -1025,7 +1025,7 @@ mod tests {
         // Verify that every GitCommand subcommand has a matching pattern
         for subcmd in [
             "status", "log", "diff", "show", "add", "commit", "push", "pull", "branch", "fetch",
-            "stash", "worktree",
+            "stash", "worktree", "rev-parse",
         ] {
             let cmd = format!("git {subcmd}");
             match classify_command(&cmd) {
@@ -1033,6 +1033,28 @@ mod tests {
                 other => panic!("git {subcmd} should be Supported, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_classify_git_rev_parse() {
+        // rev-parse is a passthrough subcommand (#1729): no filtering, just routes
+        // through `rtk git` so usage is tracked in `rtk gain` analytics.
+        for args in [
+            "git rev-parse HEAD",
+            "git rev-parse --show-toplevel",
+            "git rev-parse --abbrev-ref HEAD",
+        ] {
+            match classify_command(args) {
+                Classification::Supported { rtk_equivalent, .. } => {
+                    assert_eq!(rtk_equivalent, "rtk git");
+                }
+                other => panic!("{args} should be Supported, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            rewrite_command("git rev-parse --show-toplevel", &[]),
+            Some("rtk git rev-parse --show-toplevel".into())
+        );
     }
 
     #[test]
