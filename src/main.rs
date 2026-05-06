@@ -2101,10 +2101,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
 
-        Commands::Gradlew { args } => {
-            gradlew_cmd::run(&args, cli.verbose)?;
-            0
-        }
+        Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
 
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;

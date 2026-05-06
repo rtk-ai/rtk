@@ -1,11 +1,10 @@
-use crate::core::tracking;
-use anyhow::{Context, Result};
+use crate::core::runner::{self, RunOptions};
+use crate::core::stream::StreamFilter;
+use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::io::{BufRead, BufReader, IsTerminal, Write};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Instant;
+use std::ffi::OsString;
+use std::process::Command;
 
 // ── Shared regex patterns (used across multiple filters) ─────────────────────
 
@@ -77,13 +76,12 @@ fn gradlew_binary() -> &'static str {
     }
 }
 
-/// Spawns a Gradle command using string literals only.
+/// Builds a Gradle `Command` using string literals only.
 ///
 /// Semgrep rule `dynamic-command-execution` forbids `Command::new(var)` —
-/// each branch passes a string literal so the set of executable binaries
-/// is statically auditable.
-fn new_gradle_command() -> Command {
-    if cfg!(windows) {
+/// each branch passes a literal so the executable set is statically auditable.
+fn new_gradle_command(args: &[String]) -> Command {
+    let mut cmd = if cfg!(windows) {
         if std::path::Path::new(".\\gradlew.bat").exists() {
             Command::new(".\\gradlew.bat")
         } else {
@@ -93,293 +91,83 @@ fn new_gradle_command() -> Command {
         Command::new("./gradlew")
     } else {
         Command::new("gradle")
-    }
+    };
+    cmd.args(args);
+    cmd
 }
 
-// ── Progress indicator (stderr only, zero stdout contamination) ──────────────
+/// `StreamFilter` for build mode: keeps lines for which `filter_build_line` returns true.
+struct BuildLineFilter;
 
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-
-struct ProgressIndicator {
-    active: bool,
-    start: Instant,
-    task_count: usize,
-    line_count: usize,
-    current_task: String,
-    spinner_frame: usize,
-}
-
-impl ProgressIndicator {
-    fn new() -> Self {
-        Self {
-            active: std::io::stderr().is_terminal(),
-            start: Instant::now(),
-            task_count: 0,
-            line_count: 0,
-            current_task: String::new(),
-            spinner_frame: 0,
-        }
-    }
-
-    /// Call on each raw stdout line. Updates counters and renders spinner to stderr.
-    fn tick(&mut self, line: &str) {
-        self.line_count += 1;
-
-        if let Some(task_name) = line.strip_prefix("> Task :") {
-            self.task_count += 1;
-            // Extract task name, stripping trailing status like " UP-TO-DATE"
-            self.current_task = task_name
-                .split_whitespace()
-                .next()
-                .unwrap_or(task_name)
-                .to_string();
-        }
-
-        if !self.active {
-            return;
-        }
-
-        let elapsed = self.start.elapsed().as_secs();
-        let frame = SPINNER[self.spinner_frame % SPINNER.len()];
-        self.spinner_frame += 1;
-
-        let display = if self.task_count > 0 {
-            format!(
-                "\r{} {} tasks [{}s] :{}",
-                frame, self.task_count, elapsed, self.current_task
-            )
+impl StreamFilter for BuildLineFilter {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        if filter_build_line(line) {
+            Some(format!("{}\n", line))
         } else {
-            format!(
-                "\r{} collecting [{}s] {} lines",
-                frame, elapsed, self.line_count
-            )
-        };
-
-        // Truncate to terminal width to avoid wrapping
-        let _ = write!(std::io::stderr(), "{}", display);
-        let _ = std::io::stderr().flush();
-    }
-
-    /// Clear the spinner line without printing a newline.
-    fn clear_line(&self) {
-        if self.active {
-            let _ = write!(std::io::stderr(), "\r\x1b[K");
-            let _ = std::io::stderr().flush();
+            None
         }
     }
 
-    /// Erase spinner and clean up.
-    fn finish(&self) {
-        self.clear_line();
+    fn flush(&mut self) -> String {
+        String::new()
     }
 }
 
-pub fn run(args: &[String], _verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // Verbose flags bypass filtering — user wants full output
     if args
         .iter()
         .any(|a| a == "--stacktrace" || a == "--info" || a == "--debug" || a == "--full-stacktrace")
     {
-        return run_passthrough(args);
+        let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
+        return runner::run_passthrough(gradlew_binary(), &osargs, verbose);
     }
+
+    let cmd = new_gradle_command(args);
+    let args_display = args.join(" ");
+    let tool = gradlew_binary();
 
     match detect_task(args) {
-        GradlewTask::Build => run_streaming(args, "gradlew_build", filter_build_line),
-        GradlewTask::Test => run_batch(args, "gradlew_test", filter_test),
-        GradlewTask::ConnectedTest => run_batch(args, "gradlew_connected", filter_connected),
-        GradlewTask::Lint => run_batch(args, "gradlew_lint", filter_lint),
-        GradlewTask::Dependencies => run_batch(args, "gradlew_deps", filter_dependencies),
-        GradlewTask::Other => run_passthrough(args),
-    }
-}
-
-/// Stream build output line-by-line, showing only errors + BUILD result
-fn run_streaming<F>(args: &[String], tee_label: &str, line_filter: F) -> Result<()>
-where
-    F: Fn(&str) -> bool,
-{
-    let timer = tracking::TimedExecution::start();
-    let gradlew = gradlew_binary();
-
-    let mut child = new_gradle_command()
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn gradlew")?;
-
-    let mut raw_lines: Vec<String> = Vec::new();
-    let mut filtered_lines: Vec<String> = Vec::new();
-
-    // Collect stderr on a separate thread to avoid pipe deadlock
-    let stderr_handle = {
-        let stderr = child.stderr.take().expect("stderr piped");
-        thread::spawn(move || {
-            BufReader::new(stderr)
-                .lines()
-                .map_while(Result::ok)
-                .collect::<Vec<String>>()
-        })
-    };
-
-    // Stream stdout through filter with progress indicator
-    let mut progress = ProgressIndicator::new();
-
-    if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines() {
-            let line = line.context("stdout read error")?;
-            progress.tick(&line);
-            raw_lines.push(line.clone());
-            if line_filter(&line) {
-                progress.clear_line();
-                println!("{}", line);
-                filtered_lines.push(line);
-            }
+        GradlewTask::Build => runner::run_streamed(
+            cmd,
+            tool,
+            &args_display,
+            Box::new(BuildLineFilter),
+            RunOptions::with_tee("gradlew_build"),
+        ),
+        GradlewTask::Test => runner::run_filtered(
+            cmd,
+            tool,
+            &args_display,
+            filter_test,
+            RunOptions::with_tee("gradlew_test"),
+        ),
+        GradlewTask::ConnectedTest => runner::run_filtered(
+            cmd,
+            tool,
+            &args_display,
+            filter_connected,
+            RunOptions::with_tee("gradlew_connected"),
+        ),
+        GradlewTask::Lint => runner::run_filtered(
+            cmd,
+            tool,
+            &args_display,
+            filter_lint,
+            RunOptions::with_tee("gradlew_lint"),
+        ),
+        GradlewTask::Dependencies => runner::run_filtered(
+            cmd,
+            tool,
+            &args_display,
+            filter_dependencies,
+            RunOptions::with_tee("gradlew_deps"),
+        ),
+        GradlewTask::Other => {
+            let osargs: Vec<OsString> = args.iter().map(OsString::from).collect();
+            runner::run_passthrough(gradlew_binary(), &osargs, verbose)
         }
     }
-    progress.finish();
-
-    let stderr_lines = stderr_handle.join().expect("stderr collector thread panicked");
-    let status = child.wait().context("Failed to wait for gradlew")?;
-    let exit_code = status.code().unwrap_or(1);
-
-    // Guarantee non-empty output on success
-    if status.success() && filtered_lines.is_empty() {
-        let task = args
-            .iter()
-            .find(|a| !a.starts_with('-'))
-            .map(String::as_str)
-            .unwrap_or("gradlew");
-        println!("ok {} ✓", task);
-    }
-
-    let raw = format!("{}\n{}", raw_lines.join("\n"), stderr_lines.join("\n"));
-    let filtered = filtered_lines.join("\n");
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, tee_label, exit_code) {
-        println!("{}", hint);
-    }
-
-    timer.track(
-        &format!("{} {}", gradlew, args.join(" ")),
-        &format!("rtk gradlew {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !status.success() {
-        std::process::exit(exit_code);
-    }
-    Ok(())
-}
-
-/// Collect all output, apply a post-processing filter, then print.
-/// Used for test/lint/connected modes that need full context before filtering.
-fn run_batch<F>(args: &[String], tee_label: &str, filter: F) -> Result<()>
-where
-    F: Fn(&str) -> String,
-{
-    let timer = tracking::TimedExecution::start();
-    let gradlew = gradlew_binary();
-
-    let mut child = new_gradle_command()
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn gradlew")?;
-
-    let mut raw_lines: Vec<String> = Vec::new();
-
-    // Collect stderr on a separate thread to avoid pipe deadlock
-    let stderr_handle = {
-        let stderr = child.stderr.take().expect("stderr piped");
-        thread::spawn(move || {
-            BufReader::new(stderr)
-                .lines()
-                .map_while(Result::ok)
-                .collect::<Vec<String>>()
-        })
-    };
-
-    let mut progress = ProgressIndicator::new();
-
-    if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines() {
-            let line = line.context("stdout read error")?;
-            progress.tick(&line);
-            raw_lines.push(line);
-        }
-    }
-    progress.finish();
-
-    let stderr_lines = stderr_handle.join().expect("stderr collector thread panicked");
-    let status = child.wait().context("Failed to wait for gradlew")?;
-    let exit_code = status.code().unwrap_or(1);
-
-    let raw_stdout = raw_lines.join("\n");
-    let filtered = filter(&raw_stdout);
-    println!("{}", filtered);
-
-    let raw = format!("{}\n{}", raw_stdout, stderr_lines.join("\n"));
-
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, tee_label, exit_code) {
-        println!("{}", hint);
-    }
-
-    timer.track(
-        &format!("{} {}", gradlew, args.join(" ")),
-        &format!("rtk gradlew {}", args.join(" ")),
-        &raw,
-        &filtered,
-    );
-
-    if !status.success() {
-        std::process::exit(exit_code);
-    }
-    Ok(())
-}
-
-/// Pass through unfiltered — for unknown tasks and verbose flags
-fn run_passthrough(args: &[String]) -> Result<()> {
-    let timer = tracking::TimedExecution::start();
-    let gradlew = gradlew_binary();
-
-    let output = new_gradle_command().args(args).output().with_context(|| {
-        format!(
-            "Failed to run {}. If this task is unsupported, try: rtk proxy gradlew {}",
-            gradlew,
-            args.join(" ")
-        )
-    })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    print!("{}", stdout);
-    eprint!("{}", stderr);
-
-    let raw = format!("{}\n{}", stdout, stderr);
-    timer.track(
-        &format!("{} {}", gradlew, args.join(" ")),
-        &format!("rtk gradlew {}", args.join(" ")),
-        &raw,
-        &raw, // passthrough: input == output
-    );
-
-    let exit_code = output.status.code().unwrap_or_else(|| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(sig) = output.status.signal() {
-                eprintln!("gradlew terminated by signal {}", sig);
-            }
-        }
-        1
-    });
-    if !output.status.success() {
-        std::process::exit(exit_code);
-    }
-    Ok(())
 }
 
 // ── Build filter predicate ────────────────────────────────────────────────────
