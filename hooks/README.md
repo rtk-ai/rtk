@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files for 7 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode).
+Owns: per-agent hook scripts and configuration files for 8 supported agents (Claude Code, Copilot, Cursor, Auggie, Cline, Windsurf, Codex, OpenCode).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -36,6 +36,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`claude/`](claude/README.md)** — Shell hook, `PreToolUse` JSON format, `settings.json` patching, test script
 - **[`copilot/`](copilot/README.md)** — Rust binary hook, dual format (VS Code Chat vs Copilot CLI), deny-with-suggestion fallback
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
+- **[`auggie/`](auggie/README.md)** — Rust binary hook (`rtk hook auggie`), `PreToolUse` JSON format, `~/.augment/settings.json` patching, matcher `launch-process`
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
@@ -49,6 +50,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | VS Code Copilot Chat | Rust binary (`rtk hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Transparent rewrite | Yes (`updated_input`) |
+| Auggie (Augment Code CLI) | Rust binary (`rtk hook auggie`) | Transparent rewrite | Yes (`updatedInput`, once Auggie ships it; safe no-op until then) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
@@ -122,6 +124,32 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```
 
 **Output**: Same as Claude Code format (with `updatedInput`).
+
+### Auggie / Augment Code CLI (Rust Binary)
+
+**Input** (stdin) — same shape as Claude Code, with `tool_name: "launch-process"`:
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "launch-process",
+  "tool_input": { "command": "git status" }
+}
+```
+
+**Output** (stdout, when rewritten) — Claude Code shape, ready for Auggie's planned `updatedInput` support:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecisionReason": "RTK auto-rewrite",
+    "updatedInput": { "command": "rtk git status" }
+  }
+}
+```
+
+When there is nothing to rewrite the hook produces no output and exits 0.
 
 ### Gemini CLI (Rust Binary)
 

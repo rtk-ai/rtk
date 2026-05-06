@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
-    CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    AUGGIE_DIR, AUGGIE_HOOK_COMMAND, AUGGIE_TOOL_MATCHER, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR,
+    OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
@@ -541,8 +542,16 @@ fn remove_hook_from_settings(verbose: u8) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
-pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose: u8) -> Result<()> {
+/// Full uninstall for Claude, Gemini, Codex, Cursor, or Auggie artifacts.
+#[allow(clippy::too_many_arguments)]
+pub fn uninstall(
+    global: bool,
+    gemini: bool,
+    codex: bool,
+    cursor: bool,
+    auggie: bool,
+    verbose: u8,
+) -> Result<()> {
     if codex {
         return uninstall_codex(global, verbose);
     }
@@ -561,6 +570,24 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
             println!("\nRestart Cursor to apply changes.");
         } else {
             println!("RTK Cursor support was not installed (nothing to remove)");
+        }
+        return Ok(());
+    }
+
+    if auggie {
+        if !global {
+            anyhow::bail!("Auggie uninstall only works with --global flag");
+        }
+        let auggie_removed =
+            remove_auggie_hooks(verbose).context("Failed to remove Auggie hooks")?;
+        if !auggie_removed.is_empty() {
+            println!("RTK uninstalled (Auggie):");
+            for item in &auggie_removed {
+                println!("  - {}", item);
+            }
+            println!("\nRestart Auggie (`auggie`) to apply changes.");
+        } else {
+            println!("RTK Auggie support was not installed (nothing to remove)");
         }
         return Ok(());
     }
@@ -674,6 +701,10 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
     let cursor_removed = remove_cursor_hooks(verbose)?;
     removed.extend(cursor_removed);
 
+    // 7. Remove Auggie hooks
+    let auggie_removed = remove_auggie_hooks(verbose)?;
+    removed.extend(auggie_removed);
+
     // Report results
     if removed.is_empty() {
         println!("RTK was not installed (nothing to remove)");
@@ -686,7 +717,7 @@ pub fn uninstall(global: bool, gemini: bool, codex: bool, cursor: bool, verbose:
         for item in removed {
             println!("  - {}", item);
         }
-        println!("\nRestart Claude Code, OpenCode, and Cursor (if used) to apply changes.");
+        println!("\nRestart Claude Code, OpenCode, Cursor, and Auggie (if used) to apply changes.");
     }
 
     Ok(())
@@ -2133,6 +2164,210 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use.len() < original_len
 }
 
+// ─── Auggie (Augment Code CLI) support ─────────────────────────────────
+//
+// Auggie reads ~/.augment/settings.json and uses the same `hooks.PreToolUse`
+// shape as Claude Code (matcher + nested hooks array with `type: "command"`).
+// The shell-equivalent tool is named `launch-process`, not `Bash`.
+// Docs: https://docs.augmentcode.com/cli/hooks
+
+fn resolve_auggie_dir() -> Result<PathBuf> {
+    resolve_home_subdir(AUGGIE_DIR)
+}
+
+/// Top-level entry point for `rtk init -g --agent auggie`.
+pub fn run_auggie_mode(verbose: u8) -> Result<()> {
+    let auggie_dir = resolve_auggie_dir()?;
+    fs::create_dir_all(&auggie_dir).with_context(|| {
+        format!(
+            "Failed to create Auggie config directory: {}",
+            auggie_dir.display()
+        )
+    })?;
+
+    let settings_path = auggie_dir.join(SETTINGS_JSON);
+    let patched = patch_auggie_settings_json(&settings_path, verbose)?;
+
+    println!("\nAuggie hook registered (global).\n");
+    println!("  Command:       {}", AUGGIE_HOOK_COMMAND);
+    println!("  Matcher:       {}", AUGGIE_TOOL_MATCHER);
+    println!("  settings.json: {}", settings_path.display());
+
+    if patched {
+        println!("  settings.json: RTK PreToolUse entry added");
+    } else {
+        println!("  settings.json: RTK PreToolUse entry already present");
+    }
+
+    println!("  Restart Auggie (`auggie`). Test with: git status\n");
+
+    Ok(())
+}
+
+/// Patch ~/.augment/settings.json to register the RTK PreToolUse hook.
+/// Returns true if the file was modified.
+fn patch_auggie_settings_json(path: &Path, verbose: u8) -> Result<bool> {
+    let mut root = if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    if auggie_hook_already_present(&root) {
+        if verbose > 0 {
+            eprintln!("Auggie settings.json: RTK hook already present");
+        }
+        return Ok(false);
+    }
+
+    insert_auggie_hook_entry(&mut root)?;
+
+    if path.exists() {
+        let backup_path = path.with_extension("json.bak");
+        fs::copy(path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+        if verbose > 0 {
+            eprintln!("Backup: {}", backup_path.display());
+        }
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Auggie settings.json")?;
+    atomic_write(path, &serialized)?;
+
+    Ok(true)
+}
+
+/// Check whether an RTK Auggie hook (matcher = `launch-process`,
+/// command = `rtk hook auggie`) is already registered. Matches both the
+/// canonical command and any legacy script paths under `.augment/`.
+fn auggie_hook_already_present(root: &serde_json::Value) -> bool {
+    let pre_tool_use = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    pre_tool_use
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd == AUGGIE_HOOK_COMMAND)
+}
+
+/// Insert RTK PreToolUse entry into ~/.augment/settings.json.
+fn insert_auggie_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let pre_tool_use = hooks
+        .entry(PRE_TOOL_USE_KEY)
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PreToolUse value is not an array")?;
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": AUGGIE_TOOL_MATCHER,
+        "hooks": [{
+            "type": "command",
+            "command": AUGGIE_HOOK_COMMAND
+        }]
+    }));
+    Ok(())
+}
+
+/// Remove the RTK Auggie hook from ~/.augment/settings.json.
+/// Returns the list of items removed (for the uninstall summary).
+fn remove_auggie_hooks(verbose: u8) -> Result<Vec<String>> {
+    let auggie_dir = resolve_auggie_dir()?;
+    let settings_path = auggie_dir.join(SETTINGS_JSON);
+    let mut removed = Vec::new();
+
+    if !settings_path.exists() {
+        return Ok(removed);
+    }
+
+    let content = fs::read_to_string(&settings_path)
+        .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(removed);
+    }
+
+    let mut root: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Ok(removed),
+    };
+
+    if remove_auggie_hook_from_json(&mut root) {
+        let backup_path = settings_path.with_extension("json.bak");
+        fs::copy(&settings_path, &backup_path)
+            .with_context(|| format!("Failed to backup to {}", backup_path.display()))?;
+
+        let serialized = serde_json::to_string_pretty(&root)
+            .context("Failed to serialize Auggie settings.json")?;
+        atomic_write(&settings_path, &serialized)?;
+
+        removed.push("Auggie settings.json: removed RTK hook entry".to_string());
+
+        if verbose > 0 {
+            eprintln!("Removed RTK hook from Auggie settings.json");
+        }
+    }
+
+    Ok(removed)
+}
+
+/// Remove the RTK Auggie hook entry from a parsed settings.json document.
+/// Returns true if any entry was removed.
+fn remove_auggie_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let pre_tool_use = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let original_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| {
+        if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
+            for hook in hooks_array {
+                if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
+                    if command == AUGGIE_HOOK_COMMAND {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    });
+
+    pre_tool_use.len() < original_len
+}
+
 /// Show current rtk configuration
 pub fn show_config(codex: bool) -> Result<()> {
     if codex {
@@ -2357,6 +2592,37 @@ fn show_claude_config() -> Result<()> {
         println!("[--] Cursor: home dir not found");
     }
 
+    // Check Auggie hooks
+    if let Ok(auggie_dir) = resolve_auggie_dir() {
+        let auggie_settings = auggie_dir.join(SETTINGS_JSON);
+        let auggie_registered = if auggie_settings.exists() {
+            let content = fs::read_to_string(&auggie_settings).unwrap_or_default();
+            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+                auggie_hook_already_present(&root)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if auggie_registered {
+            println!(
+                "[ok] Auggie hook: registered in {}",
+                auggie_settings.display()
+            );
+        } else if auggie_settings.exists() {
+            println!(
+                "[--] Auggie hook: settings.json exists but RTK hook not configured ({})",
+                auggie_settings.display()
+            );
+        } else {
+            println!("[--] Auggie hook: not found");
+        }
+    } else {
+        println!("[--] Auggie: home dir not found");
+    }
+
     println!("\nUsage:");
     println!("  rtk init              # Full injection into local CLAUDE.md");
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
@@ -2369,6 +2635,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
+    println!("  rtk init -g --agent auggie  # Install Auggie (Augment Code CLI) hooks");
 
     Ok(())
 }
@@ -3782,7 +4049,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, 0, false).unwrap();
-            uninstall(true, false, false, false, 0).unwrap();
+            uninstall(true, false, false, false, false, 0).unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -3955,5 +4222,139 @@ mod tests {
             !cleaned.contains(RTK_BLOCK_END),
             "RTK end marker must be removed"
         );
+    }
+
+    // ─── Auggie tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_auggie_hook_already_present_canonical() {
+        let root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [{ "type": "command", "command": AUGGIE_HOOK_COMMAND }]
+                }]
+            }
+        });
+        assert!(auggie_hook_already_present(&root));
+    }
+
+    #[test]
+    fn test_auggie_hook_not_present_when_only_other_entries() {
+        let root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [{ "type": "command", "command": "/usr/local/bin/other-hook.sh" }]
+                }]
+            }
+        });
+        assert!(!auggie_hook_already_present(&root));
+    }
+
+    #[test]
+    fn test_auggie_hook_not_present_when_empty() {
+        assert!(!auggie_hook_already_present(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn test_insert_auggie_hook_into_empty_settings() {
+        let mut root = serde_json::json!({});
+        insert_auggie_hook_entry(&mut root).unwrap();
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["matcher"], "launch-process");
+        assert_eq!(arr[0]["hooks"][0]["type"], "command");
+        assert_eq!(arr[0]["hooks"][0]["command"], AUGGIE_HOOK_COMMAND);
+    }
+
+    #[test]
+    fn test_insert_auggie_hook_preserves_other_entries() {
+        let mut root = serde_json::json!({
+            "permissions": { "allow": ["git status"] },
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [{ "type": "command", "command": "/opt/other/hook.sh" }]
+                }]
+            }
+        });
+        insert_auggie_hook_entry(&mut root).unwrap();
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "existing entry must be preserved");
+        assert_eq!(root["permissions"]["allow"][0], "git status");
+    }
+
+    #[test]
+    fn test_remove_auggie_hook_from_json_canonical() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "launch-process",
+                        "hooks": [{ "type": "command", "command": "/opt/other/hook.sh" }]
+                    },
+                    {
+                        "matcher": "launch-process",
+                        "hooks": [{ "type": "command", "command": AUGGIE_HOOK_COMMAND }]
+                    }
+                ]
+            }
+        });
+        assert!(remove_auggie_hook_from_json(&mut root));
+        let arr = root["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["hooks"][0]["command"], "/opt/other/hook.sh");
+    }
+
+    #[test]
+    fn test_remove_auggie_hook_when_absent_is_noop() {
+        let mut root = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "launch-process",
+                    "hooks": [{ "type": "command", "command": "/opt/other/hook.sh" }]
+                }]
+            }
+        });
+        assert!(!remove_auggie_hook_from_json(&mut root));
+    }
+
+    #[test]
+    fn test_patch_auggie_settings_json_creates_file_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(SETTINGS_JSON);
+
+        // First call creates the file with the RTK entry
+        let added = patch_auggie_settings_json(&path, 0).unwrap();
+        assert!(added);
+        let content = fs::read_to_string(&path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(auggie_hook_already_present(&root));
+
+        // Second call is a no-op
+        let added_again = patch_auggie_settings_json(&path, 0).unwrap();
+        assert!(!added_again);
+    }
+
+    #[test]
+    fn test_patch_auggie_settings_json_preserves_existing_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(SETTINGS_JSON);
+        fs::write(
+            &path,
+            r#"{"permissions":{"allow":["git status"]},"hooks":{}}"#,
+        )
+        .unwrap();
+
+        assert!(patch_auggie_settings_json(&path, 0).unwrap());
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["permissions"]["allow"][0], "git status");
+        assert!(auggie_hook_already_present(&root));
+
+        // .bak file is not written when the original did not exist; for an
+        // existing file we expect a backup to have been produced.
+        assert!(path.with_extension("json.bak").exists());
     }
 }

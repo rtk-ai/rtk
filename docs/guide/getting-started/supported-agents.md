@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Kilo Code, and Antigravity
+description: How to integrate RTK with Claude Code, Cursor, Auggie, Copilot, Cline, Windsurf, Codex, OpenCode, Kilo Code, and Antigravity
 sidebar:
   order: 3
 ---
@@ -32,6 +32,7 @@ Agent runs "cargo test"
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
 | GitHub Copilot CLI | Shell hook (deny-with-suggestion) | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Yes |
+| Auggie (Augment Code CLI) | Rust binary (`PreToolUse`) | Yes (once Auggie ships `updatedInput`; safe no-op until then) |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
@@ -63,6 +64,14 @@ rtk init --global --cursor
 ```
 
 Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
+
+### Auggie (Augment Code CLI)
+
+```bash
+rtk init --global --agent auggie
+```
+
+Restart Auggie (`auggie`). The hook patches `~/.augment/settings.json` with a `PreToolUse` entry whose matcher is `launch-process` (Auggie's shell tool) and whose command is `rtk hook auggie`. Auggie's stdin/stdout JSON shape mirrors Claude Code's, so the same registry powers the rewrite. See Auggie's hook reference for details: <https://docs.augmentcode.com/cli/hooks>.
 
 ### VS Code Copilot Chat
 

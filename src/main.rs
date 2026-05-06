@@ -44,6 +44,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Auggie (Augment Code CLI)
+    Auggie,
 }
 
 #[derive(Parser)]
@@ -759,6 +761,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Auggie (Augment Code CLI) PreToolUse hook (reads JSON from stdin)
+    Auggie,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1759,7 +1763,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                let auggie = agent == Some(AgentTarget::Auggie);
+                hooks::init::uninstall(global, gemini, codex, cursor, auggie, cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1783,6 +1788,11 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Auggie) {
+                if !global {
+                    anyhow::bail!("Auggie hooks are global-only. Use: rtk init -g --agent auggie");
+                }
+                hooks::init::run_auggie_mode(cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2112,6 +2122,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Auggie => {
+                hooks::hook_cmd::run_auggie()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {

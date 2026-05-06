@@ -12,6 +12,10 @@ pub const BEFORE_TOOL_KEY: &str = "BeforeTool";
 pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
+/// Native Rust hook command for Auggie (Augment Code CLI).
+pub const AUGGIE_HOOK_COMMAND: &str = "rtk hook auggie";
+/// Auggie's PreToolUse matcher value for the shell-command tool.
+pub const AUGGIE_TOOL_MATCHER: &str = "launch-process";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
@@ -21,3 +25,4 @@ pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+pub const AUGGIE_DIR: &str = ".augment";

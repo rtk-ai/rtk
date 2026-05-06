@@ -397,6 +397,53 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── Auggie (Augment Code CLI) native hook ─────────────────────
+//
+// Auggie's PreToolUse stdin and `hookSpecificOutput.updatedInput`
+// payload mirror Claude Code's exactly, so the same payload
+// processor can be reused. The matcher value `launch-process`
+// (Auggie's shell tool name) is set in settings.json, not here.
+
+/// Run the Auggie PreToolUse hook natively.
+pub fn run_auggie() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_auggie_inner(input: &str) -> Option<String> {
+    run_claude_inner(input)
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Run the Cursor Agent hook natively.
@@ -904,5 +951,72 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // --- Auggie handler ---
+    //
+    // Auggie's PreToolUse stdin/stdout shape mirrors Claude Code's, with
+    // `tool_name` set to "launch-process" instead of "Bash". The same
+    // payload processor is reused; these tests pin that contract.
+
+    fn auggie_input(cmd: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "launch-process",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_auggie_rewrite_git_status() {
+        let result = run_auggie_inner(&auggie_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_auggie_passthrough_no_output() {
+        assert!(run_auggie_inner(&auggie_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_auggie_already_rtk_passthrough() {
+        assert!(run_auggie_inner(&auggie_input("rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_auggie_heredoc_passthrough() {
+        assert!(run_auggie_inner(&auggie_input("cat <<EOF\nhello\nEOF")).is_none());
+    }
+
+    #[test]
+    fn test_auggie_empty_command_passthrough() {
+        let input = json!({
+            "tool_name": "launch-process",
+            "tool_input": { "command": "" }
+        })
+        .to_string();
+        assert!(run_auggie_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_auggie_malformed_json_passthrough() {
+        assert!(run_auggie_inner("not valid json {{{").is_none());
+    }
+
+    #[test]
+    fn test_auggie_compound_command() {
+        let result = run_auggie_inner(&auggie_input("git add . && cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git add . && rtk cargo test");
     }
 }
