@@ -77,6 +77,25 @@ fn gradlew_binary() -> &'static str {
     }
 }
 
+/// Spawns a Gradle command using string literals only.
+///
+/// Semgrep rule `dynamic-command-execution` forbids `Command::new(var)` —
+/// each branch passes a string literal so the set of executable binaries
+/// is statically auditable.
+fn new_gradle_command() -> Command {
+    if cfg!(windows) {
+        if std::path::Path::new(".\\gradlew.bat").exists() {
+            Command::new(".\\gradlew.bat")
+        } else {
+            Command::new("gradle")
+        }
+    } else if std::path::Path::new("./gradlew").exists() {
+        Command::new("./gradlew")
+    } else {
+        Command::new("gradle")
+    }
+}
+
 // ── Progress indicator (stderr only, zero stdout contamination) ──────────────
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -182,7 +201,7 @@ where
     let timer = tracking::TimedExecution::start();
     let gradlew = gradlew_binary();
 
-    let mut child = Command::new(gradlew)
+    let mut child = new_gradle_command()
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -263,7 +282,7 @@ where
     let timer = tracking::TimedExecution::start();
     let gradlew = gradlew_binary();
 
-    let mut child = Command::new(gradlew)
+    let mut child = new_gradle_command()
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -326,7 +345,7 @@ fn run_passthrough(args: &[String]) -> Result<()> {
     let timer = tracking::TimedExecution::start();
     let gradlew = gradlew_binary();
 
-    let output = Command::new(gradlew).args(args).output().with_context(|| {
+    let output = new_gradle_command().args(args).output().with_context(|| {
         format!(
             "Failed to run {}. If this task is unsupported, try: rtk proxy gradlew {}",
             gradlew,
