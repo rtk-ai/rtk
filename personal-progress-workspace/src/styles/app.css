@@ -108,6 +108,109 @@ select {
   padding: 20px;
 }
 
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background:
+    linear-gradient(145deg, rgba(56, 189, 248, 0.16), transparent 34%),
+    linear-gradient(40deg, rgba(52, 211, 153, 0.12), transparent 38%),
+    var(--bg);
+}
+
+.auth-card {
+  display: grid;
+  gap: 16px;
+  width: min(440px, 100%);
+  padding: 28px;
+}
+
+.auth-card h1 {
+  margin: 0;
+  font-size: 32px;
+  line-height: 1.08;
+}
+
+.auth-card__subtitle,
+.form-note,
+.form-error,
+.form-success {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.auth-card__subtitle,
+.form-note {
+  color: var(--muted);
+}
+
+.auth-card label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.auth-card input {
+  width: 100%;
+  border: 1px solid #2b3954;
+  border-radius: 8px;
+  background: #0b1220;
+  color: var(--text);
+  padding: 11px 12px;
+}
+
+.auth-card input:focus-visible {
+  border-color: var(--blue);
+  outline: 2px solid rgba(56, 189, 248, 0.18);
+  outline-offset: 1px;
+}
+
+.auth-card > button[type="submit"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.24), rgba(52, 211, 153, 0.16));
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.auth-card > button[type="submit"]:disabled,
+.auth-card__switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.auth-card__switch {
+  justify-self: center;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.auth-card__switch:focus-visible,
+.auth-card > button[type="submit"]:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.form-error {
+  color: #fca5a5;
+}
+
+.form-success {
+  color: #86efac;
+}
+
 .workspace-sidebar h1 {
   margin: 0;
   font-size: 28px;

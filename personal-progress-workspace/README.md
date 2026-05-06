@@ -22,6 +22,7 @@ Notifications are intentionally outside the MVP scope.
 4. Fill `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 5. Run `npm install`.
 6. Run `npm run dev`.
+7. Open the app and use `Create account instead` on the auth screen for first-time setup.
 
 ## Verification
 
