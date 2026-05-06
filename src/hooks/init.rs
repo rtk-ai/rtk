@@ -1470,45 +1470,143 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
 // ─── Charmbracelet Crush support ──────────────────────────────
 
 const CRUSH_SKILL: &str = include_str!("../../hooks/crush/SKILL.md");
+const CRUSH_HOOK_CONTENT: &str = include_str!("../../hooks/crush/rtk-rewrite.sh");
+
+/// Patch crush.json with the RTK PreToolUse hook entry.
+/// Creates the file if it doesn't exist, shallow-merges the hook entry
+/// into the existing hooks.PreToolUse array if present.
+fn patch_crush_json(config_path: &Path, hook_path: &Path) -> Result<()> {
+    use serde_json::{json, Value};
+
+    let mut config: Value = if config_path.exists() {
+        let content = fs::read_to_string(config_path).context("Failed to read crush.json")?;
+        serde_json::from_str(&content).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+
+    let hooks = config
+        .as_object_mut()
+        .and_then(|c| {
+            if !c.contains_key("hooks") {
+                c.insert("hooks".to_string(), json!({}));
+            }
+            c.get_mut("hooks")
+        })
+        .and_then(|h| h.as_object_mut())
+        .context("Failed to parse hooks object in Crush configuration")?;
+
+    if !hooks.contains_key("PreToolUse") {
+        hooks.insert("PreToolUse".to_string(), json!([]));
+    }
+
+    let pre_tool_use = hooks
+        .get_mut("PreToolUse")
+        .and_then(|v| v.as_array_mut())
+        .context("PreToolUse is not a valid array")?;
+
+    let hook_path_str = hook_path.to_string_lossy().to_string();
+
+    // Idempotency check: skip if hook already present
+    let hook_exists = pre_tool_use
+        .iter()
+        .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(&hook_path_str));
+
+    if !hook_exists {
+        pre_tool_use.push(json!({
+            "matcher": "^bash$",
+            "command": hook_path_str
+        }));
+    }
+
+    atomic_write(
+        config_path,
+        &serde_json::to_string_pretty(&config).context("Failed to serialize Crush config")?,
+    )
+    .with_context(|| format!("Failed to write Crush config to {:?}", config_path))?;
+
+    Ok(())
+}
 
 pub fn run_crush_mode(global: bool, verbose: u8) -> Result<()> {
-    if global {
-        let home = dirs::home_dir().context("Cannot determine home directory")?;
-        let target_dir = home.join(".agents/skills/rtk-awareness");
-        run_crush_mode_at(&target_dir, verbose, global)
+    let base_dir = if global {
+        dirs::home_dir().context("Cannot determine home directory")?
     } else {
-        let target_dir = std::env::current_dir()?.join(".agents/skills/rtk-awareness");
-        run_crush_mode_at(&target_dir, verbose, global)
-    }
+        std::env::current_dir().context("Cannot determine current directory")?
+    };
+    run_crush_mode_at(&base_dir, verbose, global)
 }
 
 fn run_crush_mode_at(target_dir: &Path, verbose: u8, global: bool) -> Result<()> {
-    let skill_path = target_dir.join("SKILL.md");
+    // 1. Deploy the skill (fallback documentation for the model)
+    let skill_dir = target_dir
+        .join(".agents")
+        .join("skills")
+        .join("rtk-awareness");
+    let skill_path = skill_dir.join("SKILL.md");
 
-    let existing = fs::read_to_string(&skill_path).unwrap_or_default();
-    if existing.contains("RTK") || existing.contains("rtk") {
-        if global {
-            println!("\nRTK already configured for Crush globally.\n");
-        } else {
-            println!("\nRTK already configured for Crush in this project.\n");
-        }
-        println!("  Skill: {} (already present)", skill_path.display());
+    let skill_exists = if skill_path.exists() {
+        let content = fs::read_to_string(&skill_path).unwrap_or_default();
+        content.contains("RTK") || content.contains("rtk")
     } else {
-        fs::create_dir_all(target_dir).context("Failed to create rtk-awareness skill directory")?;
-        fs::write(&skill_path, CRUSH_SKILL).context("Failed to write SKILL.md")?;
+        false
+    };
 
+    if skill_exists {
+        let scope = if global {
+            "globally"
+        } else {
+            "in this project"
+        };
+        println!("\nRTK skill already present for Crush {}.\n", scope);
+    } else {
+        fs::create_dir_all(&skill_dir).context("Failed to create rtk-awareness skill directory")?;
+        fs::write(&skill_path, CRUSH_SKILL).context("Failed to write SKILL.md")?;
         if verbose > 0 {
             eprintln!("Wrote {}", skill_path.display());
         }
-
-        if global {
-            println!("\nRTK configured for Crush globally.\n");
-        } else {
-            println!("\nRTK configured for Crush.\n");
-        }
-        println!("  Skill: {} (installed)", skill_path.display());
     }
-    println!("  Crush will now use rtk commands for token savings.");
+
+    // 2. Deploy the PreToolUse hook script
+    let hook_dir = target_dir.join(".crush").join("hooks");
+    fs::create_dir_all(&hook_dir).context("Failed to create crush hooks directory")?;
+
+    let hook_path = hook_dir.join("rtk-rewrite.sh");
+    atomic_write(&hook_path, CRUSH_HOOK_CONTENT).context("Failed to write rtk-rewrite.sh")?;
+
+    // Set executable permissions (Unix)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&hook_path)
+            .context("Failed to read hook file metadata")?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&hook_path, perms).context("Failed to make hook executable")?;
+    }
+
+    if verbose > 0 {
+        eprintln!("Wrote {}", hook_path.display());
+    }
+
+    // 3. Patch the Crush configuration
+    let config_file = if global {
+        target_dir.join(".crush.json")
+    } else {
+        target_dir.join("crush.json")
+    };
+    patch_crush_json(&config_file, &hook_path)?;
+
+    if verbose > 0 {
+        eprintln!("Patched {}", config_file.display());
+    }
+
+    let scope = if global { "globally" } else { "locally" };
+    println!("\nRTK configured for Crush {}.\n", scope);
+    println!("  Skill: {} (installed)", skill_path.display());
+    println!("  Hook:  {} (installed)", hook_path.display());
+    println!("  Config: {} (patched)", config_file.display());
+    println!("  All bash commands will now be automatically routed through RTK.");
     println!("  Test with: git status\n");
 
     Ok(())
