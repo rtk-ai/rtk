@@ -1,5 +1,6 @@
 //! Inspects JSON structure without showing values, saving tokens on large payloads.
 
+use crate::core::toon;
 use crate::core::tracking;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -36,7 +37,7 @@ fn validate_json_extension(file: &Path) -> Result<()> {
 }
 
 /// Show JSON (compact with values by default, or keys-only with --keys-only)
-pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Result<()> {
+pub fn run(file: &Path, max_depth: usize, schema_only: bool, toon_out: bool, verbose: u8) -> Result<()> {
     validate_json_extension(file)?;
     let timer = tracking::TimedExecution::start();
 
@@ -47,11 +48,7 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
     let content = fs::read_to_string(file)
         .with_context(|| format!("Failed to read file: {}", file.display()))?;
 
-    let output = if schema_only {
-        filter_json_string(&content, max_depth)?
-    } else {
-        filter_json_compact(&content, max_depth)?
-    };
+    let output = render(&content, max_depth, schema_only, toon_out)?;
     println!("{}", output);
     timer.track(
         &format!("cat {}", file.display()),
@@ -63,7 +60,7 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
 }
 
 /// Show JSON from stdin
-pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()> {
+pub fn run_stdin(max_depth: usize, schema_only: bool, toon_out: bool, verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -76,14 +73,28 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
         .read_to_string(&mut content)
         .context("Failed to read from stdin")?;
 
-    let output = if schema_only {
-        filter_json_string(&content, max_depth)?
-    } else {
-        filter_json_compact(&content, max_depth)?
-    };
+    let output = render(&content, max_depth, schema_only, toon_out)?;
     println!("{}", output);
     timer.track("cat - (stdin)", "rtk json -", &content, &output);
     Ok(())
+}
+
+/// Pick the right renderer. TOON wins over schema-only when both are
+/// requested at the API level (CLI guards against this with `conflicts_with`).
+/// Falls back to compact JSON on TOON encoding failure.
+fn render(content: &str, max_depth: usize, schema_only: bool, toon_out: bool) -> Result<String> {
+    if toon_out {
+        if let Some(t) = toon::try_from_json(content) {
+            return Ok(t);
+        }
+        // Fall through to compact: TOON couldn't parse, but compact will
+        // surface the underlying parse error to the user.
+    }
+    if schema_only {
+        filter_json_string(content, max_depth)
+    } else {
+        filter_json_compact(content, max_depth)
+    }
 }
 
 /// Parse a JSON string and return compact representation with values preserved.

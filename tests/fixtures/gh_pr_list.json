@@ -1,0 +1,12 @@
+[
+  {"number": 1492, "title": "feat(toon): add output format", "author": "rom1", "state": "OPEN", "isDraft": false, "additions": 412, "deletions": 8},
+  {"number": 1491, "title": "fix(hook): match run_in_terminal", "author": "rom1", "state": "OPEN", "isDraft": false, "additions": 4, "deletions": 1},
+  {"number": 1490, "title": "chore(deps): bump regex to 1.12", "author": "dependabot", "state": "MERGED", "isDraft": false, "additions": 12, "deletions": 12},
+  {"number": 1489, "title": "feat(filters): pnpm v9 support", "author": "alice", "state": "OPEN", "isDraft": true, "additions": 320, "deletions": 14},
+  {"number": 1488, "title": "fix(git): handle empty stash", "author": "bob", "state": "MERGED", "isDraft": false, "additions": 22, "deletions": 5},
+  {"number": 1487, "title": "docs: clarify TOON heuristic", "author": "carol", "state": "OPEN", "isDraft": false, "additions": 64, "deletions": 0},
+  {"number": 1486, "title": "fix(cargo): truncate long error spans", "author": "dave", "state": "MERGED", "isDraft": false, "additions": 31, "deletions": 9},
+  {"number": 1485, "title": "feat(kubectl): -o json schema mode", "author": "eve", "state": "CLOSED", "isDraft": false, "additions": 88, "deletions": 11},
+  {"number": 1484, "title": "perf(json): lazy parser", "author": "frank", "state": "OPEN", "isDraft": false, "additions": 145, "deletions": 78},
+  {"number": 1483, "title": "fix(hook): copilot CLI deny path", "author": "grace", "state": "MERGED", "isDraft": false, "additions": 18, "deletions": 3}
+]
