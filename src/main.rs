@@ -15,6 +15,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
+use cmds::jvm::gradlew_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -716,6 +717,14 @@ enum Commands {
     #[command(name = "golangci-lint")]
     GolangciLint {
         /// Additional golangci-lint arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Android Gradle wrapper with compact output (build, test, lint)
+    #[command(name = "gradlew")]
+    Gradlew {
+        /// Gradle tasks and arguments (e.g., assembleDebug, testDebugUnitTest, lint, --info)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2091,6 +2100,8 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
+
+        Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
 
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;

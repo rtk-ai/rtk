@@ -627,6 +627,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^(?:\./gradlew|gradlew\.bat|gradlew|gradle)(?:\s+(test|build|clean|assemble\w*|install\w*|check|lint\w*|dependencies))?(\s|$)",
+        rtk_cmd: "rtk gradlew",
+        rewrite_prefixes: &["./gradlew", "gradlew.bat", "gradlew", "gradle"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[("test", 90.0), ("build", 80.0), ("check", 80.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^hadolint\b",
         rtk_cmd: "rtk hadolint",
         rewrite_prefixes: &["hadolint"],
