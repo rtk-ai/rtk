@@ -1,5 +1,6 @@
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::StreamFilter;
+use crate::core::utils::resolved_command;
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -76,21 +77,23 @@ fn gradlew_binary() -> &'static str {
     }
 }
 
-/// Builds a Gradle `Command` using string literals only.
+/// Builds a Gradle `Command`.
 ///
-/// Semgrep rule `dynamic-command-execution` forbids `Command::new(var)` —
-/// each branch passes a literal so the executable set is statically auditable.
+/// Local wrappers (`./gradlew`, `gradlew.bat`) are passed as string literals so
+/// semgrep's `dynamic-command-execution` rule stays happy. The `gradle` system
+/// binary is resolved via `resolved_command("gradle")` for PATHEXT support on
+/// Windows (`.CMD`/`.BAT` shims) — matches how cargo, golangci-lint, etc. do it.
 fn new_gradle_command(args: &[String]) -> Command {
     let mut cmd = if cfg!(windows) {
         if std::path::Path::new(".\\gradlew.bat").exists() {
             Command::new(".\\gradlew.bat")
         } else {
-            Command::new("gradle")
+            resolved_command("gradle")
         }
     } else if std::path::Path::new("./gradlew").exists() {
         Command::new("./gradlew")
     } else {
-        Command::new("gradle")
+        resolved_command("gradle")
     };
     cmd.args(args);
     cmd
