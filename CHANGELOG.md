@@ -430,6 +430,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 * **cargo clippy:** include actionable error details in compact output instead of summary-only counts ([#602](https://github.com/rtk-ai/rtk/issues/602))
+* **rewrite:** skip `find` rewrites when unsupported compound predicates/actions are present (`-not`, `-exec`, `-prune`, etc.) ([#664](https://github.com/rtk-ai/rtk/issues/664))
 * **curl:** skip JSON schema replacement when schema is larger than original payload ([#297](https://github.com/rtk-ai/rtk/issues/297))
 * **init:** `rtk init -g --uninstall` now removes `<!-- rtk-instructions -->` block from CLAUDE.md ([#384](https://github.com/rtk-ai/rtk/issues/384))
 * **toml-dsl:** fix regex overmatch on `tofu-plan/init/validate/fmt` and `mix-format/compile` — add `(\s|$)` word boundary to prevent matching subcommands (e.g. `tofu planet`, `mix formats`) ([#349](https://github.com/rtk-ai/rtk/issues/349))

@@ -714,6 +714,13 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
     let env_prefix = &cmd_part[..env_prefix_len];
     let cmd_clean = stripped_cow.trim();
 
+    // rtk find intentionally does not support compound predicates/actions.
+    // If the command uses unsupported find flags, skip rewriting to preserve
+    // native find behavior and avoid token-wasting error loops.
+    if strip_word_prefix(cmd_clean, "find").is_some() && has_unsupported_find_flags(cmd_clean) {
+        return None;
+    }
+
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
     // #508: warn on stderr so agents learn to stop overusing it
     if has_rtk_disabled_prefix(cmd_part) {
@@ -761,6 +768,16 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
     }
 
     None
+}
+
+fn has_unsupported_find_flags(cmd: &str) -> bool {
+    lazy_static! {
+        static ref UNSUPPORTED_FIND_FLAGS: Regex = Regex::new(
+            r"(^|\s)-(not|exec|execdir|ok|okdir|delete|prune|fls|fprint|fprintf|quit)(\s|$)"
+        )
+        .expect("valid regex");
+    }
+    UNSUPPORTED_FIND_FLAGS.is_match(cmd)
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -3051,6 +3068,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_rewrite_find_skips_unsupported_not() {
+        assert_eq!(
+            rewrite_command("find . -name '*.md' -not -path './node_modules/*'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_find_skips_unsupported_exec() {
+        assert_eq!(
+            rewrite_command("find . -name '*.tmp' -exec rm {} \\;", &[]),
+            None
+        );
+    }
+
+    // --- Ensure PATTERNS and RULES stay aligned after modifications ---
     #[test]
     fn test_all_rules_are_complete() {
         for rule in RULES {
