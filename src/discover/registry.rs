@@ -3030,7 +3030,7 @@ mod tests {
     #[test]
     fn test_rewrite_gradlew() {
         assert_eq!(
-            rewrite_command("./gradlew assembleDebug", &[]),
+            rewrite_command_no_prefixes("./gradlew assembleDebug", &[]),
             Some("rtk gradlew assembleDebug".into())
         );
     }
@@ -3038,7 +3038,7 @@ mod tests {
     #[test]
     fn test_rewrite_gradlew_no_dot_slash() {
         assert_eq!(
-            rewrite_command("gradlew build", &[]),
+            rewrite_command_no_prefixes("gradlew build", &[]),
             Some("rtk gradlew build".into())
         );
     }
@@ -3046,7 +3046,7 @@ mod tests {
     #[test]
     fn test_rewrite_gradlew_bat() {
         assert_eq!(
-            rewrite_command("gradlew.bat clean", &[]),
+            rewrite_command_no_prefixes("gradlew.bat clean", &[]),
             Some("rtk gradlew clean".into())
         );
     }
@@ -3054,7 +3054,7 @@ mod tests {
     #[test]
     fn test_rewrite_gradle() {
         assert_eq!(
-            rewrite_command("gradle build", &[]),
+            rewrite_command_no_prefixes("gradle build", &[]),
             Some("rtk gradlew build".into())
         );
     }
