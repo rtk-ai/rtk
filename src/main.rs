@@ -741,8 +741,11 @@ enum Commands {
 
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
     ///
-    /// Exits 0 and prints the rewritten command if supported.
-    /// Exits 1 with no output if the command has no RTK equivalent.
+    /// Exit codes (Claude Code hook protocol):
+    ///   0 = Allow    — rewritten, auto-approve
+    ///   1 = None     — no RTK equivalent, passthrough
+    ///   2 = Deny     — blocked by deny rules
+    ///   3 = Default  — rewritten, prompt user before running
     ///
     /// Used by Claude Code, Gemini CLI, and other LLM hooks:
     ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
