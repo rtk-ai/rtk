@@ -1310,6 +1310,13 @@ fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
         .collect()
 }
 
+fn normalize_hook_check_command(command: &[String]) -> String {
+    match command {
+        [shell, inner] if matches!(shell.as_str(), "bash" | "sh" | "zsh") => inner.clone(),
+        _ => command.join(" "),
+    }
+}
+
 /// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
 fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
     // Check if this is a Build or Typecheck command with filters
@@ -1599,7 +1606,7 @@ fn run_cli() -> Result<i32> {
                 )?,
                 PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
                 PnpmCommands::Other(args) => {
-                    pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
+                    pnpm_cmd::run_other(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
                 }
             }
         }
@@ -2127,7 +2134,7 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Check { agent: _, command } => {
                 use crate::discover::registry::rewrite_command;
-                let raw = command.join(" ");
+                let raw = normalize_hook_check_command(&command);
                 let excluded = crate::core::config::Config::load()
                     .map(|c| c.hooks.exclude_commands)
                     .unwrap_or_default();
@@ -2732,6 +2739,22 @@ mod tests {
             }
             _ => panic!("Expected Hook Check command"),
         }
+    }
+
+    #[test]
+    fn test_normalize_hook_check_command_shell_wrapper() {
+        assert_eq!(
+            normalize_hook_check_command(&["bash".into(), "pnpm build".into()]),
+            "pnpm build"
+        );
+        assert_eq!(
+            normalize_hook_check_command(&["sh".into(), "git status".into()]),
+            "git status"
+        );
+        assert_eq!(
+            normalize_hook_check_command(&["pnpm".into(), "build".into()]),
+            "pnpm build"
+        );
     }
 
     #[test]
