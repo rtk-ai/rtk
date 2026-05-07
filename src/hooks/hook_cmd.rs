@@ -290,6 +290,10 @@ enum PayloadAction {
         rewritten: String,
         output: Value,
     },
+    Passthrough {
+        cmd: String,
+        output: Value,
+    },
     Skip {
         reason: &'static str,
         cmd: String,
@@ -318,10 +322,19 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     let rewritten = match get_rewritten(cmd) {
         Some(r) => r,
         None => {
-            return PayloadAction::Skip {
-                reason: "skip:no_match",
+            let updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+            let output = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": PRE_TOOL_USE_KEY,
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "no RTK rewrite available",
+                    "updatedInput": updated_input
+                }
+            });
+            return PayloadAction::Passthrough {
                 cmd: cmd.to_string(),
-            }
+                output,
+            };
         }
     };
 
@@ -379,6 +392,10 @@ pub fn run_claude() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             let _ = writeln!(io::stdout(), "{output}");
         }
+        PayloadAction::Passthrough { cmd, output } => {
+            audit_log("passthrough", &cmd, "");
+            let _ = writeln!(io::stdout(), "{output}");
+        }
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
         }
@@ -392,7 +409,9 @@ pub fn run_claude() -> Result<()> {
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
     match process_claude_payload(&v) {
-        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        PayloadAction::Rewrite { output, .. } | PayloadAction::Passthrough { output, .. } => {
+            Some(output.to_string())
+        }
         _ => None,
     }
 }
@@ -685,18 +704,34 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_passthrough_no_output() {
-        assert!(run_claude_inner(&claude_input("htop")).is_none());
+    fn test_claude_passthrough_allow_json() {
+        // Commands with no RTK rewrite must emit a passthrough allow JSON, not empty output
+        let result = run_claude_inner(&claude_input("htop")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecisionReason"],
+            "no RTK rewrite available"
+        );
+        assert_eq!(v["hookSpecificOutput"]["updatedInput"]["command"], "htop");
     }
 
     #[test]
     fn test_claude_heredoc_passthrough() {
-        assert!(run_claude_inner(&claude_input("cat <<EOF\nhello\nEOF")).is_none());
+        let result = run_claude_inner(&claude_input("cat <<EOF\nhello\nEOF")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     #[test]
     fn test_claude_already_rtk_passthrough() {
-        assert!(run_claude_inner(&claude_input("rtk git status")).is_none());
+        let result = run_claude_inner(&claude_input("rtk git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
     }
 
     #[test]
