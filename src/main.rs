@@ -309,7 +309,7 @@ enum Commands {
         #[arg(short, long, default_value = "200")]
         max: usize,
         /// Show only match context (not full line)
-        #[arg(short, long)]
+        #[arg(long)]
         context_only: bool,
         /// Filter by file type (e.g., ts, py, rust)
         #[arg(short = 't', long)]
@@ -870,8 +870,6 @@ enum PnpmCommands {
     },
     /// Install packages (filter progress bars)
     Install {
-        /// Packages to install
-        packages: Vec<String>,
         /// Additional pnpm arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1585,8 +1583,8 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Install { packages, args } => pnpm_cmd::run(
-                    pnpm_cmd::PnpmCommand::Install { packages },
+                PnpmCommands::Install { args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Install,
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
@@ -2057,10 +2055,7 @@ fn run_cli() -> Result<i32> {
                 "next" => next_cmd::run(&args[1..], cli.verbose)?,
                 "prettier" => prettier_cmd::run(&args[1..], cli.verbose)?,
                 "playwright" => playwright_cmd::run(&args[1..], cli.verbose)?,
-                _ => {
-                    // Generic passthrough with npm boilerplate filter
-                    npm_cmd::run(&args, cli.verbose, cli.skip_env)?
-                }
+                _ => npm_cmd::exec(&args, cli.verbose, cli.skip_env)?,
             }
         }
 
@@ -2230,9 +2225,16 @@ fn run_cli() -> Result<i32> {
                     libc::signal(sig, libc::SIG_DFL);
                     libc::raise(sig);
                 }
+                // nosemgrep: unsafe-block
                 unsafe {
-                    libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
-                    libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+                    libc::signal(
+                        libc::SIGINT,
+                        handle_signal as *const () as libc::sighandler_t,
+                    );
+                    libc::signal(
+                        libc::SIGTERM,
+                        handle_signal as *const () as libc::sighandler_t,
+                    );
                 }
             }
 
@@ -2987,5 +2989,20 @@ mod tests {
             cli.ultra_compact,
             "--ultra-compact long form must still enable ultra-compact mode"
         );
+    }
+
+    #[test]
+    fn test_npx_unknown_tool_passthrough() {
+        // The bug (rtk-ai/rtk#815) was that unknown tools under `rtk npx`
+        // were dispatched to `npm` instead of `npx`. At the parse level, the
+        // Npx variant must carry all args through unchanged so the dispatch
+        // arm can forward them to npx.
+        let cli = Cli::try_parse_from(["rtk", "npx", "cowsay", "hello"]).unwrap();
+        match cli.command {
+            Commands::Npx { args } => {
+                assert_eq!(args, vec!["cowsay", "hello"]);
+            }
+            _ => panic!("Expected Commands::Npx for unknown tool"),
+        }
     }
 }

@@ -63,12 +63,16 @@ lazy_static! {
     // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
     static ref GIT_GLOBAL_OPT: Regex =
         Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
-    static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(.+)$").unwrap();
-    static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(.+)$").unwrap();
-    static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(.+)$").unwrap();
-    static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(.+)$").unwrap();
-    static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(.+)$").unwrap();
-    static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(.+)$").unwrap();
+    // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
+    // invocations like `head -3 a b c` fail to match so the segment is passed through
+    // to the native `head`/`tail` binary — which already handles multi-file with
+    // `==> name <==` banners that `rtk read --max-lines` cannot reproduce.
+    static ref HEAD_N: Regex = Regex::new(r"^head\s+-(\d+)\s+(\S+)$").unwrap();
+    static ref HEAD_LINES: Regex = Regex::new(r"^head\s+--lines=(\d+)\s+(\S+)$").unwrap();
+    static ref TAIL_N: Regex = Regex::new(r"^tail\s+-(\d+)\s+(\S+)$").unwrap();
+    static ref TAIL_N_SPACE: Regex = Regex::new(r"^tail\s+-n\s+(\d+)\s+(\S+)$").unwrap();
+    static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
+    static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
 }
 
 const GOLANGCI_GLOBAL_OPT_WITH_VALUE: &[&str] = &[
@@ -660,10 +664,8 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
             if rest.is_empty() {
                 return None;
             }
-            return match rewrite_segment_inner(rest, excluded, depth + 1) {
-                Some(rewritten) => Some(format!("{} {}", prefix, rewritten)),
-                None => None,
-            };
+            return rewrite_segment_inner(rest, excluded, depth + 1)
+                .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -1712,6 +1714,48 @@ mod tests {
     #[test]
     fn test_rewrite_tail_plain_file_skipped() {
         assert_eq!(rewrite_command("tail src/main.rs", &[]), None);
+    }
+
+    // --- Issue #1362: head/tail with multiple files falls back to native command ---
+    //
+    // `rtk read <file> --max-lines N` only accepts a single positional file path in
+    // a shape that maps cleanly to `head -N`. Rewriting `head -N a b c` to
+    // `rtk read a b c --max-lines N` previously produced a command where `rtk read`
+    // would concatenate the files without the `==> name <==` banners that native
+    // `head` emits, so the fix is to skip the rewrite and let the shell run the
+    // real `head`/`tail` binary.
+
+    #[test]
+    fn test_rewrite_head_numeric_flag_multi_file_skipped() {
+        assert_eq!(rewrite_command("head -3 /tmp/a /tmp/b /tmp/c", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_head_lines_long_flag_multi_file_skipped() {
+        assert_eq!(
+            rewrite_command("head --lines=50 src/main.rs src/lib.rs", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_tail_numeric_flag_multi_file_skipped() {
+        assert_eq!(rewrite_command("tail -20 a.log b.log", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_tail_n_space_flag_multi_file_skipped() {
+        assert_eq!(rewrite_command("tail -n 12 a.log b.log c.log", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_tail_lines_eq_multi_file_skipped() {
+        assert_eq!(rewrite_command("tail --lines=7 a.log b.log", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_tail_lines_space_multi_file_skipped() {
+        assert_eq!(rewrite_command("tail --lines 7 a.log b.log", &[]), None);
     }
 
     // --- New registry entries ---
@@ -2788,6 +2832,31 @@ mod tests {
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_npm_bare_subcommand() {
+        let commands = vec!["exec", "run", "run-script", "x"];
+        for command in commands {
+            assert_eq!(
+                rewrite_command(format!("npm {command}").as_str(), &[]),
+                Some(format!("rtk npm {command}")),
+                "Failed for bare command: npm {}",
+                command
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_npm_with_args() {
+        assert_eq!(
+            rewrite_command("npm run test", &[]),
+            Some("rtk npm run test".to_string()),
+        );
+        assert_eq!(
+            rewrite_command("npm exec vitest", &[]),
+            Some("rtk vitest".to_string()),
+        );
     }
 
     #[test]

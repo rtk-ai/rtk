@@ -1,0 +1,126 @@
+name: Update Next Release PR
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  update-next-release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Next Release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+          ALLOWED_REPOS: "rtk-ai/rtk"
+        run: |
+          set -euo pipefail
+
+          URL_PATTERN=""
+          for repo in $ALLOWED_REPOS; do
+            URL_PATTERN="${URL_PATTERN}|https://github\\.com/${repo}/issues/[0-9]+"
+          done
+          URL_PATTERN="${URL_PATTERN#|}"
+
+          if printf '%s' "$PR_TITLE" | grep -qiE '^feat'; then
+            SECTION="Feats"
+          elif printf '%s' "$PR_TITLE" | grep -qiE '^fix'; then
+            SECTION="Fix"
+          else
+            SECTION="Other"
+          fi
+
+          ISSUE_REFS=""
+          if [ -n "$PR_BODY" ]; then
+            ISSUE_REFS=$(echo "$PR_BODY" \
+              | grep -oiE "(closes|fixes|resolves):?\s+#[0-9]+|${URL_PATTERN}" \
+              | grep -oE '#[0-9]+|issues/[0-9]+' \
+              | sed 's|issues/|#|' \
+              | sort -u \
+              || true)
+          fi
+
+          ENTRY="- ${PR_TITLE} [#${PR_NUMBER}](${PR_URL})"
+          if [ -n "$ISSUE_REFS" ]; then
+            CLOSES_PARTS=""
+            while IFS= read -r ref; do
+              [ -z "$ref" ] && continue
+              NUM="${ref#\#}"
+              ISSUE_URL="https://github.com/${REPO}/issues/${NUM}"
+              if [ -n "$CLOSES_PARTS" ]; then
+                CLOSES_PARTS="${CLOSES_PARTS}, [${ref}](${ISSUE_URL}) (to verify)"
+              else
+                CLOSES_PARTS="Closes [${ref}](${ISSUE_URL}) (to verify)"
+              fi
+            done <<< "$ISSUE_REFS"
+            ENTRY="${ENTRY} — ${CLOSES_PARTS}"
+          fi
+
+          NEXT_PR=$(gh pr list \
+            --repo "$REPO" \
+            --label next-release \
+            --base master \
+            --head develop \
+            --state open \
+            --json number,body \
+            --jq '.[0] // empty')
+
+          NEXT_PR_NUMBER=""
+          if [ -n "$NEXT_PR" ]; then
+            NEXT_PR_NUMBER=$(echo "$NEXT_PR" | jq -r '.number')
+          fi
+
+          if [ -z "$NEXT_PR_NUMBER" ]; then
+            TEMPLATE="### Feats
+
+          ### Fix
+
+          ### Other"
+
+            PR_CREATE_URL=$(gh pr create \
+              --repo "$REPO" \
+              --base master \
+              --head develop \
+              --title "Next Release" \
+              --label next-release \
+              --body "$TEMPLATE")
+
+            NEXT_PR_NUMBER=$(echo "$PR_CREATE_URL" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+')
+            CURRENT_BODY="$TEMPLATE"
+          else
+            CURRENT_BODY=$(echo "$NEXT_PR" | jq -r '.body')
+          fi
+
+          SECTION_HEADER="### ${SECTION}"
+          export ENTRY
+          if echo "$CURRENT_BODY" | grep -qF "$SECTION_HEADER"; then
+            UPDATED_BODY=$(echo "$CURRENT_BODY" | awk -v section="$SECTION_HEADER" '
+              $0 == section {
+                print
+                print ENVIRON["ENTRY"]
+                next
+              }
+              { print }
+            ')
+          else
+            UPDATED_BODY="${CURRENT_BODY}
+
+          ${SECTION_HEADER}
+          ${ENTRY}"
+          fi
+
+          gh pr edit "$NEXT_PR_NUMBER" \
+            --repo "$REPO" \
+            --body "$UPDATED_BODY"
+
+          echo "Updated Next Release PR #${NEXT_PR_NUMBER} — added entry to ### ${SECTION}"

@@ -215,11 +215,11 @@ rtk grep <pattern> [chemin] [options]
 |--------|-------|--------|-------------|
 | `--max-len` | `-l` | 80 | Longueur maximale de ligne |
 | `--max` | `-m` | 50 | Nombre maximum de resultats |
-| `--context-only` | `-c` | non | Afficher uniquement le contexte du match |
+| `--context-only` |  | non | Afficher uniquement le contexte du match (pas de raccourci, `-c` est reserve a `grep --count`) |
 | `--file-type` | `-t` | tous | Filtrer par type (ts, py, rust, etc.) |
 | `--line-numbers` | `-n` | oui | Numeros de ligne (toujours actif) |
 
-Les arguments supplementaires sont transmis a `rg` (ripgrep).
+Les arguments supplementaires sont transmis a `rg` (ripgrep). Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement a `rg`/`grep` sans filtrage RTK.
 
 **Economies :** ~80%
 
@@ -800,7 +800,7 @@ Detecte automatiquement : prettier, black, ruff format, rustfmt. Applique un fil
 |----------|-------------|-----------|
 | `rtk pnpm list [-d N]` | Arbre de dependances compact | ~70% |
 | `rtk pnpm outdated` | Paquets obsoletes : `pkg: old -> new` | ~80% |
-| `rtk pnpm install [pkgs...]` | Filtre les barres de progression | ~60% |
+| `rtk pnpm install` | Filtre les barres de progression | ~60% |
 | `rtk pnpm build` | Delegue au filtre Next.js | ~87% |
 | `rtk pnpm typecheck` | Delegue au filtre tsc | ~83% |
 

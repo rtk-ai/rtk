@@ -211,8 +211,11 @@ jobs:
       - name: Build rtk
         run: cargo build --release
 
+      - name: Install system tools
+        run: sudo apt-get install -y tree
+
       - name: Install Python tools
-        run: pip install ruff pytest
+        run: pip install ruff pytest mypy
 
       - name: Install Go
         uses: actions/setup-go@v5
