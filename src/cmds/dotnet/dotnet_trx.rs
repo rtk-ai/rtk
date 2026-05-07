@@ -253,22 +253,16 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                             .unwrap_or_else(|| "unknown".to_string());
                     }
                 }
-                b"ErrorInfo" => {
-                    if in_failed_result {
-                        in_error_info = true;
-                    }
+                b"ErrorInfo" if in_failed_result => {
+                    in_error_info = true;
                 }
-                b"Message" => {
-                    if in_failed_result && in_error_info {
-                        capture_field = Some(CaptureField::Message);
-                        message_buf.clear();
-                    }
+                b"Message" if in_failed_result && in_error_info => {
+                    capture_field = Some(CaptureField::Message);
+                    message_buf.clear();
                 }
-                b"StackTrace" => {
-                    if in_failed_result && in_error_info {
-                        capture_field = Some(CaptureField::StackTrace);
-                        stack_buf.clear();
-                    }
+                b"StackTrace" if in_failed_result && in_error_info => {
+                    capture_field = Some(CaptureField::StackTrace);
+                    stack_buf.clear();
                 }
                 _ => {}
             },
@@ -332,34 +326,32 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                 b"ErrorInfo" => {
                     in_error_info = false;
                 }
-                b"UnitTestResult" => {
-                    if in_failed_result {
-                        let mut details = Vec::new();
+                b"UnitTestResult" if in_failed_result => {
+                    let mut details = Vec::new();
 
-                        let message = message_buf.trim();
-                        if !message.is_empty() {
-                            details.push(message.to_string());
-                        }
-
-                        let stack = stack_buf.trim();
-                        if !stack.is_empty() {
-                            let stack_lines: Vec<&str> = stack.lines().take(3).collect();
-                            if !stack_lines.is_empty() {
-                                details.push(stack_lines.join("\n"));
-                            }
-                        }
-
-                        summary.failed_tests.push(FailedTest {
-                            name: failed_test_name.clone(),
-                            details,
-                        });
-
-                        in_failed_result = false;
-                        in_error_info = false;
-                        capture_field = None;
-                        message_buf.clear();
-                        stack_buf.clear();
+                    let message = message_buf.trim();
+                    if !message.is_empty() {
+                        details.push(message.to_string());
                     }
+
+                    let stack = stack_buf.trim();
+                    if !stack.is_empty() {
+                        let stack_lines: Vec<&str> = stack.lines().take(3).collect();
+                        if !stack_lines.is_empty() {
+                            details.push(stack_lines.join("\n"));
+                        }
+                    }
+
+                    summary.failed_tests.push(FailedTest {
+                        name: failed_test_name.clone(),
+                        details,
+                    });
+
+                    in_failed_result = false;
+                    in_error_info = false;
+                    capture_field = None;
+                    message_buf.clear();
+                    stack_buf.clear();
                 }
                 _ => {}
             },

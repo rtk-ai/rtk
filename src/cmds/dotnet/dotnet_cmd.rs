@@ -90,8 +90,8 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
         eprintln!("Running: dotnet {} ...", subcommand);
     }
 
-    let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run dotnet {}", subcommand))?;
+    let result =
+        exec_capture(&mut cmd).with_context(|| format!("Failed to run dotnet {}", subcommand))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -131,8 +131,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     }
 
     let command_started_at = SystemTime::now();
-    let result = exec_capture(&mut cmd)
-        .with_context(|| format!("Failed to run dotnet {}", subcommand))?;
+    let result =
+        exec_capture(&mut cmd).with_context(|| format!("Failed to run dotnet {}", subcommand))?;
 
     let raw = format!("{}\n{}", result.stdout, result.stderr);
     let command_success = result.success();
@@ -147,10 +147,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             } else {
                 binlog::BuildSummary::default()
             };
-            let raw_summary = normalize_build_summary(
-                binlog::parse_build_from_text(&raw),
-                command_success,
-            );
+            let raw_summary =
+                normalize_build_summary(binlog::parse_build_from_text(&raw), command_success);
             let summary = merge_build_summaries(binlog_summary, raw_summary);
             format_build_output(&summary, &binlog_path)
         }
@@ -179,10 +177,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             } else {
                 binlog::BuildSummary::default()
             };
-            let raw_diagnostics = normalize_build_summary(
-                binlog::parse_build_from_text(&raw),
-                command_success,
-            );
+            let raw_diagnostics =
+                normalize_build_summary(binlog::parse_build_from_text(&raw), command_success);
             let test_build_summary = merge_build_summaries(binlog_diagnostics, raw_diagnostics);
             format_test_output(
                 &summary,
@@ -200,10 +196,8 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             } else {
                 binlog::RestoreSummary::default()
             };
-            let raw_summary = normalize_restore_summary(
-                binlog::parse_restore_from_text(&raw),
-                command_success,
-            );
+            let raw_summary =
+                normalize_restore_summary(binlog::parse_restore_from_text(&raw), command_success);
             let summary = merge_restore_summaries(binlog_summary, raw_summary);
 
             let (raw_errors, raw_warnings) = binlog::parse_restore_issues_from_text(&raw);
@@ -597,12 +591,10 @@ fn scan_mtp_kind_in_file(path: &Path) -> MtpProjectKind {
                         | b"testingplatformdotnettestsupport"
                 );
             }
-            Ok(Event::Text(e)) => {
-                if inside_mtp_element {
-                    if let Ok(text) = e.unescape() {
-                        if text.trim().eq_ignore_ascii_case("true") {
-                            return MtpProjectKind::VsTestBridge;
-                        }
+            Ok(Event::Text(e)) if inside_mtp_element => {
+                if let Ok(text) = e.unescape() {
+                    if text.trim().eq_ignore_ascii_case("true") {
+                        return MtpProjectKind::VsTestBridge;
                     }
                 }
             }
@@ -1143,10 +1135,10 @@ fn format_test_output(
         sep.into(),
         header,
     ]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// Format the restore summary for stdout.

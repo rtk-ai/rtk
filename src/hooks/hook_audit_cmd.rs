@@ -143,7 +143,7 @@ pub fn run(since_days: u64, verbose: u8) -> Result<()> {
 
     if !skip_actions.is_empty() {
         let mut sorted_skips = skip_actions;
-        sorted_skips.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_skips.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (action, count) in &sorted_skips {
             let reason = action.strip_prefix("skip:").unwrap_or(action);
             println!(
