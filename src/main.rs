@@ -22,8 +22,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, gci_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls,
-    patch, pipe_cmd, read, summary, tree, wc_cmd,
+    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls,
+    pipe_cmd, read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -31,175 +31,6 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GrepEffectiveLimits {
-    max_line_chars: Option<usize>,
-    max_matches: Option<usize>,
-    max_per_file: Option<usize>,
-    summary_enabled: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compute_grep_effective_limits(
-    max_len: usize,
-    max: usize,
-    all: bool,
-    full_lines: bool,
-    agent_safe: bool,
-    max_matches: Option<usize>,
-    max_per_file: Option<usize>,
-    max_line_chars: Option<usize>,
-) -> GrepEffectiveLimits {
-    // Keep legacy defaults unless user opts in. `--agent-safe` supplies caps unless
-    // explicit override flags are present. `--all` forces uncapped.
-    let mut effective_max_matches: Option<usize> = None;
-    let mut effective_max_per_file: Option<usize> = None;
-    let mut effective_max_line_chars: Option<usize> = None;
-
-    if agent_safe {
-        effective_max_matches = Some(80);
-        effective_max_per_file = Some(5);
-        effective_max_line_chars = Some(240);
-    }
-
-    if let Some(n) = max_matches {
-        effective_max_matches = Some(n);
-    }
-    if let Some(n) = max_per_file {
-        effective_max_per_file = Some(n);
-    }
-    if let Some(n) = max_line_chars {
-        effective_max_line_chars = Some(n);
-    }
-
-    // Back-compat: legacy flags set the baseline when not using explicit new overrides.
-    if effective_max_matches.is_none() {
-        effective_max_matches = Some(max);
-    }
-    if effective_max_line_chars.is_none() {
-        effective_max_line_chars = Some(max_len);
-    }
-
-    if full_lines {
-        effective_max_line_chars = None;
-    }
-    if all {
-        effective_max_matches = None;
-        effective_max_per_file = None;
-    }
-
-    let summary_enabled =
-        agent_safe || max_matches.is_some() || max_per_file.is_some() || max_line_chars.is_some();
-
-    GrepEffectiveLimits {
-        max_line_chars: effective_max_line_chars,
-        max_matches: effective_max_matches,
-        max_per_file: effective_max_per_file,
-        summary_enabled,
-    }
-}
-
-fn parse_truthy_env_var(name: &str) -> bool {
-    let Ok(v) = std::env::var(name) else {
-        return false;
-    };
-    matches!(
-        v.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "y" | "on"
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GrepCliFixups {
-    top_files: Option<usize>,
-    json: bool,
-}
-
-struct GrepCliArgs {
-    files_only: bool,
-    count_by_file: bool,
-    all: bool,
-    max_matches: Option<usize>,
-    max_per_file: Option<usize>,
-    max_line_chars: Option<usize>,
-    full_lines: bool,
-    agent_safe: bool,
-    summary_enabled: bool,
-    fixups: GrepCliFixups,
-}
-
-fn apply_grep_rtk_flags_from_extra_args(
-    state: &mut GrepCliArgs,
-    extra_args: Vec<String>,
-) -> Result<Vec<String>> {
-    let mut forwarded: Vec<String> = Vec::new();
-    let mut i = 0usize;
-    while i < extra_args.len() {
-        let a = &extra_args[i];
-
-        let take_value = |name: &str| -> Result<String> {
-            let Some(v) = extra_args.get(i + 1) else {
-                return Err(anyhow::anyhow!("missing value for {}", name));
-            };
-            Ok(v.clone())
-        };
-
-        match a.as_str() {
-            "--files-only" => {
-                state.files_only = true;
-                i += 1;
-            }
-            "--count-by-file" => {
-                state.count_by_file = true;
-                i += 1;
-            }
-            "--all" => {
-                state.all = true;
-                i += 1;
-            }
-            "--max-matches" => {
-                let v = take_value("--max-matches")?;
-                state.max_matches = Some(v.parse().context("invalid --max-matches")?);
-                i += 2;
-            }
-            "--max-per-file" => {
-                let v = take_value("--max-per-file")?;
-                state.max_per_file = Some(v.parse().context("invalid --max-per-file")?);
-                i += 2;
-            }
-            "--max-line-chars" => {
-                let v = take_value("--max-line-chars")?;
-                state.max_line_chars = Some(v.parse().context("invalid --max-line-chars")?);
-                i += 2;
-            }
-            "--full-lines" => {
-                state.full_lines = true;
-                i += 1;
-            }
-            "--agent-safe" => {
-                state.agent_safe = true;
-                state.summary_enabled = true;
-                i += 1;
-            }
-            "--top-files" => {
-                let v = take_value("--top-files")?;
-                state.fixups.top_files = Some(v.parse().context("invalid --top-files")?);
-                i += 2;
-            }
-            "--json" => {
-                state.fixups.json = true;
-                i += 1;
-            }
-            _ => {
-                forwarded.push(a.clone());
-                i += 1;
-            }
-        }
-    }
-
-    Ok(forwarded)
-}
 
 /// Target agent for hook installation.
 #[derive(Debug, Clone, Copy, PartialEq, ValueEnum)]
@@ -276,37 +107,9 @@ enum Commands {
         /// Keep only last N lines
         #[arg(long, conflicts_with = "max_lines")]
         tail_lines: Option<usize>,
-        /// Read only an inclusive line range (START:END, 1-based)
-        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines"])]
-        lines: Option<String>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
-        /// Input encoding for file decoding
-        #[arg(long, value_enum, default_value = "auto")]
-        encoding: core::text_encoding::TextEncoding,
-    },
-
-    /// Encoding-aware file patch helper (best-effort roundtrip)
-    Patch {
-        /// File to patch
-        #[arg(long)]
-        file: PathBuf,
-        /// Input/output encoding
-        #[arg(long, value_enum, default_value = "auto")]
-        encoding: core::text_encoding::TextEncoding,
-        /// Replace exactly one match by default
-        #[arg(long = "replace")]
-        old: String,
-        /// Replacement string
-        #[arg(long = "with")]
-        new: String,
-        /// Replace all matches
-        #[arg(long)]
-        all: bool,
-        /// Write `<file>.bak` before patching
-        #[arg(long)]
-        backup: bool,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -457,37 +260,6 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// PowerShell-like Get-ChildItem (subset) with compact output
-    Gci {
-        /// Root path
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Recurse into subdirectories
-        #[arg(long)]
-        recurse: bool,
-        /// Include hidden files/directories
-        #[arg(long)]
-        force: bool,
-        /// Files only
-        #[arg(long, conflicts_with = "directory")]
-        file: bool,
-        /// Directories only
-        #[arg(long)]
-        directory: bool,
-        /// Name filter (glob, e.g. "*.cpp" or "API_win.obj")
-        #[arg(long)]
-        filter: Option<String>,
-        /// Include patterns (comma-separated globs)
-        #[arg(long)]
-        include: Option<String>,
-        /// Max results to show
-        #[arg(long, default_value = "50")]
-        max: usize,
-        /// Select properties (comma-separated: FullName,LastWriteTime,Length)
-        #[arg(long)]
-        select: Option<String>,
-    },
-
     /// Ultra-condensed diff (only changed lines)
     Diff {
         /// First file or - for stdin (unified diff)
@@ -500,12 +272,6 @@ enum Commands {
     Log {
         /// Log file (omit for stdin)
         file: Option<PathBuf>,
-        /// Show last N matching events (deduped)
-        #[arg(long, default_value = "0")]
-        events: usize,
-        /// Additional keywords to treat as events (can be repeated)
-        #[arg(long = "keyword", action = clap::ArgAction::Append)]
-        keyword: Vec<String>,
     },
 
     /// .NET commands with compact output (build/test/restore/format)
@@ -540,7 +306,6 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
-    #[command(alias = "fgrep")]
     Grep {
         /// Pattern to search
         pattern: String,
@@ -553,40 +318,6 @@ enum Commands {
         /// Max results to show
         #[arg(short, long, default_value = "200")]
         max: usize,
-        /// Print only unique matching file paths (no match lines)
-        #[arg(long, conflicts_with = "count_by_file")]
-        files_only: bool,
-        /// Print one row per matching file: `<count>  <path>` (no match lines)
-        #[arg(long, conflicts_with = "files_only")]
-        count_by_file: bool,
-        /// Uncapped/full normal match output (no total/per-file caps; does not affect line clipping)
-        #[arg(long)]
-        all: bool,
-        /// Optional total match cap for normal match-line output (does not apply to --files-only/--count-by-file)
-        #[arg(long, conflicts_with = "all")]
-        max_matches: Option<usize>,
-        /// Optional max matches per file for normal match-line output (does not apply to --files-only/--count-by-file)
-        #[arg(long, conflicts_with = "all")]
-        max_per_file: Option<usize>,
-        /// Optional max displayed line length for normal match-line output
-        #[arg(long, conflicts_with = "full_lines")]
-        max_line_chars: Option<usize>,
-        /// Do not clip/truncate match lines (does not affect caps; use --all for uncapped)
-        #[arg(long)]
-        full_lines: bool,
-        /// Convenience preset for token-safe agent usage (explicit flags override)
-        #[arg(long)]
-        agent_safe: bool,
-        /// Show only the top N files by match count (no match lines)
-        #[arg(
-            long,
-            value_parser = clap::value_parser!(usize),
-            conflicts_with_all = ["files_only", "count_by_file"]
-        )]
-        top_files: Option<usize>,
-        /// Output JSON only (no human output)
-        #[arg(long)]
-        json: bool,
         /// Show only match context (not full line)
         #[arg(long)]
         context_only: bool,
@@ -596,12 +327,6 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
-        /// Treat pattern as a literal string (fixed)
-        #[arg(long, conflicts_with = "regex")]
-        fixed: bool,
-        /// Treat pattern as a regular expression
-        #[arg(long, conflicts_with = "fixed")]
-        regex: bool,
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -960,6 +685,13 @@ enum Commands {
     /// Pytest test runner with compact output
     Pytest {
         /// Pytest arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// CTest runner with compact GoogleTest failure output
+    Ctest {
+        /// CTest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1855,37 +1587,7 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
     }
 }
 
-fn parse_line_range(spec: &str) -> std::result::Result<(usize, usize), String> {
-    let (start_s, end_s) = spec
-        .split_once(':')
-        .ok_or_else(|| "expected START:END".to_string())?;
-    let start: usize = start_s
-        .parse()
-        .map_err(|_| "START must be a positive integer".to_string())?;
-    let end: usize = end_s
-        .parse()
-        .map_err(|_| "END must be a positive integer".to_string())?;
-    if start == 0 || end == 0 {
-        return Err("START and END must be >= 1".to_string());
-    }
-    if end < start {
-        return Err("END must be >= START".to_string());
-    }
-    Ok((start, end))
-}
-
 fn main() {
-    // Reset SIGPIPE to default handler so writing to a closed pipe
-    // e.g `rtk git log | head` exits silently instead of panicking.
-    // Rust ignores SIGPIPE by default and with panic="abort" in the
-    // release profile that becomes SIGABRT + coredump.
-    #[cfg(unix)]
-    #[allow(unsafe_code)]
-    // nosemgrep: unsafe-block
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
-
     let code = match run_cli() {
         Ok(code) => code,
         Err(e) => {
@@ -1956,27 +1658,10 @@ fn run_cli() -> Result<i32> {
             level,
             max_lines,
             tail_lines,
-            lines,
             line_numbers,
-            encoding,
         } => {
             let mut had_error = false;
             let mut stdin_seen = false;
-            let line_range = match lines.as_deref() {
-                None => Ok(None),
-                Some(spec) => parse_line_range(spec).map(Some),
-            };
-            let line_range = match line_range {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "rtk read: invalid --lines '{}': {}",
-                        lines.unwrap_or_default(),
-                        e
-                    );
-                    return Ok(2);
-                }
-            };
             for file in &files {
                 let result = if file == Path::new("-") {
                     if stdin_seen {
@@ -1984,24 +1669,14 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(
-                        level,
-                        max_lines,
-                        tail_lines,
-                        line_range,
-                        line_numbers,
-                        encoding,
-                        cli.verbose,
-                    )
+                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
                 } else {
                     read::run(
                         file,
                         level,
                         max_lines,
                         tail_lines,
-                        line_range,
                         line_numbers,
-                        encoding,
                         cli.verbose,
                     )
                 };
@@ -2016,25 +1691,6 @@ fn run_cli() -> Result<i32> {
                 0
             }
         }
-
-        Commands::Patch {
-            file,
-            encoding,
-            old,
-            new,
-            all,
-            backup,
-        } => patch::run(
-            patch::PatchArgs {
-                file: &file,
-                encoding,
-                old: &old,
-                new: &new,
-                all,
-                backup,
-            },
-            cli.verbose,
-        )?,
 
         Commands::Smart {
             file,
@@ -2262,44 +1918,6 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Gci {
-            path,
-            recurse,
-            force,
-            file,
-            directory,
-            filter,
-            include,
-            max,
-            select,
-        } => {
-            let mut parsed = gci_cmd::GciArgs {
-                path,
-                recurse,
-                force,
-                max,
-                filter,
-                ..Default::default()
-            };
-            if file {
-                parsed.kind = gci_cmd::GciKind::File;
-            } else if directory {
-                parsed.kind = gci_cmd::GciKind::Directory;
-            }
-            if let Some(spec) = include {
-                parsed.include = spec
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
-            if let Some(sel) = select.as_deref() {
-                gci_cmd::parse_select_list(sel, &mut parsed);
-            }
-            gci_cmd::run(&parsed, cli.verbose)?;
-            0
-        }
-
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
                 diff_cmd::run(&file1, &f2, cli.verbose)?
@@ -2309,15 +1927,11 @@ fn run_cli() -> Result<i32> {
             }
         }
 
-        Commands::Log {
-            file,
-            events,
-            keyword,
-        } => {
+        Commands::Log { file } => {
             if let Some(f) = file {
-                log_cmd::run_file(&f, events, &keyword, cli.verbose)?;
+                log_cmd::run_file(&f, cli.verbose)?;
             } else {
-                log_cmd::run_stdin(events, &keyword, cli.verbose)?;
+                log_cmd::run_stdin(cli.verbose)?;
             }
             0
         }
@@ -2404,107 +2018,20 @@ fn run_cli() -> Result<i32> {
             path,
             max_len,
             max,
-            files_only,
-            count_by_file,
-            all,
-            max_matches,
-            max_per_file,
-            max_line_chars,
-            full_lines,
-            agent_safe,
-            top_files,
-            json,
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
-            fixed,
-            regex,
             extra_args,
-        } => {
-            // Default to fixed/literal search for agent safety; --regex opts into regex mode.
-            // --fixed is accepted as an explicit/no-op compatibility flag.
-            let fixed_mode = fixed || !regex;
-
-            let mut state = GrepCliArgs {
-                files_only,
-                count_by_file,
-                all,
-                max_matches,
-                max_per_file,
-                max_line_chars,
-                full_lines,
-                agent_safe,
-                summary_enabled: false,
-                fixups: GrepCliFixups { top_files, json },
-            };
-
-            let forwarded_extra_args = apply_grep_rtk_flags_from_extra_args(&mut state, extra_args)
-                .map_err(|e| anyhow::anyhow!("rtk grep: {}", e))?;
-
-            // Env/config: opt-in agent-safe preset for grep only.
-            // Precedence: CLI > env > config.
-            let config_agent_safe = crate::core::config::Config::load()
-                .ok()
-                .and_then(|c| c.agent.map(|a| a.safe_mode))
-                .unwrap_or(false);
-            let env_agent_safe = parse_truthy_env_var("RTK_AGENT_SAFE");
-            if !state.agent_safe && (env_agent_safe || config_agent_safe) {
-                state.agent_safe = true;
-                state.summary_enabled = true;
-            }
-
-            if state.files_only && state.count_by_file {
-                return Err(clap::Error::raw(
-                    ErrorKind::ArgumentConflict,
-                    "--files-only conflicts with --count-by-file",
-                )
-                .into());
-            }
-            if state.files_only && state.fixups.top_files.is_some() {
-                return Err(clap::Error::raw(
-                    ErrorKind::ArgumentConflict,
-                    "--files-only conflicts with --top-files",
-                )
-                .into());
-            }
-            if state.count_by_file && state.fixups.top_files.is_some() {
-                return Err(clap::Error::raw(
-                    ErrorKind::ArgumentConflict,
-                    "--count-by-file conflicts with --top-files",
-                )
-                .into());
-            }
-
-            let effective = compute_grep_effective_limits(
-                max_len,
-                max,
-                state.all,
-                state.full_lines,
-                state.agent_safe,
-                state.max_matches,
-                state.max_per_file,
-                state.max_line_chars,
-            );
-            grep_cmd::run(
-                &pattern,
-                &path,
-                effective.max_line_chars,
-                effective.max_matches,
-                effective.max_per_file,
-                state.all,
-                state.files_only,
-                state.count_by_file,
-                state.agent_safe,
-                effective.summary_enabled || state.summary_enabled,
-                state.fixups.top_files,
-                state.fixups.json,
-                context_only,
-                file_type.as_deref(),
-                fixed_mode,
-                &forwarded_extra_args,
-                cli.verbose,
-            )?
-        }
+        } => grep_cmd::run(
+            &pattern,
+            &path,
+            max_len,
+            max,
+            context_only,
+            file_type.as_deref(),
+            &extra_args,
+            cli.verbose,
+        )?,
 
         Commands::Init {
             global,
@@ -2529,12 +2056,6 @@ fn run_cli() -> Result<i32> {
             };
             if show {
                 hooks::init::show_config(codex)?;
-            } else if uninstall && copilot {
-                if global {
-                    hooks::init::uninstall_copilot_global(ctx)?;
-                } else {
-                    hooks::init::uninstall_copilot(ctx)?;
-                }
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
@@ -2555,11 +2076,7 @@ fn run_cli() -> Result<i32> {
                 };
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
-                if global {
-                    hooks::init::run_copilot_global(ctx)?;
-                } else {
-                    hooks::init::run_copilot(ctx)?;
-                }
+                hooks::init::run_copilot(ctx)?;
             } else if agent == Some(AgentTarget::Pi) {
                 hooks::init::run_pi_mode(global, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
@@ -2863,6 +2380,8 @@ fn run_cli() -> Result<i32> {
         Commands::Ruff { args } => ruff_cmd::run(&args, cli.verbose)?,
 
         Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
+
+        Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
 
@@ -3250,7 +2769,6 @@ fn is_operational_command(cmd: &Commands) -> bool {
         Commands::Ls { .. }
             | Commands::Tree { .. }
             | Commands::Read { .. }
-            | Commands::Patch { .. }
             | Commands::Smart { .. }
             | Commands::Git { .. }
             | Commands::Gh { .. }
@@ -4067,40 +3585,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Integration test: requires `cargo build` first
-    fn test_broken_pipe_does_not_crash() {
-        let bin_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("rtk");
-        assert!(
-            bin_path.exists(),
-            "Debug binary not found at {:?} - run `cargo build` first",
-            bin_path
-        );
-
-        let mut child = std::process::Command::new(&bin_path)
-            .args(["git", "log", "--oneline", "-50"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("Failed to spawn rtk");
-
-        // Read one byte then drop stdout to close the pipe.
-        let mut stdout = child.stdout.take().unwrap();
-        let mut buf = [0u8; 1];
-        let _ = std::io::Read::read(&mut stdout, &mut buf);
-
-        let status = child.wait().expect("Failed to wait for rtk");
-        let code = status.code().unwrap_or(-1);
-
-        assert_ne!(
-            code, 134,
-            "rtk crashed with SIGABRT (exit 134) on broken pipe - SIGPIPE handler missing"
-        );
-    }
-
-    #[test]
     fn test_ultra_compact_long_form_still_works() {
         let cli = Cli::try_parse_from(["rtk", "--ultra-compact", "git", "status"]).unwrap();
         assert!(
@@ -4163,190 +3647,5 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
-    }
-
-    #[test]
-    fn test_grep_agent_safe_overrides_per_file() {
-        let cli =
-            Cli::try_parse_from(["rtk", "grep", "Foo", "--agent-safe", "--max-per-file", "30"])
-                .unwrap();
-        match cli.command {
-            Commands::Grep {
-                max_len,
-                max,
-                all,
-                full_lines,
-                agent_safe,
-                max_matches,
-                max_per_file,
-                max_line_chars,
-                ..
-            } => {
-                let effective = compute_grep_effective_limits(
-                    max_len,
-                    max,
-                    all,
-                    full_lines,
-                    agent_safe,
-                    max_matches,
-                    max_per_file,
-                    max_line_chars,
-                );
-                assert_eq!(effective.max_matches, Some(80));
-                assert_eq!(effective.max_per_file, Some(30));
-                assert_eq!(effective.max_line_chars, Some(240));
-            }
-            _ => panic!("Expected Grep command"),
-        }
-    }
-
-    #[test]
-    fn test_grep_agent_safe_overrides_total_only() {
-        let cli =
-            Cli::try_parse_from(["rtk", "grep", "Foo", "--agent-safe", "--max-matches", "200"])
-                .unwrap();
-        match cli.command {
-            Commands::Grep {
-                max_len,
-                max,
-                all,
-                full_lines,
-                agent_safe,
-                max_matches,
-                max_per_file,
-                max_line_chars,
-                ..
-            } => {
-                let effective = compute_grep_effective_limits(
-                    max_len,
-                    max,
-                    all,
-                    full_lines,
-                    agent_safe,
-                    max_matches,
-                    max_per_file,
-                    max_line_chars,
-                );
-                assert_eq!(effective.max_matches, Some(200));
-                assert_eq!(effective.max_per_file, Some(5));
-                assert_eq!(effective.max_line_chars, Some(240));
-            }
-            _ => panic!("Expected Grep command"),
-        }
-    }
-
-    #[test]
-    fn test_grep_all_disables_caps_but_not_full_lines() {
-        let cli = Cli::try_parse_from(["rtk", "grep", "Foo", "--all"]).unwrap();
-        match cli.command {
-            Commands::Grep {
-                max_len,
-                max,
-                all,
-                full_lines,
-                agent_safe,
-                max_matches,
-                max_per_file,
-                max_line_chars,
-                ..
-            } => {
-                let effective = compute_grep_effective_limits(
-                    max_len,
-                    max,
-                    all,
-                    full_lines,
-                    agent_safe,
-                    max_matches,
-                    max_per_file,
-                    max_line_chars,
-                );
-                assert_eq!(effective.max_matches, None);
-                assert_eq!(effective.max_per_file, None);
-                assert_eq!(effective.max_line_chars, Some(80));
-            }
-            _ => panic!("Expected Grep command"),
-        }
-    }
-
-    #[test]
-    fn test_grep_full_lines_disables_clipping() {
-        let cli = Cli::try_parse_from(["rtk", "grep", "Foo", "--full-lines"]).unwrap();
-        match cli.command {
-            Commands::Grep {
-                max_len,
-                max,
-                all,
-                full_lines,
-                agent_safe,
-                max_matches,
-                max_per_file,
-                max_line_chars,
-                ..
-            } => {
-                let effective = compute_grep_effective_limits(
-                    max_len,
-                    max,
-                    all,
-                    full_lines,
-                    agent_safe,
-                    max_matches,
-                    max_per_file,
-                    max_line_chars,
-                );
-                assert_eq!(effective.max_line_chars, None);
-            }
-            _ => panic!("Expected Grep command"),
-        }
-    }
-
-    #[test]
-    fn test_grep_flags_after_path_are_parsed_by_rtk() {
-        let cli =
-            Cli::try_parse_from(["rtk", "grep", "Foo", "tmp_grep_test", "--files-only"]).unwrap();
-        match cli.command {
-            Commands::Grep {
-                files_only,
-                count_by_file,
-                all,
-                max_matches,
-                max_per_file,
-                max_line_chars,
-                full_lines,
-                agent_safe,
-                top_files,
-                json,
-                extra_args,
-                ..
-            } => {
-                let mut state = GrepCliArgs {
-                    files_only,
-                    count_by_file,
-                    all,
-                    max_matches,
-                    max_per_file,
-                    max_line_chars,
-                    full_lines,
-                    agent_safe,
-                    summary_enabled: false,
-                    fixups: GrepCliFixups { top_files, json },
-                };
-                let forwarded =
-                    apply_grep_rtk_flags_from_extra_args(&mut state, extra_args).unwrap();
-                assert!(state.files_only);
-                assert!(!state.count_by_file);
-                assert!(forwarded.is_empty(), "rtk flags must not forward to rg");
-            }
-            _ => panic!("Expected Grep command"),
-        }
-    }
-
-    #[test]
-    fn test_parse_truthy_env_var() {
-        std::env::set_var("RTK_AGENT_SAFE", "yes");
-        assert!(parse_truthy_env_var("RTK_AGENT_SAFE"));
-        std::env::set_var("RTK_AGENT_SAFE", "0");
-        assert!(!parse_truthy_env_var("RTK_AGENT_SAFE"));
-        std::env::remove_var("RTK_AGENT_SAFE");
-        assert!(!parse_truthy_env_var("RTK_AGENT_SAFE"));
     }
 }

@@ -13,7 +13,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
         "cargo-test" | "cargo" => Some(crate::cmds::rust::cargo_cmd::filter_cargo_test),
         "pytest" => Some(crate::cmds::python::pytest_cmd::filter_pytest_output),
-        "ctest" => Some(crate::cmds::cpp::ctest_cmd::filter_ctest_output),
+        "ctest" => Some(crate::cmds::system::ctest_cmd::filter_ctest_output),
         "go-test" => Some(go_test_wrapper),
         "go-build" => Some(crate::cmds::go::go_cmd::filter_go_build),
         "tsc" => Some(crate::cmds::js::tsc_cmd::filter_tsc_output),
