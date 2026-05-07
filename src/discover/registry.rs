@@ -382,6 +382,53 @@ fn strip_absolute_path(cmd: &str) -> String {
     }
 }
 
+/// Standard system bin directories where PATH resolution is guaranteed to find
+/// the same binary as the absolute path. Project-local locations such as
+/// `.venv/bin/`, `./node_modules/.bin/`, and `/snap/bin/` are intentionally
+/// excluded because rtk wrappers re-resolve via PATH and could run the wrong
+/// binary (see #1053).
+const SAFE_BIN_PREFIXES: &[&str] = &[
+    "/bin/",
+    "/sbin/",
+    "/usr/bin/",
+    "/usr/sbin/",
+    "/usr/local/bin/",
+    "/usr/local/sbin/",
+    "/opt/homebrew/bin/",
+    "/opt/homebrew/sbin/",
+    "/home/linuxbrew/.linuxbrew/bin/",
+    "/home/linuxbrew/.linuxbrew/sbin/",
+];
+
+/// Normalize the leading command token when it is a system absolute path
+/// (e.g. `/bin/ls`, `/usr/local/bin/git`) or a shell-escape form (`\foo`),
+/// so the rule prefix matcher in `rewrite_segment_inner` can find a match.
+/// Returns `None` when the input is already bare or when the path falls
+/// outside `SAFE_BIN_PREFIXES` (#1699, #1053).
+fn strip_safe_path_or_escape(cmd: &str) -> Option<String> {
+    let first_space = cmd.find(' ');
+    let (first_word, rest) = match first_space {
+        Some(pos) => (&cmd[..pos], &cmd[pos..]),
+        None => (cmd, ""),
+    };
+
+    if let Some(without_escape) = first_word.strip_prefix('\\') {
+        if !without_escape.is_empty() && !without_escape.contains('/') {
+            return Some(format!("{}{}", without_escape, rest));
+        }
+    }
+
+    for prefix in SAFE_BIN_PREFIXES {
+        if let Some(basename) = first_word.strip_prefix(prefix) {
+            if !basename.is_empty() && !basename.contains('/') {
+                return Some(format!("{}{}", basename, rest));
+            }
+        }
+    }
+
+    None
+}
+
 /// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
 pub fn has_rtk_disabled_prefix(cmd: &str) -> bool {
     let trimmed = cmd.trim();
@@ -692,11 +739,24 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
         }
     }
 
+    // Extract env prefix (sudo, env VAR=val, etc.) so the rest of the
+    // pipeline can route on the bare command.
+    let stripped_cow = ENV_PREFIX.replace(cmd_part, "");
+    let env_prefix_len = cmd_part.len() - stripped_cow.len();
+    let env_prefix = &cmd_part[..env_prefix_len];
+    let cmd_after_env = stripped_cow.trim();
+
+    // Normalize system absolute paths (#1699) and shell-escape (\foo) so
+    // both classify and the prefix matcher see the bare command name.
+    // Limited to safe locations where PATH resolves to the same binary;
+    // .venv/bin/, node_modules/.bin/, /snap/bin/ are intentionally not
+    // normalized (#1053).
+    let normalized = strip_safe_path_or_escape(cmd_after_env);
+    let cmd_clean = normalized.as_deref().unwrap_or(cmd_after_env);
+
     // Use classify_command for correct ignore/prefix handling
-    let rtk_equivalent = match classify_command(cmd_part) {
+    let rtk_equivalent = match classify_command(cmd_clean) {
         Classification::Supported { rtk_equivalent, .. } => {
-            let stripped = ENV_PREFIX.replace(cmd_part, "");
-            let cmd_clean = stripped.trim();
             if is_excluded(cmd_clean, excluded) {
                 return None;
             }
@@ -707,12 +767,6 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
     let rule = RULES.iter().find(|r| r.rtk_cmd == rtk_equivalent)?;
-
-    // Extract env prefix (sudo, env VAR=val, etc.)
-    let stripped_cow = ENV_PREFIX.replace(cmd_part, "");
-    let env_prefix_len = cmd_part.len() - stripped_cow.len();
-    let env_prefix = &cmd_part[..env_prefix_len];
-    let cmd_clean = stripped_cow.trim();
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
     // #508: warn on stderr so agents learn to stop overusing it
@@ -1258,6 +1312,66 @@ mod tests {
             rewrite_command("GIT_SSH_COMMAND=ssh git push", &[]),
             Some("GIT_SSH_COMMAND=ssh rtk git push".into())
         );
+    }
+
+    // --- #1699: absolute system bin paths and shell-escape prefix ---
+
+    #[test]
+    fn test_rewrite_system_absolute_path() {
+        assert_eq!(
+            rewrite_command("/bin/ls -la /tmp", &[]),
+            Some("rtk ls -la /tmp".into())
+        );
+        assert_eq!(
+            rewrite_command("/usr/bin/grep -rn foo bar/", &[]),
+            Some("rtk grep -rn foo bar/".into())
+        );
+        assert_eq!(
+            rewrite_command("/usr/local/bin/git status", &[]),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_homebrew_absolute_path() {
+        assert_eq!(
+            rewrite_command("/opt/homebrew/bin/git status", &[]),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_shell_escape_prefix() {
+        assert_eq!(
+            rewrite_command("\\grep foo bar/", &[]),
+            Some("rtk grep foo bar/".into())
+        );
+        assert_eq!(rewrite_command("\\ls -la", &[]), Some("rtk ls -la".into()));
+    }
+
+    #[test]
+    fn test_rewrite_absolute_path_with_env_prefix() {
+        assert_eq!(
+            rewrite_command("sudo /bin/ls /root", &[]),
+            Some("sudo rtk ls /root".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_absolute_path_with_redirect() {
+        assert_eq!(
+            rewrite_command("/bin/ls -la 2>&1", &[]),
+            Some("rtk ls -la 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_unsafe_paths_pass_through() {
+        // .venv/bin/, node_modules/.bin/, and /snap/bin/ must not be rewritten
+        // because rtk wrappers re-resolve via PATH (#1053).
+        assert_eq!(rewrite_command(".venv/bin/pytest -v", &[]), None);
+        assert_eq!(rewrite_command("./node_modules/.bin/vitest run", &[]), None);
+        assert_eq!(rewrite_command("/snap/bin/docker exec foo bar", &[]), None);
     }
 
     #[test]
@@ -3300,6 +3414,41 @@ mod tests {
         assert_eq!(strip_absolute_path("/bin/ls -la"), "ls -la");
         assert_eq!(strip_absolute_path("grep -rn foo"), "grep -rn foo");
         assert_eq!(strip_absolute_path("/usr/local/bin/git"), "git");
+    }
+
+    #[test]
+    fn test_strip_safe_path_or_escape_helper() {
+        // System bins normalize to basename.
+        assert_eq!(
+            strip_safe_path_or_escape("/bin/ls -la"),
+            Some("ls -la".to_string())
+        );
+        assert_eq!(
+            strip_safe_path_or_escape("/usr/bin/grep -rn foo"),
+            Some("grep -rn foo".to_string())
+        );
+        assert_eq!(
+            strip_safe_path_or_escape("/opt/homebrew/bin/git"),
+            Some("git".to_string())
+        );
+        // Shell-escape strips the backslash.
+        assert_eq!(
+            strip_safe_path_or_escape("\\ls -la"),
+            Some("ls -la".to_string())
+        );
+        // Already bare returns None (no normalization needed).
+        assert_eq!(strip_safe_path_or_escape("ls -la"), None);
+        // Unsafe locations return None.
+        assert_eq!(strip_safe_path_or_escape(".venv/bin/pytest"), None);
+        assert_eq!(
+            strip_safe_path_or_escape("./node_modules/.bin/vitest"),
+            None
+        );
+        assert_eq!(strip_safe_path_or_escape("/snap/bin/docker"), None);
+        // Nested under a safe prefix is not stripped (basename would contain `/`).
+        assert_eq!(strip_safe_path_or_escape("/bin/sub/cmd"), None);
+        // Empty basename after a safe prefix is not stripped.
+        assert_eq!(strip_safe_path_or_escape("/bin/"), None);
     }
 
     // --- #163: git global options ---
