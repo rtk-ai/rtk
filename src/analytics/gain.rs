@@ -640,7 +640,7 @@ fn export_csv(
 /// Silently returns None on any error (missing dirs, permission issues, etc.).
 fn check_rtk_disabled_bypass() -> Option<String> {
     use crate::discover::provider::{ClaudeProvider, SessionProvider};
-    use crate::discover::registry::has_rtk_disabled_prefix;
+    use crate::discover::registry::cmd_has_rtk_disabled_prefix;
 
     let provider = ClaudeProvider;
 
@@ -663,7 +663,7 @@ fn check_rtk_disabled_bypass() -> Option<String> {
 
         for ext_cmd in &extracted {
             total_bash += 1;
-            if has_rtk_disabled_prefix(&ext_cmd.command) {
+            if cmd_has_rtk_disabled_prefix(&ext_cmd.command) {
                 bypassed += 1;
             }
         }

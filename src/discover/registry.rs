@@ -382,17 +382,22 @@ fn strip_absolute_path(cmd: &str) -> String {
     }
 }
 
-/// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
-pub fn has_rtk_disabled_prefix(cmd: &str) -> bool {
-    strip_disabled_prefix(cmd).0.contains("RTK_DISABLED=")
+pub fn prefix_contains_rtk_disabled(prefix_part: &str) -> bool {
+    prefix_part.contains("RTK_DISABLED=")
 }
 
-/// Strip RTK_DISABLED=X and other env prefixes.
-///
-/// Returns `(env_prefix, actual_command)`.
+/// Check if a command has RTK_DISABLED= prefix in its env prefix portion.
+pub fn cmd_has_rtk_disabled_prefix(cmd: &str) -> bool {
+    let (prefix_part, _) = strip_disabled_prefix(cmd);
+    prefix_contains_rtk_disabled(prefix_part)
+}
+
+/// Strip RTK_DISABLED=X and other env prefixes, returns `(env_prefix, actual_command)`.
 pub fn strip_disabled_prefix(cmd: &str) -> (&str, &str) {
     let trimmed = cmd.trim();
     let stripped = ENV_PREFIX.replace(trimmed, "");
+    // stripped is a Cow<str> that borrows from trimmed when no replacement happens.
+    // We need to return a &str into the original, so compute the offset.
     let prefix_len = trimmed.len() - stripped.len();
     let prefix_part = &trimmed[..prefix_len];
     let rest = trimmed[prefix_len..].trim();
@@ -3333,15 +3338,17 @@ mod tests {
     // --- #508: RTK_DISABLED detection helpers ---
 
     #[test]
-    fn test_has_rtk_disabled_prefix() {
-        assert!(has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
-        assert!(has_rtk_disabled_prefix("FOO=1 RTK_DISABLED=1 cargo test"));
-        assert!(has_rtk_disabled_prefix(
+    fn test_cmd_has_rtk_disabled_prefix() {
+        assert!(cmd_has_rtk_disabled_prefix("RTK_DISABLED=1 git status"));
+        assert!(cmd_has_rtk_disabled_prefix(
+            "FOO=1 RTK_DISABLED=1 cargo test"
+        ));
+        assert!(cmd_has_rtk_disabled_prefix(
             "RTK_DISABLED=true git log --oneline"
         ));
-        assert!(!has_rtk_disabled_prefix("git status"));
-        assert!(!has_rtk_disabled_prefix("rtk git status"));
-        assert!(!has_rtk_disabled_prefix("SOME_VAR=1 git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("rtk git status"));
+        assert!(!cmd_has_rtk_disabled_prefix("SOME_VAR=1 git status"));
     }
 
     #[test]

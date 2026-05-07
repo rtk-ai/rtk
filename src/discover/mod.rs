@@ -16,6 +16,8 @@ use registry::{
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
+use crate::discover::registry::prefix_contains_rtk_disabled;
+
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
     rtk_equivalent: &'static str,
@@ -97,7 +99,7 @@ pub fn run(
 
                 // Detect RTK_DISABLED= bypass before classification
                 let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
-                if env_prefix.contains("RTK_DISABLED=") {
+                if prefix_contains_rtk_disabled(env_prefix) {
                     // Only count if the underlying command is one RTK supports
                     match classify_command(actual_cmd) {
                         Classification::Supported { .. } => {
