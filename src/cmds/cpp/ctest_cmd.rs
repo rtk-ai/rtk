@@ -1,5 +1,6 @@
 //! Filters ctest output — passing tests collapsed, failures shown verbatim.
 
+#![allow(dead_code)]
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::resolved_command;
 use anyhow::Result;

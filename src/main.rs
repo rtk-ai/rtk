@@ -8,7 +8,7 @@ mod parser;
 
 // Re-export command modules for routing
 use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
-use cmds::cpp::{cmake_cmd, codegraph_cmd, ctest_cmd, make_cmd, msbuild_cmd, remove_item};
+use cmds::cpp::{cmake_cmd, codegraph_cmd, make_cmd, msbuild_cmd, remove_item};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -22,8 +22,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd, read, search,
-    summary, tree, wc_cmd,
+    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    read, search, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -849,8 +849,9 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// CTest with failure-only output
+    /// CTest runner with compact GoogleTest failure output
     Ctest {
+        /// CTest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
