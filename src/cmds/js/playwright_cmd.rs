@@ -1,5 +1,6 @@
 //! Filters Playwright E2E test output to show only failures.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{detect_package_manager, resolved_command, strip_ansi};
 use anyhow::{Context, Result};
@@ -240,7 +241,7 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Skip `which playwright` — it can find pyenv shims or other non-Node
@@ -285,16 +286,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: playwright {}", args.join(" "));
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .context("Failed to run playwright (try: npm install -g playwright)")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Parse output using PlaywrightParser
-    let parse_result = PlaywrightParser::parse(&stdout);
+    let parse_result = PlaywrightParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -316,8 +314,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         }
     };
 
-    let exit_code = output.status.code().unwrap_or(1);
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "playwright", exit_code) {
+    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "playwright", result.exit_code) {
         println!("{}\n{}", filtered, hint);
     } else {
         println!("{}", filtered);
@@ -331,11 +328,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
     );
 
     // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(exit_code);
+    if !result.success() {
+        return Ok(result.exit_code);
     }
 
-    Ok(())
+    Ok(0)
 }
 
 #[cfg(test)]

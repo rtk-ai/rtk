@@ -1,5 +1,6 @@
 //! Reads user settings from config.toml.
 
+use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -42,7 +43,7 @@ impl Default for TrackingConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            history_days: 90,
+            history_days: DEFAULT_HISTORY_DAYS as u32,
             database_path: None,
         }
     }
@@ -87,15 +88,13 @@ impl Default for FilterConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     pub enabled: bool,
-}
-
-impl Default for TelemetryConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_given: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_date: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,11 +126,6 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
-}
-
-/// Check if telemetry is enabled in config. Returns None if config can't be loaded.
-pub fn telemetry_enabled() -> Option<bool> {
-    Config::load().ok().map(|c| c.telemetry.enabled)
 }
 
 impl Config {
@@ -168,7 +162,7 @@ impl Config {
 
 fn get_config_path() -> Result<PathBuf> {
     let config_dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    Ok(config_dir.join("rtk").join("config.toml"))
+    Ok(config_dir.join(RTK_DATA_DIR).join(CONFIG_TOML))
 }
 
 pub fn show_config() -> Result<()> {
@@ -218,5 +212,40 @@ history_days = 90
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert!(config.hooks.exclude_commands.is_empty());
+    }
+
+    #[test]
+    fn test_old_toml_without_consent_fields() {
+        let toml = r#"
+[telemetry]
+enabled = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.telemetry.enabled);
+        assert!(config.telemetry.consent_given.is_none());
+        assert!(config.telemetry.consent_date.is_none());
+    }
+
+    #[test]
+    fn test_telemetry_default_disabled() {
+        let config = Config::default();
+        assert!(!config.telemetry.enabled);
+        assert!(config.telemetry.consent_given.is_none());
+    }
+
+    #[test]
+    fn test_telemetry_consent_roundtrip() {
+        let toml = r#"
+[telemetry]
+enabled = true
+consent_given = true
+consent_date = "2026-04-10T12:00:00Z"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.telemetry.consent_given, Some(true));
+        assert_eq!(
+            config.telemetry.consent_date.as_deref(),
+            Some("2026-04-10T12:00:00Z")
+        );
     }
 }

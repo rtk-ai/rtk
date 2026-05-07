@@ -1,5 +1,6 @@
 //! Runs code formatters (Prettier, Ruff) and shows only files that changed.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{package_manager_exec, resolved_command};
 use crate::prettier_cmd;
@@ -52,7 +53,7 @@ fn detect_formatter_in_dir(args: &[String], dir: &Path) -> String {
     "ruff".to_string()
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<()> {
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
     // Detect formatter
@@ -111,14 +112,12 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         eprintln!("Running: {} {}", formatter, user_args.join(" "));
     }
 
-    let output = cmd.output().context(format!(
+    let result = exec_capture(&mut cmd).context(format!(
         "Failed to run {}. Is it installed? Try: pip install {} (or npm/pnpm for JS formatters)",
         formatter, formatter
     ))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Dispatch to appropriate filter based on formatter
     let filtered = match formatter.as_str() {
@@ -137,12 +136,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<()> {
         &filtered,
     );
 
-    // Preserve exit code for CI/CD
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    Ok(result.exit_code)
 }
 
 /// Filter black output - show files that need formatting

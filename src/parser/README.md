@@ -1,6 +1,6 @@
 # Parser Infrastructure
 
-> See also [docs/TECHNICAL.md](../../docs/TECHNICAL.md) for the full architecture overview
+> See also [docs/contributing/TECHNICAL.md](../../docs/contributing/TECHNICAL.md) for the full architecture overview
 
 ## Overview
 
@@ -9,8 +9,6 @@ The parser infrastructure provides a unified, three-tier parsing system for tool
 - **Tier 1 (Full)**: Complete JSON parsing with all structured data
 - **Tier 2 (Degraded)**: Partial parsing with warnings (fallback regex)
 - **Tier 3 (Passthrough)**: Raw output truncation with error markers
-
-This ensures RTK **never returns false data silently** while maintaining maximum token efficiency.
 
 ## Architecture
 

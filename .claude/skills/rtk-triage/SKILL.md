@@ -1,4 +1,5 @@
 ---
+name: rtk-triage
 description: >
   Triage complet RTK : exécute issue-triage + pr-triage en parallèle,
   puis croise les données pour détecter doubles couvertures, trous sécurité,
@@ -9,6 +10,8 @@ allowed-tools:
   - Write
   - Read
   - AskUserQuestion
+effort: high
+tags: [triage, orchestration, issues, pr, security, cross-analysis, rtk]
 ---
 
 # /rtk-triage

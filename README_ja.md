@@ -18,7 +18,7 @@
   <a href="https://www.rtk-ai.app">ウェブサイト</a> &bull;
   <a href="#インストール">インストール</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">トラブルシューティング</a> &bull;
-  <a href="ARCHITECTURE.md">アーキテクチャ</a> &bull;
+  <a href="docs/contributing/ARCHITECTURE.md">アーキテクチャ</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -121,10 +121,11 @@ rtk git push                    # -> "ok main"
 
 ### テスト
 ```bash
-rtk test cargo test             # 失敗のみ表示（-90%）
-rtk vitest run                  # Vitest コンパクト
+rtk jest                        # Jest コンパクト
+rtk vitest                      # Vitest コンパクト
 rtk pytest                      # Python テスト（-90%）
 rtk go test                     # Go テスト（-90%）
+rtk test <cmd>                  # 失敗のみ表示（-90%）
 ```
 
 ### ビルド & リント
@@ -146,7 +147,7 @@ rtk discover                    # 見逃した節約機会を発見
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - よくある問題の解決
 - **[INSTALL.md](INSTALL.md)** - 詳細インストールガイド
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - 技術アーキテクチャ
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 技術アーキテクチャ
 
 ## コントリビュート
 
@@ -157,3 +158,7 @@ rtk discover                    # 見逃した節約機会を発見
 ## ライセンス
 
 MIT ライセンス - 詳細は [LICENSE](LICENSE) を参照。
+
+## 免責事項
+
+詳細は [DISCLAIMER.md](DISCLAIMER.md) を参照。

@@ -60,27 +60,6 @@ pub fn strip_ansi(text: &str) -> String {
 ///
 /// # Returns
 /// `(stdout: String, stderr: String, exit_code: i32)`
-///
-/// # Examples
-/// ```no_run
-/// use rtk::utils::execute_command;
-/// let (stdout, stderr, code) = execute_command("echo", &["test"]).unwrap();
-/// assert_eq!(code, 0);
-/// ```
-#[allow(dead_code)]
-pub fn execute_command(cmd: &str, args: &[&str]) -> Result<(String, String, i32)> {
-    let output = resolved_command(cmd)
-        .args(args)
-        .output()
-        .context(format!("Failed to execute {}", cmd))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
-
-    Ok((stdout, stderr, exit_code))
-}
-
 /// Formats a token count with K/M suffixes for readability.
 ///
 /// # Arguments
@@ -218,6 +197,27 @@ pub fn exit_code_from_output(output: &std::process::Output, label: &str) -> i32 
             {
                 use std::os::unix::process::ExitStatusExt;
                 if let Some(sig) = output.status.signal() {
+                    eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
+                    return 128 + sig;
+                }
+            }
+            eprintln!("[rtk] {}: process terminated by signal", label);
+            1
+        }
+    }
+}
+
+/// Extract exit code from an ExitStatus (for `.status()` calls, not `.output()`).
+/// Returns the actual exit code, or `128 + signal` per Unix convention when
+/// terminated by a signal. Falls back to 1 on non-Unix platforms.
+pub fn exit_code_from_status(status: &std::process::ExitStatus, label: &str) -> i32 {
+    match status.code() {
+        Some(code) => code,
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = status.signal() {
                     eprintln!("[rtk] {}: process terminated by signal {}", label, sig);
                     return 128 + sig;
                 }
@@ -368,6 +368,42 @@ pub fn tool_exists(name: &str) -> bool {
     which::which(name).is_ok()
 }
 
+/// Extract short name from AWS ARN.
+/// Example: `arn:aws:ecs:region:acct:service/cluster/name` -> `name`
+/// For simple ARNs like `arn:aws:iam::123:user/alice`, returns `alice`.
+pub fn shorten_arn(arn: &str) -> &str {
+    // ARNs use "/" or ":" as separators. Try "/" first (service/cluster/name pattern),
+    // then fall back to ":" for Lambda/IAM ARNs.
+    let slash_result = arn.rsplit('/').next().unwrap_or(arn);
+    // If rsplit('/') returned the whole string (no '/' found), try ':'
+    if slash_result == arn {
+        arn.rsplit(':').next().unwrap_or(arn)
+    } else {
+        slash_result
+    }
+}
+
+/// Convert bytes to human-readable format (KB, MB, GB, TB).
+/// Used for S3 object sizes.
+pub fn human_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+
+    if bytes >= TB {
+        format!("{:.1} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,21 +455,6 @@ mod tests {
     fn test_strip_ansi_complex() {
         let input = "\x1b[32mGreen\x1b[0m normal \x1b[31mRed\x1b[0m";
         assert_eq!(strip_ansi(input), "Green normal Red");
-    }
-
-    #[test]
-    fn test_execute_command_success() {
-        let result = execute_command("echo", &["test"]);
-        assert!(result.is_ok());
-        let (stdout, _, code) = result.unwrap();
-        assert_eq!(code, 0);
-        assert!(stdout.contains("test"));
-    }
-
-    #[test]
-    fn test_execute_command_failure() {
-        let result = execute_command("nonexistent_command_xyz_12345", &[]);
-        assert!(result.is_err());
     }
 
     #[test]
@@ -762,5 +783,83 @@ mod tests {
                 "which_in should find .cmd wrapper on Windows"
             );
         }
+    }
+
+    // ===== AWS helper function tests =====
+
+    #[test]
+    fn test_shorten_arn_ecs_service() {
+        assert_eq!(
+            shorten_arn("arn:aws:ecs:us-east-1:123:service/cluster/api-service"),
+            "api-service"
+        );
+    }
+
+    #[test]
+    fn test_shorten_arn_iam_user() {
+        assert_eq!(shorten_arn("arn:aws:iam::123456789012:user/alice"), "alice");
+    }
+
+    #[test]
+    fn test_shorten_arn_lambda() {
+        assert_eq!(
+            shorten_arn("arn:aws:lambda:us-west-2:123:function:my-function"),
+            "my-function"
+        );
+    }
+
+    #[test]
+    fn test_shorten_arn_fallback() {
+        // Non-ARN string - return as-is
+        assert_eq!(shorten_arn("simple-name"), "simple-name");
+    }
+
+    #[test]
+    fn test_human_bytes_bytes() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_human_bytes_kb() {
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(2048), "2.0 KB");
+        assert_eq!(human_bytes(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn test_human_bytes_mb() {
+        assert_eq!(human_bytes(1_048_576), "1.0 MB");
+        assert_eq!(human_bytes(5_242_880), "5.0 MB");
+    }
+
+    #[test]
+    fn test_human_bytes_gb() {
+        assert_eq!(human_bytes(1_073_741_824), "1.0 GB");
+        assert_eq!(human_bytes(2_147_483_648), "2.0 GB");
+    }
+
+    #[test]
+    fn test_human_bytes_tb() {
+        assert_eq!(human_bytes(1_099_511_627_776), "1.0 TB");
+    }
+
+    #[test]
+    fn test_count_tokens_basic() {
+        assert_eq!(count_tokens("hello world"), 2);
+        assert_eq!(count_tokens("one two three four"), 4);
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        assert_eq!(count_tokens(""), 0);
+        assert_eq!(count_tokens("   "), 0);
+    }
+
+    #[test]
+    fn test_count_tokens_multiple_spaces() {
+        assert_eq!(count_tokens("hello    world"), 2);
+        assert_eq!(count_tokens("  hello   world  "), 2);
     }
 }

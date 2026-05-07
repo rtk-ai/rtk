@@ -1,6 +1,7 @@
 //! Filters dotnet CLI output — build, test, and format results.
 
 use crate::binlog;
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
@@ -18,19 +19,19 @@ const DOTNET_CLI_UI_LANGUAGE: &str = "DOTNET_CLI_UI_LANGUAGE";
 const DOTNET_CLI_UI_LANGUAGE_VALUE: &str = "en-US";
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub fn run_build(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_build(args: &[String], verbose: u8) -> Result<i32> {
     run_dotnet_with_binlog("build", args, verbose)
 }
 
-pub fn run_test(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     run_dotnet_with_binlog("test", args, verbose)
 }
 
-pub fn run_restore(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_restore(args: &[String], verbose: u8) -> Result<i32> {
     run_dotnet_with_binlog("restore", args, verbose)
 }
 
-pub fn run_format(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_format(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let (report_path, cleanup_report_path) = resolve_format_report_path(args);
     let mut cmd = resolved_command("dotnet");
@@ -46,10 +47,8 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<()> {
     }
 
     let command_started_at = SystemTime::now();
-    let output = cmd.output().context("Failed to run dotnet format")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run dotnet format")?;
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     let check_mode = !has_write_mode_override(args);
     let filtered =
@@ -69,14 +68,10 @@ pub fn run_format(args: &[String], verbose: u8) -> Result<()> {
         }
     }
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    Ok(result.exit_code)
 }
 
-pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
+pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         anyhow::bail!("dotnet: no subcommand specified");
     }
@@ -95,16 +90,13 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
         eprintln!("Running: dotnet {} ...", subcommand);
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run dotnet {}", subcommand))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    print!("{}", stdout);
-    eprint!("{}", stderr);
+    print!("{}", result.stdout);
+    eprint!("{}", result.stderr);
 
     timer.track(
         &format!("dotnet {}", subcommand),
@@ -113,14 +105,10 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<()> {
         &raw,
     );
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    Ok(result.exit_code)
 }
 
-fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Result<()> {
+fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
     let binlog_path = build_binlog_path(subcommand);
     let should_expect_binlog = subcommand != "test" || has_binlog_arg(args);
@@ -143,27 +131,25 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
     }
 
     let command_started_at = SystemTime::now();
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run dotnet {}", subcommand))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
+    let command_success = result.success();
 
     let filtered = match subcommand {
         "build" => {
             let binlog_summary = if should_expect_binlog && binlog_path.exists() {
                 normalize_build_summary(
                     binlog::parse_build(&binlog_path).unwrap_or_default(),
-                    output.status.success(),
+                    command_success,
                 )
             } else {
                 binlog::BuildSummary::default()
             };
             let raw_summary = normalize_build_summary(
                 binlog::parse_build_from_text(&raw),
-                output.status.success(),
+                command_success,
             );
             let summary = merge_build_summaries(binlog_summary, raw_summary);
             format_build_output(&summary, &binlog_path)
@@ -184,18 +170,18 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
                 command_started_at,
             );
 
-            let summary = normalize_test_summary(summary, output.status.success());
+            let summary = normalize_test_summary(summary, command_success);
             let binlog_diagnostics = if should_expect_binlog && binlog_path.exists() {
                 normalize_build_summary(
                     binlog::parse_build(&binlog_path).unwrap_or_default(),
-                    output.status.success(),
+                    command_success,
                 )
             } else {
                 binlog::BuildSummary::default()
             };
             let raw_diagnostics = normalize_build_summary(
                 binlog::parse_build_from_text(&raw),
-                output.status.success(),
+                command_success,
             );
             let test_build_summary = merge_build_summaries(binlog_diagnostics, raw_diagnostics);
             format_test_output(
@@ -209,14 +195,14 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
             let binlog_summary = if should_expect_binlog && binlog_path.exists() {
                 normalize_restore_summary(
                     binlog::parse_restore(&binlog_path).unwrap_or_default(),
-                    output.status.success(),
+                    command_success,
                 )
             } else {
                 binlog::RestoreSummary::default()
             };
             let raw_summary = normalize_restore_summary(
                 binlog::parse_restore_from_text(&raw),
-                output.status.success(),
+                command_success,
             );
             let summary = merge_restore_summaries(binlog_summary, raw_summary);
 
@@ -227,9 +213,9 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         _ => raw.clone(),
     };
 
-    let output_to_print = if !output.status.success() {
-        let stdout_trimmed = stdout.trim();
-        let stderr_trimmed = stderr.trim();
+    let output_to_print = if !command_success {
+        let stdout_trimmed = result.stdout.trim();
+        let stderr_trimmed = result.stderr.trim();
         if !stdout_trimmed.is_empty() {
             format!("{}\n\n{}", stdout_trimmed, filtered)
         } else if !stderr_trimmed.is_empty() {
@@ -261,11 +247,7 @@ fn run_dotnet_with_binlog(subcommand: &str, args: &[String], verbose: u8) -> Res
         eprintln!("Binlog cleaned up: {}", binlog_path.display());
     }
 
-    if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
-    }
-
-    Ok(())
+    Ok(result.exit_code)
 }
 
 fn build_binlog_path(subcommand: &str) -> PathBuf {
