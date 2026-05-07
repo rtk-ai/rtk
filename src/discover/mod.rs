@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
-    strip_disabled_prefix, Classification,
+    category_avg_tokens, classify_command, has_rtk_disabled_prefix, normalize_command,
+    split_command_chain, strip_disabled_prefix, Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
 
@@ -102,7 +102,8 @@ pub fn run(
                     match classify_command(actual_cmd) {
                         Classification::Supported { .. } => {
                             rtk_disabled_count += 1;
-                            let display = truncate_command(actual_cmd);
+                            let display =
+                                truncate_command(&normalize_command(actual_cmd).sanitized_display);
                             *rtk_disabled_cmds.entry(display).or_insert(0) += 1;
                         }
                         _ => {
@@ -111,6 +112,14 @@ pub fn run(
                     }
                     continue;
                 }
+
+                let normalized = normalize_command(part);
+                let display_part = normalized.sanitized_display.as_str();
+                let matching_part = if normalized.command_for_matching.is_empty() {
+                    part
+                } else {
+                    normalized.command_for_matching.as_str()
+                };
 
                 match classify_command(part) {
                     Classification::Supported {
@@ -138,7 +147,7 @@ pub fn run(
                             len / 4
                         } else {
                             // Fallback: category average
-                            let subcmd = extract_subcmd(part);
+                            let subcmd = extract_subcmd(matching_part);
                             category_avg_tokens(category, subcmd)
                         };
 
@@ -150,7 +159,7 @@ pub fn run(
                         bucket.total_raw_output_tokens += output_tokens;
 
                         // Track the display name with status
-                        let display_name = truncate_command(part);
+                        let display_name = truncate_command(display_part);
                         let entry = bucket
                             .command_counts
                             .entry(format!("{}:{:?}", display_name, status))
@@ -161,7 +170,7 @@ pub fn run(
                         let bucket = unsupported_map.entry(base_command).or_insert_with(|| {
                             UnsupportedBucket {
                                 count: 0,
-                                example: part.to_string(),
+                                example: display_part.to_string(),
                             }
                         });
                         bucket.count += 1;

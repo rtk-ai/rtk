@@ -21,6 +21,31 @@ pub enum Classification {
     Ignored,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedCommand {
+    pub executable: Option<String>,
+    pub subcommand: Option<String>,
+    pub canonical_family: Option<String>,
+    pub command_for_matching: String,
+    pub sanitized_display: String,
+    pub ignored: bool,
+    pub rewrite_safe: bool,
+}
+
+impl NormalizedCommand {
+    fn ignored(display: &str) -> Self {
+        Self {
+            executable: None,
+            subcommand: None,
+            canonical_family: None,
+            command_for_matching: String::new(),
+            sanitized_display: display.to_string(),
+            ignored: true,
+            rewrite_safe: false,
+        }
+    }
+}
+
 /// Average token counts per category for estimation when no output_len available.
 pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
     match category {
@@ -42,6 +67,292 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         "PackageManager" => 150,
         _ => 150,
     }
+}
+
+const SECRET_ENV_MARKERS: &[&str] = &[
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASS",
+    "KEY",
+    "AUTH",
+    "CREDENTIAL",
+];
+
+const WRAPPER_COMMANDS: &[&str] = &["sudo", "env", "command"];
+
+/// Characters that can appear at the start of a command as session-parser
+/// artefacts (e.g. `$ ( kubectl ...` → `( kubectl ...`).
+const STRIP_LEADING: &[char] = &['(', ')'];
+
+const KUBECTL_GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
+    "-n",
+    "--namespace",
+    "--context",
+    "--kubeconfig",
+    "--server",
+    "--user",
+    "--as",
+    "--as-group",
+    "--token",
+    "--certificate-authority",
+];
+
+/// Lenient env-prefix regex that catches mixed-case assignments the strict
+/// uppercase-only ENV_PREFIX misses (e.g. `DOCKERCONFIG=`, `imageTag=foo`).
+const LENIENT_ENV_ASSIGN: &str =
+    r#"(?:[A-Za-z_][A-Za-z0-9_]*=(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S*)\s+)+"#;
+
+lazy_static! {
+    static ref LENIENT_ENV_PREFIX: Regex =
+        Regex::new(&format!(r#"^(?:{})"#, LENIENT_ENV_ASSIGN)).expect("invalid lenient env regex");
+}
+
+const KUBECTL_GLOBAL_FLAGS_NO_VALUE: &[&str] = &[
+    "--all-namespaces",
+    "-A",
+    "--insecure-skip-tls-verify",
+    "--request-timeout",
+];
+
+pub fn normalize_command(cmd: &str) -> NormalizedCommand {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() {
+        return NormalizedCommand::ignored(trimmed);
+    }
+
+    if trimmed.starts_with('#') {
+        return NormalizedCommand::ignored(trimmed);
+    }
+
+    for exact in IGNORED_EXACT {
+        if trimmed == *exact {
+            return NormalizedCommand::ignored(trimmed);
+        }
+    }
+    for prefix in IGNORED_PREFIXES {
+        if trimmed.starts_with(prefix) {
+            return NormalizedCommand::ignored(trimmed);
+        }
+    }
+
+    let sanitized_display = sanitize_command_display(trimmed);
+    let rewrite_safe = is_rewrite_safe_shell_shape(trimmed);
+    let without_line_continuation = strip_leading_line_continuation(trimmed);
+    let without_env = ENV_PREFIX.replace(without_line_continuation, "");
+    // Also strip mixed-case env assignments the strict ENV_PREFIX missed
+    // (e.g. DOCKERCONFIG=, imageTag=foo).
+    let without_env = LENIENT_ENV_PREFIX.replace(&without_env, "");
+    let after_env = without_env.trim();
+
+    // Strip session-parser artefacts: leading (, ) from "$ ( cmd ...)" splits
+    let after_env = after_env.trim_start_matches(STRIP_LEADING).trim_start();
+
+    // Flag-only fragments have no executable
+    if after_env.is_empty() || after_env.starts_with('-') {
+        return NormalizedCommand::ignored(trimmed);
+    }
+
+    // Check for comments after env stripping (e.g. "VAR=val # comment ...")
+    if after_env.starts_with('#') {
+        return NormalizedCommand::ignored(trimmed);
+    }
+
+    // Ignore command substitution fragments from session parser.
+    // Catch "$ (...)" (with space), "$(..." (immediate), or bare "$".
+    // Do NOT match "$(" appearing later in the args — those are valid
+    // commands that happen to contain a substitution (e.g. git log $(...)).
+    if after_env.starts_with("$(") || after_env.starts_with("$ (") || after_env.starts_with('$') {
+        return NormalizedCommand::ignored(trimmed);
+    }
+
+    // Ignore lines that are just continuation markers after session extraction
+    if after_env == "\\" || after_env.starts_with("\\\n") {
+        return NormalizedCommand::ignored(trimmed);
+    }
+
+    // Clean trailing unmatched parenthesis from command substitution fragments
+    let after_env = if after_env.ends_with(')') && !after_env.contains('(') {
+        after_env.trim_end_matches(')').trim_end()
+    } else {
+        after_env
+    };
+
+    if after_env.is_empty() {
+        return NormalizedCommand::ignored(trimmed);
+    }
+
+    let mut command_for_matching = after_env.to_string();
+
+    command_for_matching = strip_absolute_path(&command_for_matching);
+    command_for_matching = strip_wrapper_prefixes(&command_for_matching);
+    command_for_matching = strip_git_global_opts(&command_for_matching);
+    command_for_matching = strip_golangci_global_opts(&command_for_matching);
+    command_for_matching = normalize_kubectl_global_flags(&command_for_matching);
+
+    if command_for_matching.is_empty() {
+        return NormalizedCommand::ignored(&sanitized_display);
+    }
+
+    let (executable, subcommand) = command_identity(&command_for_matching);
+    let canonical_family = executable.as_ref().map(|exe| match subcommand.as_ref() {
+        Some(sub) => format!("{} {}", exe, sub),
+        None => exe.clone(),
+    });
+
+    NormalizedCommand {
+        executable,
+        subcommand,
+        canonical_family,
+        command_for_matching,
+        sanitized_display,
+        ignored: false,
+        rewrite_safe,
+    }
+}
+
+fn sanitize_command_display(cmd: &str) -> String {
+    tokenize(cmd)
+        .into_iter()
+        .map(|token| sanitize_token(&token.value))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sanitize_token(token: &str) -> String {
+    let Some((name, _value)) = token.split_once('=') else {
+        return token.to_string();
+    };
+
+    let upper = name.trim_start_matches("export ").to_ascii_uppercase();
+    if SECRET_ENV_MARKERS
+        .iter()
+        .any(|marker| upper.contains(marker))
+    {
+        format!("{}=<redacted>", name)
+    } else {
+        token.to_string()
+    }
+}
+
+fn strip_leading_line_continuation(cmd: &str) -> &str {
+    cmd.strip_prefix('\\').map(str::trim_start).unwrap_or(cmd)
+}
+
+fn strip_wrapper_prefixes(cmd: &str) -> String {
+    let mut current = cmd.trim();
+    loop {
+        let Some((first, rest)) = current.split_once(char::is_whitespace) else {
+            return current.to_string();
+        };
+        if WRAPPER_COMMANDS.contains(&first) {
+            current = rest.trim_start();
+        } else {
+            return current.to_string();
+        }
+    }
+}
+
+fn is_rewrite_safe_shell_shape(cmd: &str) -> bool {
+    if has_heredoc(cmd) || cmd.contains("$(") || cmd.contains('`') {
+        return false;
+    }
+
+    let tokens = tokenize(cmd);
+    !tokens.iter().any(|token| {
+        token.kind == TokenKind::Pipe
+            || (token.kind == TokenKind::Operator && token.value == ";")
+            || (token.kind == TokenKind::Shellism
+                && matches!(token.value.as_str(), "(" | ")" | "{" | "}"))
+    })
+}
+
+fn command_identity(cmd: &str) -> (Option<String>, Option<String>) {
+    let mut parts = cmd.split_whitespace();
+    let executable = parts.next().map(ToString::to_string);
+    let subcommand = executable.as_deref().and_then(|exe| {
+        if should_include_subcommand_in_family(exe) {
+            parts
+                .find(|part| !part.starts_with('-') && !part.contains('/') && !part.contains('.'))
+                .map(ToString::to_string)
+        } else {
+            None
+        }
+    });
+    (executable, subcommand)
+}
+
+fn should_include_subcommand_in_family(executable: &str) -> bool {
+    matches!(
+        executable,
+        "cargo"
+            | "docker"
+            | "dotnet"
+            | "gh"
+            | "git"
+            | "glab"
+            | "go"
+            | "helm"
+            | "kubectl"
+            | "npm"
+            | "pnpm"
+            | "rtk"
+            | "yadm"
+    )
+}
+
+fn normalize_kubectl_global_flags(cmd: &str) -> String {
+    let tokens = split_token_spans(cmd);
+    let Some(first) = tokens.first() else {
+        return cmd.to_string();
+    };
+
+    if first.0 != "kubectl" && first.0 != "k" {
+        return cmd.to_string();
+    }
+
+    let mut kept: Vec<&str> = vec!["kubectl"];
+    let mut skipped_globals: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i].0;
+        if token == "--" {
+            kept.extend(tokens[i..].iter().map(|t| t.0));
+            break;
+        }
+
+        if let Some((flag, _value)) = token.split_once('=') {
+            if KUBECTL_GLOBAL_FLAGS_WITH_VALUE.contains(&flag) {
+                skipped_globals.push(token);
+                i += 1;
+                continue;
+            }
+        }
+
+        if KUBECTL_GLOBAL_FLAGS_WITH_VALUE.contains(&token) {
+            skipped_globals.push(token);
+            if let Some(value) = tokens.get(i + 1) {
+                skipped_globals.push(value.0);
+            }
+            i += 2;
+            continue;
+        }
+
+        if KUBECTL_GLOBAL_FLAGS_NO_VALUE.contains(&token) {
+            skipped_globals.push(token);
+            i += 1;
+            continue;
+        }
+
+        kept.extend(tokens[i..].iter().map(|t| t.0));
+        break;
+    }
+
+    if kept.len() == 1 {
+        kept.extend(skipped_globals);
+    }
+
+    kept.join(" ")
 }
 
 lazy_static! {
@@ -92,38 +403,12 @@ struct GolangciRunParts<'a> {
 
 /// Classify a single (already-split) command.
 pub fn classify_command(cmd: &str) -> Classification {
-    let trimmed = cmd.trim();
-    if trimmed.is_empty() {
+    let normalized = normalize_command(cmd);
+    if normalized.ignored {
         return Classification::Ignored;
     }
 
-    // Check ignored
-    for exact in IGNORED_EXACT {
-        if trimmed == *exact {
-            return Classification::Ignored;
-        }
-    }
-    for prefix in IGNORED_PREFIXES {
-        if trimmed.starts_with(prefix) {
-            return Classification::Ignored;
-        }
-    }
-
-    // Strip env prefixes (sudo, env VAR=val, VAR=val)
-    let stripped = ENV_PREFIX.replace(trimmed, "");
-    let cmd_clean = stripped.trim();
-    if cmd_clean.is_empty() {
-        return Classification::Ignored;
-    }
-
-    // Normalize absolute binary paths: /usr/bin/grep → grep (#485)
-    let cmd_normalized = strip_absolute_path(cmd_clean);
-    // Strip git global options: git -C /tmp status → git status (#163)
-    let cmd_normalized = strip_git_global_opts(&cmd_normalized);
-    // Strip golangci-lint global options before `run` so classify/rewrite stays
-    // aligned with the runtime wrapper behavior.
-    let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
-    let cmd_clean = cmd_normalized.as_str();
+    let cmd_clean = normalized.command_for_matching.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
     if cmd_clean.starts_with("cat ")
@@ -186,7 +471,10 @@ pub fn classify_command(cmd: &str) -> Classification {
         }
     } else {
         // Extract base command for unsupported
-        let base = extract_base_command(cmd_clean);
+        let base = normalized
+            .canonical_family
+            .as_deref()
+            .unwrap_or_else(|| extract_base_command(cmd_clean));
         if base.is_empty() {
             Classification::Ignored
         } else {
@@ -452,16 +740,31 @@ pub fn rewrite_command(cmd: &str, excluded: &[String]) -> Option<String> {
         return None;
     }
 
+    // Non-compound commands that contain command substitutions are not rewrite-safe.
+    let has_compound = trimmed.contains("&&")
+        || trimmed.contains("||")
+        || trimmed.contains(';')
+        || trimmed.contains(" & ")
+        || trimmed.contains('|')
+        || trimmed.contains("$(");
+
+    // Already-RTK commands pass through unchanged.
+    if !has_compound && (trimmed.starts_with("rtk ") || trimmed == "rtk") {
+        return Some(trimmed.to_string());
+    }
+
+    if !has_compound {
+        let normalized = normalize_command(trimmed);
+        if !normalized.rewrite_safe {
+            return None;
+        }
+    }
+
     let compiled = compile_exclude_patterns(excluded);
 
     // Simple (non-compound) already-RTK command — return as-is.
     // For compound commands that start with "rtk" (e.g. "rtk git add . && cargo test"),
     // fall through to rewrite_compound so the remaining segments get rewritten.
-    let has_compound = trimmed.contains("&&")
-        || trimmed.contains("||")
-        || trimmed.contains(';')
-        || trimmed.contains('|')
-        || trimmed.contains(" & ");
     if !has_compound && (trimmed.starts_with("rtk ") || trimmed == "rtk") {
         return Some(trimmed.to_string());
     }
@@ -784,6 +1087,161 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_normalize_redacts_env_prefix_and_finds_kubectl_get() {
+        let normalized =
+            normalize_command("GITEA_TOKEN=abc123 kubectl -n postgres get pods -o wide");
+
+        assert_eq!(normalized.executable.as_deref(), Some("kubectl"));
+        assert_eq!(normalized.subcommand.as_deref(), Some("get"));
+        assert_eq!(normalized.canonical_family.as_deref(), Some("kubectl get"));
+        assert_eq!(
+            normalized.sanitized_display,
+            "GITEA_TOKEN=<redacted> kubectl -n postgres get pods -o wide"
+        );
+        assert!(!normalized.ignored);
+        assert!(normalized.rewrite_safe);
+    }
+
+    #[test]
+    fn test_normalize_ignores_comment_commands() {
+        let normalized = normalize_command("# Check whether the Gitea token works");
+
+        assert!(normalized.ignored);
+        assert_eq!(normalized.canonical_family, None);
+        assert_eq!(
+            normalized.sanitized_display,
+            "# Check whether the Gitea token works"
+        );
+    }
+
+    #[test]
+    fn test_normalize_collapses_leading_backslash_git_commit() {
+        let normalized = normalize_command("\\ git commit -m fix");
+
+        assert_eq!(normalized.executable.as_deref(), Some("git"));
+        assert_eq!(normalized.subcommand.as_deref(), Some("commit"));
+        assert_eq!(normalized.canonical_family.as_deref(), Some("git commit"));
+        assert_eq!(normalized.sanitized_display, "\\ git commit -m fix");
+    }
+
+    #[test]
+    fn test_normalize_ignores_env_then_comment() {
+        let normalized =
+            normalize_command("GITEA_TOKEN=abc # Use the saved file python3 - << 'EOF'");
+
+        assert!(normalized.ignored);
+    }
+
+    #[test]
+    fn test_normalize_ignores_command_substitution_fragment() {
+        let normalized = normalize_command("$ ( kubectl get secret gitea-registry -n k8s-mcp )");
+
+        assert!(normalized.ignored);
+    }
+
+    #[test]
+    fn test_normalize_ignores_dollar_paren_without_space() {
+        let normalized = normalize_command("$(kubectl get pods)");
+
+        assert!(normalized.ignored);
+    }
+
+    #[test]
+    fn test_normalize_ignores_flag_only_fragment() {
+        let normalized = normalize_command("-n litellm get secret");
+
+        assert!(normalized.ignored);
+    }
+
+    #[test]
+    fn test_normalize_strips_trailing_paren_in_fragment() {
+        // "get" is not in should_include_subcommand_in_family, so canonical_family
+        // is just "get". The key assertion is that the trailing ")" was stripped
+        // and the command was NOT ignored.
+        let normalized = normalize_command("get pods )");
+
+        assert_eq!(normalized.canonical_family.as_deref(), Some("get"));
+        assert!(!normalized.ignored);
+    }
+
+    #[test]
+    fn test_normalize_strips_trailing_paren_complex() {
+        let normalized =
+            normalize_command("DOCKERCONFIG= $ ( kubectl get secret gitea-registry -n k8s-mcp -o jsonpath='{.data.\\.dockerconfigjson}' ) kubectl create secret");
+
+        assert!(normalized.ignored);
+    }
+
+    #[test]
+    fn test_normalize_marks_pipeline_as_not_rewrite_safe() {
+        let normalized = normalize_command("kubectl get pods | jq .");
+
+        assert_eq!(normalized.canonical_family.as_deref(), Some("kubectl get"));
+        assert!(!normalized.rewrite_safe);
+    }
+
+    #[test]
+    fn test_classify_kubectl_with_global_namespace_flag_as_supported() {
+        assert!(matches!(
+            classify_command("kubectl -n argocd get pods"),
+            Classification::Supported {
+                rtk_equivalent: "rtk kubectl",
+                category: "Infra",
+                status: RtkStatus::Existing,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_observed_homelab_supported_commands_classify_existing() {
+        for (cmd, rtk_equivalent, category) in [
+            (
+                "kubectl exec -n postgres postgres-1 -- ls",
+                "rtk kubectl",
+                "Infra",
+            ),
+            (
+                "kubectl rollout status statefulset/redis",
+                "rtk kubectl",
+                "Infra",
+            ),
+            (
+                "kubectl run redis-verify --rm -i --image=redis",
+                "rtk kubectl",
+                "Infra",
+            ),
+            (
+                "kubectl kustomize --load-restrictor=LoadRestrictionsNone k8s/app",
+                "rtk kubectl",
+                "Infra",
+            ),
+            ("helm show values bitnami/postgresql", "rtk helm", "Infra"),
+            ("ps aux", "rtk ps", "System"),
+            ("ping -c 3 fw1", "rtk ping", "Network"),
+            ("yamllint k8s/redis/secret.yaml", "rtk yamllint", "Build"),
+            (
+                "PGPASSWORD=secret psql -h localhost -c 'select 1'",
+                "rtk psql",
+                "Infra",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    classify_command(cmd),
+                    Classification::Supported {
+                        rtk_equivalent: actual_rtk,
+                        category: actual_category,
+                        status: RtkStatus::Existing,
+                        ..
+                    } if actual_rtk == rtk_equivalent && actual_category == category
+                ),
+                "expected supported classification for {cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_git_status() {
         assert_eq!(
             classify_command("git status"),
@@ -819,6 +1277,40 @@ mod tests {
                 estimated_savings_pct: 80.0,
                 status: RtkStatus::Existing,
             }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_safe_kubectl_global_flag_command() {
+        assert_eq!(
+            rewrite_command("kubectl -n argocd get pods", &[]),
+            Some("rtk kubectl -n argocd get pods".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pipe_left_side_only() {
+        assert_eq!(
+            rewrite_command("kubectl get pods | jq .", &[]),
+            Some("rtk kubectl get pods | jq .".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_skips_command_substitution_env_value() {
+        // Command substitution makes this a compound command; the left segment
+        // is unsupported (bare `VAR=value`), so no rewrite occurs.
+        assert_eq!(
+            rewrite_command("VAR=$(secret-tool read token) kubectl get pods", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_does_not_double_wrap_rtk() {
+        assert_eq!(
+            rewrite_command("rtk kubectl get pods", &[]),
+            Some("rtk kubectl get pods".to_string())
         );
     }
 

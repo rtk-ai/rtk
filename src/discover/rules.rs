@@ -381,12 +381,12 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^kubectl\s+(get|logs|describe|apply)",
+        pattern: r"^kubectl\s+(get|logs|describe|top|events|exec|rollout|run|kustomize|apply|delete|patch|wait|config|version|api-resources|api-versions)",
         rtk_cmd: "rtk kubectl",
-        rewrite_prefixes: &["kubectl"],
+        rewrite_prefixes: &["kubectl", "k"],
         category: "Infra",
         savings_pct: 85.0,
-        subcmd_savings: &[],
+        subcmd_savings: &[("get", 85.0), ("logs", 85.0)],
         subcmd_status: &[],
     },
     RtkRule {
