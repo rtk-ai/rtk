@@ -1,19 +1,21 @@
 //! Filters mypy type-checking output, grouping errors by file.
 
 use crate::core::runner;
-use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+use crate::core::utils::{override_command, resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashMap;
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = if tool_exists("mypy") {
-        resolved_command("mypy")
-    } else {
-        let mut c = resolved_command("python3");
-        c.arg("-m").arg("mypy");
-        c
-    };
+    let mut cmd = override_command("mypy").unwrap_or_else(|| {
+        if tool_exists("mypy") {
+            resolved_command("mypy")
+        } else {
+            let mut c = resolved_command("python3");
+            c.arg("-m").arg("mypy");
+            c
+        }
+    });
 
     for arg in args {
         cmd.arg(arg);

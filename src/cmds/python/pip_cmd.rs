@@ -17,8 +17,12 @@ struct Package {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // Auto-detect uv vs pip
-    let use_uv = tool_exists("uv");
+    // Honor explicit binary path from rewrite engine (#1053), otherwise auto-detect
+    let has_bin_override = std::env::var("RTK_BIN_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some();
+    let use_uv = !has_bin_override && tool_exists("uv");
     let base_cmd = if use_uv { "uv" } else { "pip" };
 
     if verbose > 0 && use_uv {
@@ -51,8 +55,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     Ok(exit_code)
 }
 
+fn pip_resolved(base_cmd: &str) -> std::process::Command {
+    if let Ok(bin) = std::env::var("RTK_BIN_PATH") {
+        if !bin.is_empty() {
+            return std::process::Command::new(bin);
+        }
+    }
+    resolved_command(base_cmd)
+}
+
 fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
-    let mut cmd = resolved_command(base_cmd);
+    let mut cmd = pip_resolved(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -80,7 +93,7 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
 }
 
 fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
-    let mut cmd = resolved_command(base_cmd);
+    let mut cmd = pip_resolved(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");
@@ -108,7 +121,7 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
 }
 
 fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
-    let mut cmd = resolved_command(base_cmd);
+    let mut cmd = pip_resolved(base_cmd);
 
     if base_cmd == "uv" {
         cmd.arg("pip");

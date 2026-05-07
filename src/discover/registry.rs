@@ -712,7 +712,17 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
     let stripped_cow = ENV_PREFIX.replace(cmd_part, "");
     let env_prefix_len = cmd_part.len() - stripped_cow.len();
     let env_prefix = &cmd_part[..env_prefix_len];
-    let cmd_clean = stripped_cow.trim();
+    let cmd_clean_raw = stripped_cow.trim();
+    let cmd_normalized = strip_absolute_path(cmd_clean_raw);
+    let original_bin = if cmd_normalized.as_str() != cmd_clean_raw {
+        cmd_clean_raw
+            .split_whitespace()
+            .next()
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    let cmd_clean = cmd_normalized.as_str();
 
     // #345: RTK_DISABLED=1 in env prefix → skip rewrite entirely
     // #508: warn on stderr so agents learn to stop overusing it
@@ -724,13 +734,22 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
         return None;
     }
 
+    // #1053: preserve original binary path so handlers use the correct executable
+    let bin_env = match &original_bin {
+        Some(bin) => format!("RTK_BIN_PATH={} ", bin),
+        None => String::new(),
+    };
+
     if let Some(parts) = parse_golangci_run_parts(cmd_clean) {
         let rewritten = if parts.global_segment.is_empty() {
-            format!("{}rtk golangci-lint {}", env_prefix, parts.run_segment)
+            format!(
+                "{}{}rtk golangci-lint {}",
+                env_prefix, bin_env, parts.run_segment
+            )
         } else {
             format!(
-                "{}rtk golangci-lint {} {}",
-                env_prefix, parts.global_segment, parts.run_segment
+                "{}{}rtk golangci-lint {} {}",
+                env_prefix, bin_env, parts.global_segment, parts.run_segment
             )
         };
         return Some(rewritten);
@@ -752,9 +771,15 @@ fn rewrite_segment_inner(seg: &str, excluded: &[ExcludePattern], depth: usize) -
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_clean, prefix) {
             let rewritten = if rest.is_empty() {
-                format!("{}{}{}", env_prefix, rule.rtk_cmd, redirect_suffix)
+                format!(
+                    "{}{}{}{}",
+                    env_prefix, bin_env, rule.rtk_cmd, redirect_suffix
+                )
             } else {
-                format!("{}{} {}{}", env_prefix, rule.rtk_cmd, rest, redirect_suffix)
+                format!(
+                    "{}{}{} {}{}",
+                    env_prefix, bin_env, rule.rtk_cmd, rest, redirect_suffix
+                )
             };
             return Some(rewritten);
         }
@@ -3583,6 +3608,151 @@ mod tests {
         assert_eq!(
             rewrite_command("git log | head | tail && git status", &[]),
             Some("rtk git log | head | tail && rtk git status".into())
+        );
+    }
+
+    // --- Absolute/venv path rewrite ---
+
+    #[test]
+    fn test_rewrite_venv_python_pytest() {
+        assert_eq!(
+            rewrite_command(".venv/bin/python -m pytest tests/", &[]),
+            Some("RTK_BIN_PATH=.venv/bin/python rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_venv_python3_pytest() {
+        assert_eq!(
+            rewrite_command(".venv/bin/python3 -m pytest -x tests/", &[]),
+            Some("RTK_BIN_PATH=.venv/bin/python3 rtk pytest -x tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_venv_pytest_direct() {
+        assert_eq!(
+            rewrite_command(".venv/bin/pytest tests/", &[]),
+            Some("RTK_BIN_PATH=.venv/bin/pytest rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_venv_ruff_check() {
+        assert_eq!(
+            rewrite_command(".venv/bin/ruff check .", &[]),
+            Some("RTK_BIN_PATH=.venv/bin/ruff rtk ruff check .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_venv_mypy() {
+        assert_eq!(
+            rewrite_command(".venv/bin/python -m mypy src/", &[]),
+            Some("RTK_BIN_PATH=.venv/bin/python rtk mypy src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_venv_pip_install() {
+        assert_eq!(
+            rewrite_command(".venv/bin/pip install flask", &[]),
+            Some("RTK_BIN_PATH=.venv/bin/pip rtk pip install flask".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_absolute_path_grep() {
+        assert_eq!(
+            rewrite_command("/usr/bin/grep -rn pattern src/", &[]),
+            Some("RTK_BIN_PATH=/usr/bin/grep rtk grep -rn pattern src/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_absolute_path_git() {
+        assert_eq!(
+            rewrite_command("/usr/local/bin/git status", &[]),
+            Some("RTK_BIN_PATH=/usr/local/bin/git rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_absolute_path_ls() {
+        assert_eq!(
+            rewrite_command("/bin/ls -la", &[]),
+            Some("RTK_BIN_PATH=/bin/ls rtk ls -la".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_venv_in_compound() {
+        assert_eq!(
+            rewrite_command(".venv/bin/python -m pytest tests/ && git status", &[]),
+            Some("RTK_BIN_PATH=.venv/bin/python rtk pytest tests/ && rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_venv_with_env_prefix() {
+        assert_eq!(
+            rewrite_command(
+                "PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/",
+                &[]
+            ),
+            Some(
+                "PYTHONDONTWRITEBYTECODE=1 RTK_BIN_PATH=.venv/bin/python rtk pytest tests/".into()
+            )
+        );
+    }
+
+    #[test]
+    fn test_rewrite_deep_venv_path() {
+        assert_eq!(
+            rewrite_command("/tmp/vt-venv/bin/python -m pytest tests/", &[]),
+            Some("RTK_BIN_PATH=/tmp/vt-venv/bin/python rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_named_venv_path() {
+        assert_eq!(
+            rewrite_command("venv/bin/python3 -m pytest tests/", &[]),
+            Some("RTK_BIN_PATH=venv/bin/python3 rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bare_command_no_bin_path() {
+        assert_eq!(
+            rewrite_command("pytest tests/", &[]),
+            Some("rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_venv_python_pytest() {
+        assert_eq!(
+            classify_command(".venv/bin/python -m pytest tests/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pytest",
+                category: "Python",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_strip_absolute_path_venv() {
+        assert_eq!(
+            strip_absolute_path(".venv/bin/python -m pytest tests/"),
+            "python -m pytest tests/"
+        );
+        assert_eq!(strip_absolute_path("venv/bin/ruff check ."), "ruff check .");
+        assert_eq!(
+            strip_absolute_path("/tmp/vt-venv/bin/python3 -m mypy src/"),
+            "python3 -m mypy src/"
         );
     }
 }
