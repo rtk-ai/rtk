@@ -22,8 +22,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls,
-    pipe_cmd, read, summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
+    read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -685,13 +685,6 @@ enum Commands {
     /// Pytest test runner with compact output
     Pytest {
         /// Pytest arguments
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// CTest runner with compact GoogleTest failure output
-    Ctest {
-        /// CTest arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2380,8 +2373,6 @@ fn run_cli() -> Result<i32> {
         Commands::Ruff { args } => ruff_cmd::run(&args, cli.verbose)?,
 
         Commands::Pytest { args } => pytest_cmd::run(&args, cli.verbose)?,
-
-        Commands::Ctest { args } => ctest_cmd::run(&args, cli.verbose)?,
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
 
