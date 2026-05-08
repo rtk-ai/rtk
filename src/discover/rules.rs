@@ -242,6 +242,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^node\s+--check\b",
+        rtk_cmd: "rtk node --check",
+        rewrite_prefixes: &["node --check"],
+        category: "JS",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?jest(\s+run)?(\s|$)",
         rtk_cmd: "rtk jest",
         rewrite_prefixes: &[

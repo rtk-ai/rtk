@@ -1,0 +1,33 @@
+[filters.node-check]
+description = "Compact node --check syntax diagnostics"
+match_command = "^node\\s+--check\\b"
+filter_stderr = true
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s+at\\s+.*$",
+  "^Node\\.js\\s+v\\d+\\.\\d+\\.\\d+$",
+]
+max_lines = 50
+truncate_lines_at = 200
+on_empty = "node --check: ok"
+
+[[tests.node-check]]
+name = "keeps syntax diagnostic and strips stack"
+input = """
+bad.js:1
+const =
+      ^
+
+SyntaxError: Unexpected token '='
+    at wrapSafe (node:internal/modules/cjs/loader:1638:18)
+    at checkSyntax (node:internal/main/check_syntax:78:3)
+
+Node.js v22.19.0
+"""
+expected = "bad.js:1\nconst =\n      ^\nSyntaxError: Unexpected token '='"
+
+[[tests.node-check]]
+name = "empty successful output shows ok"
+input = ""
+expected = "node --check: ok"

@@ -1456,6 +1456,26 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_node_check() {
+        assert!(matches!(
+            classify_command("node --check src/app.js"),
+            Classification::Supported {
+                rtk_equivalent: "rtk node --check",
+                category: "JS",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_node_check() {
+        assert_eq!(
+            rewrite_command_no_prefixes("node --check src/app.js", &[]),
+            Some("rtk node --check src/app.js".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_pipe_first_only() {
         // After a pipe, the filter command stays raw
         assert_eq!(
