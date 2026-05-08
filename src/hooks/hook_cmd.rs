@@ -399,11 +399,25 @@ fn run_claude_inner(input: &str) -> Option<String> {
 
 // ── Cursor native hook ─────────────────────────────────────────
 
+/// Strip leading UTF-8 BOM(s) from a string.
+///
+/// Cursor on Windows ships hook payloads with one or two leading UTF-8 BOMs
+/// (`EF BB BF`). `serde_json::from_str` rejects them, so the hook silently
+/// no-ops on every Shell command unless we strip them first. The loop covers
+/// the observed double-BOM case and is defensive against future N-BOM cases.
+fn strip_utf8_boms(s: &str) -> &str {
+    let mut out = s;
+    while let Some(rest) = out.strip_prefix('\u{FEFF}') {
+        out = rest;
+    }
+    out
+}
+
 /// Run the Cursor Agent hook natively.
 pub fn run_cursor() -> Result<()> {
     let input = read_stdin_limited()?;
 
-    let input = input.trim();
+    let input = strip_utf8_boms(input.trim());
     if input.is_empty() {
         let _ = writeln!(io::stdout(), "{{}}");
         return Ok(());
@@ -444,15 +458,19 @@ pub fn run_cursor() -> Result<()> {
         }
     };
 
-    let decision = match verdict {
-        PermissionVerdict::Allow => "allow",
-        _ => "ask",
-    };
-
+    // Cursor 3.x preToolUse only enforces "allow"/"deny"; "ask" is silently
+    // ignored and the original command runs without the rewrite. Always return
+    // "allow" for rewrites so the updated_input takes effect. Deny verdicts
+    // are short-circuited above so we never lose security boundaries here.
+    //
+    // The `continue: true` key mirrors the shape of other Cursor hooks
+    // (`afterShellExecution`, `beforeSubmitPrompt`, `stop`, ...) so the panel
+    // renders the JSON instead of collapsing to "Output: {}".
     audit_log("rewrite", &cmd, &rewritten);
 
     let output = json!({
-        "permission": decision,
+        "continue": true,
+        "permission": "allow",
         "updated_input": { "command": rewritten }
     });
     let _ = writeln!(io::stdout(), "{output}");
@@ -471,6 +489,7 @@ fn run_cursor_inner_with_rules(
     ask_rules: &[String],
     allow_rules: &[String],
 ) -> String {
+    let input = strip_utf8_boms(input.trim());
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(_) => return "{}".to_string(),
@@ -492,12 +511,9 @@ fn run_cursor_inner_with_rules(
 
     match get_rewritten(&cmd) {
         Some(rewritten) => {
-            let decision = match verdict {
-                PermissionVerdict::Allow => "allow",
-                _ => "ask",
-            };
             let output = json!({
-                "permission": decision,
+                "continue": true,
+                "permission": "allow",
                 "updated_input": { "command": rewritten }
             });
             output.to_string()
@@ -777,8 +793,10 @@ mod tests {
     fn test_cursor_rewrite_flat_format() {
         let result = run_cursor_inner(&cursor_input("git status"));
         let v: Value = serde_json::from_str(&result).unwrap();
-        // Default permission (no explicit allow rule) → "ask"
-        assert_eq!(v["permission"], "ask");
+        // Cursor 3.x preToolUse silently ignores "ask" — rewrites must always
+        // be returned with permission: "allow" or the updated_input is dropped.
+        assert_eq!(v["permission"], "allow");
+        assert_eq!(v["continue"], true);
         assert_eq!(v["updated_input"]["command"], "rtk git status");
         assert!(v.get("hookSpecificOutput").is_none());
     }
@@ -812,7 +830,37 @@ mod tests {
         let result = run_cursor_inner(&cursor_input("cargo test"));
         let v: Value = serde_json::from_str(&result).unwrap();
         assert!(v.get("hookSpecificOutput").is_none());
-        assert_eq!(v["permission"], "ask");
+        assert_eq!(v["permission"], "allow");
+        assert_eq!(v["continue"], true);
+    }
+
+    #[test]
+    fn test_cursor_strips_single_utf8_bom() {
+        let input_with_bom = format!("\u{FEFF}{}", cursor_input("git status"));
+        let result = run_cursor_inner(&input_with_bom);
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["permission"], "allow");
+        assert_eq!(v["continue"], true);
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_cursor_strips_double_utf8_bom() {
+        // Cursor on Windows sometimes ships TWO leading BOMs back-to-back.
+        let input_with_double_bom = format!("\u{FEFF}\u{FEFF}{}", cursor_input("git status"));
+        let result = run_cursor_inner(&input_with_double_bom);
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["permission"], "allow");
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_strip_utf8_boms_helper() {
+        assert_eq!(strip_utf8_boms("hello"), "hello");
+        assert_eq!(strip_utf8_boms("\u{FEFF}hello"), "hello");
+        assert_eq!(strip_utf8_boms("\u{FEFF}\u{FEFF}hello"), "hello");
+        assert_eq!(strip_utf8_boms("\u{FEFF}\u{FEFF}\u{FEFF}{}"), "{}");
+        assert_eq!(strip_utf8_boms(""), "");
     }
 
     // --- Audit logging ---
