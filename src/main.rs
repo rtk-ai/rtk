@@ -41,10 +41,6 @@ pub enum AgentTarget {
     Windsurf,
     /// Cline / Roo Code (VS Code)
     Cline,
-    /// Kilo Code
-    Kilocode,
-    /// Google Antigravity
-    Antigravity,
 }
 
 #[derive(Parser)]
@@ -69,6 +65,10 @@ struct Cli {
     /// Set SKIP_ENV_VALIDATION=1 for child processes (Next.js, tsc, lint, prisma)
     #[arg(long = "skip-env", global = true)]
     skip_env: bool,
+
+    /// Skip output filtering and return raw command output
+    #[arg(long, global = true)]
+    raw: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -221,16 +221,16 @@ enum Commands {
         command: Vec<String>,
     },
 
-    /// Show JSON (compact values by default, or keys-only with --keys-only)
+    /// Show JSON (compact values, or schema-only with --schema)
     Json {
         /// JSON file
         file: PathBuf,
         /// Max depth
         #[arg(short, long, default_value = "5")]
         depth: usize,
-        /// Show keys only (strip all values, show structure)
+        /// Show structure only (strip all values)
         #[arg(long)]
-        keys_only: bool,
+        schema: bool,
     },
 
     /// Summarize project dependencies
@@ -1358,6 +1358,11 @@ fn run_cli() -> Result<i32> {
         }
     };
 
+    // Enable raw mode: bypass all output filtering
+    if cli.raw {
+        std::env::set_var("RTK_RAW_MODE", "1");
+    }
+
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
     if !matches!(cli.command, Commands::Gain { .. }) {
@@ -1617,12 +1622,12 @@ fn run_cli() -> Result<i32> {
         Commands::Json {
             file,
             depth,
-            keys_only,
+            schema,
         } => {
             if file == Path::new("-") {
-                json_cmd::run_stdin(depth, keys_only, cli.verbose)?;
+                json_cmd::run_stdin(depth, schema, cli.verbose)?;
             } else {
-                json_cmd::run(&file, depth, keys_only, cli.verbose)?;
+                json_cmd::run(&file, depth, schema, cli.verbose)?;
             }
             0
         }
@@ -1780,18 +1785,6 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
             } else if copilot {
                 hooks::init::run_copilot(cli.verbose)?;
-            } else if agent == Some(AgentTarget::Kilocode) {
-                if global {
-                    anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
-                }
-                hooks::init::run_kilocode_mode(cli.verbose)?;
-            } else if agent == Some(AgentTarget::Antigravity) {
-                if global {
-                    anyhow::bail!(
-                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
-                    );
-                }
-                hooks::init::run_antigravity_mode(cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
