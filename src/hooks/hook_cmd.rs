@@ -506,6 +506,69 @@ fn run_cursor_inner_with_rules(
     }
 }
 
+// ── Kimi CLI hook ─────────────────────────────────────────────
+
+/// Run the Kimi CLI PreToolUse hook.
+///
+/// Kimi's hook protocol is deny-only — we cannot rewrite the command via
+/// `updatedInput`. Instead, when an unprefixed command would be rewritten by
+/// the engine, we emit `permissionDecision: "deny"` with a reason instructing
+/// the LLM to retry with the `rtk`-prefixed form. Kimi feeds the reason back
+/// into the model context so it self-corrects.
+pub fn run_kimi() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let _ = writeln!(io::stdout(), "{}", run_kimi_inner(input.trim()));
+    Ok(())
+}
+
+fn run_kimi_inner(input: &str) -> String {
+    if input.is_empty() {
+        return "{}".to_string();
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return "{}".to_string();
+        }
+    };
+
+    // Kimi sends `tool_name = "Shell"` for shell commands. Anything else: passthrough.
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(tool_name, "Shell" | "Bash" | "bash" | "shell") {
+        return "{}".to_string();
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return "{}".to_string(),
+    };
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => return "{}".to_string(),
+    };
+
+    audit_log("rewrite", cmd, &rewritten);
+
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": PRE_TOOL_USE_KEY,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": format!(
+                "Use `{}` instead — RTK saves 60-90% tokens",
+                rewritten
+            )
+        }
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,5 +974,83 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // --- Kimi CLI hook ---
+
+    fn kimi_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "session_id": "test",
+            "cwd": "/tmp",
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": { "command": cmd },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_kimi_rewrite_emits_deny_with_suggestion() {
+        let out = run_kimi_inner(&kimi_input("Shell", "git status"));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecision"], "deny",
+            "got: {out}"
+        );
+        assert_eq!(
+            v["hookSpecificOutput"]["hookEventName"], "PreToolUse",
+            "got: {out}"
+        );
+        let reason = v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(reason.contains("rtk git status"), "reason: {reason}");
+    }
+
+    #[test]
+    fn test_kimi_already_rtk_passes_through() {
+        let out = run_kimi_inner(&kimi_input("Shell", "rtk git status"));
+        assert_eq!(out, "{}");
+    }
+
+    #[test]
+    fn test_kimi_unknown_command_passes_through() {
+        let out = run_kimi_inner(&kimi_input("Shell", "htop"));
+        assert_eq!(out, "{}");
+    }
+
+    #[test]
+    fn test_kimi_non_shell_tool_passes_through() {
+        let out = run_kimi_inner(&kimi_input("ReadFile", "git status"));
+        assert_eq!(out, "{}");
+    }
+
+    #[test]
+    fn test_kimi_bash_alias_works() {
+        let out = run_kimi_inner(&kimi_input("Bash", "git status"));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    #[test]
+    fn test_kimi_invalid_json_returns_empty() {
+        assert_eq!(run_kimi_inner("not json at all"), "{}");
+    }
+
+    #[test]
+    fn test_kimi_empty_input_returns_empty() {
+        assert_eq!(run_kimi_inner(""), "{}");
+    }
+
+    #[test]
+    fn test_kimi_missing_command_passes_through() {
+        let out = run_kimi_inner(r#"{"tool_name":"Shell","tool_input":{}}"#);
+        assert_eq!(out, "{}");
+    }
+
+    #[test]
+    fn test_kimi_heredoc_passes_through() {
+        let out = run_kimi_inner(&kimi_input("Shell", "cat <<'EOF'\nhi\nEOF"));
+        assert_eq!(out, "{}");
     }
 }

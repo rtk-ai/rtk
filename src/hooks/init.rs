@@ -363,6 +363,265 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+// ─── Surgical JSON / TOML patching helpers ────────────────────
+
+/// Find the byte bounds of a JSON array that follows a specific key.
+fn find_json_array_bounds(text: &str, key: &str) -> Option<(usize, usize)> {
+    let key_pattern = format!("\"{}\"", key);
+    let key_pos = text.find(&key_pattern)?;
+    let rest = &text[key_pos..];
+    let bracket_offset = rest.find('[')?;
+    let array_start = key_pos + bracket_offset;
+
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (i, c) in text[array_start..].chars().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((array_start, array_start + i + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Find all top-level object elements within a JSON array range.
+fn find_json_array_object_elements(
+    text: &str,
+    array_start: usize,
+    array_end: usize,
+) -> Vec<(usize, usize)> {
+    let mut elements = Vec::new();
+    let mut brace_depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut current_start: Option<usize> = None;
+
+    for (i, c) in text[array_start + 1..array_end].chars().enumerate() {
+        let global_idx = array_start + 1 + i;
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match c {
+            '{' => {
+                if brace_depth == 0 {
+                    current_start = Some(global_idx);
+                }
+                brace_depth += 1;
+            }
+            '}' => {
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    if let Some(start) = current_start {
+                        elements.push((start, global_idx + 1));
+                        current_start = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    elements
+}
+
+/// Find the byte index just after the root object's closing `}`.
+fn find_root_object_end(text: &str) -> Option<usize> {
+    let trimmed = text.trim_start();
+    let offset = text.len() - trimmed.len();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (i, c) in text[offset..].chars().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(offset + i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Infer the indentation string used for elements inside a JSON array.
+fn infer_array_indent(text: &str, array_start: usize) -> String {
+    if let Some(first_brace) = text[array_start + 1..].find('{') {
+        let brace_pos = array_start + 1 + first_brace;
+        let line_start = text[..brace_pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let indent_len = text[line_start..brace_pos]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .count();
+        " ".repeat(indent_len)
+    } else {
+        "  ".to_string()
+    }
+}
+
+/// Append a pretty-printed JSON object to an array in the original text.
+fn append_to_json_array(original: &str, array_bounds: (usize, usize), new_entry: &str) -> String {
+    let (array_start, array_end) = array_bounds;
+    let indent = infer_array_indent(original, array_start);
+    let inner = &original[array_start + 1..array_end - 1];
+
+    let indented_entry = new_entry
+        .lines()
+        .map(|l| format!("{}{}", indent, l))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if inner.trim().is_empty() {
+        format!(
+            "{}\n{}\n{}",
+            &original[..array_start + 1],
+            indented_entry,
+            &original[array_end - 1..]
+        )
+    } else {
+        let before_bracket = array_end - 1;
+        let inner_trimmed = inner.trim_end();
+        let separator = if inner_trimmed.ends_with(',') {
+            format!("\n{}", indent)
+        } else {
+            format!(",\n{}", indent)
+        };
+        format!(
+            "{}{}{}{}\n{}",
+            &original[..before_bracket],
+            separator,
+            indented_entry,
+            &original[before_bracket..before_bracket + 1],
+            &original[before_bracket + 1..]
+        )
+    }
+}
+
+/// Find all `[[hooks]]` blocks in TOML text.
+/// Returns vector of (start_line, end_line) for each block.
+fn find_toml_hooks_blocks(text: &str) -> Vec<(usize, usize)> {
+    let mut blocks = Vec::new();
+    let mut in_hooks_block = false;
+    let mut block_start = 0usize;
+
+    let lines: Vec<(usize, &str)> = text
+        .lines()
+        .enumerate()
+        .scan(0usize, |pos, (_idx, line)| {
+            let start = *pos;
+            *pos += line.len() + 1; // +1 for newline
+            Some((start, line))
+        })
+        .collect();
+
+    for i in 0..lines.len() {
+        let (start, line) = lines[i];
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("[[") && trimmed.ends_with("]]") {
+            if in_hooks_block {
+                blocks.push((block_start, start));
+            }
+            if trimmed == "[[hooks]]" {
+                in_hooks_block = true;
+                block_start = start;
+            } else {
+                in_hooks_block = false;
+            }
+        }
+    }
+
+    if in_hooks_block {
+        blocks.push((block_start, text.len()));
+    }
+
+    blocks
+}
+
+/// Build the intended Kimi hook table as a toml::Value.
+fn intended_kimi_hook() -> toml::Value {
+    let mut hook_table = toml::map::Map::new();
+    hook_table.insert(
+        "event".to_string(),
+        toml::Value::String("PreToolUse".to_string()),
+    );
+    hook_table.insert(
+        "matcher".to_string(),
+        toml::Value::String("Shell".to_string()),
+    );
+    hook_table.insert(
+        "command".to_string(),
+        toml::Value::String(KIMI_HOOK_COMMAND.to_string()),
+    );
+    hook_table.insert("timeout".to_string(), toml::Value::Integer(10));
+    toml::Value::Table(hook_table)
+}
+
+/// Serialize a single hook table as a `[[hooks]]` TOML block.
+fn hook_to_toml_block(hook: &toml::Value) -> String {
+    let mut wrapper = toml::map::Map::new();
+    wrapper.insert("hooks".to_string(), toml::Value::Array(vec![hook.clone()]));
+    toml::to_string_pretty(&toml::Value::Table(wrapper))
+        .unwrap()
+        .trim_start()
+        .to_string()
+}
+
 /// Prompt user for consent to patch settings.json
 /// Prints to stderr (stdout may be piped), reads from stdin
 /// Default is No (capital N)
@@ -763,6 +1022,113 @@ fn uninstall_codex_at(codex_dir: &Path, verbose: u8) -> Result<Vec<String>> {
     Ok(removed)
 }
 
+/// Check if the exact RTK hook entry is already present in parsed settings.json.
+fn is_exact_claude_hook_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    let pre_tool_use_array = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    pre_tool_use_array.iter().any(|entry| {
+        entry.get("matcher") == Some(&serde_json::json!("Bash"))
+            && entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("type") == Some(&serde_json::json!("command"))
+                            && h.get("command") == Some(&serde_json::json!(hook_command))
+                    })
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// Surgically patch Claude settings.json text.
+/// Returns `None` if the exact hook is already present.
+fn patch_claude_settings_text(original: &str, hook_command: &str) -> Result<Option<String>> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(original).with_context(|| "Failed to parse settings.json")?;
+
+    if is_exact_claude_hook_present(&parsed, hook_command) {
+        return Ok(None);
+    }
+
+    let intended_entry = serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": hook_command
+        }]
+    });
+    let intended_text = serde_json::to_string_pretty(&intended_entry)?;
+
+    // No hooks/PreToolUse section → append to root object
+    if parsed
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .is_none()
+    {
+        let root_end = find_root_object_end(original)
+            .context("Could not find root object end in settings.json")?;
+        let before_close = root_end - 1;
+        let has_content = original[..before_close].trim().len() > 1;
+        let separator = if has_content { ",\n" } else { "\n" };
+        let mut result = String::with_capacity(original.len() + 256);
+        result.push_str(&original[..before_close]);
+        result.push_str(separator);
+        result.push_str("  \"hooks\": {\n");
+        result.push_str("    \"PreToolUse\": [\n");
+        for line in intended_text.lines() {
+            result.push_str("      ");
+            result.push_str(line);
+            result.push('\n');
+        }
+        result.push_str("    ]\n");
+        result.push_str("  }\n");
+        result.push_str(&original[before_close..]);
+        return Ok(Some(result));
+    }
+
+    let array_bounds = find_json_array_bounds(original, PRE_TOOL_USE_KEY)
+        .context("Could not find PreToolUse array in settings.json")?;
+
+    let elements = find_json_array_object_elements(original, array_bounds.0, array_bounds.1);
+
+    for (start, end) in elements {
+        let element_text = &original[start..end];
+        if element_text.contains(REWRITE_HOOK_FILE) || element_text.contains(hook_command) {
+            let indent = infer_array_indent(original, array_bounds.0);
+            let indented = intended_text
+                .lines()
+                .map(|l| {
+                    if l.trim().is_empty() {
+                        l.to_string()
+                    } else {
+                        format!("{}{}", indent, l)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut result = String::with_capacity(original.len() + indented.len());
+            result.push_str(&original[..start]);
+            result.push_str(&indented);
+            result.push_str(&original[end..]);
+            return Ok(Some(result));
+        }
+    }
+
+    Ok(Some(append_to_json_array(
+        original,
+        array_bounds,
+        &intended_text,
+    )))
+}
+
 /// Orchestrator: patch settings.json with RTK hook (binary command variant)
 /// Handles reading, checking, prompting, merging, backing up, and atomic writing
 fn patch_settings_json_command(
@@ -775,22 +1141,23 @@ fn patch_settings_json_command(
     let settings_path = claude_dir.join(SETTINGS_JSON);
 
     // Read or create settings.json
-    let mut root = if settings_path.exists() {
+    let (original_content, parsed) = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)
             .with_context(|| format!("Failed to read {}", settings_path.display()))?;
 
         if content.trim().is_empty() {
-            serde_json::json!({})
+            (content, serde_json::json!({}))
         } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?
+            let root = serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", settings_path.display()))?;
+            (content, root)
         }
     } else {
-        serde_json::json!({})
+        (String::new(), serde_json::json!({}))
     };
 
-    // Check idempotency
-    if hook_already_present(&root, hook_command) {
+    // Check idempotency using parsed value
+    if is_exact_claude_hook_present(&parsed, hook_command) {
         if verbose > 0 {
             eprintln!("settings.json: hook already present");
         }
@@ -814,7 +1181,15 @@ fn patch_settings_json_command(
         }
     }
 
-    insert_hook_entry(&mut root, hook_command)?;
+    // Build new content
+    let new_content = if original_content.trim().is_empty() {
+        let mut root = serde_json::json!({});
+        insert_hook_entry(&mut root, hook_command)?;
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?
+    } else {
+        patch_claude_settings_text(&original_content, hook_command)?
+            .context("Failed to patch settings.json")?
+    };
 
     // Backup original
     if settings_path.exists() {
@@ -827,9 +1202,7 @@ fn patch_settings_json_command(
     }
 
     // Atomic write
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
-    atomic_write(&settings_path, &serialized)?;
+    atomic_write(&settings_path, &new_content)?;
 
     println!("\n  settings.json: hook added");
     if settings_path.with_extension("json.bak").exists() {
@@ -1467,6 +1840,138 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ─── Kimi CLI support ─────────────────────────────────────────
+
+const KIMI_RULES: &str = include_str!("../../hooks/kimi/rules.md");
+const KIMI_HOOK_COMMAND: &str = "rtk hook kimi";
+
+/// Parse the existing kimi config.toml and ensure the RTK hook is present
+/// in the `hooks` array, preserving any existing hooks. Returns the
+/// unchanged string if the hook is already installed.
+fn patch_kimi_config(existing: &str) -> Result<String> {
+    // ── Strategy: never parse & re-serialize the whole document.
+    // We do targeted string surgery so comments, ordering and formatting
+    // survive untouched.
+
+    let intended = hook_to_toml_block(&intended_kimi_hook());
+
+    // 1. Empty file → just write the hook block
+    if existing.trim().is_empty() {
+        return Ok(intended);
+    }
+
+    // 2. Already installed (command appears anywhere)?
+    if existing.lines().any(|l| l.contains(KIMI_HOOK_COMMAND)) {
+        return Ok(existing.to_string());
+    }
+
+    // 3. File already uses [[hooks]] blocks → append after the last one
+    let blocks = find_toml_hooks_blocks(existing);
+    if !blocks.is_empty() {
+        let (_start, end) = blocks.last().unwrap();
+        let mut result = String::with_capacity(existing.len() + 256);
+        result.push_str(&existing[..*end]);
+        // Ensure blank line before new block
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push('\n');
+        result.push_str(&intended);
+        result.push_str(&existing[*end..]);
+        return Ok(result);
+    }
+
+    // 4. Inline array: hooks = []  or  hooks = [{...}]
+    //    Strip the inline line, then append [[hooks]] blocks.
+    let mut result = String::with_capacity(existing.len() + 256);
+    let mut hooks_line_found = false;
+    let mut inline_value: Option<String> = None;
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("hooks") && trimmed.contains('=') && !hooks_line_found {
+            hooks_line_found = true;
+            // Capture everything after '=' so we can parse existing entries
+            if let Some(eq) = trimmed.find('=') {
+                inline_value = Some(trimmed[eq + 1..].trim().to_string());
+            }
+            continue;
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    // If the inline array had entries, convert them to [[hooks]] blocks.
+    // An empty "[]" yields nothing.
+    if let Some(val) = inline_value {
+        if val != "[]" {
+            // Wrap the raw array text in a dummy key so toml can parse it
+            let wrapped = format!("dummy = {}", val);
+            if let Ok(doc) = toml::from_str::<toml::Value>(&wrapped) {
+                if let Some(arr) = doc.get("dummy").and_then(|v| v.as_array()) {
+                    for entry in arr {
+                        result.push_str(&hook_to_toml_block(entry));
+                    }
+                }
+            }
+        }
+    }
+
+    // Ensure blank line before new block
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    if !result.ends_with("\n\n") {
+        result.push('\n');
+    }
+    result.push_str(&intended);
+    Ok(result)
+}
+
+pub fn run_kimi(verbose: u8) -> Result<()> {
+    let home = dirs::home_dir().context("Cannot resolve home directory")?;
+    run_kimi_at(&home.join(".kimi"), verbose)
+}
+
+fn run_kimi_at(kimi_dir: &Path, verbose: u8) -> Result<()> {
+    fs::create_dir_all(kimi_dir)
+        .with_context(|| format!("Failed to create {}", kimi_dir.display()))?;
+
+    // 1. Rules file
+    let rules_path = kimi_dir.join("rtk-rules.md");
+    write_if_changed(&rules_path, KIMI_RULES, "Kimi RTK rules", verbose)?;
+
+    // 2. Patch config.toml — append [[hooks]] block if not already present
+    let config_path = kimi_dir.join("config.toml");
+    let existing = fs::read_to_string(&config_path).unwrap_or_default();
+
+    let new_content = patch_kimi_config(&existing)
+        .with_context(|| format!("Failed to patch {}", config_path.display()))?;
+
+    if new_content == existing {
+        if verbose > 0 {
+            eprintln!("Kimi hook already in {}", config_path.display());
+        }
+        println!("\nRTK already configured for Kimi CLI.\n");
+        println!("  Config: {}", config_path.display());
+    } else {
+        atomic_write(&config_path, &new_content)
+            .with_context(|| format!("Failed to write {}", config_path.display()))?;
+
+        if verbose > 0 {
+            eprintln!("Patched {}", config_path.display());
+        }
+
+        println!("\nRTK configured for Kimi CLI.\n");
+        println!("  Config: {} (patched)", config_path.display());
+    }
+    println!("  Rules:  {}", rules_path.display());
+    println!("  Add the rules file to your Kimi system prompt or agent config.");
+    println!("  Restart your kimi-cli session to activate.\n");
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -1920,29 +2425,132 @@ fn install_cursor_hooks(verbose: u8) -> Result<()> {
 
 /// Patch ~/.cursor/hooks.json to add RTK preToolUse hook.
 /// Returns true if the file was modified.
+/// Check if the exact Cursor RTK hook entry is already present.
+fn is_exact_cursor_hook_present(root: &serde_json::Value) -> bool {
+    let hooks = match root
+        .get("hooks")
+        .and_then(|h| h.get("preToolUse"))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    hooks.iter().any(|entry| {
+        entry.get("command") == Some(&serde_json::json!(CURSOR_HOOK_COMMAND))
+            && entry.get("matcher") == Some(&serde_json::json!("Shell"))
+    })
+}
+
+/// Surgically patch Cursor hooks.json text.
+/// Returns `None` if the exact hook is already present.
+fn patch_cursor_hooks_text(original: &str) -> Result<Option<String>> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(original).with_context(|| "Failed to parse Cursor hooks.json")?;
+
+    if is_exact_cursor_hook_present(&parsed) {
+        return Ok(None);
+    }
+
+    let intended_entry = serde_json::json!({
+        "command": CURSOR_HOOK_COMMAND,
+        "matcher": "Shell"
+    });
+    let intended_text = serde_json::to_string_pretty(&intended_entry)?;
+
+    // No hooks.preToolUse section → append to root object
+    if parsed
+        .get("hooks")
+        .and_then(|h| h.get("preToolUse"))
+        .is_none()
+    {
+        let root_end = find_root_object_end(original)
+            .context("Could not find root object end in hooks.json")?;
+        let before_close = root_end - 1;
+        let has_content = original[..before_close].trim().len() > 1;
+        let separator = if has_content { ",\n" } else { "\n" };
+        let mut result = String::with_capacity(original.len() + 256);
+        result.push_str(&original[..before_close]);
+        result.push_str(separator);
+        result.push_str("  \"hooks\": {\n");
+        result.push_str("    \"preToolUse\": [\n");
+        for line in intended_text.lines() {
+            result.push_str("      ");
+            result.push_str(line);
+            result.push('\n');
+        }
+        result.push_str("    ]\n");
+        result.push_str("  }\n");
+        result.push_str(&original[before_close..]);
+        return Ok(Some(result));
+    }
+
+    let array_bounds = find_json_array_bounds(original, "preToolUse")
+        .context("Could not find preToolUse array in hooks.json")?;
+
+    let elements = find_json_array_object_elements(original, array_bounds.0, array_bounds.1);
+
+    for (start, end) in elements {
+        let element_text = &original[start..end];
+        if element_text.contains(REWRITE_HOOK_FILE) || element_text.contains(CURSOR_HOOK_COMMAND) {
+            let indent = infer_array_indent(original, array_bounds.0);
+            let indented = intended_text
+                .lines()
+                .map(|l| {
+                    if l.trim().is_empty() {
+                        l.to_string()
+                    } else {
+                        format!("{}{}", indent, l)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut result = String::with_capacity(original.len() + indented.len());
+            result.push_str(&original[..start]);
+            result.push_str(&indented);
+            result.push_str(&original[end..]);
+            return Ok(Some(result));
+        }
+    }
+
+    Ok(Some(append_to_json_array(
+        original,
+        array_bounds,
+        &intended_text,
+    )))
+}
+
 fn patch_cursor_hooks_json(path: &Path, verbose: u8) -> Result<bool> {
-    let mut root = if path.exists() {
+    let (original_content, parsed) = if path.exists() {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
         if content.trim().is_empty() {
-            serde_json::json!({ "version": 1 })
+            (content, serde_json::json!({ "version": 1 }))
         } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
+            let root = serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?;
+            (content, root)
         }
     } else {
-        serde_json::json!({ "version": 1 })
+        (String::new(), serde_json::json!({ "version": 1 }))
     };
 
     // Check idempotency
-    if cursor_hook_already_present(&root) {
+    if is_exact_cursor_hook_present(&parsed) {
         if verbose > 0 {
             eprintln!("Cursor hooks.json: RTK hook already present");
         }
         return Ok(false);
     }
 
-    insert_cursor_hook_entry(&mut root)?;
+    // Build new content
+    let new_content = if original_content.trim().is_empty() {
+        let mut root = serde_json::json!({ "version": 1 });
+        insert_cursor_hook_entry(&mut root)?;
+        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?
+    } else {
+        patch_cursor_hooks_text(&original_content)?.context("Failed to patch hooks.json")?
+    };
 
     // Backup if exists
     if path.exists() {
@@ -1955,9 +2563,7 @@ fn patch_cursor_hooks_json(path: &Path, verbose: u8) -> Result<bool> {
     }
 
     // Atomic write
-    let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
-    atomic_write(path, &serialized)?;
+    atomic_write(path, &new_content)?;
 
     Ok(true)
 }
@@ -2501,6 +3107,113 @@ pub fn run_gemini(global: bool, hook_only: bool, patch_mode: PatchMode, verbose:
 }
 
 /// Patch ~/.gemini/settings.json with the BeforeTool hook
+/// Check if the exact Gemini RTK hook entry is already present.
+fn is_exact_gemini_hook_present(root: &serde_json::Value, hook_cmd: &str) -> bool {
+    let hooks = match root
+        .get("hooks")
+        .and_then(|h| h.get(BEFORE_TOOL_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    hooks.iter().any(|entry| {
+        entry.get("matcher") == Some(&serde_json::json!("run_shell_command"))
+            && entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|inner| {
+                    inner.iter().any(|h| {
+                        h.get("type") == Some(&serde_json::json!("command"))
+                            && h.get("command") == Some(&serde_json::json!(hook_cmd))
+                    })
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// Surgically patch Gemini settings.json text.
+/// Returns `None` if the exact hook is already present.
+fn patch_gemini_settings_text(original: &str, hook_cmd: &str) -> Result<Option<String>> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(original).with_context(|| "Failed to parse Gemini settings.json")?;
+
+    if is_exact_gemini_hook_present(&parsed, hook_cmd) {
+        return Ok(None);
+    }
+
+    let intended_entry = serde_json::json!({
+        "matcher": "run_shell_command",
+        "hooks": [{
+            "type": "command",
+            "command": hook_cmd
+        }]
+    });
+    let intended_text = serde_json::to_string_pretty(&intended_entry)?;
+
+    // No hooks.BeforeTool section → append to root object
+    if parsed
+        .get("hooks")
+        .and_then(|h| h.get(BEFORE_TOOL_KEY))
+        .is_none()
+    {
+        let root_end = find_root_object_end(original)
+            .context("Could not find root object end in Gemini settings.json")?;
+        let before_close = root_end - 1;
+        let has_content = original[..before_close].trim().len() > 1;
+        let separator = if has_content { ",\n" } else { "\n" };
+        let mut result = String::with_capacity(original.len() + 256);
+        result.push_str(&original[..before_close]);
+        result.push_str(separator);
+        result.push_str("  \"hooks\": {\n");
+        result.push_str("    \"BeforeTool\": [\n");
+        for line in intended_text.lines() {
+            result.push_str("      ");
+            result.push_str(line);
+            result.push('\n');
+        }
+        result.push_str("    ]\n");
+        result.push_str("  }\n");
+        result.push_str(&original[before_close..]);
+        return Ok(Some(result));
+    }
+
+    let array_bounds = find_json_array_bounds(original, BEFORE_TOOL_KEY)
+        .context("Could not find BeforeTool array in Gemini settings.json")?;
+
+    let elements = find_json_array_object_elements(original, array_bounds.0, array_bounds.1);
+
+    for (start, end) in elements {
+        let element_text = &original[start..end];
+        if element_text.contains("rtk") {
+            let indent = infer_array_indent(original, array_bounds.0);
+            let indented = intended_text
+                .lines()
+                .map(|l| {
+                    if l.trim().is_empty() {
+                        l.to_string()
+                    } else {
+                        format!("{}{}", indent, l)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut result = String::with_capacity(original.len() + indented.len());
+            result.push_str(&original[..start]);
+            result.push_str(&indented);
+            result.push_str(&original[end..]);
+            return Ok(Some(result));
+        }
+    }
+
+    Ok(Some(append_to_json_array(
+        original,
+        array_bounds,
+        &intended_text,
+    )))
+}
+
 fn patch_gemini_settings(
     gemini_dir: &Path,
     hook_path: &Path,
@@ -2511,28 +3224,21 @@ fn patch_gemini_settings(
     let hook_cmd = hook_path.to_string_lossy().to_string();
 
     // Read or create settings.json
-    let mut settings: serde_json::Value = if settings_path.exists() {
+    let (original_content, parsed) = if settings_path.exists() {
         let content = fs::read_to_string(&settings_path)
             .with_context(|| format!("Failed to read {}", settings_path.display()))?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+        let root = serde_json::from_str(&content).unwrap_or(serde_json::json!({}));
+        (content, root)
     } else {
-        serde_json::json!({})
+        (String::new(), serde_json::json!({}))
     };
 
-    let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
-    if let Some(hooks) = settings.pointer(&before_tool_pointer) {
-        if let Some(arr) = hooks.as_array() {
-            if arr.iter().any(|h| {
-                h.pointer("/hooks/0/command")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|c| c.contains("rtk"))
-            }) {
-                if verbose > 0 {
-                    eprintln!("Gemini settings.json already has RTK hook");
-                }
-                return Ok(());
-            }
+    // Check exact idempotency
+    if is_exact_gemini_hook_present(&parsed, &hook_cmd) {
+        if verbose > 0 {
+            eprintln!("Gemini settings.json already has RTK hook");
         }
+        return Ok(());
     }
 
     // Ask user before patching
@@ -2556,37 +3262,35 @@ fn patch_gemini_settings(
         }
     }
 
-    // Build hook entry matching Gemini CLI format
-    let hook_entry = serde_json::json!({
-        "matcher": "run_shell_command",
-        "hooks": [{
-            "type": "command",
-            "command": hook_cmd
-        }]
-    });
-
-    // Insert into settings
-    let hooks = settings
-        .as_object_mut()
-        .context("settings.json is not an object")?
-        .entry("hooks")
-        .or_insert(serde_json::json!({}));
-
-    let before_tool = hooks
-        .as_object_mut()
-        .context("hooks is not an object")?
-        .entry(BEFORE_TOOL_KEY)
-        .or_insert(serde_json::json!([]));
-
-    before_tool
-        .as_array_mut()
-        .context("BeforeTool is not an array")?
-        .push(hook_entry);
+    // Build new content
+    let new_content = if original_content.trim().is_empty() {
+        let mut root = serde_json::json!({});
+        let hooks = root
+            .as_object_mut()
+            .unwrap()
+            .entry("hooks")
+            .or_insert(serde_json::json!({}));
+        let before_tool = hooks
+            .as_object_mut()
+            .unwrap()
+            .entry(BEFORE_TOOL_KEY)
+            .or_insert(serde_json::json!([]));
+        before_tool.as_array_mut().unwrap().push(serde_json::json!({
+            "matcher": "run_shell_command",
+            "hooks": [{
+                "type": "command",
+                "command": hook_cmd
+            }]
+        }));
+        serde_json::to_string_pretty(&root).context("Failed to serialize Gemini settings.json")?
+    } else {
+        patch_gemini_settings_text(&original_content, &hook_cmd)?
+            .context("Failed to patch Gemini settings.json")?
+    };
 
     // Write atomically
-    let content = serde_json::to_string_pretty(&settings)?;
     let tmp = NamedTempFile::new_in(gemini_dir)?;
-    fs::write(tmp.path(), &content)?;
+    fs::write(tmp.path(), &new_content)?;
     tmp.persist(&settings_path)
         .with_context(|| format!("Failed to write {}", settings_path.display()))?;
 
@@ -3017,6 +3721,210 @@ mod tests {
         run_antigravity_mode_at(temp.path(), 0).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_kimi_init_creates_config_and_rules() {
+        let temp = TempDir::new().unwrap();
+        run_kimi_at(temp.path(), 0).unwrap();
+
+        let rules = temp.path().join("rtk-rules.md");
+        let config = temp.path().join("config.toml");
+        assert!(rules.exists(), "rules file missing");
+        assert!(config.exists(), "config.toml missing");
+
+        let cfg = fs::read_to_string(&config).unwrap();
+        assert!(cfg.contains("[[hooks]]"), "missing [[hooks]] block");
+        assert!(cfg.contains("rtk hook kimi"), "missing rtk hook command");
+        assert!(cfg.contains("PreToolUse"), "missing event");
+    }
+
+    #[test]
+    fn test_kimi_init_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_kimi_at(temp.path(), 0).unwrap();
+        run_kimi_at(temp.path(), 0).unwrap();
+
+        let cfg = fs::read_to_string(temp.path().join("config.toml")).unwrap();
+        assert_eq!(
+            cfg.matches("rtk hook kimi").count(),
+            1,
+            "hook block duplicated on rerun"
+        );
+    }
+
+    #[test]
+    fn test_kimi_init_preserves_existing_config() {
+        let temp = TempDir::new().unwrap();
+        let cfg_path = temp.path().join("config.toml");
+        fs::create_dir_all(temp.path()).unwrap();
+        fs::write(&cfg_path, "model = \"k1\"\n[ui]\ntheme = \"dark\"\n").unwrap();
+
+        run_kimi_at(temp.path(), 0).unwrap();
+
+        let cfg = fs::read_to_string(&cfg_path).unwrap();
+        assert!(cfg.contains("model = \"k1\""), "lost model line");
+        assert!(cfg.contains("theme = \"dark\""), "lost theme line");
+        assert!(cfg.contains("rtk hook kimi"), "missing hook block");
+    }
+
+    #[test]
+    fn test_kimi_init_replaces_inline_hooks_array() {
+        let temp = TempDir::new().unwrap();
+        let cfg_path = temp.path().join("config.toml");
+        fs::create_dir_all(temp.path()).unwrap();
+        fs::write(&cfg_path, "model = \"k1\"\nhooks = []\n").unwrap();
+
+        run_kimi_at(temp.path(), 0).unwrap();
+
+        let cfg = fs::read_to_string(&cfg_path).unwrap();
+        assert!(cfg.contains("model = \"k1\""), "lost model line");
+        assert!(
+            !cfg.contains("hooks = []"),
+            "inline hooks array should be removed"
+        );
+        assert!(cfg.contains("[[hooks]]"), "missing [[hooks]] block");
+        assert!(cfg.contains("rtk hook kimi"), "missing rtk hook command");
+
+        // Must be valid TOML
+        let _: toml::Value = toml::from_str(&cfg).expect("resulting config is not valid TOML");
+    }
+
+    #[test]
+    fn test_kimi_init_preserves_existing_hooks() {
+        let temp = TempDir::new().unwrap();
+        let cfg_path = temp.path().join("config.toml");
+        fs::create_dir_all(temp.path()).unwrap();
+        fs::write(
+            &cfg_path,
+            "model = \"k1\"\nhooks = [{event = \"PreToolUse\", matcher = \"Shell\", command = \"existing-hook\", timeout = 5}]\n",
+        )
+        .unwrap();
+
+        run_kimi_at(temp.path(), 0).unwrap();
+
+        let cfg = fs::read_to_string(&cfg_path).unwrap();
+        assert!(cfg.contains("model = \"k1\""), "lost model line");
+        assert!(
+            !cfg.contains("hooks = ["),
+            "inline hooks array should be converted"
+        );
+        assert!(cfg.contains("existing-hook"), "lost existing hook command");
+        assert!(cfg.contains("rtk hook kimi"), "missing rtk hook command");
+
+        // Parse and verify both hooks are present
+        let doc: toml::Value = toml::from_str(&cfg).expect("resulting config is not valid TOML");
+        let hooks = doc
+            .get("hooks")
+            .and_then(|v| v.as_array())
+            .expect("hooks should be an array");
+        assert_eq!(hooks.len(), 2, "should have exactly 2 hooks");
+        assert!(
+            hooks
+                .iter()
+                .any(|h| { h.get("command").and_then(|c| c.as_str()) == Some("existing-hook") }),
+            "existing hook missing"
+        );
+        assert!(
+            hooks
+                .iter()
+                .any(|h| { h.get("command").and_then(|c| c.as_str()) == Some("rtk hook kimi") }),
+            "rtk hook missing"
+        );
+    }
+
+    #[test]
+    fn test_kimi_init_preserves_full_user_config() {
+        // Regression test for the real ~/.kimi/config.toml format
+        let input = r#"default_model = "kimi-code/kimi-for-coding"
+default_thinking = true
+default_yolo = false
+skip_yolo_prompt_injection = false
+default_plan_mode = false
+default_editor = ""
+theme = "dark"
+show_thinking_stream = true
+hooks = []
+merge_all_available_skills = true
+extra_skill_dirs = []
+telemetry = true
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding"
+max_context_size = 262144
+capabilities = ["thinking", "image_in", "video_in"]
+display_name = "Kimi-k2.6"
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = ""
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+[loop_control]
+max_steps_per_turn = 500
+max_retries_per_step = 3
+max_ralph_iterations = 0
+reserved_context_size = 50000
+compaction_trigger_ratio = 0.85
+
+[background]
+max_running_tasks = 4
+read_max_bytes = 30000
+notification_tail_lines = 20
+notification_tail_chars = 3000
+wait_poll_interval_ms = 500
+worker_heartbeat_interval_ms = 5000
+worker_stale_after_ms = 15000
+kill_grace_period_ms = 2000
+keep_alive_on_exit = false
+agent_task_timeout_s = 900
+print_wait_ceiling_s = 3600
+
+[notifications]
+claim_stale_after_ms = 15000
+
+[services.moonshot_search]
+base_url = "https://api.kimi.com/coding/v1/search"
+api_key = ""
+
+[services.moonshot_search.oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+[services.moonshot_fetch]
+base_url = "https://api.kimi.com/coding/v1/fetch"
+api_key = ""
+
+[services.moonshot_fetch.oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+[mcp.client]
+tool_call_timeout_ms = 60000
+"#;
+        assert!(find_toml_hooks_blocks(input).is_empty());
+
+        let output = patch_kimi_config(input).unwrap();
+        assert!(output.contains("default_model"), "lost default_model");
+        assert!(output.contains("mcp.client"), "lost mcp.client table");
+        assert!(output.contains("moonshot_search"), "lost moonshot_search");
+        assert!(
+            output.contains("tool_call_timeout_ms"),
+            "lost tool_call_timeout_ms"
+        );
+        assert!(output.contains("rtk hook kimi"), "missing rtk hook");
+        assert!(
+            !output.contains("hooks = []"),
+            "inline hooks array should be removed"
+        );
+
+        // Must be valid TOML
+        let _: toml::Value = toml::from_str(&output).expect("output is not valid TOML");
     }
 
     #[test]

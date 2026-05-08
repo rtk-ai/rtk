@@ -45,6 +45,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Kimi CLI
+    Kimi,
 }
 
 #[derive(Parser)]
@@ -768,6 +770,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Kimi CLI PreToolUse hook (deny-with-suggestion, reads JSON from stdin)
+    Kimi,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1792,6 +1796,11 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Kimi) {
+                if !global {
+                    anyhow::bail!("Kimi CLI is global-only. Use: rtk init -g --agent kimi");
+                }
+                hooks::init::run_kimi(cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2123,6 +2132,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Kimi => {
+                hooks::hook_cmd::run_kimi()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
