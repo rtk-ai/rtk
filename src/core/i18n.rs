@@ -153,21 +153,25 @@ pub fn bool_text(value: bool, lang: UiLanguage) -> &'static str {
 }
 
 fn language_candidate(config: &config::Config) -> Option<String> {
-    if let Some(candidate) = normalize(&config.display.language) {
-        return Some(candidate);
-    }
-
     const CANDIDATE_ENV: [&str; 4] = ["RTK_DISPLAY_LANGUAGE", "LANGUAGE", "LC_MESSAGES", "LANG"];
 
-    for env_name in CANDIDATE_ENV {
+    let env_candidate = CANDIDATE_ENV.iter().find_map(|env_name| {
         if let Ok(value) = std::env::var(env_name) {
             if let Some(candidate) = normalize(&value) {
                 return Some(candidate);
             }
         }
+        None
+    });
+
+    if let Some(candidate) = normalize(&config.display.language) {
+        if candidate == "en" {
+            return env_candidate.or(Some("en".to_string()));
+        }
+        return Some(candidate);
     }
 
-    None
+    env_candidate.or(Some("en".to_string()))
 }
 
 fn normalize(value: &str) -> Option<String> {
@@ -283,5 +287,25 @@ mod tests {
                 std::env::remove_var(&key);
             }
         }
+    }
+
+    #[test]
+    fn test_language_hint_prefers_environment_over_config() {
+        let cfg = config::Config::default();
+
+        std::env::set_var("RTK_DISPLAY_LANGUAGE", "id");
+        std::env::remove_var("LANGUAGE");
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
+
+        assert_eq!(language_hint(&cfg), "id");
+
+        std::env::set_var("LANG", "id_ID.UTF-8");
+        assert_eq!(language_hint(&cfg), "id");
+
+        std::env::remove_var("RTK_DISPLAY_LANGUAGE");
+        std::env::remove_var("LANGUAGE");
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
     }
 }
