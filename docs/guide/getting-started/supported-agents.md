@@ -35,6 +35,7 @@ Agent runs "cargo test"
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
+| Charmbracelet Crush | PreToolUse hook (`crush.json`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
@@ -128,6 +129,22 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
 
+### Charmbracelet Crush
+
+```bash
+rtk init --agent crush    # installs PreToolUse hook + patches crush.json + creates skill
+rtk init --global --agent crush  # install globally
+```
+
+Uses Crush's native `PreToolUse` hook system. On every `bash` call, `rtk rewrite` intercepts the command and rewrites it before execution. Also installs a skill file at `.agents/skills/rtk-awareness/SKILL.md` so the model understands why commands are being rewritten.
+
+Verify:
+
+```bash
+cat .crush.json    # should show hooks.PreToolUse entry
+cat .crush/hooks/rtk-rewrite.sh  # the hook script
+```
+
 ### Mistral Vibe (planned)
 
 Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
@@ -140,7 +157,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript/JS in agent's plugin system | Transparent — in-place mutation |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini, Crush) are guaranteed — the command is rewritten before the agent sees it.
 
 ## Windows support
 

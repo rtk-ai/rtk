@@ -9,7 +9,7 @@ pub mod rules;
 use anyhow::Result;
 use std::collections::HashMap;
 
-use provider::{ClaudeProvider, SessionProvider};
+use provider::{ClaudeProvider, CrushProvider, SessionProvider};
 use registry::{
     category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
     Classification,
@@ -48,8 +48,6 @@ pub fn run(
     format: &str,
     verbose: u8,
 ) -> Result<()> {
-    let provider = ClaudeProvider;
-
     // Determine project filter
     let project_filter = if all {
         None
@@ -63,7 +61,25 @@ pub fn run(
         Some(encoded)
     };
 
-    let sessions = provider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    // Try Claude first, fall back to Crush
+    let mut sessions = ClaudeProvider
+        .discover_sessions(project_filter.as_deref(), Some(since_days))
+        .unwrap_or_default();
+    let mut provider: Box<dyn SessionProvider> = Box::new(ClaudeProvider);
+
+    if sessions.is_empty() {
+        if let Ok(cp) = CrushProvider::new() {
+            provider = Box::new(cp);
+            sessions = provider
+                .discover_sessions(None, Some(since_days))
+                .unwrap_or_default();
+        }
+    }
+
+    // If still no sessions, surface Claude's error for proper diagnostics
+    if sessions.is_empty() {
+        ClaudeProvider.discover_sessions(project_filter.as_deref(), Some(since_days))?;
+    }
 
     if verbose > 0 {
         eprintln!("Scanning {} session files...", sessions.len());
