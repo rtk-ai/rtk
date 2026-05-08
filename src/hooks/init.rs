@@ -1467,6 +1467,45 @@ fn run_antigravity_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
     Ok(())
 }
 
+// ─── ByteDance TRAE support ──────────────────────────────────
+
+const TRAE_RULES: &str = include_str!("../../hooks/trae/rules.md");
+
+pub fn run_trae_mode(verbose: u8) -> Result<()> {
+    run_trae_mode_at(&std::env::current_dir()?, verbose)
+}
+
+fn run_trae_mode_at(base_dir: &Path, verbose: u8) -> Result<()> {
+    // TRAE reads .trae/rules/ from the project root (workspace-scoped)
+    let target_dir = base_dir.join(".trae/rules");
+    let rules_path = target_dir.join("rtk-rules.md");
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        println!("\nRTK already configured for TRAE in this project.\n");
+        println!("  Rules: .trae/rules/rtk-rules.md (already present)");
+    } else {
+        fs::create_dir_all(&target_dir).context("Failed to create .trae/rules directory")?;
+        let new_content = if existing.trim().is_empty() {
+            TRAE_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), TRAE_RULES)
+        };
+        fs::write(&rules_path, &new_content).context("Failed to write .trae/rules/rtk-rules.md")?;
+
+        if verbose > 0 {
+            eprintln!("Wrote .trae/rules/rtk-rules.md");
+        }
+
+        println!("\nRTK configured for TRAE.\n");
+        println!("  Rules: .trae/rules/rtk-rules.md (installed)");
+    }
+    println!("  TRAE will now use rtk commands for token savings.");
+    println!("  Test with: git status\n");
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, verbose: u8) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -3015,6 +3054,31 @@ mod tests {
 
         // Second run should not overwrite
         run_antigravity_mode_at(temp.path(), 0).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_trae_mode_creates_rules_file() {
+        let temp = TempDir::new().unwrap();
+        run_trae_mode_at(temp.path(), 0).unwrap();
+
+        let rules_path = temp.path().join(".trae/rules/rtk-rules.md");
+        assert!(rules_path.exists(), "Rules file should be created");
+        let content = fs::read_to_string(&rules_path).unwrap();
+        assert!(content.contains("RTK"), "Rules file should contain RTK");
+    }
+
+    #[test]
+    fn test_trae_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_trae_mode_at(temp.path(), 0).unwrap();
+
+        let path = temp.path().join(".trae/rules/rtk-rules.md");
+        let first = fs::read_to_string(&path).unwrap();
+
+        // Second run should not overwrite
+        run_trae_mode_at(temp.path(), 0).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
     }
