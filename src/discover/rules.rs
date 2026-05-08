@@ -389,16 +389,23 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
+        // Extended 2026-05-08: added generic docker `inspect/network/
+        // volume/system/stop/start/restart/kill/rm/rmi/pull/push/tag`.
+        // (Did NOT add `compose up/down/config` — existing tests
+        // explicitly skip these and the maintainers' decision is
+        // respected.)
+        pattern: r"^docker\s+(ps|images|logs|run|exec|build|inspect|network|volume|system|stop|start|restart|kill|rm|rmi|pull|push|tag|compose\s+(ps|logs|build))",
         rtk_cmd: "rtk docker",
         rewrite_prefixes: &["docker"],
         category: "Infra",
         savings_pct: 85.0,
-        subcmd_savings: &[],
+        subcmd_savings: &[("inspect", 88.0)],
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^kubectl\s+(get|logs|describe|apply)",
+        // Extended 2026-05-08: cover the remaining most-common kubectl
+        // subcommands (delete/exec/run/port-forward/edit/rollout/etc.).
+        pattern: r"^kubectl\s+(get|logs|describe|apply|delete|exec|run|port-forward|edit|rollout|scale|create|patch|cp|top|config|api-resources|api-versions|cluster-info|drain|cordon|uncordon|taint|label|annotate)",
         rtk_cmd: "rtk kubectl",
         rewrite_prefixes: &["kubectl"],
         category: "Infra",
@@ -635,12 +642,43 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^gcloud\b",
+        // 2026-05-08: added `$GC` and `$GCLOUD` as recognized aliases.
+        // Real-world usage in `rtk discover` against 30 days of Claude
+        // Code sessions showed 1716+ commands prefixed with `$GC ` —
+        // a common shell-variable alias defined as `$GC=gcloud` (or
+        // `gcloud --project=foo`). Without recognition these all
+        // exited 1 (passthrough) and burned an estimated ~212K tokens.
+        //
+        // Behavior: when matched, the rewrite collapses `$GC <subcmd>`
+        // to `rtk gcloud <subcmd>`. This assumes `$GC` is a simple
+        // alias for `gcloud` (no flags). Users who need `$GC=gcloud
+        // --project=foo` should use `gcloud --project=foo` directly
+        // (rtk's gcloud handler accepts global flags) — see
+        // hooks/claude/README.md "shell aliases" section.
+        pattern: r"^(?:gcloud|\$GC|\$GCLOUD)\b",
         rtk_cmd: "rtk gcloud",
-        rewrite_prefixes: &["gcloud"],
+        rewrite_prefixes: &["gcloud", "$GC", "$GCLOUD"],
         category: "Infra",
         savings_pct: 65.0,
-        subcmd_savings: &[],
+        subcmd_savings: &[
+            ("logging read", 80.0),  // log dumps are the heaviest gcloud output
+            ("run services describe", 70.0),  // YAML can be 5K+ tokens
+            ("builds describe", 60.0),
+            ("builds list", 65.0),
+        ],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        // 2026-05-08: alembic is the canonical Python migration tool.
+        // Every FlexHaul Python service (api, brain) uses it. `upgrade
+        // head` / `downgrade -1` / `revision --autogenerate` outputs
+        // are multi-line + can include the full diff — high-token.
+        pattern: r"^alembic\s+(upgrade|downgrade|revision|history|current|heads|branches|merge|stamp|show|edit)",
+        rtk_cmd: "rtk alembic",
+        rewrite_prefixes: &["alembic"],
+        category: "Build",
+        savings_pct: 70.0,
+        subcmd_savings: &[("upgrade", 75.0), ("downgrade", 75.0), ("history", 80.0)],
         subcmd_status: &[],
     },
     RtkRule {

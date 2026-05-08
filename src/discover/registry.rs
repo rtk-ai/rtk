@@ -1222,6 +1222,87 @@ mod tests {
         );
     }
 
+    // --- 2026-05-08: extended generic docker subcommands ---
+    // (Note: docker compose up/down/config remain explicitly skipped
+    // per existing test policy in test_rewrite_docker_compose_*_skipped.)
+    #[test]
+    fn test_rewrite_docker_inspect_network() {
+        assert_eq!(
+            rewrite_command("docker inspect my-container", &[]),
+            Some("rtk docker inspect my-container".into())
+        );
+        assert_eq!(
+            rewrite_command("docker network ls", &[]),
+            Some("rtk docker network ls".into())
+        );
+        assert_eq!(
+            rewrite_command("docker stop api", &[]),
+            Some("rtk docker stop api".into())
+        );
+    }
+
+    // --- 2026-05-08: extended kubectl subcommands ---
+    #[test]
+    fn test_rewrite_kubectl_delete_exec_run() {
+        assert_eq!(
+            rewrite_command("kubectl delete pod my-pod", &[]),
+            Some("rtk kubectl delete pod my-pod".into())
+        );
+        assert_eq!(
+            rewrite_command("kubectl exec -it my-pod -- bash", &[]),
+            Some("rtk kubectl exec -it my-pod -- bash".into())
+        );
+        assert_eq!(
+            rewrite_command("kubectl rollout restart deployment/api", &[]),
+            Some("rtk kubectl rollout restart deployment/api".into())
+        );
+    }
+
+    // --- 2026-05-08: gcloud shell-variable alias support ---
+    // Common pattern: users alias `$GC=gcloud` to save typing. Per
+    // `rtk discover` against 30 days of sessions: 1716+ commands
+    // prefixed with `$GC` and 286+ with `secrets versions` (a sub-
+    // pattern of `$GC secrets`). Adding `$GC`/`$GCLOUD` recognition
+    // routes all of them through rtk gcloud.
+    #[test]
+    fn test_rewrite_gcloud_dollar_gc_alias() {
+        assert_eq!(
+            rewrite_command("$GC logging read 'resource.type=cloud_run_revision'", &[]),
+            Some(
+                "rtk gcloud logging read 'resource.type=cloud_run_revision'".into()
+            )
+        );
+        assert_eq!(
+            rewrite_command("$GC builds describe abc-123", &[]),
+            Some("rtk gcloud builds describe abc-123".into())
+        );
+        assert_eq!(
+            rewrite_command("$GCLOUD run services describe my-svc", &[]),
+            Some("rtk gcloud run services describe my-svc".into())
+        );
+    }
+
+    // --- 2026-05-08: alembic migration tool ---
+    #[test]
+    fn test_rewrite_alembic_upgrade_downgrade() {
+        assert_eq!(
+            rewrite_command("alembic upgrade head", &[]),
+            Some("rtk alembic upgrade head".into())
+        );
+        assert_eq!(
+            rewrite_command("alembic downgrade -1", &[]),
+            Some("rtk alembic downgrade -1".into())
+        );
+        assert_eq!(
+            rewrite_command("alembic revision --autogenerate -m 'add foo'", &[]),
+            Some("rtk alembic revision --autogenerate -m 'add foo'".into())
+        );
+        assert_eq!(
+            rewrite_command("alembic history", &[]),
+            Some("rtk alembic history".into())
+        );
+    }
+
     // --- git -C <path> support (#555) ---
 
     #[test]
