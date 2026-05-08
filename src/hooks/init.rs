@@ -12,7 +12,8 @@ use crate::hooks::constants::{
 
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, QWEN_HOOK_FILE,
+    REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -2651,6 +2652,159 @@ fn uninstall_gemini(verbose: u8) -> Result<Vec<String>> {
     }
 
     Ok(removed)
+}
+
+// ─── Qwen Code support ────────────────────────────────────────────
+
+/// Qwen Code hook wrapper script — delegates to `rtk hook qwen`
+const QWEN_HOOK_SCRIPT: &str = r#"#!/bin/bash
+exec rtk hook qwen
+"#;
+
+const QWEN_MD: &str = "QWEN.md";
+
+fn resolve_qwen_dir() -> Result<PathBuf> {
+    resolve_home_subdir(".qwen")
+}
+
+/// Entry point for `rtk init --qwen`
+pub fn run_qwen(global: bool, hook_only: bool, patch_mode: PatchMode, verbose: u8) -> Result<()> {
+    if !global {
+        anyhow::bail!("Qwen Code support is global-only. Use: rtk init -g --qwen");
+    }
+
+    let qwen_dir = resolve_qwen_dir()?;
+    fs::create_dir_all(&qwen_dir).with_context(|| {
+        format!(
+            "Failed to create Qwen Code config dir: {}",
+            qwen_dir.display()
+        )
+    })?;
+
+    // 1. Install hook script
+    let hook_dir = qwen_dir.join("hooks");
+    fs::create_dir_all(&hook_dir)
+        .with_context(|| format!("Failed to create hook dir: {}", hook_dir.display()))?;
+    let hook_path = hook_dir.join(QWEN_HOOK_FILE);
+    write_if_changed(&hook_path, QWEN_HOOK_SCRIPT, "Qwen Code hook", verbose)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to set hook permissions: {}", hook_path.display()))?;
+    }
+
+    // 2. Install QWEN.md (RTK awareness for Qwen Code)
+    if !hook_only {
+        let qwen_md_path = qwen_dir.join(QWEN_MD);
+        write_if_changed(&qwen_md_path, RTK_SLIM, QWEN_MD, verbose)?;
+    }
+
+    // 3. Patch ~/.qwen/settings.json
+    patch_qwen_settings(&qwen_dir, &hook_path, patch_mode, verbose)?;
+
+    println!("\nQwen Code hook installed (global).\n");
+    println!("  Hook: {}", hook_path.display());
+    if !hook_only {
+        println!("  QWEN.md: {}", qwen_dir.join(QWEN_MD).display());
+    }
+    println!("  Restart Qwen Code. Test with: git status\n");
+    Ok(())
+}
+
+/// Patch ~/.qwen/settings.json with the BeforeTool hook
+fn patch_qwen_settings(
+    qwen_dir: &Path,
+    hook_path: &Path,
+    patch_mode: PatchMode,
+    verbose: u8,
+) -> Result<()> {
+    let settings_path = qwen_dir.join(SETTINGS_JSON);
+    let hook_cmd = hook_path.to_string_lossy().to_string();
+
+    // Read or create settings.json
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let before_tool_pointer = format!("/hooks/{}", BEFORE_TOOL_KEY);
+    if let Some(hooks) = settings.pointer(&before_tool_pointer) {
+        if let Some(arr) = hooks.as_array() {
+            if arr.iter().any(|h| {
+                h.pointer("/hooks/0/command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|c| c.contains("rtk"))
+            }) {
+                if verbose > 0 {
+                    eprintln!("Qwen Code settings.json already has RTK hook");
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    if patch_mode == PatchMode::Skip {
+        println!(
+            "\nManual setup needed: add RTK hook to {}\n\
+             See: https://github.com/rtk-ai/rtk#qwen-code",
+            settings_path.display()
+        );
+        return Ok(());
+    }
+
+    if patch_mode == PatchMode::Ask {
+        print!("Patch {} with RTK hook? [y/N] ", settings_path.display());
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Skipped. Add hook manually later.");
+            return Ok(());
+        }
+    }
+
+    // Build hook entry matching Qwen Code BeforeTool format (identical to Gemini CLI)
+    let hook_entry = serde_json::json!({
+        "matcher": "run_shell_command",
+        "hooks": [{
+            "type": "command",
+            "command": hook_cmd
+        }]
+    });
+
+    let hooks = settings
+        .as_object_mut()
+        .context("settings.json is not an object")?
+        .entry("hooks")
+        .or_insert(serde_json::json!({}));
+
+    let before_tool = hooks
+        .as_object_mut()
+        .context("hooks is not an object")?
+        .entry(BEFORE_TOOL_KEY)
+        .or_insert(serde_json::json!([]));
+
+    before_tool
+        .as_array_mut()
+        .context("BeforeTool is not an array")?
+        .push(hook_entry);
+
+    let content = serde_json::to_string_pretty(&settings)?;
+    let tmp = NamedTempFile::new_in(qwen_dir)?;
+    fs::write(tmp.path(), &content)?;
+    tmp.persist(&settings_path)
+        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Patched {}", settings_path.display());
+    }
+
+    Ok(())
 }
 
 // ── Copilot integration ─────────────────────────────────────

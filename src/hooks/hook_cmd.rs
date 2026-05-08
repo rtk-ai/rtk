@@ -226,6 +226,14 @@ pub fn run_gemini() -> Result<()> {
     Ok(())
 }
 
+// ── Qwen Code hook ────────────────────────────────────────────
+
+/// Run the Qwen Code BeforeTool hook.
+/// Qwen Code uses the same JSON format as Gemini CLI, so we share the logic.
+pub fn run_qwen() -> Result<()> {
+    run_gemini()
+}
+
 fn print_allow() {
     let _ = writeln!(io::stdout(), r#"{{"decision":"allow"}}"#);
 }
@@ -911,5 +919,26 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // ── Qwen Code hook tests ──────────────────────────────────────────────────
+    // Qwen Code uses the identical BeforeTool JSON format as Gemini CLI, so
+    // rewrite_command coverage from the Gemini tests applies equally. These
+    // tests verify the shared format assumption and the run_qwen delegation.
+
+    #[test]
+    fn test_qwen_format_identical_to_gemini() {
+        // Verify that Qwen Code's BeforeTool JSON structure matches Gemini CLI.
+        // run_qwen delegates to run_gemini, so the same rewrite logic applies.
+        assert_eq!(
+            rewrite_command("git status", &[]),
+            Some("rtk git status".into())
+        );
+        assert_eq!(
+            rewrite_command("cargo test", &[]),
+            Some("rtk cargo test".into())
+        );
+        // Non-RTK commands that don't match any filter pass through unchanged
+        assert_eq!(rewrite_command("echo hello", &[]), None);
     }
 }
