@@ -323,14 +323,20 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         Some(r) => r,
         None => {
             let updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
-            let output = json!({
-                "hookSpecificOutput": {
-                    "hookEventName": PRE_TOOL_USE_KEY,
-                    "permissionDecision": "allow",
-                    "permissionDecisionReason": "no RTK rewrite available",
-                    "updatedInput": updated_input
-                }
+            let mut hook_output = json!({
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "permissionDecisionReason": "no RTK rewrite available",
+                "updatedInput": updated_input
             });
+
+            if verdict == PermissionVerdict::Allow {
+                hook_output
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("permissionDecision".into(), json!("allow"));
+            }
+
+            let output = json!({ "hookSpecificOutput": hook_output });
             return PayloadAction::Passthrough {
                 cmd: cmd.to_string(),
                 output,
@@ -413,6 +419,88 @@ fn run_claude_inner(input: &str) -> Option<String> {
             Some(output.to_string())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+fn run_claude_inner_with_verdict(input: &str, verdict: PermissionVerdict) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_claude_payload_with_verdict(&v, verdict) {
+        PayloadAction::Rewrite { output, .. } | PayloadAction::Passthrough { output, .. } => {
+            Some(output.to_string())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn process_claude_payload_with_verdict(v: &Value, verdict: PermissionVerdict) -> PayloadAction {
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return PayloadAction::Ignore,
+    };
+
+    if verdict == PermissionVerdict::Deny {
+        return PayloadAction::Skip {
+            reason: "skip:deny_rule",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            let updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+            let mut hook_output = json!({
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "permissionDecisionReason": "no RTK rewrite available",
+                "updatedInput": updated_input
+            });
+
+            if verdict == PermissionVerdict::Allow {
+                hook_output
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("permissionDecision".into(), json!("allow"));
+            }
+
+            let output = json!({ "hookSpecificOutput": hook_output });
+            return PayloadAction::Passthrough {
+                cmd: cmd.to_string(),
+                output,
+            };
+        }
+    };
+
+    let updated_input = {
+        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = ti.as_object_mut() {
+            obj.insert("command".into(), Value::String(rewritten.clone()));
+        }
+        ti
+    };
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "updatedInput": updated_input
+    });
+
+    if verdict == PermissionVerdict::Allow {
+        hook_output
+            .as_object_mut()
+            .unwrap()
+            .insert("permissionDecision".into(), json!("allow"));
+    }
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output: json!({ "hookSpecificOutput": hook_output }),
     }
 }
 
@@ -704,9 +792,24 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_passthrough_allow_json() {
-        // Commands with no RTK rewrite must emit a passthrough allow JSON, not empty output
+    fn test_claude_passthrough_default_ask_case() {
+        // Commands with no RTK rewrite and no explicit allow rule get default/ask verdict.
+        // permissionDecision is absent, letting Claude Code use its default ask semantics.
         let result = run_claude_inner(&claude_input("htop")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert!(v["hookSpecificOutput"]["permissionDecision"].is_null());
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecisionReason"],
+            "no RTK rewrite available"
+        );
+        assert_eq!(v["hookSpecificOutput"]["updatedInput"]["command"], "htop");
+    }
+
+    #[test]
+    fn test_claude_passthrough_explicit_allow_case() {
+        // Commands with no RTK rewrite but explicit allow rule get Allow verdict.
+        // permissionDecision is present and set to "allow".
+        let result = run_claude_inner_with_verdict(&claude_input("htop"), PermissionVerdict::Allow).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
@@ -717,15 +820,37 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_heredoc_passthrough() {
+    fn test_claude_heredoc_passthrough_default_case() {
+        // Heredoc commands with no explicit allow rule get default/ask verdict.
         let result = run_claude_inner(&claude_input("cat <<EOF\nhello\nEOF")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert!(v["hookSpecificOutput"]["permissionDecision"].is_null());
+    }
+
+    #[test]
+    fn test_claude_heredoc_passthrough_explicit_allow() {
+        // Heredoc commands with explicit allow rule get Allow verdict.
+        let result = run_claude_inner_with_verdict(&claude_input("cat <<EOF\nhello\nEOF"), PermissionVerdict::Allow).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     #[test]
-    fn test_claude_already_rtk_passthrough() {
+    fn test_claude_already_rtk_passthrough_default_case() {
+        // Commands already using rtk with no explicit allow rule get default/ask verdict.
         let result = run_claude_inner(&claude_input("rtk git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert!(v["hookSpecificOutput"]["permissionDecision"].is_null());
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_claude_already_rtk_passthrough_explicit_allow() {
+        // Commands already using rtk with explicit allow rule get Allow verdict.
+        let result = run_claude_inner_with_verdict(&claude_input("rtk git status"), PermissionVerdict::Allow).unwrap();
         let v: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
         assert_eq!(
