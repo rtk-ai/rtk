@@ -12,7 +12,18 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+        // Extended 2026-05-08: the original pattern only matched 12
+        // subcommands. `rtk discover` over 41k+ commands in 30 days
+        // showed `git checkout` alone hit 629x with ~64K tokens
+        // saveable. This expansion brings the broader git surface
+        // (checkout/rebase/restore/switch/tag/merge/cherry-pick/reset/
+        // mv/rm/clone/init/bisect/reflog/describe/blame/grep/clean/
+        // config/remote) under rtk routing. Each routes to the existing
+        // `rtk git` handler which passes through to native git for
+        // subcommands without dedicated trim logic — same baseline
+        // output as before, but visible to discover/learn telemetry +
+        // ready for future per-subcommand optimization.
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree|checkout|rebase|restore|switch|tag|merge|cherry-pick|reset|mv|rm|clone|init|bisect|reflog|describe|blame|grep|clean|config|remote)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
@@ -22,16 +33,22 @@ pub const RULES: &[RtkRule] = &[
             ("show", 80.0),
             ("add", 59.0),
             ("commit", 59.0),
+            ("blame", 75.0),
+            ("reflog", 65.0),
         ],
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
+        // Extended 2026-05-08: added merge/view/list/checks/checkout
+        // which cover the majority of `gh pr` subcommands brokers run
+        // (merge especially — squash-merge is part of the standard
+        // PR workflow, hit hundreds of times in active sessions).
+        pattern: r"^gh\s+(pr|issue|run|repo|api|release|workflow|auth|browse)",
         rtk_cmd: "rtk gh",
         rewrite_prefixes: &["gh"],
         category: "GitHub",
         savings_pct: 82.0,
-        subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0)],
+        subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0), ("workflow", 78.0)],
         subcmd_status: &[],
     },
     RtkRule {

@@ -1140,6 +1140,88 @@ mod tests {
         );
     }
 
+    // --- 2026-05-08: extended git subcommands ---
+    // Confirmed via `rtk discover` against 41k+ Claude Code Bash
+    // commands in 30 days that these were the most-frequently-missed
+    // git subcommands. `git checkout` alone hit 629 occurrences.
+
+    #[test]
+    fn test_rewrite_git_checkout() {
+        assert_eq!(
+            rewrite_command("git checkout main", &[]),
+            Some("rtk git checkout main".into())
+        );
+        assert_eq!(
+            rewrite_command("git checkout -b feature/foo", &[]),
+            Some("rtk git checkout -b feature/foo".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_rebase() {
+        assert_eq!(
+            rewrite_command("git rebase origin/main", &[]),
+            Some("rtk git rebase origin/main".into())
+        );
+        assert_eq!(
+            rewrite_command("git pull --rebase origin main", &[]),
+            Some("rtk git pull --rebase origin main".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_restore_switch() {
+        assert_eq!(
+            rewrite_command("git restore --staged file.py", &[]),
+            Some("rtk git restore --staged file.py".into())
+        );
+        assert_eq!(
+            rewrite_command("git switch feature-branch", &[]),
+            Some("rtk git switch feature-branch".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_merge_reset_tag() {
+        assert_eq!(
+            rewrite_command("git merge --no-ff feature/foo", &[]),
+            Some("rtk git merge --no-ff feature/foo".into())
+        );
+        assert_eq!(
+            rewrite_command("git reset --hard HEAD", &[]),
+            Some("rtk git reset --hard HEAD".into())
+        );
+        assert_eq!(
+            rewrite_command("git tag v1.0.0", &[]),
+            Some("rtk git tag v1.0.0".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_git_cherry_pick_blame_reflog() {
+        assert_eq!(
+            rewrite_command("git cherry-pick abc123", &[]),
+            Some("rtk git cherry-pick abc123".into())
+        );
+        assert_eq!(
+            rewrite_command("git blame src/foo.rs", &[]),
+            Some("rtk git blame src/foo.rs".into())
+        );
+        assert_eq!(
+            rewrite_command("git reflog", &[]),
+            Some("rtk git reflog".into())
+        );
+    }
+
+    // --- 2026-05-08: extended `gh` subcommands ---
+    #[test]
+    fn test_rewrite_gh_workflow() {
+        assert_eq!(
+            rewrite_command("gh workflow run deploy-production.yml", &[]),
+            Some("rtk gh workflow run deploy-production.yml".into())
+        );
+    }
+
     // --- git -C <path> support (#555) ---
 
     #[test]
