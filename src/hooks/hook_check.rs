@@ -1,11 +1,11 @@
 //! Detects whether RTK hooks are installed and warns if they are outdated.
 
 use super::constants::{
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON,
+    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CURSOR_DIR, CURSOR_HOOK_COMMAND, HOOKS_JSON, HOOKS_SUBDIR,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use crate::core::constants::RTK_DATA_DIR;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CURRENT_HOOK_VERSION: u8 = 3;
 const WARN_INTERVAL_SECS: u64 = 24 * 3600;
@@ -24,11 +24,20 @@ pub enum HookStatus {
 /// Return the current hook status without printing anything.
 /// Returns `Ok` if no Claude Code is detected (not applicable).
 pub fn status() -> HookStatus {
-    // Don't warn users who don't have Claude Code installed
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return HookStatus::Ok,
     };
+
+    // Cursor 3.x users register the hook in `~/.cursor/hooks.json` directly
+    // (no `.claude/` directory required). If that file references `rtk hook
+    // cursor` (directly or via a wrapper script that invokes rtk), treat the
+    // hook as installed and skip the legacy Claude detection path.
+    if cursor_3x_hook_registered(&home) {
+        return HookStatus::Ok;
+    }
+
+    // Don't warn users who don't have Claude Code installed
     let claude_dir = home.join(CLAUDE_DIR);
     if !claude_dir.exists() {
         return HookStatus::Ok;
@@ -57,6 +66,53 @@ pub fn status() -> HookStatus {
     } else {
         HookStatus::Outdated
     }
+}
+
+/// Check whether `~/.cursor/hooks.json` registers an rtk-aware hook (Cursor 3.x format).
+///
+/// Cursor 3.x adopts a project-style hook config at `~/.cursor/hooks.json` with
+/// a top-level `version: 1` and a `hooks` map keyed by hook event names
+/// (`preToolUse`, `beforeShellExecution`, etc.). Each entry has a `command`
+/// string that Cursor invokes with the tool input piped on stdin. This is a
+/// distinct surface from `~/.claude/settings.json`, so users who configure
+/// Cursor 3.x correctly were still seeing the "No hook installed" warning.
+///
+/// Returns true if the file exists, is valid JSON, and any hook entry under
+/// `preToolUse` or `beforeShellExecution` has a `command` that either invokes
+/// `rtk hook cursor` directly or references the `rtk` binary through a
+/// platform-specific wrapper (PowerShell/bash/batch). The wrapper case covers
+/// users on Windows + Cursor where the `permission: "ask"` quirk requires a
+/// thin shim returning `permission: "allow"` (see rtk-ai/rtk#1718).
+fn cursor_3x_hook_registered(home: &Path) -> bool {
+    let cursor_hooks = home.join(CURSOR_DIR).join(HOOKS_JSON);
+    let Ok(content) = std::fs::read_to_string(&cursor_hooks) else {
+        return false;
+    };
+    let root: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let hooks = match root.get("hooks") {
+        Some(h) => h,
+        None => return false,
+    };
+    // Inspect the hook arrays Cursor uses for command interception.
+    for key in &["preToolUse", "beforeShellExecution"] {
+        if let Some(arr) = hooks.get(key).and_then(|v| v.as_array()) {
+            let any_rtk = arr
+                .iter()
+                .filter_map(|entry| entry.get("command")?.as_str())
+                .any(|cmd| {
+                    cmd == CURSOR_HOOK_COMMAND
+                        || cmd.contains(CURSOR_HOOK_COMMAND)
+                        || cmd.contains("rtk")
+                });
+            if any_rtk {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Check if the native binary command is registered in settings.json
@@ -293,5 +349,108 @@ mod tests {
             "Expected valid HookStatus variant, got {:?}",
             s
         );
+    }
+
+    // --- Cursor 3.x hook detection ---
+
+    fn write_cursor_hooks_json(home: &std::path::Path, contents: &str) {
+        let dir = home.join(CURSOR_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(HOOKS_JSON), contents).unwrap();
+    }
+
+    #[test]
+    fn test_cursor_3x_hook_registered_native_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_cursor_hooks_json(
+            tmp.path(),
+            r#"{
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [
+                        { "command": "rtk hook cursor", "matcher": "Shell" }
+                    ]
+                }
+            }"#,
+        );
+        assert!(cursor_3x_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_cursor_3x_hook_registered_wrapper_script() {
+        // Users on Windows + Cursor sometimes need a thin wrapper around
+        // `rtk hook cursor` until rtk-ai/rtk#1718 (BOM strip + permission:"allow"
+        // + continue:true) is merged. Detection should still recognize that
+        // wrapper as an rtk-aware hook so the warning is suppressed.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_cursor_hooks_json(
+            tmp.path(),
+            r#"{
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [
+                        {
+                            "command": "powershell.exe -File C:/Users/foo/.cursor/hooks/rtk-cursor-allow.ps1",
+                            "matcher": "Shell"
+                        }
+                    ]
+                }
+            }"#,
+        );
+        assert!(cursor_3x_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_cursor_3x_hook_registered_before_shell_execution() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_cursor_hooks_json(
+            tmp.path(),
+            r#"{
+                "version": 1,
+                "hooks": {
+                    "beforeShellExecution": [
+                        { "command": "rtk hook cursor" }
+                    ]
+                }
+            }"#,
+        );
+        assert!(cursor_3x_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_cursor_3x_hook_not_registered_no_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(!cursor_3x_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_cursor_3x_hook_not_registered_unrelated_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_cursor_hooks_json(
+            tmp.path(),
+            r#"{
+                "version": 1,
+                "hooks": {
+                    "preToolUse": [
+                        { "command": "./scripts/audit.sh" }
+                    ]
+                }
+            }"#,
+        );
+        assert!(!cursor_3x_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_cursor_3x_hook_not_registered_invalid_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_cursor_hooks_json(tmp.path(), "{ this is not json");
+        assert!(!cursor_3x_hook_registered(tmp.path()));
+    }
+
+    #[test]
+    fn test_cursor_3x_hook_not_registered_empty_hooks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_cursor_hooks_json(tmp.path(), r#"{ "version": 1, "hooks": {} }"#);
+        assert!(!cursor_3x_hook_registered(tmp.path()));
     }
 }
