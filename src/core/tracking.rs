@@ -7,7 +7,7 @@
 //! # Architecture
 //!
 //! - Storage: SQLite database (~/.local/share/rtk/tracking.db)
-//! - Retention: 90-day automatic cleanup
+//! - Retention: 30-day automatic cleanup
 //! - Metrics: Input/output tokens, savings %, execution time
 //!
 //! # Quick Start
@@ -380,7 +380,7 @@ impl Tracker {
     /// Record a command execution with token counts and timing.
     ///
     /// Calculates savings metrics and stores the record in the database.
-    /// Automatically cleans up records older than 90 days after insertion.
+    /// Automatically cleans up records older than 30 days after insertion.
     ///
     /// # Arguments
     ///
@@ -1140,7 +1140,7 @@ impl Tracker {
     /// Ecosystem distribution as percentages (top categories by command prefix).
     pub fn ecosystem_mix(&self) -> Result<Vec<(String, f64)>> {
         let total: f64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM commands WHERE input_tokens > 0 AND timestamp >= datetime('now', '-90 days')",
+            "SELECT COUNT(*) FROM commands WHERE input_tokens > 0 AND timestamp >= datetime('now', '-30 days')",
             [],
             |row| row.get(0),
         )?;
@@ -1149,7 +1149,7 @@ impl Tracker {
         }
         let mut stmt = self.conn.prepare(
             "SELECT rtk_cmd, COUNT(*) as cnt FROM commands
-             WHERE input_tokens > 0 AND timestamp >= datetime('now', '-90 days')
+             WHERE input_tokens > 0 AND timestamp >= datetime('now', '-30 days')
              GROUP BY rtk_cmd ORDER BY cnt DESC",
         )?;
         let mut categories: std::collections::HashMap<String, f64> =
