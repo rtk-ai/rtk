@@ -2649,6 +2649,26 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_xmllint() {
+        assert!(matches!(
+            classify_command("xmllint --noout config.xml"),
+            Classification::Supported {
+                rtk_equivalent: "rtk xmllint",
+                category: "Build",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_xmllint() {
+        assert_eq!(
+            rewrite_command_no_prefixes("xmllint --noout config.xml", &[]),
+            Some("rtk xmllint --noout config.xml".into())
+        );
+    }
+
+    #[test]
     fn test_classify_jest() {
         let commands = vec![
             "jest run",

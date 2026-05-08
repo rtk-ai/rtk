@@ -1,0 +1,36 @@
+[filters.xmllint]
+description = "Compact xmllint output — strip blank lines and parser boilerplate, keep diagnostics"
+match_command = "^xmllint\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Document\\s+.*\\s+does not validate$",
+]
+max_lines = 50
+truncate_lines_at = 200
+on_empty = "xmllint: ok"
+
+[[tests.xmllint]]
+name = "keeps parser diagnostics and strips blank lines"
+input = """
+bad.xml:3: parser error : Opening and ending tag mismatch: item line 2 and root
+</root>
+       ^
+
+bad.xml:4: parser error : Premature end of data in tag root line 1
+
+"""
+expected = "bad.xml:3: parser error : Opening and ending tag mismatch: item line 2 and root\n</root>\n       ^\nbad.xml:4: parser error : Premature end of data in tag root line 1"
+
+[[tests.xmllint]]
+name = "empty successful output shows ok"
+input = ""
+expected = "xmllint: ok"
+
+[[tests.xmllint]]
+name = "validation boilerplate stripped"
+input = """
+Document bad.xml does not validate
+bad.xml:7: element root: validity error : Element root content does not follow the DTD
+"""
+expected = "bad.xml:7: element root: validity error : Element root content does not follow the DTD"

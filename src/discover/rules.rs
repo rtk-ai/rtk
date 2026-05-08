@@ -852,6 +852,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^xmllint\b",
+        rtk_cmd: "rtk xmllint",
+        rewrite_prefixes: &["xmllint"],
+        category: "Build",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^wc(\s|$)",
         rtk_cmd: "rtk wc",
         rewrite_prefixes: &["wc"],
