@@ -44,6 +44,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 | `os` | `macos` | Know which platforms to support and test |
 | `arch` | `aarch64` | Prioritize ARM vs x86 builds |
 | `install_method` | `homebrew` | Understand distribution channels (homebrew/cargo/script/nix) |
+| `language_hint` | `id` | Optional locale proxy from config/env to segment usage by language preference |
 
 ### Usage volume
 
