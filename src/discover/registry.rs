@@ -445,15 +445,15 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 /// Handles compound commands (`&&`, `||`, `;`) by rewriting each segment independently.
 /// For pipes (`|`), only rewrites the left-hand command (pipe targets stay raw),
 /// but continues rewriting segments after subsequent `&&`/`||`/`;` operators.
-/// Also strips user-configured transparent wrapper prefixes
+/// Also strips built-in and user-configured transparent wrapper prefixes
 /// (`[hooks].transparent_prefixes` in `config.toml`) before routing.
 ///
 /// A transparent prefix is a wrapper command that doesn't change *what* is
 /// being run, only *how* it's run — e.g. `docker exec mycontainer`,
 /// `direnv exec .`, `poetry run`, or `bundle exec`. Stripping it lets the inner
 /// command match a filter; the prefix is then re-prepended to the rewrite. The
-/// built-in [`SHELL_PREFIX_BUILTINS`] (`noglob`, `command`, `builtin`, `exec`,
-/// `nocorrect`) are always applied in addition to user-configured prefixes.
+/// built-in [`TRANSPARENT_PREFIX_BUILTINS`] (`noglob`, `command`, `uv run`,
+/// etc.) are always applied in addition to user-configured prefixes.
 ///
 /// Matching is strict: a configured prefix `"foo bar"` matches a command that
 /// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
@@ -626,9 +626,16 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     None
 }
 
-/// Shell prefix builtins that modify how the shell runs a command
+/// Built-in transparent prefixes that modify how a command is executed
 /// but don't change which command runs. Strip before routing, re-prepend after.
-const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
+const TRANSPARENT_PREFIX_BUILTINS: &[&str] = &[
+    "noglob",
+    "command",
+    "builtin",
+    "exec",
+    "nocorrect",
+    "uv run",
+];
 
 const MAX_PREFIX_DEPTH: usize = 10;
 
@@ -728,7 +735,7 @@ fn rewrite_segment_inner(
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
-    for &prefix in SHELL_PREFIX_BUILTINS {
+    for &prefix in TRANSPARENT_PREFIX_BUILTINS {
         if let Some(rest) = strip_word_prefix(trimmed, prefix) {
             if rest.is_empty() {
                 return None;
@@ -2271,6 +2278,25 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_uv_run_python_tools() {
+        for cmd in [
+            "uv run pytest tests/",
+            "uv run python -m pytest -x tests/",
+            "uv run ruff check .",
+            "uv run python -m mypy src/",
+        ] {
+            assert!(matches!(
+                classify_command(cmd),
+                Classification::Supported {
+                    rtk_equivalent: "rtk uv",
+                    category: "Python",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn test_rewrite_ruff_check() {
         assert_eq!(
             rewrite_command_no_prefixes("ruff check .", &[]),
@@ -2323,6 +2349,30 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("uv pip list", &[]),
             Some("rtk pip list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_uv_run_python_tools() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run pytest tests/", &[]),
+            Some("uv run rtk pytest tests/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run python -m pytest -x tests/", &[]),
+            Some("uv run rtk pytest -x tests/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run ruff check .", &[]),
+            Some("uv run rtk ruff check .".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run python -m mypy src/", &[]),
+            Some("uv run rtk mypy src/".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run python -c 'print(1)'", &[]),
+            None
         );
     }
 

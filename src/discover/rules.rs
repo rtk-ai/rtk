@@ -453,6 +453,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^uv\s+run\s+((python[0-9.]*\s+-m\s+)?(pytest|mypy)(\s|$)|ruff\s+(check|format))",
+        rtk_cmd: "rtk uv",
+        rewrite_prefixes: &["uv run"],
+        category: "Python",
+        savings_pct: 85.0,
+        subcmd_savings: &[("pytest", 90.0), ("ruff", 80.0), ("mypy", 80.0)],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)",
         rtk_cmd: "rtk pip",
         rewrite_prefixes: &["pip3", "pip", "uv pip"],
