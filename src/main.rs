@@ -895,6 +895,14 @@ enum PnpmCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run a script with smart routing to specialized filters
+    Run {
+        /// Script name to run
+        script: String,
+        /// Additional script arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported pnpm subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1625,6 +1633,11 @@ fn run_cli() -> Result<i32> {
                     cli.verbose,
                 )?,
                 PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
+                PnpmCommands::Run { script, args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Run { script, args },
+                    &[],
+                    cli.verbose,
+                )?,
                 PnpmCommands::Other(args) => {
                     pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
                 }
