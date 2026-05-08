@@ -63,6 +63,11 @@ lazy_static! {
     // --git-dir <dir>, --work-tree <dir>, and flag-only options (#163)
     static ref GIT_GLOBAL_OPT: Regex =
         Regex::new(r"^(?:(?:-C\s+\S+|-c\s+\S+|--git-dir(?:=\S+|\s+\S+)|--work-tree(?:=\S+|\s+\S+)|--no-pager|--no-optional-locks|--bare|--literal-pathspecs)\s+)+").unwrap();
+    // pnpm --filter/-F flags before the subcommand or script name.
+    // e.g. pnpm --filter wavebid-a2o-ui test:micro → pnpm test:micro (for matching)
+    // The filter is preserved in the rewritten command.
+    static ref PNPM_FILTER_OPT: Regex =
+        Regex::new(r"^(?:(?:-F|--filter)(?:=\S+|\s+\S+))\s+").unwrap();
     // Issue #1362: each capture expects a SINGLE file argument (`\S+$`). Multi-file
     // invocations like `head -3 a b c` fail to match so the segment is passed through
     // to the native `head`/`tail` binary — which already handles multi-file with
@@ -123,6 +128,8 @@ pub fn classify_command(cmd: &str) -> Classification {
     // Strip golangci-lint global options before `run` so classify/rewrite stays
     // aligned with the runtime wrapper behavior.
     let cmd_normalized = strip_golangci_global_opts(&cmd_normalized);
+    // Strip pnpm --filter/-F flags before the subcommand/script for matching.
+    let cmd_normalized = strip_pnpm_filter_opts(&cmd_normalized);
     let cmd_clean = cmd_normalized.as_str();
 
     // Exclude cat/head/tail with redirect operators — these are writes, not reads (#315)
@@ -260,6 +267,22 @@ fn strip_git_global_opts(cmd: &str) -> String {
     format!("git {}", stripped.trim())
 }
 
+/// Strip pnpm --filter/-F flags before the subcommand for pattern matching.
+/// `pnpm --filter wavebid-a2o-ui test:micro` → `pnpm test:micro`
+/// The filter flags are preserved in the actual rewritten command.
+fn strip_pnpm_filter_opts(cmd: &str) -> String {
+    if !cmd.starts_with("pnpm ") {
+        return cmd.to_string();
+    }
+    let after_pnpm = &cmd[5..]; // skip "pnpm "
+    let stripped = PNPM_FILTER_OPT.replace(after_pnpm, "");
+    // Only apply if something was actually stripped
+    if stripped.len() == after_pnpm.len() {
+        return cmd.to_string();
+    }
+    format!("pnpm {}", stripped.trim())
+}
+
 /// Strip golangci-lint global options before the `run` subcommand.
 /// `golangci-lint --color never run ./...` → `golangci-lint run ./...`
 /// Returns the original string unchanged if this is not a supported compact `run` invocation.
@@ -357,6 +380,56 @@ fn split_token_spans(cmd: &str) -> Vec<(&str, usize, usize)> {
     }
 
     tokens
+}
+
+/// Parse pnpm commands with --filter/-F flags.
+/// Returns (filter_segment, script_segment) if filter flags are present.
+/// `pnpm --filter wavebid-a2o-ui test:micro` → ("--filter wavebid-a2o-ui", "test:micro")
+/// Returns None if no filter flags found.
+fn parse_pnpm_filter_parts(cmd: &str) -> Option<(&str, &str)> {
+    let tokens = split_token_spans(cmd);
+    let first = tokens.first()?;
+    if first.0 != "pnpm" {
+        return None;
+    }
+
+    let mut i = 1;
+    while i < tokens.len() {
+        let token = tokens[i].0;
+
+        if token == "--" {
+            return None;
+        }
+
+        // Not a flag — this is the subcommand/script name
+        if !token.starts_with('-') {
+            // Everything from pnpm to here (exclusive) is the filter segment
+            let filter_end = tokens[i].1;
+            let filter_segment = cmd[tokens[1].1..filter_end].trim();
+            let script_segment = cmd[tokens[i].1..].trim();
+            if filter_segment.is_empty() || script_segment.is_empty() {
+                return None;
+            }
+            return Some((filter_segment, script_segment));
+        }
+
+        // --filter=VALUE or -F=VALUE (inline value)
+        if token.starts_with("--filter=") || token.starts_with("-F=") {
+            i += 1;
+            continue;
+        }
+
+        // --filter VALUE or -F VALUE (separate value)
+        if token == "--filter" || token == "-F" {
+            i += 2; // skip flag and value
+            continue;
+        }
+
+        // Other flags: skip
+        i += 1;
+    }
+
+    None
 }
 
 /// Normalize absolute binary paths: `/usr/bin/grep -rn foo` → `grep -rn foo` (#485)
@@ -799,6 +872,20 @@ fn rewrite_segment_inner(
             )
         };
         return Some(rewritten);
+    }
+
+    // pnpm --filter/-F <pkg> <script> → rtk pnpm --filter <pkg> run <script>
+    // Only applies when rtk_cmd is "rtk pnpm run" (our script-name rule).
+    if rule.rtk_cmd == "rtk pnpm run" {
+        let stripped = ENV_PREFIX.replace(cmd_part, "");
+        let clean = stripped.trim();
+        if let Some((filter_segment, script_segment)) = parse_pnpm_filter_parts(clean) {
+            let rewritten = format!(
+                "{}rtk pnpm {} run {}{}",
+                env_prefix, filter_segment, script_segment, redirect_suffix
+            );
+            return Some(rewritten);
+        }
     }
 
     // #196: gh with --json/--jq/--template produces structured output that
