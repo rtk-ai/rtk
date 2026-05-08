@@ -45,6 +45,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Kiro CLI
+    Kiro,
 }
 
 #[derive(Parser)]
@@ -1792,6 +1794,8 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(cli.verbose)?;
+            } else if agent == Some(AgentTarget::Kiro) {
+                hooks::init::run_kiro_mode(global, cli.verbose)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
