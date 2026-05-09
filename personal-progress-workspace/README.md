@@ -52,6 +52,31 @@ vercel --prod
 
 The first `vercel` command links the local project and creates a preview deployment. The `vercel --prod` command publishes the production URL.
 
+## Supabase Production Checklist
+
+Before sharing the public URL:
+
+1. Run `supabase/migrations/202605050001_initial_schema.sql` in the Supabase SQL editor or through Supabase CLI.
+2. Confirm Row Level Security is enabled for:
+   - `workspaces`
+   - `workspace_members`
+   - `boards`
+   - `board_columns`
+   - `goals`
+   - `items`
+   - `milestones`
+   - `focus_sessions`
+   - `habit_logs`
+   - `activity_events`
+3. In Supabase Auth URL Configuration, set Site URL to the production Vercel URL.
+4. Add the production Vercel URL to Redirect URLs.
+5. Add any preview URLs only while actively testing previews.
+6. Keep only `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in frontend hosting env vars.
+7. Do not expose the Supabase service role key in Vercel or frontend code.
+8. Enable email confirmations if you want users to prove ownership of their email before using the workspace.
+9. Review Supabase email rate limits before inviting more than a small test group.
+10. Create a test account from the deployed URL and confirm workspace data is isolated from another test account.
+
 ## Verification
 
 Run:
