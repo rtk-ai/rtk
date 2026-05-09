@@ -4,7 +4,8 @@ import { BarChart3, LogIn, UserPlus } from "lucide-react";
 import { env } from "../../lib/env";
 import { supabase } from "../../lib/supabase";
 
-const missingSupabaseConfigError = "Supabase configuration is missing.";
+const missingSupabaseConfigMessage =
+  "Cloud sync is not connected yet. Add Supabase env vars in .env.local to enable login and account creation.";
 const accountCreatedMessage = "Account created. Check your email to confirm it, then sign in.";
 
 type AuthMode = "sign-in" | "create-account";
@@ -37,7 +38,7 @@ export function SignInPage() {
     setNotice(null);
 
     if (!env.hasSupabaseConfig) {
-      setError(missingSupabaseConfigError);
+      setError(missingSupabaseConfigMessage);
       return;
     }
 
@@ -65,8 +66,6 @@ export function SignInPage() {
       setSubmitting(false);
     }
   }
-
-  const displayedError = error ?? (!env.hasSupabaseConfig ? missingSupabaseConfigError : null);
 
   return (
     <main className="auth-page">
@@ -120,7 +119,7 @@ export function SignInPage() {
               ? "Create an account once, then your workspace can sync through Supabase."
               : "Use your existing account to continue your workspace."}
           </p>
-          {!env.hasSupabaseConfig ? <p className="form-note">Supabase env vars are not configured locally.</p> : null}
+          {!env.hasSupabaseConfig ? <p className="form-note">{missingSupabaseConfigMessage}</p> : null}
           <label>
             Email
             <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required />
@@ -130,7 +129,7 @@ export function SignInPage() {
             <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required />
           </label>
           {notice ? <p className="form-success">{notice}</p> : null}
-          {displayedError ? <p className="form-error">{displayedError}</p> : null}
+          {error ? <p className="form-error">{error}</p> : null}
           <button type="submit" disabled={!env.hasSupabaseConfig || submitting}>
             {isCreatingAccount ? <UserPlus size={18} /> : <LogIn size={18} />}
             {submitting ? "Working" : isCreatingAccount ? "Create account" : "Sign in"}

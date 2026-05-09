@@ -41,9 +41,11 @@ describe("SignInPage", () => {
     render(<SignInPage />);
 
     await userEvent.click(screen.getByRole("button", { name: "Log in" }));
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
-    expect(await screen.findByText("Supabase configuration is missing.")).toBeVisible();
+    expect(screen.queryByText("Supabase configuration is missing.")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Cloud sync is not connected yet. Add Supabase env vars in .env.local to enable login and account creation."),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
     expect(supabase.auth.signInWithPassword).not.toHaveBeenCalled();
   });
