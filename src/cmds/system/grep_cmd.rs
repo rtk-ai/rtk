@@ -29,7 +29,11 @@ pub fn run(
     let rg_pattern = pattern.replace(r"\|", "|");
 
     let mut rg_cmd = resolved_command("rg");
-    rg_cmd.args(["-n", "--no-heading", &rg_pattern, path]);
+    // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
+    // Without this, rg returns 0 matches for files in .gitignore, causing
+    // false negatives that make AI agents draw wrong conclusions.
+    // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
+    rg_cmd.args(["-n", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -46,20 +50,39 @@ pub fn run(
     let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
-            grep_cmd.args(["-rn", pattern, path]);
+            //When we fall back to grep,include all args, not just -rn.
+            grep_cmd.args(["-rn", pattern, path]).args(extra_args);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
+
+    // Passthrough output flags that produce output that is already small.
+    if has_format_flag(extra_args) {
+        print!("{}", result.stdout);
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr.trim());
+        }
+
+        let args_display = if extra_args.is_empty() {
+            format!("'{}' {}", pattern, path)
+        } else {
+            format!("{} '{}' {}", extra_args.join(" "), pattern, path)
+        };
+
+        timer.track_passthrough(
+            &format!("grep {}", args_display),
+            &format!("rtk grep {} (passthrough)", args_display),
+        );
+        return Ok(result.exit_code);
+    }
 
     let exit_code = result.exit_code;
     let raw_output = result.stdout.clone();
 
     if result.stdout.trim().is_empty() {
         // Show stderr for errors (bad regex, missing file, etc.)
-        if exit_code == 2 {
-            if !result.stderr.trim().is_empty() {
-                eprintln!("{}", result.stderr.trim());
-            }
+        if exit_code == 2 && !result.stderr.trim().is_empty() {
+            eprintln!("{}", result.stderr.trim());
         }
         let msg = format!("0 matches for '{}'", pattern);
         println!("{}", msg);
@@ -72,16 +95,18 @@ pub fn run(
         return Ok(exit_code);
     }
 
-    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
-    let mut total = 0;
+    // Always filter: truncate long lines, apply per-file and global caps.
+    // Output in standard file:line:content format that AI agents can parse.
+    // (A passthrough approach yields 0% savings — no reason for RTK to exist on that path.)
+    let total_matches = result.stdout.lines().count();
 
-    // Compile context regex once (instead of per-line in clean_line)
     let context_re = if context_only {
         Regex::new(&format!("(?i).{{0,20}}{}.*", regex::escape(pattern))).ok()
     } else {
         None
     };
 
+    let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for line in result.stdout.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
 
@@ -95,43 +120,39 @@ pub fn run(
             continue;
         };
 
-        total += 1;
         let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
 
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!("{} matches in {}F:\n\n", total, by_file.len()));
+    rtk_output.push_str(&format!(
+        "{} matches in {} files:\n\n",
+        total_matches,
+        by_file.len()
+    ));
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();
     files.sort_by_key(|(f, _)| *f);
 
+    let per_file = config::limits().grep_max_per_file;
     for (file, matches) in files {
         if shown >= max_results {
             break;
         }
 
         let file_display = compact_path(file);
-        rtk_output.push_str(&format!("[file] {} ({}):\n", file_display, matches.len()));
-
-        let per_file = config::limits().grep_max_per_file;
         for (line_num, content) in matches.iter().take(per_file) {
-            rtk_output.push_str(&format!("  {:>4}: {}\n", line_num, content));
-            shown += 1;
             if shown >= max_results {
                 break;
             }
+            rtk_output.push_str(&format!("{}:{}:{}\n", file_display, line_num, content));
+            shown += 1;
         }
-
-        if matches.len() > per_file {
-            rtk_output.push_str(&format!("  +{}\n", matches.len() - per_file));
-        }
-        rtk_output.push('\n');
     }
 
-    if total > shown {
-        rtk_output.push_str(&format!("... +{}\n", total - shown));
+    if total_matches > shown {
+        rtk_output.push_str(&format!("[+{} more]\n", total_matches - shown));
     }
 
     print!("{}", rtk_output);
@@ -143,6 +164,23 @@ pub fn run(
     );
 
     Ok(exit_code)
+}
+
+fn has_format_flag(extra_args: &[String]) -> bool {
+    extra_args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-c" | "--count"
+                | "-l"
+                | "--files-with-matches"
+                | "-L"
+                | "--files-without-match"
+                | "-o"
+                | "--only-matching"
+                | "-Z"
+                | "--null"
+        )
+    })
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
@@ -293,6 +331,48 @@ mod tests {
         );
     }
 
+    // --- format flag detection ---
+
+    #[test]
+    fn test_format_flag_detects_count() {
+        assert!(has_format_flag(&["-c".to_string()]));
+        assert!(has_format_flag(&["--count".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_files_with_matches() {
+        assert!(has_format_flag(&["-l".to_string()]));
+        assert!(has_format_flag(&["--files-with-matches".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_files_without_match() {
+        assert!(has_format_flag(&["-L".to_string()]));
+        assert!(has_format_flag(&["--files-without-match".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_only_matching() {
+        assert!(has_format_flag(&["-o".to_string()]));
+        assert!(has_format_flag(&["--only-matching".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_detects_null() {
+        assert!(has_format_flag(&["-Z".to_string()]));
+        assert!(has_format_flag(&["--null".to_string()]));
+    }
+
+    #[test]
+    fn test_format_flag_ignores_normal_flags() {
+        assert!(!has_format_flag(&[
+            "-i".to_string(),
+            "-w".to_string(),
+            "-A".to_string(),
+            "3".to_string(),
+        ]));
+    }
+
     // Verify line numbers are always enabled in rg invocation (grep_cmd.rs:24).
     // The -n/--line-numbers clap flag in main.rs is a no-op accepted for compat.
     #[test]
@@ -306,6 +386,26 @@ mod tests {
             assert!(
                 output.status.code() == Some(1) || output.status.success(),
                 "rg -n should be accepted"
+            );
+        }
+        // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    #[test]
+    fn test_rg_no_ignore_vcs_flag_accepted() {
+        // Verify rg accepts --no-ignore-vcs (used to match grep -r behavior for .gitignore)
+        let mut cmd = resolved_command("rg");
+        cmd.args([
+            "-n",
+            "--no-heading",
+            "--no-ignore-vcs",
+            "NONEXISTENT_PATTERN_12345",
+            ".",
+        ]);
+        if let Ok(output) = cmd.output() {
+            assert!(
+                output.status.code() == Some(1) || output.status.success(),
+                "rg --no-ignore-vcs should be accepted"
             );
         }
         // If rg is not installed, skip gracefully (test still passes)

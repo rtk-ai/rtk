@@ -46,7 +46,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets
+      - run: cargo clippy --all-targets -- -D unsafe_code
 
   # ─── Parallel gates (all need code to compile) ───
 
@@ -185,6 +185,18 @@ jobs:
           echo "- Require approval from 2 maintainers" >> $GITHUB_STEP_SUMMARY
           echo "- Test in isolated environment before merge" >> $GITHUB_STEP_SUMMARY
 
+  semgrep:
+    name: semgrep security scan
+    needs: clippy
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: semgrep scan --config .semgrep.yml --baseline-commit ${{ github.event.pull_request.base.sha }} --error
+
   benchmark:
     name: benchmark
     needs: clippy
@@ -199,8 +211,11 @@ jobs:
       - name: Build rtk
         run: cargo build --release
 
+      - name: Install system tools
+        run: sudo apt-get install -y tree
+
       - name: Install Python tools
-        run: pip install ruff pytest
+        run: pip install ruff pytest mypy
 
       - name: Install Go
         uses: actions/setup-go@v5

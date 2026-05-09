@@ -40,17 +40,7 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<()> {
         diff.added, diff.removed, diff.modified
     ));
 
-    // Never truncate diff content — users make decisions based on this data.
-    // Only the summary header provides compression; all changes are shown in full.
-    for change in &diff.changes {
-        match change {
-            DiffChange::Added(ln, c) => rtk.push_str(&format!("+{:4} {}\n", ln, c)),
-            DiffChange::Removed(ln, c) => rtk.push_str(&format!("-{:4} {}\n", ln, c)),
-            DiffChange::Modified(ln, old, new) => {
-                rtk.push_str(&format!("~{:4} {} → {}\n", ln, old, new))
-            }
-        }
-    }
+    rtk.push_str(&format_diff_changes(&diff));
 
     print!("{}", rtk);
     timer.track(
@@ -91,6 +81,20 @@ struct DiffResult {
     removed: usize,
     modified: usize,
     changes: Vec<DiffChange>,
+}
+
+fn format_diff_changes(diff: &DiffResult) -> String {
+    let mut out = String::new();
+    for change in &diff.changes {
+        match change {
+            DiffChange::Added(ln, c) => out.push_str(&format!("+{:4} {}\n", ln, c)),
+            DiffChange::Removed(ln, c) => out.push_str(&format!("-{:4} {}\n", ln, c)),
+            DiffChange::Modified(ln, old, new) => {
+                out.push_str(&format!("~{:4} {} → {}\n", ln, old, new))
+            }
+        }
+    }
+    out
 }
 
 fn compute_diff(lines1: &[&str], lines2: &[&str]) -> DiffResult {
@@ -415,6 +419,23 @@ diff --git a/b.rs b/b.rs
             result.changes.len()
         );
         assert!(!result.changes.is_empty());
+    }
+
+    #[test]
+    fn test_format_diff_shows_all_changes() {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for i in 0..100 {
+            a.push(format!("old_line_{}", i));
+            b.push(format!("new_line_{}", i));
+        }
+        let a_refs: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
+        let b_refs: Vec<&str> = b.iter().map(|s| s.as_str()).collect();
+        let diff = compute_diff(&a_refs, &b_refs);
+        let output = format_diff_changes(&diff);
+
+        assert!(output.contains("old_line_0"), "should contain first change");
+        assert!(output.contains("new_line_99"), "should contain last change");
     }
 
     #[test]

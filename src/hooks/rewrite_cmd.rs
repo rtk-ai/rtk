@@ -16,8 +16,8 @@ use std::io::Write;
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    let excluded = crate::core::config::Config::load()
-        .map(|c| c.hooks.exclude_commands)
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
 
     // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
@@ -27,7 +27,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
-    match registry::rewrite_command(cmd, &excluded) {
+    match registry::rewrite_command(cmd, &excluded, &transparent_prefixes) {
         Some(rewritten) => match verdict {
             PermissionVerdict::Allow => {
                 print!("{}", rewritten);
@@ -53,20 +53,24 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn rewrite_command_no_prefixes(cmd: &str) -> Option<String> {
+        registry::rewrite_command(cmd, &[], &[])
+    }
+
     #[test]
     fn test_run_supported_command_succeeds() {
-        assert!(registry::rewrite_command("git status", &[]).is_some());
+        assert!(rewrite_command_no_prefixes("git status").is_some());
     }
 
     #[test]
     fn test_run_unsupported_returns_none() {
-        assert!(registry::rewrite_command("htop", &[]).is_none());
+        assert!(rewrite_command_no_prefixes("htop").is_none());
     }
 
     #[test]
     fn test_run_already_rtk_returns_some() {
         assert_eq!(
-            registry::rewrite_command("rtk git status", &[]),
+            rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
         );
     }
@@ -148,7 +152,7 @@ mod tests {
 
             // Verify the rewrite exists (so the hook would output it),
             // but the exit code forces user confirmation.
-            assert!(registry::rewrite_command("git status", &[]).is_some());
+            assert!(registry::rewrite_command("git status", &[], &[]).is_some());
             assert_eq!(expected_exit_code(&verdict), 3);
         }
 
