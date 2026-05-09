@@ -17,14 +17,66 @@ pub enum PermissionVerdict {
     Default,
 }
 
+/// Claude Code `permissions.defaultMode` values.
+///
+/// Mirrors the schema at <https://json.schemastore.org/claude-code-settings.json>
+/// (`permissions.defaultMode`). When the user opts into a non-prompting mode,
+/// rtk's hook should honor it instead of falling back to `Default` (= ask),
+/// otherwise the Mac desktop app re-evaluates rtk-rewritten commands and
+/// prompts even though the user opted in via `rtk init -g`.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum DefaultMode {
+    /// `default` — least-privilege fallback (Claude Code prompts when no rule matches).
+    #[default]
+    Default,
+    /// `acceptEdits` — auto-approves Edit/Write but still surfaces prompts for Bash.
+    /// Treated as non-prompting for the rtk-rewrite path: the user opted in.
+    AcceptEdits,
+    /// `auto` — Claude Code's auto-classifier decides. We trust the user's opt-in.
+    Auto,
+    /// `bypassPermissions` — yolo mode, never prompts. The canonical case for rtk.
+    BypassPermissions,
+    /// `dontAsk` — user pre-accepted all permissions for this session.
+    DontAsk,
+    /// `plan` — read-only planning mode. Treated as least-privilege (no auto-allow).
+    Plan,
+}
+
+impl DefaultMode {
+    /// Returns true when the mode does NOT prompt the user, so rtk's auto-rewrite
+    /// can safely emit `permissionDecision: "allow"` for non-deny commands.
+    fn is_non_prompting(self) -> bool {
+        matches!(
+            self,
+            Self::AcceptEdits | Self::Auto | Self::BypassPermissions | Self::DontAsk
+        )
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "default" => Some(Self::Default),
+            "acceptEdits" => Some(Self::AcceptEdits),
+            "auto" => Some(Self::Auto),
+            "bypassPermissions" => Some(Self::BypassPermissions),
+            "dontAsk" => Some(Self::DontAsk),
+            "plan" => Some(Self::Plan),
+            _ => None,
+        }
+    }
+}
+
 /// Check `cmd` against Claude Code's deny/ask/allow permission rules.
 ///
-/// Precedence: Deny > Ask > Allow > Default (ask).
-/// Returns `Default` when no rules match — callers should treat this as ask
-/// to match Claude Code's least-privilege default.
+/// Precedence: Deny > Ask > Allow > (defaultMode-aware) Default.
+///
+/// When no rule matches and `permissions.defaultMode` is a non-prompting mode
+/// (`bypassPermissions`, `acceptEdits`, `auto`, `dontAsk`), returns `Allow`
+/// instead of `Default`. This honors the user's explicit opt-out from prompts —
+/// without it, the Mac desktop app re-evaluates rtk-rewritten commands and
+/// prompts on every Bash call (see rtk-ai/rtk#1771).
 pub fn check_command(cmd: &str) -> PermissionVerdict {
-    let (deny_rules, ask_rules, allow_rules) = load_permission_rules();
-    check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules)
+    let (deny_rules, ask_rules, allow_rules, default_mode) = load_permission_rules();
+    check_command_with_rules(cmd, &deny_rules, &ask_rules, &allow_rules, default_mode)
 }
 
 /// Internal implementation allowing tests to inject rules without file I/O.
@@ -33,6 +85,7 @@ pub(crate) fn check_command_with_rules(
     deny_rules: &[String],
     ask_rules: &[String],
     allow_rules: &[String],
+    default_mode: DefaultMode,
 ) -> PermissionVerdict {
     let segments = split_compound_command(cmd);
     let mut any_ask = false;
@@ -78,11 +131,17 @@ pub(crate) fn check_command_with_rules(
         }
     }
 
-    // Precedence: Deny > Ask > Allow > Default (ask).
-    // Allow requires (1) at least one segment seen, (2) all segments matched, (3) non-empty rules.
+    // Precedence: Deny > Ask > Allow > defaultMode-aware fallback.
+    //
+    // Allow requires (1) at least one segment seen, (2) all segments matched,
+    // (3) non-empty allow rules. When that fails, fall back to defaultMode:
+    //   - non-prompting mode (bypassPermissions/acceptEdits/auto/dontAsk) → Allow
+    //   - default/plan → Default (ask, least-privilege)
     if any_ask {
         PermissionVerdict::Ask
-    } else if saw_segment && all_segments_allowed && !allow_rules.is_empty() {
+    } else if saw_segment
+        && ((all_segments_allowed && !allow_rules.is_empty()) || default_mode.is_non_prompting())
+    {
         PermissionVerdict::Allow
     } else {
         PermissionVerdict::Default
@@ -98,10 +157,18 @@ pub(crate) fn check_command_with_rules(
 /// 4. `~/.claude/settings.local.json`
 ///
 /// Missing files and malformed JSON are silently skipped.
-fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
+///
+/// Resolution order for `defaultMode`: project-local files take precedence
+/// over user-global files (matches Claude Code's settings layering). The
+/// first non-`Default` value found wins; ties resolve to the higher-precedence
+/// file. If no file declares a `defaultMode`, the fallback is
+/// `DefaultMode::Default` (matches Claude Code's least-privilege default).
+fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>, DefaultMode) {
     let mut deny_rules = Vec::new();
     let mut ask_rules = Vec::new();
     let mut allow_rules = Vec::new();
+    let mut default_mode = DefaultMode::Default;
+    let mut default_mode_seen = false;
 
     for path in get_settings_paths() {
         let Ok(content) = std::fs::read_to_string(&path) else {
@@ -121,9 +188,23 @@ fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
         append_bash_rules(permissions.get("deny"), &mut deny_rules);
         append_bash_rules(permissions.get("ask"), &mut ask_rules);
         append_bash_rules(permissions.get("allow"), &mut allow_rules);
+
+        // Capture the first explicit defaultMode encountered. get_settings_paths()
+        // yields project-local files before user-global, so this naturally honors
+        // Claude Code's settings precedence.
+        if !default_mode_seen {
+            if let Some(mode) = permissions
+                .get("defaultMode")
+                .and_then(|v| v.as_str())
+                .and_then(DefaultMode::from_str)
+            {
+                default_mode = mode;
+                default_mode_seen = true;
+            }
+        }
     }
 
-    (deny_rules, ask_rules, allow_rules)
+    (deny_rules, ask_rules, allow_rules, default_mode)
 }
 
 /// Extract Bash-scoped patterns from a JSON array and append them to `target`.
@@ -329,7 +410,7 @@ mod tests {
         let deny = vec!["git push --force".to_string()];
         let ask = vec!["git push --force".to_string()];
         assert_eq!(
-            check_command_with_rules("git push --force", &deny, &ask, &[]),
+            check_command_with_rules("git push --force", &deny, &ask, &[], DefaultMode::Default),
             PermissionVerdict::Deny
         );
     }
@@ -340,7 +421,7 @@ mod tests {
 
         // With empty rule sets, verdict is Default (not Allow).
         assert_eq!(
-            check_command_with_rules("cat .env", &[], &[], &[]),
+            check_command_with_rules("cat .env", &[], &[], &[], DefaultMode::Default),
             PermissionVerdict::Default
         );
     }
@@ -349,7 +430,7 @@ mod tests {
     fn test_empty_permissions() {
         // No rules at all → Default (ask), not Allow.
         assert_eq!(
-            check_command_with_rules("git push --force", &[], &[], &[]),
+            check_command_with_rules("git push --force", &[], &[], &[], DefaultMode::Default),
             PermissionVerdict::Default
         );
     }
@@ -381,7 +462,13 @@ mod tests {
     fn test_compound_command_deny() {
         let deny = vec!["git push --force".to_string()];
         assert_eq!(
-            check_command_with_rules("git status && git push --force", &deny, &[], &[]),
+            check_command_with_rules(
+                "git status && git push --force",
+                &deny,
+                &[],
+                &[],
+                DefaultMode::Default
+            ),
             PermissionVerdict::Deny
         );
     }
@@ -390,7 +477,13 @@ mod tests {
     fn test_compound_command_ask() {
         let ask = vec!["git push".to_string()];
         assert_eq!(
-            check_command_with_rules("git status && git push origin main", &[], &ask, &[]),
+            check_command_with_rules(
+                "git status && git push origin main",
+                &[],
+                &ask,
+                &[],
+                DefaultMode::Default
+            ),
             PermissionVerdict::Ask
         );
     }
@@ -400,7 +493,13 @@ mod tests {
         let deny = vec!["git push --force".to_string()];
         let ask = vec!["git status".to_string()];
         assert_eq!(
-            check_command_with_rules("git status && git push --force", &deny, &ask, &[]),
+            check_command_with_rules(
+                "git status && git push --force",
+                &deny,
+                &ask,
+                &[],
+                DefaultMode::Default
+            ),
             PermissionVerdict::Deny
         );
     }
@@ -410,7 +509,13 @@ mod tests {
         // "&&" inside quotes must NOT cause a split — old naive splitter got this wrong
         let deny = vec!["git push --force".to_string()];
         assert_eq!(
-            check_command_with_rules(r#"echo "git push --force && danger""#, &deny, &[], &[]),
+            check_command_with_rules(
+                r#"echo "git push --force && danger""#,
+                &deny,
+                &[],
+                &[],
+                DefaultMode::Default
+            ),
             PermissionVerdict::Default
         );
     }
@@ -419,7 +524,7 @@ mod tests {
     fn test_pipe_segments_checked() {
         let deny = vec!["rm -rf".to_string()];
         assert_eq!(
-            check_command_with_rules("cat file | rm -rf /", &deny, &[], &[]),
+            check_command_with_rules("cat file | rm -rf /", &deny, &[], &[], DefaultMode::Default),
             PermissionVerdict::Deny
         );
     }
@@ -428,7 +533,7 @@ mod tests {
     fn test_ask_verdict() {
         let ask = vec!["git push".to_string()];
         assert_eq!(
-            check_command_with_rules("git push origin main", &[], &ask, &[]),
+            check_command_with_rules("git push origin main", &[], &ask, &[], DefaultMode::Default),
             PermissionVerdict::Ask
         );
     }
@@ -512,11 +617,11 @@ mod tests {
     fn test_deny_with_leading_wildcard() {
         let deny = vec!["* --force".to_string()];
         assert_eq!(
-            check_command_with_rules("git push --force", &deny, &[], &[]),
+            check_command_with_rules("git push --force", &deny, &[], &[], DefaultMode::Default),
             PermissionVerdict::Deny
         );
         assert_eq!(
-            check_command_with_rules("git push", &deny, &[], &[]),
+            check_command_with_rules("git push", &deny, &[], &[], DefaultMode::Default),
             PermissionVerdict::Default
         );
     }
@@ -526,7 +631,7 @@ mod tests {
     fn test_deny_star_colon_star() {
         let deny = vec!["*:*".to_string()];
         assert_eq!(
-            check_command_with_rules("rm -rf /", &deny, &[], &[]),
+            check_command_with_rules("rm -rf /", &deny, &[], &[], DefaultMode::Default),
             PermissionVerdict::Deny
         );
     }
@@ -537,7 +642,7 @@ mod tests {
     fn test_explicit_allow_rule() {
         let allow = vec!["git status".to_string()];
         assert_eq!(
-            check_command_with_rules("git status", &[], &[], &allow),
+            check_command_with_rules("git status", &[], &[], &allow, DefaultMode::Default),
             PermissionVerdict::Allow
         );
     }
@@ -546,7 +651,7 @@ mod tests {
     fn test_allow_wildcard() {
         let allow = vec!["git *".to_string()];
         assert_eq!(
-            check_command_with_rules("git log --oneline", &[], &[], &allow),
+            check_command_with_rules("git log --oneline", &[], &[], &allow, DefaultMode::Default),
             PermissionVerdict::Allow
         );
     }
@@ -556,7 +661,7 @@ mod tests {
         let deny = vec!["git push --force".to_string()];
         let allow = vec!["git *".to_string()];
         assert_eq!(
-            check_command_with_rules("git push --force", &deny, &[], &allow),
+            check_command_with_rules("git push --force", &deny, &[], &allow, DefaultMode::Default),
             PermissionVerdict::Deny
         );
     }
@@ -566,7 +671,13 @@ mod tests {
         let ask = vec!["git push".to_string()];
         let allow = vec!["git *".to_string()];
         assert_eq!(
-            check_command_with_rules("git push origin main", &[], &ask, &allow),
+            check_command_with_rules(
+                "git push origin main",
+                &[],
+                &ask,
+                &allow,
+                DefaultMode::Default
+            ),
             PermissionVerdict::Ask
         );
     }
@@ -574,7 +685,7 @@ mod tests {
     #[test]
     fn test_no_rules_returns_default() {
         assert_eq!(
-            check_command_with_rules("cargo test", &[], &[], &[]),
+            check_command_with_rules("cargo test", &[], &[], &[], DefaultMode::Default),
             PermissionVerdict::Default
         );
     }
@@ -584,7 +695,7 @@ mod tests {
         // Commands not in any list should get Default, not Allow
         let allow = vec!["git *".to_string()];
         assert_eq!(
-            check_command_with_rules("cargo build", &[], &[], &allow),
+            check_command_with_rules("cargo build", &[], &[], &allow, DefaultMode::Default),
             PermissionVerdict::Default
         );
     }
@@ -606,19 +717,25 @@ mod tests {
 
         // Single allowed command → Allow
         assert_eq!(
-            check_command_with_rules("git status", &[], &[], &allow),
+            check_command_with_rules("git status", &[], &[], &allow, DefaultMode::Default),
             PermissionVerdict::Allow
         );
 
         // Single unallowed command → Default
         assert_eq!(
-            check_command_with_rules("git add .", &[], &[], &allow),
+            check_command_with_rules("git add .", &[], &[], &allow, DefaultMode::Default),
             PermissionVerdict::Default
         );
 
         // BUG #1213: chain with one allowed + one unallowed → must be Default
         assert_eq!(
-            check_command_with_rules("git status && git add .", &[], &[], &allow),
+            check_command_with_rules(
+                "git status && git add .",
+                &[],
+                &[],
+                &allow,
+                DefaultMode::Default
+            ),
             PermissionVerdict::Default,
             "allowed segment must not escalate unallowed segment"
         );
@@ -630,6 +747,7 @@ mod tests {
                 &[],
                 &[],
                 &allow,
+                DefaultMode::Default,
             ),
             PermissionVerdict::Default,
             "middle unallowed segment must demote the whole chain"
@@ -637,7 +755,13 @@ mod tests {
 
         // Unallowed-then-allowed ordering must also demote
         assert_eq!(
-            check_command_with_rules("git add . && git status", &[], &[], &allow),
+            check_command_with_rules(
+                "git add . && git status",
+                &[],
+                &[],
+                &allow,
+                DefaultMode::Default
+            ),
             PermissionVerdict::Default,
             "unallowed first segment must demote the chain"
         );
@@ -649,7 +773,13 @@ mod tests {
         let allow = vec!["git *".to_string(), "cargo *".to_string()];
 
         assert_eq!(
-            check_command_with_rules("git status && cargo test", &[], &[], &allow),
+            check_command_with_rules(
+                "git status && cargo test",
+                &[],
+                &[],
+                &allow,
+                DefaultMode::Default
+            ),
             PermissionVerdict::Allow
         );
 
@@ -658,7 +788,8 @@ mod tests {
                 "git log --oneline && cargo build && git status",
                 &[],
                 &[],
-                &allow
+                &allow,
+                DefaultMode::Default,
             ),
             PermissionVerdict::Allow
         );
@@ -669,7 +800,13 @@ mod tests {
         // `;` separator must be handled identically to `&&`.
         let allow = vec!["git status".to_string()];
         assert_eq!(
-            check_command_with_rules("git status; git push", &[], &[], &allow),
+            check_command_with_rules(
+                "git status; git push",
+                &[],
+                &[],
+                &allow,
+                DefaultMode::Default
+            ),
             PermissionVerdict::Default
         );
     }
@@ -679,7 +816,7 @@ mod tests {
         // `|` separator must be handled identically to `&&`.
         let allow = vec!["git log".to_string()];
         assert_eq!(
-            check_command_with_rules("git log | grep foo", &[], &[], &allow),
+            check_command_with_rules("git log | grep foo", &[], &[], &allow, DefaultMode::Default),
             PermissionVerdict::Default
         );
     }
@@ -689,7 +826,13 @@ mod tests {
         // `||` separator must also split segments.
         let allow = vec!["cargo build".to_string()];
         assert_eq!(
-            check_command_with_rules("cargo build || cargo clean", &[], &[], &allow),
+            check_command_with_rules(
+                "cargo build || cargo clean",
+                &[],
+                &[],
+                &allow,
+                DefaultMode::Default
+            ),
             PermissionVerdict::Default
         );
     }
@@ -700,8 +843,166 @@ mod tests {
         let ask = vec!["git push".to_string()];
         let allow = vec!["git *".to_string()];
         assert_eq!(
-            check_command_with_rules("git status && git push origin main", &[], &ask, &allow),
+            check_command_with_rules(
+                "git status && git push origin main",
+                &[],
+                &ask,
+                &allow,
+                DefaultMode::Default
+            ),
             PermissionVerdict::Ask
         );
+    }
+
+    // --- DefaultMode tests (regression for #1771) ---
+    //
+    // When the user opts into a non-prompting `permissions.defaultMode`
+    // (bypassPermissions, acceptEdits, auto, dontAsk), commands that don't
+    // match any explicit rule should auto-allow instead of falling through
+    // to Default (= ask). Without this, the Mac desktop app re-evaluates
+    // rtk-rewritten commands and prompts on every Bash call.
+
+    #[test]
+    fn test_default_mode_bypass_permissions_auto_allows_unmatched() {
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &[], DefaultMode::BypassPermissions),
+            PermissionVerdict::Allow,
+            "bypassPermissions must auto-allow when no rule matches"
+        );
+    }
+
+    #[test]
+    fn test_default_mode_accept_edits_auto_allows_unmatched() {
+        assert_eq!(
+            check_command_with_rules("ls -la", &[], &[], &[], DefaultMode::AcceptEdits),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_default_mode_auto_auto_allows_unmatched() {
+        assert_eq!(
+            check_command_with_rules("cargo test", &[], &[], &[], DefaultMode::Auto),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_default_mode_dont_ask_auto_allows_unmatched() {
+        assert_eq!(
+            check_command_with_rules("npm install", &[], &[], &[], DefaultMode::DontAsk),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_default_mode_default_falls_through_to_default() {
+        // Backward-compat: Default mode preserves least-privilege fallback.
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &[], DefaultMode::Default),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_default_mode_plan_falls_through_to_default() {
+        // Plan mode is read-only/least-privilege — no auto-allow.
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &[], DefaultMode::Plan),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_default_mode_does_not_override_deny() {
+        // Even in bypassPermissions, a Deny rule still wins.
+        let deny = vec!["rm -rf *".to_string()];
+        assert_eq!(
+            check_command_with_rules("rm -rf /", &deny, &[], &[], DefaultMode::BypassPermissions),
+            PermissionVerdict::Deny,
+            "Deny rules must override defaultMode auto-allow (security floor)"
+        );
+    }
+
+    #[test]
+    fn test_default_mode_does_not_override_ask() {
+        // Even in bypassPermissions, an Ask rule still surfaces a prompt.
+        let ask = vec!["git push --force".to_string()];
+        assert_eq!(
+            check_command_with_rules(
+                "git push --force origin main",
+                &[],
+                &ask,
+                &[],
+                DefaultMode::BypassPermissions
+            ),
+            PermissionVerdict::Ask,
+            "Ask rules must override defaultMode auto-allow (user intent)"
+        );
+    }
+
+    #[test]
+    fn test_default_mode_explicit_allow_still_returns_allow() {
+        // Explicit allow rule + bypassPermissions = Allow (not duplicated, not Default).
+        let allow = vec!["git *".to_string()];
+        assert_eq!(
+            check_command_with_rules(
+                "git status",
+                &[],
+                &[],
+                &allow,
+                DefaultMode::BypassPermissions
+            ),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_default_mode_compound_command_with_bypass() {
+        // Compound commands honor bypassPermissions when no rule matches any segment.
+        assert_eq!(
+            check_command_with_rules(
+                "git status && cargo test",
+                &[],
+                &[],
+                &[],
+                DefaultMode::BypassPermissions
+            ),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_default_mode_compound_with_partial_deny_still_denies() {
+        // bypassPermissions does NOT bypass deny on any segment.
+        let deny = vec!["git push --force".to_string()];
+        assert_eq!(
+            check_command_with_rules(
+                "git status && git push --force",
+                &deny,
+                &[],
+                &[],
+                DefaultMode::BypassPermissions
+            ),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
+    fn test_default_mode_from_str() {
+        assert_eq!(DefaultMode::from_str("default"), Some(DefaultMode::Default));
+        assert_eq!(
+            DefaultMode::from_str("acceptEdits"),
+            Some(DefaultMode::AcceptEdits)
+        );
+        assert_eq!(DefaultMode::from_str("auto"), Some(DefaultMode::Auto));
+        assert_eq!(
+            DefaultMode::from_str("bypassPermissions"),
+            Some(DefaultMode::BypassPermissions)
+        );
+        assert_eq!(DefaultMode::from_str("dontAsk"), Some(DefaultMode::DontAsk));
+        assert_eq!(DefaultMode::from_str("plan"), Some(DefaultMode::Plan));
+        assert_eq!(DefaultMode::from_str("invalid"), None);
+        assert_eq!(DefaultMode::from_str(""), None);
     }
 }
