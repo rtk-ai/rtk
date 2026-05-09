@@ -485,7 +485,13 @@ fn run_cursor_inner_with_rules(
         None => return "{}".to_string(),
     };
 
-    let verdict = permissions::check_command_with_rules(&cmd, deny_rules, ask_rules, allow_rules);
+    let verdict = permissions::check_command_with_rules(
+        &cmd,
+        deny_rules,
+        ask_rules,
+        allow_rules,
+        permissions::DefaultMode::default(),
+    );
     if verdict == PermissionVerdict::Deny {
         return "{}".to_string();
     }
@@ -890,20 +896,20 @@ mod tests {
 
     #[test]
     fn test_cursor_deny_blocks_rewrite() {
-        use super::permissions::check_command_with_rules;
+        use super::permissions::{check_command_with_rules, DefaultMode};
         let deny = vec!["git status".to_string()];
         assert_eq!(
-            check_command_with_rules("git status", &deny, &[], &[]),
+            check_command_with_rules("git status", &deny, &[], &[], DefaultMode::Default),
             PermissionVerdict::Deny
         );
     }
 
     #[test]
     fn test_gemini_deny_blocks_rewrite() {
-        use super::permissions::check_command_with_rules;
+        use super::permissions::{check_command_with_rules, DefaultMode};
         let deny = vec!["cargo test".to_string()];
         assert_eq!(
-            check_command_with_rules("cargo test", &deny, &[], &[]),
+            check_command_with_rules("cargo test", &deny, &[], &[], DefaultMode::Default),
             PermissionVerdict::Deny
         );
         // Denied commands must not be rewritten — Gemini handler checks deny before rewrite
