@@ -372,6 +372,10 @@ enum Commands {
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
+
+        /// Preview changes without writing any files (combine with -v to show content)
+        #[arg(long = "dry-run", conflicts_with = "show")]
+        dry_run: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -1763,12 +1767,17 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            dry_run,
         } => {
+            let ctx = hooks::init::InitContext {
+                verbose: cli.verbose,
+                dry_run,
+            };
             if show {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                hooks::init::uninstall(global, gemini, codex, cursor, ctx)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1777,21 +1786,21 @@ fn run_cli() -> Result<i32> {
                 } else {
                     hooks::init::PatchMode::Ask
                 };
-                hooks::init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
+                hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
-                hooks::init::run_copilot(cli.verbose)?;
+                hooks::init::run_copilot(ctx)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
                 }
-                hooks::init::run_kilocode_mode(cli.verbose)?;
+                hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
                 if global {
                     anyhow::bail!(
                         "Antigravity is project-scoped. Use: rtk init --agent antigravity"
                     );
                 }
-                hooks::init::run_antigravity_mode(cli.verbose)?;
+                hooks::init::run_antigravity_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -1817,7 +1826,7 @@ fn run_cli() -> Result<i32> {
                     hook_only,
                     codex,
                     patch_mode,
-                    cli.verbose,
+                    ctx,
                 )?;
             }
             0
