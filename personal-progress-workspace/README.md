@@ -24,6 +24,34 @@ Notifications are intentionally outside the MVP scope.
 6. Run `npm run dev`.
 7. Open the app and use `Create account instead` on the auth screen for first-time setup.
 
+## Deploy on a Free Vercel Subdomain
+
+Use Vercel Hobby for a quick public test URL such as `your-project.vercel.app`.
+
+1. Push this repository branch to GitHub.
+2. In Vercel, create a new project from the GitHub repository.
+3. Use these project settings:
+   - Framework preset: `Vite`
+   - Install command: `npm ci`
+   - Build command: `npm run build`
+   - Output directory: `dist`
+4. Add these Vercel environment variables for Production, Preview, and Development:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+5. Deploy the project.
+6. Copy the generated `https://<project-name>.vercel.app` URL.
+7. Add that URL to Supabase Auth settings before sharing it with testers.
+
+If using the Vercel CLI after logging in locally, run:
+
+```powershell
+npm install -g vercel
+vercel
+vercel --prod
+```
+
+The first `vercel` command links the local project and creates a preview deployment. The `vercel --prod` command publishes the production URL.
+
 ## Verification
 
 Run:
