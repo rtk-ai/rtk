@@ -68,7 +68,7 @@ async function ensureOwnerMembership(workspaceId: string, userId: string) {
     .from("workspace_members")
     .upsert(
       { workspace_id: workspaceId, user_id: userId, role: "owner" },
-      { onConflict: "workspace_id,user_id" },
+      { ignoreDuplicates: true, onConflict: "workspace_id,user_id" },
     );
 
   if (memberError) throw memberError;

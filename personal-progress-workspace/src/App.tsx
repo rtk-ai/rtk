@@ -19,7 +19,20 @@ function AppContent() {
   if (authLoading) return <main className="app-shell">Loading session...</main>;
   if (!user) return <SignInPage />;
   if (workspace.isLoading) return <main className="app-shell">Preparing workspace...</main>;
-  if (workspace.isError || !workspace.data) return <main className="app-shell">Workspace failed to load.</main>;
+  if (workspace.isError || !workspace.data) {
+    return (
+      <main className="app-shell">
+        <section className="hero-panel" role="alert">
+          <p className="eyebrow">Workspace setup</p>
+          <h1>Workspace failed to load</h1>
+          <p>{getWorkspaceErrorMessage(workspace.error)}</p>
+          <button className="app-view-nav__button" type="button" onClick={() => void workspace.refetch()}>
+            Retry workspace load
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   function handleCommand(action: CommandAction) {
     if (action.id === "open-dashboard") {
@@ -83,4 +96,13 @@ export function App() {
       <AppContent />
     </AuthProvider>
   );
+}
+
+function getWorkspaceErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "object" && error && "message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+
+  return "No workspace data was returned. Check Supabase Auth, RLS policies, and the workspace migration.";
 }

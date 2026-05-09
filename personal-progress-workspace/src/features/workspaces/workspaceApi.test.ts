@@ -98,7 +98,7 @@ describe("getOrCreatePersonalWorkspace", () => {
     await expect(getOrCreatePersonalWorkspace(user("user-1"))).resolves.toEqual(ownedWorkspace);
     expect(membershipUpsert).toHaveBeenCalledWith(
       { workspace_id: "workspace-owned", user_id: "user-1", role: "owner" },
-      { onConflict: "workspace_id,user_id" },
+      { ignoreDuplicates: true, onConflict: "workspace_id,user_id" },
     );
     expect(insertColumns).toHaveBeenCalledWith([
       { board_id: "board-owned", name: "Planned", status_key: "Planned", sort_order: 1 },
