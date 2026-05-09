@@ -746,29 +746,33 @@ pub fn uninstall(
             let trimmed = working_content.trim();
             if trimmed.is_empty() {
                 if dry_run {
-                    println!("[dry-run] would remove CLAUDE.md (empty after cleanup): {}", claude_md_path.display());
+                    println!(
+                        "[dry-run] would remove CLAUDE.md (empty after cleanup): {}",
+                        claude_md_path.display()
+                    );
                 } else {
                     // nosemgrep: filesystem-deletion
                     fs::remove_file(&claude_md_path).with_context(|| {
                         format!(
-                        "Failed to remove empty CLAUDE.md: {}",
-                        claude_md_path.display()
+                            "Failed to remove empty CLAUDE.md: {}",
+                            claude_md_path.display()
                         )
                     })?;
                 }
                 removed.retain(|r| !r.starts_with("CLAUDE.md:"));
                 removed.push("CLAUDE.md: removed (was empty after cleanup)".to_string());
-            } else {
-                if dry_run {
-                    println!("[dry-run] would update CLAUDE.md: {}", claude_md_path.display());
-                    if verbose > 0 {
-                        println!("[dry-run] content:\n{}", working_content);
-                    }
-                } else {
-                     fs::write(&claude_md_path, &working_content).with_context(|| {
-                          format!("Failed to write CLAUDE.md: {}", claude_md_path.display())
-                     })?;
+            } else if dry_run {
+                println!(
+                    "[dry-run] would update CLAUDE.md: {}",
+                    claude_md_path.display()
+                );
+                if verbose > 0 {
+                    println!("[dry-run] content:\n{}", working_content);
                 }
+            } else {
+                fs::write(&claude_md_path, &working_content).with_context(|| {
+                    format!("Failed to write CLAUDE.md: {}", claude_md_path.display())
+                })?;
             }
         }
     }
@@ -3704,6 +3708,9 @@ mod tests {
             "dry-run must not create AGENTS.md: {}",
             agents_md.display()
         );
+    }
+
+    #[test]
     fn test_uninstall_codex_at_removes_rtk_instructions_block() {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path();
@@ -3720,7 +3727,7 @@ mod tests {
         .unwrap();
         fs::write(&rtk_md, "codex config").unwrap();
 
-        let removed = uninstall_codex_at(codex_dir, 0).unwrap();
+        let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
 
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("OLD RTK STUFF"));
@@ -4509,6 +4516,9 @@ mod tests {
                 "dry-run uninstall must not modify settings.json"
             );
         });
+    }
+
+    #[test]
     fn test_uninstall_removes_rtk_instructions_block() {
         let temp = TempDir::new().unwrap();
         let claude_md = temp.path().join("CLAUDE.md");
