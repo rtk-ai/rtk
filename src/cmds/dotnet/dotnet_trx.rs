@@ -565,9 +565,12 @@ mod tests {
         let trx_old = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="2" executed="2" passed="2" failed="0" /></ResultSummary></TestRun>"#;
         std::fs::write(trx_dir.join("old.trx"), trx_old).expect("write old trx");
-        std::thread::sleep(Duration::from_millis(5));
-        let since = SystemTime::now();
-        std::thread::sleep(Duration::from_millis(5));
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        let since = SystemTime::now()
+            .checked_sub(Duration::from_millis(10))
+            .expect("threshold overflow");
 
         let trx_new = r#"<?xml version="1.0" encoding="utf-8"?>
 <TestRun><ResultSummary><Counters total="3" executed="3" passed="2" failed="1" /></ResultSummary></TestRun>"#;

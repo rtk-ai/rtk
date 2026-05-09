@@ -15,6 +15,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
+use cmds::jvm::gradlew_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -309,7 +310,7 @@ enum Commands {
         #[arg(short, long, default_value = "200")]
         max: usize,
         /// Show only match context (not full line)
-        #[arg(short, long)]
+        #[arg(long)]
         context_only: bool,
         /// Filter by file type (e.g., ts, py, rust)
         #[arg(short = 't', long)]
@@ -720,6 +721,14 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Android Gradle wrapper with compact output (build, test, lint)
+    #[command(name = "gradlew")]
+    Gradlew {
+        /// Gradle tasks and arguments (e.g., assembleDebug, testDebugUnitTest, lint, --info)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
     #[command(name = "hook-audit")]
     HookAudit {
@@ -870,8 +879,6 @@ enum PnpmCommands {
     },
     /// Install packages (filter progress bars)
     Install {
-        /// Packages to install
-        packages: Vec<String>,
         /// Additional pnpm arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1585,8 +1592,8 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Install { packages, args } => pnpm_cmd::run(
-                    pnpm_cmd::PnpmCommand::Install { packages },
+                PnpmCommands::Install { args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Install,
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
@@ -2094,6 +2101,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::GolangciLint { args } => golangci_cmd::run(&args, cli.verbose)?,
 
+        Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
+
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
             0
@@ -2119,10 +2128,10 @@ fn run_cli() -> Result<i32> {
             HookCommands::Check { agent: _, command } => {
                 use crate::discover::registry::rewrite_command;
                 let raw = command.join(" ");
-                let excluded = crate::core::config::Config::load()
-                    .map(|c| c.hooks.exclude_commands)
+                let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+                    .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
                     .unwrap_or_default();
-                match rewrite_command(&raw, &excluded) {
+                match rewrite_command(&raw, &excluded, &transparent_prefixes) {
                     Some(rewritten) => {
                         println!("{}", rewritten);
                         0
@@ -2227,6 +2236,7 @@ fn run_cli() -> Result<i32> {
                     libc::signal(sig, libc::SIG_DFL);
                     libc::raise(sig);
                 }
+                // nosemgrep: unsafe-block
                 unsafe {
                     libc::signal(
                         libc::SIGINT,
@@ -2719,6 +2729,30 @@ mod tests {
             } => {
                 assert_eq!(agent, "gemini");
                 assert_eq!(command, vec!["cargo", "test"]);
+            }
+            _ => panic!("Expected Hook Check command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_check_preserves_double_dash_in_command() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "hook",
+            "check",
+            "shadowenv",
+            "exec",
+            "--",
+            "git",
+            "status",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Hook {
+                command: HookCommands::Check { agent, command },
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(command, vec!["shadowenv", "exec", "--", "git", "status"]);
             }
             _ => panic!("Expected Hook Check command"),
         }

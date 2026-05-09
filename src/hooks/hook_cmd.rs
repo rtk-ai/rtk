@@ -107,11 +107,11 @@ fn get_rewritten(cmd: &str) -> Option<String> {
         return None;
     }
 
-    let excluded = crate::core::config::Config::load()
-        .map(|c| c.hooks.exclude_commands)
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
 
-    let rewritten = rewrite_command(cmd, &excluded)?;
+    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
 
     if rewritten == cmd {
         return None;
@@ -211,11 +211,11 @@ pub fn run_gemini() -> Result<()> {
         return Ok(());
     }
 
-    let excluded = crate::core::config::Config::load()
-        .map(|c| c.hooks.exclude_commands)
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
 
-    match rewrite_command(cmd, &excluded) {
+    match rewrite_command(cmd, &excluded, &transparent_prefixes) {
         Some(ref rewritten) => {
             audit_log("rewrite", cmd, rewritten);
             print_rewrite(rewritten);
@@ -510,6 +510,10 @@ fn run_cursor_inner_with_rules(
 mod tests {
     use super::*;
 
+    fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
+        crate::discover::registry::rewrite_command(cmd, excluded, &[])
+    }
+
     // --- Copilot format detection ---
 
     fn vscode_input(tool: &str, cmd: &str) -> Value {
@@ -608,26 +612,29 @@ mod tests {
     #[test]
     fn test_gemini_hook_uses_rewrite_command() {
         assert_eq!(
-            rewrite_command("git status", &[]),
+            rewrite_command_no_prefixes("git status", &[]),
             Some("rtk git status".into())
         );
         assert_eq!(
-            rewrite_command("cargo test", &[]),
+            rewrite_command_no_prefixes("cargo test", &[]),
             Some("rtk cargo test".into())
         );
         assert_eq!(
-            rewrite_command("rtk git status", &[]),
+            rewrite_command_no_prefixes("rtk git status", &[]),
             Some("rtk git status".into())
         );
-        assert_eq!(rewrite_command("cat <<EOF", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("cat <<EOF", &[]), None);
     }
 
     #[test]
     fn test_gemini_hook_excluded_commands() {
         let excluded = vec!["curl".to_string()];
-        assert_eq!(rewrite_command("curl https://example.com", &excluded), None);
         assert_eq!(
-            rewrite_command("git status", &excluded),
+            rewrite_command_no_prefixes("curl https://example.com", &excluded),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("git status", &excluded),
             Some("rtk git status".into())
         );
     }
@@ -635,7 +642,7 @@ mod tests {
     #[test]
     fn test_gemini_hook_env_prefix_preserved() {
         assert_eq!(
-            rewrite_command("RUST_LOG=debug cargo test", &[]),
+            rewrite_command_no_prefixes("RUST_LOG=debug cargo test", &[]),
             Some("RUST_LOG=debug rtk cargo test".into())
         );
     }

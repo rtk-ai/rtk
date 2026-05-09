@@ -1,0 +1,48 @@
+Starting a Gradle Daemon (subsequent builds will be faster)
+Daemon will be stopped at the end of the build after running out of JVM memory
+
+> Configure project :app
+> Configure project :core
+
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:compileDebugAidl NO-SOURCE
+> Task :app:compileDebugRenderscript NO-SOURCE
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:lintVitalAnalyzeDebug UP-TO-DATE
+> Task :app:lint
+Ran lint on variant debug: 0 issues found
+
+Wrote HTML report to file:///Users/user/MyApp/app/build/reports/lint-results-debug.html
+Wrote XML report to file:///Users/user/MyApp/app/build/reports/lint-results-debug.xml
+
+> Task :app:lintDebug
+
+Ran lint on variant debug: 3 issues found
+
+src/main/java/com/example/myapp/MainActivity.kt:45: Error: Format string invalid [StringFormatInvalid]
+  String.format(getString(R.string.template), arg1, arg2)
+  ^
+    This format string placeholder index (2) does not correspond to an argument
+
+src/main/java/com/example/myapp/Utils.kt:89: Warning: HardcodedText [HardcodedText]
+    return "Hello World"
+           ~~~~~~~~~~~~~
+
+src/main/res/layout/activity_main.xml:15: Warning: Missing contentDescription attribute on image [ContentDescription]
+    <ImageView
+
+Wrote HTML report to file:///Users/user/MyApp/app/build/reports/lint-results-debug.html
+Wrote XML report to file:///Users/user/MyApp/app/build/reports/lint-results-debug.xml
+
+BUILD FAILED in 8s
+3 actionable tasks: 2 executed, 1 up-to-date
