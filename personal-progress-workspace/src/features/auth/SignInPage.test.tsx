@@ -37,17 +37,28 @@ describe("SignInPage", () => {
     authMocks.signUp.mockReset();
   });
 
-  it("does not attempt sign-in when Supabase config is missing", async () => {
+  it("keeps auth submit available when Supabase config is missing and explains setup", async () => {
     render(<SignInPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Log in" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create account" }));
+    await userEvent.type(screen.getByLabelText("Email"), "new@example.com");
+    await userEvent.type(screen.getByLabelText("Password"), "secure-password");
 
     expect(screen.queryByText("Supabase configuration is missing.")).not.toBeInTheDocument();
     expect(
-      screen.getByText("Cloud sync is not connected yet. Add Supabase env vars in .env.local to enable login and account creation."),
+      screen.getByText("Cloud sync is not connected yet. Add Supabase env vars in .env.local before accounts can be created."),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Create account" })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(
+      screen.getByText(
+        "Create account is not available until Supabase is connected. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then restart the dev server.",
+      ),
+    ).toBeVisible();
     expect(supabase.auth.signInWithPassword).not.toHaveBeenCalled();
+    expect(supabase.auth.signUp).not.toHaveBeenCalled();
   });
 
   it("opens the auth form from a small top-right login button", async () => {

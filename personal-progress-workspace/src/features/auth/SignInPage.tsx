@@ -4,8 +4,8 @@ import { BarChart3, LogIn, UserPlus } from "lucide-react";
 import { env } from "../../lib/env";
 import { supabase } from "../../lib/supabase";
 
-const missingSupabaseConfigMessage =
-  "Cloud sync is not connected yet. Add Supabase env vars in .env.local to enable login and account creation.";
+const missingSupabaseConfigNote =
+  "Cloud sync is not connected yet. Add Supabase env vars in .env.local before accounts can be created.";
 const accountCreatedMessage = "Account created. Check your email to confirm it, then sign in.";
 
 type AuthMode = "sign-in" | "create-account";
@@ -38,7 +38,9 @@ export function SignInPage() {
     setNotice(null);
 
     if (!env.hasSupabaseConfig) {
-      setError(missingSupabaseConfigMessage);
+      setError(
+        `${isCreatingAccount ? "Create account" : "Sign in"} is not available until Supabase is connected. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY, then restart the dev server.`,
+      );
       return;
     }
 
@@ -119,18 +121,31 @@ export function SignInPage() {
               ? "Create an account once, then your workspace can sync through Supabase."
               : "Use your existing account to continue your workspace."}
           </p>
-          {!env.hasSupabaseConfig ? <p className="form-note">{missingSupabaseConfigMessage}</p> : null}
+          {!env.hasSupabaseConfig ? <p className="form-note">{missingSupabaseConfigNote}</p> : null}
           <label>
             Email
-            <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" required />
+            <input
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              type="email"
+              autoComplete="email"
+              required
+            />
           </label>
           <label>
             Password
-            <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" required />
+            <input
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              type="password"
+              autoComplete={isCreatingAccount ? "new-password" : "current-password"}
+              minLength={8}
+              required
+            />
           </label>
           {notice ? <p className="form-success">{notice}</p> : null}
           {error ? <p className="form-error">{error}</p> : null}
-          <button type="submit" disabled={!env.hasSupabaseConfig || submitting}>
+          <button type="submit" disabled={submitting}>
             {isCreatingAccount ? <UserPlus size={18} /> : <LogIn size={18} />}
             {submitting ? "Working" : isCreatingAccount ? "Create account" : "Sign in"}
           </button>
