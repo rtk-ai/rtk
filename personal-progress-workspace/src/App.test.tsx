@@ -14,6 +14,7 @@ describe("App", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Sign in to your command center" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Log in" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Sign in to your command center" })).not.toBeInTheDocument();
   });
 });

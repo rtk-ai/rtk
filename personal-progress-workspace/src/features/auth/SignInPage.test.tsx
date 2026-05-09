@@ -40,11 +40,34 @@ describe("SignInPage", () => {
   it("does not attempt sign-in when Supabase config is missing", async () => {
     render(<SignInPage />);
 
+    await userEvent.click(screen.getByRole("button", { name: "Log in" }));
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
     expect(await screen.findByText("Supabase configuration is missing.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeDisabled();
     expect(supabase.auth.signInWithPassword).not.toHaveBeenCalled();
+  });
+
+  it("opens the auth form from a small top-right login button", async () => {
+    render(<SignInPage />);
+
+    expect(screen.getByRole("button", { name: "Log in" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Create account" })).toBeVisible();
+    expect(screen.queryByLabelText("Email")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Log in" }));
+
+    expect(screen.getByLabelText("Email")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Sign in to your command center" })).toBeVisible();
+  });
+
+  it("opens create-account mode from the top-right create account button", async () => {
+    render(<SignInPage />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(screen.getByLabelText("Email")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Create your command center" })).toBeVisible();
   });
 
   it("signs in with an existing account when configured", async () => {
@@ -53,6 +76,7 @@ describe("SignInPage", () => {
 
     render(<SignInPage />);
 
+    await userEvent.click(screen.getByRole("button", { name: "Log in" }));
     await userEvent.type(screen.getByLabelText("Email"), "me@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "secure-password");
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
@@ -69,7 +93,7 @@ describe("SignInPage", () => {
 
     render(<SignInPage />);
 
-    await userEvent.click(screen.getByRole("button", { name: "Create account instead" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create account" }));
     await userEvent.type(screen.getByLabelText("Email"), "new@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "secure-password");
     await userEvent.click(screen.getByRole("button", { name: "Create account" }));

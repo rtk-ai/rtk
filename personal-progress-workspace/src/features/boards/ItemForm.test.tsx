@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceItem } from "../../domain/types";
@@ -18,14 +18,14 @@ describe("ItemForm", () => {
     const onSubmit = vi.fn();
     render(<ItemForm defaults={defaults} onSubmit={onSubmit} />);
 
-    await userEvent.type(screen.getByLabelText("Title"), "Plan launch");
-    await userEvent.type(screen.getByLabelText("Description"), "Draft the rollout notes");
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Plan launch" } });
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Draft the rollout notes" } });
     await userEvent.selectOptions(screen.getByLabelText("Type"), "content");
     await userEvent.selectOptions(screen.getByLabelText("Priority"), "high");
-    await userEvent.type(screen.getByLabelText("Tags"), "launch, writing,  ");
-    await userEvent.type(screen.getByLabelText("Scheduled date"), "2026-05-08");
-    await userEvent.type(screen.getByLabelText("Due date"), "2026-05-10");
-    await userEvent.type(screen.getByLabelText("Estimate minutes"), "75");
+    fireEvent.change(screen.getByLabelText("Tags"), { target: { value: "launch, writing,  " } });
+    fireEvent.change(screen.getByLabelText("Scheduled date"), { target: { value: "2026-05-08" } });
+    fireEvent.change(screen.getByLabelText("Due date"), { target: { value: "2026-05-10" } });
+    fireEvent.change(screen.getByLabelText("Estimate minutes"), { target: { value: "75" } });
     await userEvent.selectOptions(screen.getByLabelText("Progress mode"), "focus_time");
     await userEvent.click(screen.getByRole("button", { name: "Create item" }));
 
