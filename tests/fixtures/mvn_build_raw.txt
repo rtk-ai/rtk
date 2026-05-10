@@ -1,0 +1,59 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] -------------------------< com.example:myapp >--------------------------
+[INFO] Building myapp 1.0.0-SNAPSHOT
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.0:resources (default-resources) @ myapp ---
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-resources-plugin/3.3.0/maven-resources-plugin-3.3.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-resources-plugin/3.3.0/maven-resources-plugin-3.3.0.pom (11 kB at 45 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-compiler-plugin/3.11.0/maven-compiler-plugin-3.11.0.jar
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-compiler-plugin/3.11.0/maven-compiler-plugin-3.11.0.jar (67 kB at 112 kB/s)
+Progress (1): maven-compiler-plugin-3.11.0.jar (8.2/67 kB)
+Progress (1): maven-compiler-plugin-3.11.0.jar (16/67 kB)
+Progress (1): maven-compiler-plugin-3.11.0.jar (24/67 kB)
+Progress (1): maven-compiler-plugin-3.11.0.jar (32/67 kB)
+Progress (1): maven-compiler-plugin-3.11.0.jar (40/67 kB)
+Progress (1): maven-compiler-plugin-3.11.0.jar (48/67 kB)
+Progress (1): maven-compiler-plugin-3.11.0.jar (56/67 kB)
+Progress (1): maven-compiler-plugin-3.11.0.jar (64/67 kB)
+Progress (1): maven-compiler-plugin-3.11.0.jar (67/67 kB)
+[INFO] Copying 3 resource files to /home/user/myapp/target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ myapp ---
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/codehaus/plexus/plexus-compiler-api/2.13.0/plexus-compiler-api-2.13.0.jar
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/codehaus/plexus/plexus-compiler-api/2.13.0/plexus-compiler-api-2.13.0.jar (27 kB at 89 kB/s)
+[INFO] Changes detected - recompiling the module! :plain:
+[INFO] Compiling 42 source files to /home/user/myapp/target/classes
+[INFO]
+[WARNING] /home/user/myapp/src/main/java/com/example/LegacyService.java: Some input files use unchecked or unsafe operations.
+[WARNING] /home/user/myapp/src/main/java/com/example/LegacyService.java: Recompile with -Xlint:unchecked for details.
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.0:testResources (default-testResources) @ myapp ---
+[INFO] Copying 2 resource files to /home/user/myapp/target/test-classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) @ myapp ---
+[INFO] Compiling 18 source files to /home/user/myapp/target/test-classes
+[INFO]
+[INFO] --- maven-surefire-plugin:3.1.2:test (default-test) @ myapp ---
+[INFO] Skipping execution of surefire because it has already been run for this configuration
+[INFO]
+[INFO] --- maven-jar-plugin:3.3.0:jar (default-jar) @ myapp ---
+[INFO] Building jar: /home/user/myapp/target/myapp-1.0.0-SNAPSHOT.jar
+[INFO]
+[INFO] --- spring-boot-maven-plugin:3.1.0:repackage (repackage) @ myapp ---
+[INFO] Replacing main artifact /home/user/myapp/target/myapp-1.0.0-SNAPSHOT.jar with repackaged archive. The original artifact is saved as /home/user/myapp/target/myapp-1.0.0-SNAPSHOT.jar.original
+[INFO]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  18.432 s
+[INFO] Finished at: 2026-03-10T14:30:12+00:00
+[INFO] ------------------------------------------------------------------------
+[INFO]
+[INFO] Reactor Summary for myapp 1.0.0-SNAPSHOT:
+[INFO]
+[INFO] myapp ............................................. SUCCESS [ 18.432 s]
+[INFO]
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------

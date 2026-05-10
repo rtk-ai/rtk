@@ -1,0 +1,255 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] -------------------------< com.example:myapp >--------------------------
+[INFO] Building myapp 1.0.0-SNAPSHOT
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-dependency-plugin:3.6.0:resolve (default-cli) @ myapp ---
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-dependency-plugin/3.6.0/maven-dependency-plugin-3.6.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-dependency-plugin/3.6.0/maven-dependency-plugin-3.6.0.pom (13 kB at 45 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/boot/spring-boot-starter-web/3.2.0/spring-boot-starter-web-3.2.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/boot/spring-boot-starter-web/3.2.0/spring-boot-starter-web-3.2.0.pom (2.5 kB at 102 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/boot/spring-boot-starter/3.2.0/spring-boot-starter-3.2.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/boot/spring-boot-starter/3.2.0/spring-boot-starter-3.2.0.pom (2.6 kB at 130 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/boot/spring-boot-autoconfigure/3.2.0/spring-boot-autoconfigure-3.2.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/boot/spring-boot-autoconfigure/3.2.0/spring-boot-autoconfigure-3.2.0.pom (1.5 kB at 75 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/spring-webmvc/6.1.1/spring-webmvc-6.1.1.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/spring-webmvc/6.1.1/spring-webmvc-6.1.1.pom (3.2 kB at 160 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/spring-context/6.1.1/spring-context-6.1.1.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/spring-context/6.1.1/spring-context-6.1.1.pom (3.0 kB at 150 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/spring-beans/6.1.1/spring-beans-6.1.1.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/spring-beans/6.1.1/spring-beans-6.1.1.pom (2.8 kB at 140 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/spring-core/6.1.1/spring-core-6.1.1.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/spring-core/6.1.1/spring-core-6.1.1.pom (3.5 kB at 175 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/spring-aop/6.1.1/spring-aop-6.1.1.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/spring-aop/6.1.1/spring-aop-6.1.1.pom (2.1 kB at 105 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/spring-expression/6.1.1/spring-expression-6.1.1.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/spring-expression/6.1.1/spring-expression-6.1.1.pom (1.8 kB at 90 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/hibernate/validator/hibernate-validator/8.0.1.Final/hibernate-validator-8.0.1.Final.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/hibernate/validator/hibernate-validator/8.0.1.Final/hibernate-validator-8.0.1.Final.pom (4.2 kB at 210 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.16.0/jackson-databind-2.16.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.16.0/jackson-databind-2.16.0.pom (5.1 kB at 255 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/com/fasterxml/jackson/core/jackson-core/2.16.0/jackson-core-2.16.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/com/fasterxml/jackson/core/jackson-core/2.16.0/jackson-core-2.16.0.pom (4.8 kB at 240 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/io/micrometer/micrometer-core/1.12.0/micrometer-core-1.12.0.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/io/micrometer/micrometer-core/1.12.0/micrometer-core-1.12.0.pom (6.3 kB at 315 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/2.0.9/slf4j-api-2.0.9.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/2.0.9/slf4j-api-2.0.9.pom (1.2 kB at 60 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.4.11/logback-classic-1.4.11.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/ch/qos/logback/logback-classic/1.4.11/logback-classic-1.4.11.pom (3.8 kB at 190 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/tomcat/embed/tomcat-embed-core/10.1.16/tomcat-embed-core-10.1.16.jar
+Progress (1): tomcat-embed-core-10.1.16.jar (32/478 kB)
+Progress (2): tomcat-embed-core-10.1.16.jar (64/478 kB)
+Progress (3): tomcat-embed-core-10.1.16.jar (96/478 kB)
+Progress (4): tomcat-embed-core-10.1.16.jar (128/478 kB)
+Progress (5): tomcat-embed-core-10.1.16.jar (160/478 kB)
+Progress (6): tomcat-embed-core-10.1.16.jar (192/478 kB)
+Progress (7): tomcat-embed-core-10.1.16.jar (224/478 kB)
+Progress (8): tomcat-embed-core-10.1.16.jar (256/478 kB)
+Progress (9): tomcat-embed-core-10.1.16.jar (288/478 kB)
+Progress (10): tomcat-embed-core-10.1.16.jar (320/478 kB)
+Progress (11): tomcat-embed-core-10.1.16.jar (352/478 kB)
+Progress (12): tomcat-embed-core-10.1.16.jar (384/478 kB)
+Progress (13): tomcat-embed-core-10.1.16.jar (416/478 kB)
+Progress (14): tomcat-embed-core-10.1.16.jar (448/478 kB)
+Progress (15): tomcat-embed-core-10.1.16.jar (478/478 kB)
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/tomcat/embed/tomcat-embed-core/10.1.16/tomcat-embed-core-10.1.16.jar (478 kB at 9.5 MB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/spring-webmvc/6.1.1/spring-webmvc-6.1.1.jar
+Progress (1): spring-webmvc-6.1.1.jar (32/987 kB)
+Progress (2): spring-webmvc-6.1.1.jar (64/987 kB)
+Progress (3): spring-webmvc-6.1.1.jar (96/987 kB)
+Progress (4): spring-webmvc-6.1.1.jar (128/987 kB)
+Progress (5): spring-webmvc-6.1.1.jar (160/987 kB)
+Progress (6): spring-webmvc-6.1.1.jar (192/987 kB)
+Progress (7): spring-webmvc-6.1.1.jar (224/987 kB)
+Progress (8): spring-webmvc-6.1.1.jar (256/987 kB)
+Progress (9): spring-webmvc-6.1.1.jar (288/987 kB)
+Progress (10): spring-webmvc-6.1.1.jar (320/987 kB)
+Progress (11): spring-webmvc-6.1.1.jar (352/987 kB)
+Progress (12): spring-webmvc-6.1.1.jar (384/987 kB)
+Progress (13): spring-webmvc-6.1.1.jar (416/987 kB)
+Progress (14): spring-webmvc-6.1.1.jar (448/987 kB)
+Progress (15): spring-webmvc-6.1.1.jar (480/987 kB)
+Progress (16): spring-webmvc-6.1.1.jar (512/987 kB)
+Progress (17): spring-webmvc-6.1.1.jar (544/987 kB)
+Progress (18): spring-webmvc-6.1.1.jar (576/987 kB)
+Progress (19): spring-webmvc-6.1.1.jar (608/987 kB)
+Progress (20): spring-webmvc-6.1.1.jar (640/987 kB)
+Progress (21): spring-webmvc-6.1.1.jar (672/987 kB)
+Progress (22): spring-webmvc-6.1.1.jar (704/987 kB)
+Progress (23): spring-webmvc-6.1.1.jar (736/987 kB)
+Progress (24): spring-webmvc-6.1.1.jar (768/987 kB)
+Progress (25): spring-webmvc-6.1.1.jar (800/987 kB)
+Progress (26): spring-webmvc-6.1.1.jar (832/987 kB)
+Progress (27): spring-webmvc-6.1.1.jar (864/987 kB)
+Progress (28): spring-webmvc-6.1.1.jar (896/987 kB)
+Progress (29): spring-webmvc-6.1.1.jar (928/987 kB)
+Progress (30): spring-webmvc-6.1.1.jar (960/987 kB)
+Progress (31): spring-webmvc-6.1.1.jar (987/987 kB)
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/spring-webmvc/6.1.1/spring-webmvc-6.1.1.jar (987 kB at 12.3 MB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/springframework/spring-context/6.1.1/spring-context-6.1.1.jar
+Progress (1): spring-context-6.1.1.jar (32/1314 kB)
+Progress (2): spring-context-6.1.1.jar (64/1314 kB)
+Progress (3): spring-context-6.1.1.jar (96/1314 kB)
+Progress (4): spring-context-6.1.1.jar (128/1314 kB)
+Progress (5): spring-context-6.1.1.jar (160/1314 kB)
+Progress (6): spring-context-6.1.1.jar (192/1314 kB)
+Progress (7): spring-context-6.1.1.jar (224/1314 kB)
+Progress (8): spring-context-6.1.1.jar (256/1314 kB)
+Progress (9): spring-context-6.1.1.jar (288/1314 kB)
+Progress (10): spring-context-6.1.1.jar (320/1314 kB)
+Progress (11): spring-context-6.1.1.jar (352/1314 kB)
+Progress (12): spring-context-6.1.1.jar (384/1314 kB)
+Progress (13): spring-context-6.1.1.jar (416/1314 kB)
+Progress (14): spring-context-6.1.1.jar (448/1314 kB)
+Progress (15): spring-context-6.1.1.jar (480/1314 kB)
+Progress (16): spring-context-6.1.1.jar (512/1314 kB)
+Progress (17): spring-context-6.1.1.jar (544/1314 kB)
+Progress (18): spring-context-6.1.1.jar (576/1314 kB)
+Progress (19): spring-context-6.1.1.jar (608/1314 kB)
+Progress (20): spring-context-6.1.1.jar (640/1314 kB)
+Progress (21): spring-context-6.1.1.jar (672/1314 kB)
+Progress (22): spring-context-6.1.1.jar (704/1314 kB)
+Progress (23): spring-context-6.1.1.jar (736/1314 kB)
+Progress (24): spring-context-6.1.1.jar (768/1314 kB)
+Progress (25): spring-context-6.1.1.jar (800/1314 kB)
+Progress (26): spring-context-6.1.1.jar (832/1314 kB)
+Progress (27): spring-context-6.1.1.jar (864/1314 kB)
+Progress (28): spring-context-6.1.1.jar (896/1314 kB)
+Progress (29): spring-context-6.1.1.jar (928/1314 kB)
+Progress (30): spring-context-6.1.1.jar (960/1314 kB)
+Progress (31): spring-context-6.1.1.jar (992/1314 kB)
+Progress (32): spring-context-6.1.1.jar (1024/1314 kB)
+Progress (33): spring-context-6.1.1.jar (1056/1314 kB)
+Progress (34): spring-context-6.1.1.jar (1088/1314 kB)
+Progress (35): spring-context-6.1.1.jar (1120/1314 kB)
+Progress (36): spring-context-6.1.1.jar (1152/1314 kB)
+Progress (37): spring-context-6.1.1.jar (1184/1314 kB)
+Progress (38): spring-context-6.1.1.jar (1216/1314 kB)
+Progress (39): spring-context-6.1.1.jar (1248/1314 kB)
+Progress (40): spring-context-6.1.1.jar (1280/1314 kB)
+Progress (41): spring-context-6.1.1.jar (1314/1314 kB)
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/springframework/spring-context/6.1.1/spring-context-6.1.1.jar (1314 kB at 13.1 MB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.16.0/jackson-databind-2.16.0.jar
+Progress (1): jackson-databind-2.16.0.jar (32/1579 kB)
+Progress (2): jackson-databind-2.16.0.jar (64/1579 kB)
+Progress (3): jackson-databind-2.16.0.jar (96/1579 kB)
+Progress (4): jackson-databind-2.16.0.jar (128/1579 kB)
+Progress (5): jackson-databind-2.16.0.jar (160/1579 kB)
+Progress (6): jackson-databind-2.16.0.jar (192/1579 kB)
+Progress (7): jackson-databind-2.16.0.jar (224/1579 kB)
+Progress (8): jackson-databind-2.16.0.jar (256/1579 kB)
+Progress (9): jackson-databind-2.16.0.jar (288/1579 kB)
+Progress (10): jackson-databind-2.16.0.jar (320/1579 kB)
+Progress (11): jackson-databind-2.16.0.jar (352/1579 kB)
+Progress (12): jackson-databind-2.16.0.jar (384/1579 kB)
+Progress (13): jackson-databind-2.16.0.jar (416/1579 kB)
+Progress (14): jackson-databind-2.16.0.jar (448/1579 kB)
+Progress (15): jackson-databind-2.16.0.jar (480/1579 kB)
+Progress (16): jackson-databind-2.16.0.jar (512/1579 kB)
+Progress (17): jackson-databind-2.16.0.jar (544/1579 kB)
+Progress (18): jackson-databind-2.16.0.jar (576/1579 kB)
+Progress (19): jackson-databind-2.16.0.jar (608/1579 kB)
+Progress (20): jackson-databind-2.16.0.jar (640/1579 kB)
+Progress (21): jackson-databind-2.16.0.jar (672/1579 kB)
+Progress (22): jackson-databind-2.16.0.jar (704/1579 kB)
+Progress (23): jackson-databind-2.16.0.jar (736/1579 kB)
+Progress (24): jackson-databind-2.16.0.jar (768/1579 kB)
+Progress (25): jackson-databind-2.16.0.jar (800/1579 kB)
+Progress (26): jackson-databind-2.16.0.jar (832/1579 kB)
+Progress (27): jackson-databind-2.16.0.jar (864/1579 kB)
+Progress (28): jackson-databind-2.16.0.jar (896/1579 kB)
+Progress (29): jackson-databind-2.16.0.jar (928/1579 kB)
+Progress (30): jackson-databind-2.16.0.jar (960/1579 kB)
+Progress (31): jackson-databind-2.16.0.jar (992/1579 kB)
+Progress (32): jackson-databind-2.16.0.jar (1024/1579 kB)
+Progress (33): jackson-databind-2.16.0.jar (1056/1579 kB)
+Progress (34): jackson-databind-2.16.0.jar (1088/1579 kB)
+Progress (35): jackson-databind-2.16.0.jar (1120/1579 kB)
+Progress (36): jackson-databind-2.16.0.jar (1152/1579 kB)
+Progress (37): jackson-databind-2.16.0.jar (1184/1579 kB)
+Progress (38): jackson-databind-2.16.0.jar (1216/1579 kB)
+Progress (39): jackson-databind-2.16.0.jar (1248/1579 kB)
+Progress (40): jackson-databind-2.16.0.jar (1280/1579 kB)
+Progress (41): jackson-databind-2.16.0.jar (1312/1579 kB)
+Progress (42): jackson-databind-2.16.0.jar (1344/1579 kB)
+Progress (43): jackson-databind-2.16.0.jar (1376/1579 kB)
+Progress (44): jackson-databind-2.16.0.jar (1408/1579 kB)
+Progress (45): jackson-databind-2.16.0.jar (1440/1579 kB)
+Progress (46): jackson-databind-2.16.0.jar (1472/1579 kB)
+Progress (47): jackson-databind-2.16.0.jar (1504/1579 kB)
+Progress (48): jackson-databind-2.16.0.jar (1536/1579 kB)
+Progress (49): jackson-databind-2.16.0.jar (1568/1579 kB)
+Progress (50): jackson-databind-2.16.0.jar (1579/1579 kB)
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.16.0/jackson-databind-2.16.0.jar (1579 kB at 14.2 MB/s)
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.0:resources (default-resources) @ myapp ---
+[INFO] Copying 3 resource files to /home/user/myapp/target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ myapp ---
+[INFO] Changes detected - recompiling the module! :plain:
+[INFO] Compiling 42 source files to /home/user/myapp/target/classes
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.0:testResources (default-testResources) @ myapp ---
+[INFO] Copying 2 resource files to /home/user/myapp/target/test-classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) @ myapp ---
+[INFO] Compiling 18 source files to /home/user/myapp/target/test-classes
+[INFO]
+[INFO] --- maven-surefire-plugin:3.1.2:test (default-test) @ myapp ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO]
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.UserServiceTest
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.452 s - in com.example.UserServiceTest
+[INFO] Running com.example.ProductServiceTest
+[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.213 s <<< FAILURE! - in com.example.ProductServiceTest
+[ERROR] com.example.ProductServiceTest.testProductPriceCalculation -- Time elapsed: 0.047 s <<< FAILURE!
+java.lang.AssertionError: expected:<150.0> but was:<149.99>
+	at org.junit.jupiter.api.AssertionUtils.fail(AssertionUtils.java:55)
+	at org.junit.jupiter.api.AssertEquals.failNotEqual(AssertEquals.java:195)
+	at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:152)
+	at org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:1141)
+	at com.example.ProductServiceTest.testProductPriceCalculation(ProductServiceTest.java:47)
+[INFO] Running com.example.OrderServiceTest
+[ERROR] Tests run: 4, Failures: 0, Errors: 1, Skipped: 0, Time elapsed: 0.318 s <<< ERROR! - in com.example.OrderServiceTest
+[ERROR] com.example.OrderServiceTest.testOrderCreationWithInvalidItems -- Time elapsed: 0.012 s <<< ERROR!
+java.lang.NullPointerException: Cannot invoke method on null
+	at com.example.OrderService.createOrder(OrderService.java:87)
+	at com.example.OrderServiceTest.testOrderCreationWithInvalidItems(OrderServiceTest.java:63)
+[INFO] Running com.example.InventoryRepositoryTest
+[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.891 s - in com.example.InventoryRepositoryTest
+[INFO] Running com.example.PaymentGatewayTest
+[WARNING] No unique index found for entity class com.example.Payment
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 2, Time elapsed: 1.204 s - in com.example.PaymentGatewayTest
+[INFO] Running com.example.EmailNotificationTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.156 s - in com.example.EmailNotificationTest
+[INFO]
+[INFO] Results:
+[INFO]
+[ERROR] Failures:
+[ERROR]   ProductServiceTest.testProductPriceCalculation:47 expected:<150.0> but was:<149.99>
+[ERROR] Errors:
+[ERROR]   OrderServiceTest.testOrderCreationWithInvalidItems:63 » NullPointer Cannot invoke method on null
+[INFO]
+[ERROR] Tests run: 29, Failures: 1, Errors: 1, Skipped: 2
+[INFO]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  12.847 s
+[INFO] Finished at: 2026-03-10T14:23:45+00:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.1.2:test (default-test) on project myapp: There are test failures.
+[ERROR]
+[ERROR] Please refer to /home/user/myapp/target/surefire-reports for the individual test results.
+[ERROR] Please refer to dump files (if any exist) [date].dump, [date]-jvmRun[N].dump and [date].dumpstream.
+[INFO]
+[INFO] Reactor Summary for myapp 1.0.0-SNAPSHOT:
+[INFO]
+[INFO] myapp ............................................. FAILURE [ 12.847 s]
+[INFO]
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
