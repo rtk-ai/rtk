@@ -49,9 +49,18 @@ pub fn run(
 
     let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
+            // Fallback when rg is unavailable: invoke GNU grep with the same
+            // user-supplied extra_args (e.g. --invert-match for #1477) so
+            // forwarded flags like -v still take effect.
             let mut grep_cmd = resolved_command("grep");
-            //When we fall back to grep,include all args, not just -rn.
-            grep_cmd.args(["-rn", pattern, path]).args(extra_args);
+            grep_cmd.arg("-rn");
+            for arg in extra_args {
+                if arg == "-r" || arg == "--recursive" {
+                    continue;
+                }
+                grep_cmd.arg(arg);
+            }
+            grep_cmd.args([pattern, path]);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;

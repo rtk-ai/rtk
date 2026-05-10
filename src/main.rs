@@ -318,6 +318,11 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Invert match — select lines that do NOT match the pattern (grep/rg -v).
+        /// `-v` is reserved for global --verbose; `rtk` translates a literal `-v`
+        /// after the `grep` subcommand into this flag (issue #1477).
+        #[arg(long = "invert-match")]
+        invert_match: bool,
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -1348,11 +1353,47 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Pre-clap argv rewrites for subcommands whose native flags collide with rtk's
+/// global flags. Today only `rtk grep` is affected: `-v` would be eaten by the
+/// global `--verbose` count flag (issue #1477). Translate it to the long form
+/// before clap parses so the intent reaches the grep handler intact.
+fn preprocess_argv(argv: Vec<OsString>) -> Vec<OsString> {
+    let mut iter = argv.into_iter();
+    let prog = match iter.next() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let mut out: Vec<OsString> = Vec::with_capacity(8);
+    out.push(prog);
+
+    let subcmd = match iter.next() {
+        Some(s) => s,
+        None => return out,
+    };
+    let is_grep = subcmd.to_str() == Some("grep");
+    out.push(subcmd);
+
+    if !is_grep {
+        out.extend(iter);
+        return out;
+    }
+
+    for arg in iter {
+        let translated = match arg.to_str() {
+            Some("-v") => OsString::from("--invert-match"),
+            _ => arg,
+        };
+        out.push(translated);
+    }
+    out
+}
+
 fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
 
-    let cli = match Cli::try_parse() {
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(preprocess_argv(argv)) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
@@ -1742,17 +1783,27 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
-            extra_args,
-        } => grep_cmd::run(
-            &pattern,
-            &path,
-            max_len,
-            max,
-            context_only,
-            file_type.as_deref(),
-            &extra_args,
-            cli.verbose,
-        )?,
+            invert_match,
+            mut extra_args,
+        } => {
+            // #1477: surface the invert-match flag to rg via extra_args so non-matching
+            // lines are returned. The `-v` short alias is rewritten to
+            // `--invert-match` by `preprocess_argv` before clap parses, then projected
+            // here as the explicit `invert_match` boolean.
+            if invert_match {
+                extra_args.insert(0, "--invert-match".to_string());
+            }
+            grep_cmd::run(
+                &pattern,
+                &path,
+                max_len,
+                max,
+                context_only,
+                file_type.as_deref(),
+                &extra_args,
+                cli.verbose,
+            )?
+        }
 
         Commands::Init {
             global,
@@ -2617,6 +2668,86 @@ mod tests {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             )),
             Ok(_) => panic!("Expected parse error for unknown subcommand"),
+        }
+    }
+
+    /// Regression test for #1477 — `rtk grep -v PATTERN PATH` previously had `-v`
+    /// consumed by the global `--verbose` count flag, leaving extra_args empty and
+    /// the search uninverted. The argv preprocessor must rewrite `-v` to
+    /// `--invert-match` so clap surfaces the invert intent on the Grep handler.
+    #[test]
+    fn test_preprocess_grep_v_becomes_invert_match() {
+        let input: Vec<OsString> = ["rtk", "grep", "-v", "foo", "/etc/hosts"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let out = preprocess_argv(input);
+        let strs: Vec<&str> = out.iter().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(
+            strs,
+            vec!["rtk", "grep", "--invert-match", "foo", "/etc/hosts"]
+        );
+    }
+
+    #[test]
+    fn test_preprocess_only_rewrites_for_grep_subcommand() {
+        // -v outside `rtk grep` MUST remain a verbosity flag.
+        let input: Vec<OsString> = ["rtk", "git", "-v", "status"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let out = preprocess_argv(input);
+        let strs: Vec<&str> = out.iter().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(strs, vec!["rtk", "git", "-v", "status"]);
+    }
+
+    #[test]
+    fn test_grep_invert_match_flag_parses() {
+        let result = Cli::try_parse_from(["rtk", "grep", "--invert-match", "foo", "/etc/hosts"]);
+        assert!(result.is_ok(), "--invert-match should parse cleanly");
+        if let Ok(cli) = result {
+            match cli.command {
+                Commands::Grep {
+                    invert_match,
+                    pattern,
+                    path,
+                    ..
+                } => {
+                    assert!(invert_match);
+                    assert_eq!(pattern, "foo");
+                    assert_eq!(path, "/etc/hosts");
+                }
+                _ => panic!("Expected Commands::Grep"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_grep_dash_v_full_pipeline_inverts_search() {
+        // End-to-end: simulate the full argv → preprocess → clap pipeline
+        // described in the regression report.
+        let raw: Vec<OsString> = ["rtk", "grep", "-v", "foo", "/etc/hosts"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let processed = preprocess_argv(raw);
+        let cli = Cli::try_parse_from(processed).expect("preprocessed argv must parse");
+        match cli.command {
+            Commands::Grep {
+                invert_match,
+                pattern,
+                path,
+                ..
+            } => {
+                assert!(
+                    invert_match,
+                    "-v after `grep` must reach the Grep::invert_match field"
+                );
+                assert_eq!(pattern, "foo");
+                assert_eq!(path, "/etc/hosts");
+                assert_eq!(cli.verbose, 0, "global verbose must NOT have been bumped");
+            }
+            _ => panic!("Expected Commands::Grep"),
         }
     }
 
