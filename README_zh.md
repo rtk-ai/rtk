@@ -33,9 +33,9 @@
 
 ---
 
-rtk 在命令输出到达 LLM 上下文之前进行过滤和压缩。单一 Rust 二进制文件，零依赖，<10ms 开销。
+rtk 在命令输出到达 LLM 上下文之前进行过滤和压缩。兼容所有 AI 编程代理，只需在命令前加 `rtk`。单一二进制文件，零依赖，<10ms 开销。
 
-## Token 节省（30 分钟 Claude Code 会话）
+## Token 节省（30 分钟编程会话）
 
 | 操作 | 频率 | 标准 | rtk | 节省 |
 |------|------|------|-----|------|
@@ -76,20 +76,28 @@ rtk gain        # 应显示 token 节省统计
 
 ## 快速开始
 
+**直接用于任何代理：**
 ```bash
-# 1. 为 Claude Code 安装 hook（推荐）
-rtk init --global
-
-# 2. 重启 Claude Code，然后测试
-git status  # 自动重写为 rtk git status
+rtk git status              # 紧凑状态
+rtk cargo test              # 仅显示失败 (-90%)
+rtk grep "pattern" .        # 分组结果
 ```
+
+**或使用 Claude Code 自动重写：**
+```bash
+rtk init --global           # 安装 hook
+# 重启 Claude Code — 命令自动重写
+git status                  # → rtk git status（透明）
+```
+
+RTK 是独立的二进制文件。Claude Code hook 可自动重写命令，但任何代理都可以通过添加 `rtk` 前缀来使用。
 
 ## 工作原理
 
 ```
   没有 rtk：                                      使用 rtk：
 
-  Claude  --git status-->  shell  -->  git         Claude  --git status-->  RTK  -->  git
+  Agent  --git status-->  shell  -->  git          Agent  --git status-->  RTK  -->  git
     ^                                   |            ^                      |          |
     |        ~2,000 tokens（原始）       |            |   ~200 tokens        | 过滤     |
     +-----------------------------------+            +------- （已过滤）-----+----------+
@@ -148,8 +156,17 @@ rtk kubectl pods                # 紧凑 Pod 列表
 ```bash
 rtk gain                        # 节省统计
 rtk gain --graph                # ASCII 图表（30 天）
-rtk discover                    # 发现遗漏的节省机会
 ```
+
+_仅限 Claude Code_（读取 `~/.claude/projects/` 会话文件）：
+```bash
+rtk discover                    # 发现历史记录中遗漏的节省机会
+rtk discover --all --since 7    # 所有项目，最近 7 天
+rtk learn                       # 从错误历史中学习 CLI 纠正
+rtk cc-economics                # 按 Claude Code 会话分析 token 成本
+```
+
+> **即将推出**：`rtk discover` 支持 Aider、Cline、Goose 及 shell 历史（适用于所有代理）。关注 [#273](https://github.com/rtk-ai/rtk/issues/273)。
 
 ## 文档
 

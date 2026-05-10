@@ -33,9 +33,9 @@
 
 ---
 
-rtk filters and compresses command outputs before they reach your LLM context. Single Rust binary, 100+ supported commands, <10ms overhead.
+rtk filters and compresses command outputs before they reach your LLM context. Works with any AI coding agent — just prefix commands with `rtk`. 100+ supported commands, single binary, <10ms overhead.
 
-## Token Savings (30-min Claude Code Session)
+## Token Savings (30-min Coding Session)
 
 | Operation | Frequency | Standard | rtk | Savings |
 |-----------|-----------|----------|-----|---------|
@@ -100,31 +100,36 @@ rtk gain        # Should show token savings stats
 
 ## Quick Start
 
+**Use directly with any agent:**
 ```bash
-# 1. Install for your AI tool
+rtk git status              # Compact status (any agent)
+rtk cargo test              # Failures only, -90%
+rtk grep "pattern" .        # Grouped results
+```
+
+**Or auto-rewrite with a hook (commands rewrite transparently):**
+```bash
 rtk init -g                     # Claude Code / Copilot (default)
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
-rtk init -g --agent cursor      # Cursor
+rtk init --agent cursor         # Cursor
 rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
-
-# 2. Restart your AI tool, then test
-git status  # Automatically rewritten to rtk git status
+# Restart your AI tool — `git status` auto-rewrites to `rtk git status`
 ```
 
-The hook transparently rewrites Bash commands (e.g., `git status` -> `rtk git status`) before execution. Claude never sees the rewrite, it just gets compressed output.
+The hook transparently rewrites Bash commands before execution. Your agent never sees the rewrite, it just gets compressed output.
 
-**Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
+**Note:** hooks only run on Bash tool calls. Built-in tools like `Read`, `Grep`, `Glob` bypass the hook — call `rtk read`, `rtk grep`, `rtk find` directly for those.
 
 ## How It Works
 
 ```
   Without rtk:                                    With rtk:
 
-  Claude  --git status-->  shell  -->  git         Claude  --git status-->  RTK  -->  git
+  Agent  --git status-->  shell  -->  git          Agent  --git status-->  RTK  -->  git
     ^                                   |            ^                      |          |
     |        ~2,000 tokens (raw)        |            |   ~200 tokens        | filter   |
     +-----------------------------------+            +------- (filtered) ---+----------+
@@ -248,12 +253,17 @@ rtk gain --graph                # ASCII graph (last 30 days)
 rtk gain --history              # Recent command history
 rtk gain --daily                # Day-by-day breakdown
 rtk gain --all --format json    # JSON export for dashboards
-
-rtk discover                    # Find missed savings opportunities
-rtk discover --all --since 7    # All projects, last 7 days
-
-rtk session                     # Show RTK adoption across recent sessions
 ```
+
+_Claude Code only_ (reads `~/.claude/projects/` session files):
+```bash
+rtk discover                    # Find missed savings opportunities in session history
+rtk discover --all --since 7    # All projects, last 7 days
+rtk learn                       # Learn CLI corrections from error history
+rtk cc-economics                # Token cost analysis by Claude Code session
+```
+
+> **Coming soon**: `rtk discover` for Aider, Cline, Goose, and shell history (any agent). Follow [#273](https://github.com/rtk-ai/rtk/issues/273).
 
 ## Global Flags
 
@@ -291,9 +301,11 @@ test utils::test_format ... ok              test_overflow: panic at utils.rs:18
 ...
 ```
 
-## Auto-Rewrite Hook
+## Auto-Rewrite Hook (Claude Code)
 
-The most effective way to use rtk. The hook transparently intercepts Bash commands and rewrites them to rtk equivalents before execution.
+RTK works with any agent by prefixing commands with `rtk`. The hook below is specific to Claude Code — it makes the rewrite automatic.
+
+The most effective way to use rtk with Claude Code. The hook transparently intercepts Bash commands and rewrites them to rtk equivalents before execution.
 
 **Result**: 100% rtk adoption across all conversations and subagents, zero token overhead.
 

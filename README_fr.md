@@ -33,9 +33,9 @@
 
 ---
 
-rtk filtre et compresse les sorties de commandes avant qu'elles n'atteignent le contexte de votre LLM. Binaire Rust unique, zero dependance, <10ms d'overhead.
+rtk filtre et compresse les sorties de commandes avant qu'elles n'atteignent le contexte de votre LLM. Compatible avec tous les agents de code IA — il suffit de prefixer les commandes avec `rtk`. Binaire unique, zero dependance, <10ms d'overhead.
 
-## Economies de tokens (session Claude Code de 30 min)
+## Economies de tokens (session de developpement de 30 min)
 
 | Operation | Frequence | Standard | rtk | Economies |
 |-----------|-----------|----------|-----|-----------|
@@ -82,23 +82,28 @@ rtk gain        # Doit afficher les statistiques d'economies
 
 ## Demarrage rapide
 
+**Utilisation directe avec n'importe quel agent :**
 ```bash
-# 1. Installer le hook pour Claude Code (recommande)
-rtk init --global
-# Suivre les instructions pour enregistrer dans ~/.claude/settings.json
-
-# 2. Redemarrer Claude Code, puis tester
-git status  # Automatiquement reecrit en rtk git status
+rtk git status              # Statut compact
+rtk cargo test              # Echecs uniquement (-90%)
+rtk grep "pattern" .        # Resultats groupes
 ```
 
-Le hook reecrit de maniere transparente les commandes (ex: `git status` -> `rtk git status`) avant execution.
+**Ou reecriture automatique avec Claude Code :**
+```bash
+rtk init --global           # Installer le hook
+# Redemarrer Claude Code — les commandes sont reecrites automatiquement
+git status                  # → rtk git status (transparent)
+```
+
+RTK est un binaire autonome. Le hook Claude Code reecrit les commandes automatiquement, mais n'importe quel agent fonctionne en prefixant `rtk`.
 
 ## Comment ca marche
 
 ```
   Sans rtk :                                       Avec rtk :
 
-  Claude  --git status-->  shell  -->  git          Claude  --git status-->  RTK  -->  git
+  Agent  --git status-->  shell  -->  git           Agent  --git status-->  RTK  -->  git
     ^                                   |             ^                      |          |
     |        ~2 000 tokens (brut)       |             |   ~200 tokens        | filtre   |
     +-----------------------------------+             +------- (filtre) -----+----------+
@@ -163,8 +168,17 @@ rtk kubectl pods                # Pods compacts
 ```bash
 rtk gain                        # Statistiques d'economies
 rtk gain --graph                # Graphique ASCII (30 jours)
-rtk discover                    # Trouver les economies manquees
 ```
+
+_Claude Code uniquement_ (lit les fichiers de session `~/.claude/projects/`) :
+```bash
+rtk discover                    # Opportunites d'economies manquees dans l'historique
+rtk discover --all --since 7    # Tous les projets, 7 derniers jours
+rtk learn                       # Corrections CLI depuis l'historique d'erreurs
+rtk cc-economics                # Analyse des couts tokens par session Claude Code
+```
+
+> **Bientot** : `rtk discover` pour Aider, Cline, Goose et l'historique shell (tous agents). Suivre [#273](https://github.com/rtk-ai/rtk/issues/273).
 
 ## Configuration
 

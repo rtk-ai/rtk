@@ -33,9 +33,9 @@
 
 ---
 
-rtk はコマンド出力を LLM コンテキストに届く前にフィルタリング・圧縮します。単一の Rust バイナリ、依存関係ゼロ、オーバーヘッド 10ms 未満。
+rtk はコマンド出力を LLM コンテキストに届く前にフィルタリング・圧縮します。すべての AI コーディングエージェントに対応し、コマンドの前に `rtk` を付けるだけで使えます。単一バイナリ、依存関係ゼロ、オーバーヘッド 10ms 未満。
 
-## トークン節約（30分の Claude Code セッション）
+## トークン節約（30分のコーディングセッション）
 
 | 操作 | 頻度 | 標準 | rtk | 節約 |
 |------|------|------|-----|------|
@@ -75,20 +75,28 @@ rtk gain        # トークン節約統計が表示されるはず
 
 ## クイックスタート
 
+**任意のエージェントで直接使用：**
 ```bash
-# 1. Claude Code 用フックをインストール（推奨）
-rtk init --global
-
-# 2. Claude Code を再起動してテスト
-git status  # 自動的に rtk git status に書き換え
+rtk git status              # コンパクトなステータス
+rtk cargo test              # 失敗のみ (-90%)
+rtk grep "pattern" .        # グループ化された結果
 ```
+
+**または Claude Code で自動書き換え：**
+```bash
+rtk init --global           # フックをインストール
+# Claude Code を再起動 — コマンドが自動的に書き換えられます
+git status                  # → rtk git status（透過的）
+```
+
+RTK はスタンドアロンバイナリです。Claude Code フックはコマンドを自動書き換えしますが、`rtk` をプレフィックスとして付けることで任意のエージェントで動作します。
 
 ## 仕組み
 
 ```
   rtk なし：                                       rtk あり：
 
-  Claude  --git status-->  shell  -->  git          Claude  --git status-->  RTK  -->  git
+  Agent  --git status-->  shell  -->  git           Agent  --git status-->  RTK  -->  git
     ^                                   |             ^                      |          |
     |        ~2,000 tokens（生出力）     |             |   ~200 tokens        | フィルタ |
     +-----------------------------------+             +------- （圧縮済）----+----------+
@@ -140,8 +148,17 @@ rtk ruff check                  # Python リント（-80%）
 ```bash
 rtk gain                        # 節約統計
 rtk gain --graph                # ASCII グラフ（30日間）
-rtk discover                    # 見逃した節約機会を発見
 ```
+
+_Claude Code 専用_（`~/.claude/projects/` セッションファイルを読み取ります）：
+```bash
+rtk discover                    # セッション履歴から見逃した節約機会を発見
+rtk discover --all --since 7    # 全プロジェクト、過去7日間
+rtk learn                       # エラー履歴から CLI 修正を学習
+rtk cc-economics                # Claude Code セッション別トークンコスト分析
+```
+
+> **近日公開**：Aider、Cline、Goose、シェル履歴（全エージェント対応）で `rtk discover` をサポート予定。[#273](https://github.com/rtk-ai/rtk/issues/273) をフォロー。
 
 ## ドキュメント
 

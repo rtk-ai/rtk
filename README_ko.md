@@ -33,9 +33,9 @@
 
 ---
 
-rtk는 명령 출력이 LLM 컨텍스트에 도달하기 전에 필터링하고 압축합니다. 단일 Rust 바이너리, 의존성 없음, 10ms 미만의 오버헤드.
+rtk는 명령 출력이 LLM 컨텍스트에 도달하기 전에 필터링하고 압축합니다. 모든 AI 코딩 에이전트와 호환되며, 명령 앞에 `rtk`를 붙이기만 하면 됩니다. 단일 바이너리, 의존성 없음, 10ms 미만의 오버헤드.
 
-## 토큰 절약 (30분 Claude Code 세션)
+## 토큰 절약 (30분 코딩 세션)
 
 | 작업 | 빈도 | 표준 | rtk | 절약 |
 |------|------|------|-----|------|
@@ -75,20 +75,28 @@ rtk gain        # 토큰 절약 통계 표시되어야 함
 
 ## 빠른 시작
 
+**모든 에이전트에서 직접 사용:**
 ```bash
-# 1. Claude Code용 hook 설치 (권장)
-rtk init --global
-
-# 2. Claude Code 재시작 후 테스트
-git status  # 자동으로 rtk git status로 재작성
+rtk git status              # 컴팩트 상태
+rtk cargo test              # 실패만 표시 (-90%)
+rtk grep "pattern" .        # 그룹화된 결과
 ```
+
+**또는 Claude Code로 자동 재작성:**
+```bash
+rtk init --global           # hook 설치
+# Claude Code 재시작 — 명령이 자동으로 재작성됩니다
+git status                  # → rtk git status (투명)
+```
+
+RTK는 독립 실행형 바이너리입니다. Claude Code hook이 명령을 자동으로 재작성하지만, `rtk`를 접두사로 붙이면 어떤 에이전트에서도 작동합니다.
 
 ## 작동 원리
 
 ```
   rtk 없이:                                        rtk 사용:
 
-  Claude  --git status-->  shell  -->  git          Claude  --git status-->  RTK  -->  git
+  Agent  --git status-->  shell  -->  git           Agent  --git status-->  RTK  -->  git
     ^                                   |             ^                      |          |
     |        ~2,000 tokens (원본)        |             |   ~200 tokens        | 필터     |
     +-----------------------------------+             +------- (필터링) -----+----------+
@@ -140,8 +148,17 @@ rtk ruff check                  # Python 린트 (-80%)
 ```bash
 rtk gain                        # 절약 통계
 rtk gain --graph                # ASCII 그래프 (30일)
-rtk discover                    # 놓친 절약 기회 발견
 ```
+
+_Claude Code 전용_ (`~/.claude/projects/` 세션 파일 읽기):
+```bash
+rtk discover                    # 세션 기록에서 놓친 절약 기회 발견
+rtk discover --all --since 7    # 모든 프로젝트, 최근 7일
+rtk learn                       # 오류 기록에서 CLI 수정 학습
+rtk cc-economics                # Claude Code 세션별 토큰 비용 분석
+```
+
+> **출시 예정**: Aider, Cline, Goose 및 셸 히스토리(모든 에이전트)에서 `rtk discover` 지원. [#273](https://github.com/rtk-ai/rtk/issues/273) 팔로우.
 
 ## 문서
 
