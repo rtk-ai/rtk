@@ -3233,6 +3233,19 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    static CODEX_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_codex_home<F: FnOnce()>(codex_home: &Path, f: F) {
+        let _guard = CODEX_HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", codex_home);
+        f();
+        match original {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+    }
+
     #[test]
     fn test_init_mentions_all_top_level_commands() {
         for cmd in [
@@ -3586,6 +3599,27 @@ mod tests {
         assert_eq!(preferred, codex_home);
         assert_eq!(empty_falls_back, home_dir.join(".codex"));
         assert_eq!(missing_falls_back, home_dir.join(".codex"));
+    }
+
+    #[test]
+    fn test_run_codex_mode_global_respects_codex_home_env() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".config/codex");
+
+        with_codex_home(&codex_dir, || {
+            run_codex_mode(true, 0).unwrap();
+        });
+
+        let agents_md = codex_dir.join(AGENTS_MD);
+        let rtk_md = codex_dir.join(RTK_MD);
+
+        assert!(agents_md.exists());
+        assert!(rtk_md.exists());
+        assert_eq!(
+            fs::read_to_string(&agents_md).unwrap(),
+            format!("{}\n", codex_rtk_md_ref(&codex_dir))
+        );
+        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_SLIM_CODEX);
     }
 
     #[test]
