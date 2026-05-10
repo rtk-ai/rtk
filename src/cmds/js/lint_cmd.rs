@@ -107,17 +107,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "eslint" => {
             cmd.arg("-f").arg("json");
         }
-        "ruff" => {
-            // Force JSON output for ruff check
-            if !effective_args.contains(&"--output-format".to_string()) {
-                cmd.arg("check").arg("--output-format=json");
-            }
+        // Force JSON output for ruff check
+        "ruff" if !effective_args.contains(&"--output-format".to_string()) => {
+            cmd.arg("check").arg("--output-format=json");
         }
-        "pylint" => {
-            // Force JSON2 output for pylint
-            if !effective_args.contains(&"--output-format".to_string()) {
-                cmd.arg("--output-format=json2");
-            }
+        // Force JSON2 output for pylint
+        "pylint" if !effective_args.contains(&"--output-format".to_string()) => {
+            cmd.arg("--output-format=json2");
         }
         "mypy" => {
             // mypy uses default text output (no special flags)
@@ -263,7 +259,7 @@ fn filter_eslint_json(output: &str) -> String {
         .filter(|r| !r.messages.is_empty())
         .map(|r| (r, r.messages.len()))
         .collect();
-    by_file.sort_by(|a, b| b.1.cmp(&a.1));
+    by_file.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     // Build output
     let mut result = String::new();

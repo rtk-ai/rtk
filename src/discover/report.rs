@@ -1,6 +1,6 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
-use crate::hooks::constants::{HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use crate::hooks::constants::{CURSOR_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
 use serde::Serialize;
 
 /// RTK support status for a command.
@@ -171,7 +171,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
     // Cursor note: check if Cursor hooks are installed
     if let Some(home) = dirs::home_dir() {
         let cursor_hook = home
-            .join(".cursor")
+            .join(CURSOR_DIR)
             .join(HOOKS_SUBDIR)
             .join(REWRITE_HOOK_FILE);
         if cursor_hook.exists() {

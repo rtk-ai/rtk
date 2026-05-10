@@ -16,6 +16,7 @@ use cmds::js::{
     lint_cmd, next_cmd, npm_cmd, playwright_cmd, pnpm_cmd, prettier_cmd, prisma_cmd, tsc_cmd,
     vitest_cmd,
 };
+use cmds::jvm::gradlew_cmd;
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -372,6 +373,10 @@ enum Commands {
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
+
+        /// Preview changes without writing any files (combine with -v to show content)
+        #[arg(long = "dry-run", conflicts_with = "show")]
+        dry_run: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -747,6 +752,14 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Android Gradle wrapper with compact output (build, test, lint)
+    #[command(name = "gradlew")]
+    Gradlew {
+        /// Gradle tasks and arguments (e.g., assembleDebug, testDebugUnitTest, lint, --info)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Show hook rewrite audit metrics (requires RTK_HOOK_AUDIT=1)
     #[command(name = "hook-audit")]
     HookAudit {
@@ -897,8 +910,6 @@ enum PnpmCommands {
     },
     /// Install packages (filter progress bars)
     Install {
-        /// Packages to install
-        packages: Vec<String>,
         /// Additional pnpm arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -1612,8 +1623,8 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Install { packages, args } => pnpm_cmd::run(
-                    pnpm_cmd::PnpmCommand::Install { packages },
+                PnpmCommands::Install { args } => pnpm_cmd::run(
+                    pnpm_cmd::PnpmCommand::Install,
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
@@ -1783,12 +1794,17 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            dry_run,
         } => {
+            let ctx = hooks::init::InitContext {
+                verbose: cli.verbose,
+                dry_run,
+            };
             if show {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, cli.verbose)?;
+                hooks::init::uninstall(global, gemini, codex, cursor, ctx)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1797,21 +1813,21 @@ fn run_cli() -> Result<i32> {
                 } else {
                     hooks::init::PatchMode::Ask
                 };
-                hooks::init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
+                hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
-                hooks::init::run_copilot(cli.verbose)?;
+                hooks::init::run_copilot(ctx)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
                 }
-                hooks::init::run_kilocode_mode(cli.verbose)?;
+                hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
                 if global {
                     anyhow::bail!(
                         "Antigravity is project-scoped. Use: rtk init --agent antigravity"
                     );
                 }
-                hooks::init::run_antigravity_mode(cli.verbose)?;
+                hooks::init::run_antigravity_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -1837,7 +1853,7 @@ fn run_cli() -> Result<i32> {
                     hook_only,
                     codex,
                     patch_mode,
-                    cli.verbose,
+                    ctx,
                 )?;
             }
             0
@@ -2125,6 +2141,7 @@ fn run_cli() -> Result<i32> {
         Commands::Gxx { args } => gcc_cmd::run("g++", &args, cli.verbose)?,
         Commands::Clang { args } => gcc_cmd::run("clang", &args, cli.verbose)?,
         Commands::Clangxx { args } => gcc_cmd::run("clang++", &args, cli.verbose)?,
+        Commands::Gradlew { args } => gradlew_cmd::run(&args, cli.verbose)?,
 
         Commands::HookAudit { since } => {
             hooks::hook_audit_cmd::run(since, cli.verbose)?;
@@ -2151,10 +2168,10 @@ fn run_cli() -> Result<i32> {
             HookCommands::Check { agent: _, command } => {
                 use crate::discover::registry::rewrite_command;
                 let raw = command.join(" ");
-                let excluded = crate::core::config::Config::load()
-                    .map(|c| c.hooks.exclude_commands)
+                let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+                    .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
                     .unwrap_or_default();
-                match rewrite_command(&raw, &excluded) {
+                match rewrite_command(&raw, &excluded, &transparent_prefixes) {
                     Some(rewritten) => {
                         println!("{}", rewritten);
                         0
@@ -2259,9 +2276,16 @@ fn run_cli() -> Result<i32> {
                     libc::signal(sig, libc::SIG_DFL);
                     libc::raise(sig);
                 }
+                // nosemgrep: unsafe-block
                 unsafe {
-                    libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
-                    libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+                    libc::signal(
+                        libc::SIGINT,
+                        handle_signal as *const () as libc::sighandler_t,
+                    );
+                    libc::signal(
+                        libc::SIGTERM,
+                        handle_signal as *const () as libc::sighandler_t,
+                    );
                 }
             }
 
@@ -2749,6 +2773,30 @@ mod tests {
             } => {
                 assert_eq!(agent, "gemini");
                 assert_eq!(command, vec!["cargo", "test"]);
+            }
+            _ => panic!("Expected Hook Check command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_check_preserves_double_dash_in_command() {
+        let cli = Cli::try_parse_from([
+            "rtk",
+            "hook",
+            "check",
+            "shadowenv",
+            "exec",
+            "--",
+            "git",
+            "status",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Hook {
+                command: HookCommands::Check { agent, command },
+            } => {
+                assert_eq!(agent, "claude");
+                assert_eq!(command, vec!["shadowenv", "exec", "--", "git", "status"]);
             }
             _ => panic!("Expected Hook Check command"),
         }

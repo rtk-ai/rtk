@@ -12,9 +12,17 @@ jobs:
       github.event.pull_request.base.ref == 'master' &&
       github.event.pull_request.head.ref != 'develop'
     steps:
-      - name: Add wrong-base label
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
+      - name: Add wrong-base label and comment
         uses: actions/github-script@v7
         with:
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const pr = context.payload.pull_request;
 
@@ -27,13 +35,9 @@ jobs:
             });
 
             // Post comment
-            const body = `👋 Thanks for the PR! It looks like this targets \`master\`, but all PRs should target the **\`develop\`** branch.
+            const body = `Automatic message from CI checks : It seems like this branche is targeting the wrong branch, any contribution should target develop branch.
 
-            Please update the base branch:
-            1. Click **Edit** at the top right of this PR
-            2. Change the base branch from \`master\` to \`develop\`
-
-            See [CONTRIBUTING.md](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/master/CONTRIBUTING.md) for details.`;
+            See [CONTRIBUTING.md](https://github.com/rtk-ai/rtk/blob/master/CONTRIBUTING.md) for details.`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,

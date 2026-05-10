@@ -800,7 +800,7 @@ Detecte automatiquement : prettier, black, ruff format, rustfmt. Applique un fil
 |----------|-------------|-----------|
 | `rtk pnpm list [-d N]` | Arbre de dependances compact | ~70% |
 | `rtk pnpm outdated` | Paquets obsoletes : `pkg: old -> new` | ~80% |
-| `rtk pnpm install [pkgs...]` | Filtre les barres de progression | ~60% |
+| `rtk pnpm install` | Filtre les barres de progression | ~60% |
 | `rtk pnpm build` | Delegue au filtre Next.js | ~87% |
 | `rtk pnpm typecheck` | Delegue au filtre tsc | ~83% |
 
