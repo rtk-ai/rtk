@@ -65,3 +65,7 @@ assets = [
 assets = [
     { source = "target/release/rtk", dest = "/usr/bin/rtk", mode = "755" },
 ]
+
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"

@@ -46,7 +46,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D unsafe_code
+      - run: cargo clippy --all-targets
 
   # ─── Parallel gates (all need code to compile) ───
 
@@ -220,14 +220,13 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version: "stable"
 
       - name: Install Go tools
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
       - name: Run benchmark
         run: ./scripts/benchmark.sh
-
 
   # ─── AI Doc Review: develop PRs only ───
 
