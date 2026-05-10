@@ -1,12 +1,12 @@
 //! Inspects JSON structure without showing values, saving tokens on large payloads.
 
+use crate::core::content_hint::save_output_and_hint;
 use crate::core::tracking;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Reject non-JSON files with a clear error before doing any I/O.
 fn validate_json_extension(file: &Path) -> Result<()> {
@@ -58,8 +58,10 @@ pub fn run(file: &Path, max_depth: usize, schema_only: bool, verbose: u8) -> Res
 
     if truncated {
         let value: Value = serde_json::from_str(&content).context("Failed to parse JSON")?;
-        if let Some(hint) = write_json_hint(&value, file) {
-            println!("{}", hint);
+        if let Ok(full_json) = serde_json::to_string(&value) {
+            if let Some(hint) = save_output_and_hint(&full_json, "json", ".json") {
+                println!("{}", hint);
+            }
         }
     }
 
@@ -96,8 +98,10 @@ pub fn run_stdin(max_depth: usize, schema_only: bool, verbose: u8) -> Result<()>
 
     if truncated {
         let value: Value = serde_json::from_str(&content).context("Failed to parse JSON")?;
-        if let Some(hint) = write_json_hint(&value, Path::new("stdin")) {
-            println!("{}", hint);
+        if let Ok(full_json) = serde_json::to_string(&value) {
+            if let Some(hint) = save_output_and_hint(&full_json, "json", ".json") {
+                println!("{}", hint);
+            }
         }
     }
 
@@ -243,69 +247,6 @@ fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
                 format!("{{{}}}", parts.join(","))
             }
         }
-    }
-}
-
-/// Write full compact JSON to a file and return a hint string.
-fn write_json_hint(value: &Value, file: &Path) -> Option<String> {
-    let full_output = serde_json::to_string(value).ok()?;
-
-    let json_dir = dirs::data_local_dir()?.join("rtk").join("json");
-    std::fs::create_dir_all(&json_dir).ok()?;
-
-    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let file_slug = file.file_name().and_then(|n| n.to_str()).unwrap_or("stdin");
-    let sanitized: String = file_slug
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(40)
-        .collect();
-    let filename = format!("{}_{}.json", epoch, sanitized);
-    let filepath = json_dir.join(filename);
-
-    std::fs::write(&filepath, &full_output).ok()?;
-
-    cleanup_old_json_files(&json_dir);
-
-    let hint = if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = filepath.strip_prefix(&home) {
-            format!("[full output: ~/{}]", relative.display())
-        } else {
-            format!("[full output: {}]", filepath.display())
-        }
-    } else {
-        format!("[full output: {}]", filepath.display())
-    };
-
-    Some(hint)
-}
-
-/// Clean up old JSON full compact files, keeping only the last 20.
-fn cleanup_old_json_files(json_dir: &std::path::Path) {
-    let mut entries: Vec<_> = std::fs::read_dir(json_dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .filter(|e| e.file_name().to_string_lossy().contains(".json"))
-        .collect();
-
-    if entries.len() <= 20 {
-        return;
-    }
-
-    entries.sort_by_key(|e| e.file_name());
-
-    let to_remove = entries.len() - 20;
-    for entry in entries.iter().take(to_remove) {
-        let _ = std::fs::remove_file(entry.path());
     }
 }
 
