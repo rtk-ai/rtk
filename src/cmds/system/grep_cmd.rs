@@ -15,6 +15,7 @@ pub fn run(
     max_line_len: usize,
     max_results: usize,
     context_only: bool,
+    count: bool,
     file_type: Option<&str>,
     extra_args: &[String],
     verbose: u8,
@@ -23,6 +24,14 @@ pub fn run(
 
     if verbose > 0 {
         eprintln!("grep: '{}' in {}", pattern, path);
+    }
+
+    // #1452: --count short-circuit. Plain `grep -c` returns the bare integer
+    // for a single file (or `path:N` per file when scanning a directory or
+    // multiple files). RTK aggregation/truncation would obscure that integer,
+    // so we bypass the formatter entirely.
+    if count {
+        return run_count(pattern, path, file_type, extra_args, &timer);
     }
 
     // Fix: convert BRE alternation \| → | for rg (which uses PCRE-style regex)
@@ -181,6 +190,88 @@ fn has_format_flag(extra_args: &[String]) -> bool {
                 | "--null"
         )
     })
+}
+
+/// `grep -c` / `rg --count` short-circuit. Mirrors plain `grep -c` semantics:
+///
+/// - Single regular file → the bare integer count (one line, no `path:` prefix).
+/// - Directory or multi-file → `path:count` per file (rg's native `--count` format).
+///
+/// Tracking still records the command but the output is forwarded verbatim so
+/// scripts that capture the count (e.g. `n=$(rtk grep -c pat file)`) keep working.
+fn run_count(
+    pattern: &str,
+    path: &str,
+    file_type: Option<&str>,
+    extra_args: &[String],
+    timer: &tracking::TimedExecution,
+) -> Result<i32> {
+    let rg_pattern = pattern.replace(r"\|", "|");
+
+    let mut rg_cmd = resolved_command("rg");
+    rg_cmd.args(["--count", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
+    if let Some(ft) = file_type {
+        rg_cmd.arg("--type").arg(ft);
+    }
+    for arg in extra_args {
+        if arg == "-r" || arg == "--recursive" || arg == "-c" || arg == "--count" {
+            continue;
+        }
+        rg_cmd.arg(arg);
+    }
+
+    let is_single_file = std::path::Path::new(path).is_file();
+
+    let result = exec_capture(&mut rg_cmd)
+        .or_else(|_| {
+            // GNU grep fallback. Recurse for directory paths so `grep -c` doesn't
+            // fail with "Is a directory". `grep -c` on a missing match exits 1 with "0".
+            let mut grep_cmd = resolved_command("grep");
+            if !is_single_file {
+                grep_cmd.arg("-r");
+            }
+            grep_cmd.arg("-c");
+            for arg in extra_args {
+                if arg == "-r" || arg == "--recursive" || arg == "-c" || arg == "--count" {
+                    continue;
+                }
+                grep_cmd.arg(arg);
+            }
+            grep_cmd.args([pattern, path]);
+            exec_capture(&mut grep_cmd)
+        })
+        .context("grep/rg failed")?;
+
+    let raw = result.stdout.clone();
+
+    let formatted = if is_single_file {
+        // rg `--count` emits "path:N"; GNU `grep -c` already emits "N".
+        // Either way, emit just the trailing integer to match `grep -c` semantics.
+        let last_line = raw.lines().last().unwrap_or("");
+        let n = last_line.rsplit(':').next().unwrap_or(last_line).trim();
+        if n.is_empty() {
+            "0".to_string()
+        } else {
+            n.to_string()
+        }
+    } else {
+        // Directory / multi-file: keep "path:N" lines (rg's native format).
+        // Trim trailing newline; we'll re-add a single newline below.
+        raw.trim_end().to_string()
+    };
+
+    println!("{}", formatted);
+    timer.track(
+        &format!("grep -c '{}' {}", pattern, path),
+        "rtk grep --count",
+        &raw,
+        &formatted,
+    );
+
+    // grep/rg exit codes: 0 = match, 1 = no match, 2 = error.
+    // For `--count` semantics we still propagate these so scripts can branch
+    // on `if rtk grep -c pat file >/dev/null; then ...; fi`.
+    Ok(result.exit_code)
 }
 
 fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {

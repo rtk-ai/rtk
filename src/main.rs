@@ -318,6 +318,11 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Count matching lines (grep/rg -c). The literal `-c` token collides
+        /// with the `context_only` short alias, so `preprocess_argv` rewrites
+        /// `-c` to `--count` after the `grep` subcommand (issue #1452).
+        #[arg(long = "count")]
+        count: bool,
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -1348,11 +1353,48 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Pre-clap argv rewrites for subcommands whose native flags collide with
+/// rtk's reserved short aliases. Today this only affects `rtk grep`, where
+/// `-c` would be eaten by `context_only`'s short alias (issue #1452). The
+/// literal `-c` token is rewritten to `--count` so the count semantics
+/// reach the Grep handler intact. Other subcommands keep their argv unchanged.
+fn preprocess_argv(argv: Vec<OsString>) -> Vec<OsString> {
+    let mut iter = argv.into_iter();
+    let prog = match iter.next() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let mut out: Vec<OsString> = Vec::with_capacity(8);
+    out.push(prog);
+
+    let subcmd = match iter.next() {
+        Some(s) => s,
+        None => return out,
+    };
+    let is_grep = subcmd.to_str() == Some("grep");
+    out.push(subcmd);
+
+    if !is_grep {
+        out.extend(iter);
+        return out;
+    }
+
+    for arg in iter {
+        let translated = match arg.to_str() {
+            Some("-c") => OsString::from("--count"),
+            _ => arg,
+        };
+        out.push(translated);
+    }
+    out
+}
+
 fn run_cli() -> Result<i32> {
     // Fire-and-forget telemetry ping (1/day, non-blocking)
     core::telemetry::maybe_ping();
 
-    let cli = match Cli::try_parse() {
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(preprocess_argv(argv)) {
         Ok(cli) => cli,
         Err(e) => {
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
@@ -1742,6 +1784,7 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            count,
             extra_args,
         } => grep_cmd::run(
             &pattern,
@@ -1749,6 +1792,7 @@ fn run_cli() -> Result<i32> {
             max_len,
             max,
             context_only,
+            count,
             file_type.as_deref(),
             &extra_args,
             cli.verbose,
@@ -3048,5 +3092,48 @@ mod tests {
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
         }
+    }
+
+    // Regression for #1452: `rtk grep -c PATTERN PATH` must parse with `count`
+    // set, not be eaten by the `context_only` short alias. preprocess_argv
+    // rewrites `-c` to `--count` after the `grep` subcommand.
+    #[test]
+    fn test_preprocess_argv_grep_dash_c_rewritten() {
+        let argv: Vec<OsString> = ["rtk", "grep", "-c", "TODO", "src/"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let rewritten = preprocess_argv(argv);
+        let as_str: Vec<&str> = rewritten.iter().filter_map(|s| s.to_str()).collect();
+        assert_eq!(as_str, vec!["rtk", "grep", "--count", "TODO", "src/"]);
+
+        let cli = Cli::try_parse_from(&rewritten).unwrap();
+        match cli.command {
+            Commands::Grep {
+                count,
+                context_only,
+                pattern,
+                path,
+                ..
+            } => {
+                assert!(count, "count flag must be set");
+                assert!(!context_only, "context_only must NOT be set");
+                assert_eq!(pattern, "TODO");
+                assert_eq!(path, "src/");
+            }
+            _ => panic!("Expected Grep command"),
+        }
+    }
+
+    // preprocess_argv must NOT touch `-c` for non-grep subcommands.
+    #[test]
+    fn test_preprocess_argv_non_grep_dash_c_untouched() {
+        let argv: Vec<OsString> = ["rtk", "git", "-c", "user.name=Foo", "log"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let rewritten = preprocess_argv(argv);
+        let as_str: Vec<&str> = rewritten.iter().filter_map(|s| s.to_str()).collect();
+        assert_eq!(as_str, vec!["rtk", "git", "-c", "user.name=Foo", "log"]);
     }
 }
