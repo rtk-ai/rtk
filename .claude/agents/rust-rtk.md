@@ -397,7 +397,7 @@ docker run --rm -v $(pwd):/rtk -w /rtk rust:latest cargo test  # Linux via Docke
 ✅ **DO** compile regex once with `lazy_static!`
 ✅ **DO** verify token savings claims in tests (≥60%)
 ✅ **DO** test on macOS + Linux + Windows (via CI or manual)
-✅ **DO** run `cargo fmt && cargo clippy && cargo test` before commit
+✅ **DO** run `cargo fmt && cargo clippy --all-targets && cargo test` before commit
 ✅ **DO** benchmark startup time with `hyperfine` (<10ms target)
 ✅ **DO** use `anyhow::Result` with `.context()` for all error propagation
 

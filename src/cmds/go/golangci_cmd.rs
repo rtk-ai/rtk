@@ -339,7 +339,7 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
         }
 
         let mut file_linter_counts: Vec<_> = file_linters.iter().collect();
-        file_linter_counts.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        file_linter_counts.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
         for (linter, linter_issues) in file_linter_counts.iter().take(3) {
             result.push_str(&format!("    {} ({})\n", linter, linter_issues.len()));
