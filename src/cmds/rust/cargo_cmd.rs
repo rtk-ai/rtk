@@ -1,5 +1,6 @@
 //! Filters cargo output — build errors, test results, clippy warnings.
 
+use crate::core::args_utils;
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
 use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
@@ -29,45 +30,6 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
         CargoCommand::Install => run_install(args, verbose),
         CargoCommand::Nextest => run_nextest(args, verbose),
     }
-}
-
-/// Reconstruct args with `--` separator preserved from the original command line.
-/// Clap strips `--` from parsed args, but cargo subcommands need it to separate
-/// their own flags from test runner flags (e.g. `cargo test -- --nocapture`).
-fn restore_double_dash(args: &[String]) -> Vec<String> {
-    let raw_args: Vec<String> = std::env::args().collect();
-    restore_double_dash_with_raw(args, &raw_args)
-}
-
-/// Testable version that takes raw_args explicitly.
-fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<String> {
-    if args.is_empty() {
-        return args.to_vec();
-    }
-
-    // If args already contain `--` (Clap preserved it), no restoration needed
-    if args.iter().any(|a| a == "--") {
-        return args.to_vec();
-    }
-
-    // Find `--` in the original command line
-    let sep_pos = match raw_args.iter().position(|a| a == "--") {
-        Some(pos) => pos,
-        None => return args.to_vec(),
-    };
-
-    // Count how many of our parsed args appeared before `--` in the original.
-    // Args before `--` are positional (e.g. test name), args after are flags.
-    let args_before_sep = raw_args[..sep_pos]
-        .iter()
-        .filter(|a| args.contains(a))
-        .count();
-
-    let mut result = Vec::with_capacity(args.len() + 1);
-    result.extend_from_slice(&args[..args_before_sep]);
-    result.push("--".to_string());
-    result.extend_from_slice(&args[args_before_sep..]);
-    result
 }
 
 // --- Stream handlers ---
@@ -291,7 +253,7 @@ where
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = restore_double_dash(args);
+    let restored_args = args_utils::restore_double_dash(args);
     for arg in &restored_args {
         cmd.arg(arg);
     }
@@ -318,7 +280,7 @@ fn run_cargo_streamed(
     let mut cmd = resolved_command("cargo");
     cmd.arg(subcommand);
 
-    let restored_args = restore_double_dash(args);
+    let restored_args = args_utils::restore_double_dash(args);
     for arg in &restored_args {
         cmd.arg(arg);
     }
@@ -1275,6 +1237,7 @@ pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::args_utils::restore_double_dash_with_raw;
 
     #[test]
     fn test_restore_double_dash_with_separator() {

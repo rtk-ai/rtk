@@ -1,5 +1,6 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
+use crate::core::args_utils;
 use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
@@ -102,65 +103,6 @@ pub fn run(
     }
 }
 
-/// Re-insert `--` before the first path-like argument when clap has consumed it.
-///
-/// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
-/// first positional argument (before any other positional).  This means:
-///   `rtk git diff -- file` → args = ["file"]   (clap ate `--`)
-///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
-///
-/// Without the `--` separator git may treat an unambiguous path as a revision and
-/// emit "fatal: ambiguous argument".  We re-insert `--` before the first path-like
-/// argument; see `normalize_diff_args_impl` for the detection rules.
-fn normalize_diff_args(args: &[String]) -> Vec<String> {
-    normalize_diff_args_impl(args, |p| std::path::Path::new(p).exists())
-}
-
-/// Testable core of `normalize_diff_args` — accepts an injectable filesystem existence checker.
-///
-/// The path-detection logic is:
-/// 1. Explicit path prefixes (`.`, `~`) → always a path, no filesystem check needed.
-/// 2. Contains path separator (`/`, `\`) → use `path_exists` to distinguish branch names
-///    (e.g. `feature/auth`) from real paths (e.g. `src/main.rs`).
-/// 3. Bare word with no separator → never a path (avoids injecting `--` when a file
-///    happens to share a name with a branch or ref, e.g. a file named `main`).
-fn normalize_diff_args_impl<F>(args: &[String], path_exists: F) -> Vec<String>
-where
-    F: Fn(&str) -> bool,
-{
-    // Already has `--` — nothing to do
-    if args.iter().any(|a| a == "--") {
-        return args.to_vec();
-    }
-    let path_start = args.iter().position(|arg| {
-        if arg.starts_with('-') {
-            return false;
-        }
-        // Explicit path prefixes — always treat as path regardless of existence
-        if arg.starts_with('.') || arg.starts_with('~') {
-            return true;
-        }
-        // Contains path separator — use filesystem check to distinguish
-        // branch names (feature/auth) from real paths (src/main.rs)
-        if arg.contains('/') || arg.contains('\\') {
-            return path_exists(arg);
-        }
-        // Bare word (no separator, no special prefix) — never inject `--`
-        // This avoids misidentifying a ref/branch as a path even if a same-named
-        // file happens to exist on disk.
-        false
-    });
-    match path_start {
-        Some(idx) => {
-            let mut out = args[..idx].to_vec();
-            out.push("--".to_string());
-            out.extend_from_slice(&args[idx..]);
-            out
-        }
-        None => args.to_vec(),
-    }
-}
-
 fn run_diff(
     args: &[String],
     max_lines: Option<usize>,
@@ -170,7 +112,7 @@ fn run_diff(
     let timer = tracking::TimedExecution::start();
 
     // Re-insert `--` when clap's trailing_var_arg consumed it (issue #1215)
-    let args = &normalize_diff_args(args);
+    let args = &args_utils::restore_double_dash(args);
 
     // Check if user wants stat output
     let wants_stat = args
@@ -1910,8 +1852,14 @@ mod tests {
         assert!(uses_compact_status_path(&["-b".to_string()]));
         assert!(uses_compact_status_path(&["--branch".to_string()]));
         assert!(uses_compact_status_path(&["-sb".to_string()]));
-        assert!(uses_compact_status_path(&["-s".to_string(), "-b".to_string()]));
-        assert!(uses_compact_status_path(&["--short".to_string(), "--branch".to_string()]));
+        assert!(uses_compact_status_path(&[
+            "-s".to_string(),
+            "-b".to_string()
+        ]));
+        assert!(uses_compact_status_path(&[
+            "--short".to_string(),
+            "--branch".to_string()
+        ]));
         assert!(!uses_compact_status_path(&["-s".to_string()]));
         assert!(!uses_compact_status_path(&["--short".to_string()]));
         assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
@@ -1998,134 +1946,6 @@ mod tests {
         assert!(
             !result.contains("more changes truncated"),
             "5 files × 20 lines should not exceed max_lines=500"
-        );
-    }
-
-    // ----- normalize_diff_args (issue #1215 + branch-name fix #1431) -----
-    //
-    // Tests use normalize_diff_args_impl with a mock path-existence checker so
-    // they don't depend on the real filesystem.
-
-    fn exists_mock<'a>(existing: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
-        move |p| existing.contains(&p)
-    }
-
-    /// Baseline: `--` already present → no-op, args unchanged.
-    #[test]
-    fn test_normalize_diff_args_noop_when_separator_present() {
-        let args = vec![
-            "HEAD".to_string(),
-            "--".to_string(),
-            "src/main.rs".to_string(),
-        ];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Core regression (issue #1215): clap ate `--` before a real file path.
-    /// When the path exists on disk, `--` must be re-inserted.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_before_existing_path() {
-        let args = vec!["apps/client/frontend/src/MyComponent.tsx".to_string()];
-        let normalized = normalize_diff_args_impl(
-            &args,
-            exists_mock(&["apps/client/frontend/src/MyComponent.tsx"]),
-        );
-        assert_eq!(
-            normalized,
-            vec![
-                "--".to_string(),
-                "apps/client/frontend/src/MyComponent.tsx".to_string()
-            ],
-            "-- must be injected before an existing path"
-        );
-    }
-
-    /// Ref before path: ["HEAD", "src/foo.rs"] where src/foo.rs exists → inject after HEAD.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_after_ref() {
-        let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
-        assert_eq!(
-            normalized,
-            vec![
-                "HEAD".to_string(),
-                "--".to_string(),
-                "src/foo.rs".to_string()
-            ]
-        );
-    }
-
-    /// Flags before path: ["--cached", "src/foo.rs"] where src/foo.rs exists.
-    #[test]
-    fn test_normalize_diff_args_reinserts_separator_after_flag() {
-        let args = vec!["--cached".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
-        assert_eq!(
-            normalized,
-            vec![
-                "--cached".to_string(),
-                "--".to_string(),
-                "src/foo.rs".to_string()
-            ]
-        );
-    }
-
-    /// Pure flags (no paths) → no injection.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_pure_flags() {
-        let args = vec!["--stat".to_string(), "--cached".to_string()];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Dotfile that exists on disk → inject `--`.
-    #[test]
-    fn test_normalize_diff_args_dotfile_is_path() {
-        let args = vec![".gitignore".to_string()];
-        let normalized = normalize_diff_args_impl(&args, exists_mock(&[".gitignore"]));
-        assert_eq!(normalized, vec!["--".to_string(), ".gitignore".to_string()]);
-    }
-
-    /// A bare ref (HEAD) that doesn't exist as a file → no injection.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_bare_ref() {
-        let args = vec!["HEAD".to_string()];
-        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
-    }
-
-    /// Branch name with `/` that does NOT exist as a file → no injection.
-    /// Regression for issue #1431: `rtk git diff feature/user-auth` must not inject `--`.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_branch_with_slash() {
-        let args = vec!["feature/user-auth".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&[])),
-            args,
-            "branch names containing '/' must not trigger -- injection"
-        );
-    }
-
-    /// Range syntax with `/` → no injection.
-    /// Regression: `rtk git diff main...feature/user-auth` produced no output.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_range_with_slash() {
-        let args = vec!["main...feature/user-auth".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&[])),
-            args,
-            "revision ranges like main...feature/user-auth must not trigger -- injection"
-        );
-    }
-
-    /// Bare word that happens to exist as a file on disk → still no injection.
-    /// A file named "main" must not cause `--` to be injected when the user
-    /// intends `rtk git diff main` as a branch comparison.
-    #[test]
-    fn test_normalize_diff_args_no_injection_for_bare_word_even_if_file_exists() {
-        let args = vec!["main".to_string()];
-        assert_eq!(
-            normalize_diff_args_impl(&args, exists_mock(&["main"])),
-            args,
-            "bare words must never trigger -- injection even when a same-named file exists"
         );
     }
 
