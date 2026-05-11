@@ -542,6 +542,7 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
 }
 
 /// Like [`exec_capture`] but inherits stdin so a wrapped engine can read a piped stdin.
+#[allow(dead_code)]
 pub fn exec_capture_stdin(cmd: &mut Command) -> Result<CaptureResult> {
     cmd.stdin(Stdio::inherit());
     let output = cmd.output().context("Failed to execute command")?;

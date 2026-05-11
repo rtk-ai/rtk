@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Shared search-output filter for `rtk grep` and `rtk rg`.
 //!
 //! Runs the agent's exact engine (grep or rg) — never substituting one for the

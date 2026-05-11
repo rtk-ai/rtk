@@ -27,5 +27,6 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "telemetry",
     "smart",
     "deps",
+    "patch",
     "json",
 ];
