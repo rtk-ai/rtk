@@ -45,19 +45,41 @@ pub trait TokenFormatter {
 
 impl TokenFormatter for TestResult {
     fn format_compact(&self) -> String {
+        // Top-N failures keep their full error message (numbered, indented). Anything
+        // beyond N collapses to a one-liner showing the test name and, when known,
+        // the source file — the original `take(5) + "+N more failures"` truncation
+        // hid every remaining failure name from the agent, which forced a re-read of
+        // the tee log to find the failing files (see rtk-ai/rtk#1813).
+        const DETAILED_FAILURES: usize = 5;
+
         let mut lines = vec![format!("PASS ({}) FAIL ({})", self.passed, self.failed)];
 
         if !self.failures.is_empty() {
             lines.push(String::new());
-            for (idx, failure) in self.failures.iter().enumerate().take(5) {
+            for (idx, failure) in self.failures.iter().enumerate().take(DETAILED_FAILURES) {
                 lines.push(format!("{}. {}", idx + 1, failure.test_name));
                 for line in failure.error_message.lines() {
                     lines.push(format!("   {}", line));
                 }
             }
 
-            if self.failures.len() > 5 {
-                lines.push(format!("\n... +{} more failures", self.failures.len() - 5));
+            if self.failures.len() > DETAILED_FAILURES {
+                lines.push(String::new());
+                lines.push(format!(
+                    "Remaining {} failures:",
+                    self.failures.len() - DETAILED_FAILURES,
+                ));
+                for (idx, failure) in self.failures.iter().enumerate().skip(DETAILED_FAILURES) {
+                    // `file_path` is set on the JSON happy-path (vitest/playwright Tier 1)
+                    // but empty in regex-fallback Tier 2 — emit the bracket suffix only
+                    // when populated so the line does not render as `1. name []`.
+                    let path_hint = if failure.file_path.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", failure.file_path)
+                    };
+                    lines.push(format!("{}. {}{}", idx + 1, failure.test_name, path_hint,));
+                }
             }
         }
 
@@ -254,6 +276,153 @@ mod tests {
         assert!(
             output.contains("Timeout exceeded"),
             "Single-line error must appear\nGot:\n{output}"
+        );
+    }
+
+    // Regression for rtk-ai/rtk#1813: when a test run has more than 5 failures the
+    // first 5 keep their full error detail, and every remaining failure must still
+    // be visible by name (plus file path when known) so the agent can locate every
+    // failing file without re-reading the tee log.
+    #[test]
+    fn test_compact_lists_remaining_failures_with_file_path() {
+        let failures: Vec<TestFailure> = (1..=7)
+            .map(|i| TestFailure {
+                test_name: format!("test number {i}"),
+                file_path: format!("tests/spec_{i}.test.ts"),
+                error_message: format!("AssertionError: test {i} failed"),
+                stack_trace: None,
+            })
+            .collect();
+        let result = make_result(40, failures);
+
+        let output = result.format_compact();
+
+        // Top 5 keep full detail (numbering + error message line).
+        for i in 1..=5 {
+            assert!(
+                output.contains(&format!("{i}. test number {i}")),
+                "detailed entry {i} missing\nGot:\n{output}"
+            );
+            assert!(
+                output.contains(&format!("AssertionError: test {i} failed")),
+                "error for detailed entry {i} missing\nGot:\n{output}"
+            );
+        }
+        // Remaining failures must be listed by name with file_path bracketed.
+        assert!(
+            output.contains("Remaining 2 failures:"),
+            "overflow section missing\nGot:\n{output}"
+        );
+        for i in 6..=7 {
+            assert!(
+                output.contains(&format!("{i}. test number {i} [tests/spec_{i}.test.ts]")),
+                "overflow entry {i} missing or malformed\nGot:\n{output}"
+            );
+        }
+        // The legacy "+N more failures" line must not appear — it was the bug.
+        assert!(
+            !output.contains("more failures"),
+            "legacy '+N more failures' truncation leaked\nGot:\n{output}"
+        );
+    }
+
+    // Tier-2 (regex fallback) leaves file_path empty for every failure; the
+    // overflow line must render as `N. test_name` with no dangling `[]` suffix.
+    #[test]
+    fn test_compact_lists_remaining_failures_without_file_path() {
+        let failures: Vec<TestFailure> = (1..=8)
+            .map(|i| TestFailure {
+                test_name: format!("orphan test {i}"),
+                file_path: String::new(),
+                error_message: format!("err {i}"),
+                stack_trace: None,
+            })
+            .collect();
+        let result = make_result(0, failures);
+
+        let output = result.format_compact();
+
+        // Overflow entries omit the bracket when file_path is empty.
+        for i in 6..=8 {
+            assert!(
+                output.contains(&format!("{i}. orphan test {i}\n"))
+                    || output.ends_with(&format!("{i}. orphan test {i}"))
+                    || output.contains(&format!("{i}. orphan test {i}\nTime:")),
+                "overflow entry {i} should be 'N. name' with no trailing brackets\nGot:\n{output}"
+            );
+            assert!(
+                !output.contains(&format!("{i}. orphan test {i} []")),
+                "empty file_path must not render as '[]'\nGot:\n{output}"
+            );
+        }
+    }
+
+    // Boundary: exactly 5 failures must not emit the "Remaining" section.
+    #[test]
+    fn test_compact_no_remaining_section_at_five_failure_boundary() {
+        let failures: Vec<TestFailure> = (1..=5)
+            .map(|i| make_failure(&format!("test {i}"), &format!("err {i}")))
+            .collect();
+        let result = make_result(10, failures);
+
+        let output = result.format_compact();
+
+        assert!(
+            !output.contains("Remaining"),
+            "no overflow section expected at boundary of 5\nGot:\n{output}"
+        );
+        assert!(
+            !output.contains("more failures"),
+            "legacy overflow line must not appear at boundary\nGot:\n{output}"
+        );
+    }
+
+    // The core promise of rtk-ai/rtk#1813: every failure name must be visible
+    // in the compact output regardless of count. With 49 failures the first 5
+    // stay detailed and the other 44 appear as one-liners with their file paths.
+    #[test]
+    fn test_compact_keeps_every_failure_name_visible_on_large_set() {
+        let failures: Vec<TestFailure> = (1..=49)
+            .map(|i| TestFailure {
+                test_name: format!(
+                    "src/agents/agent-validation.test.ts > agent rejects malformed payload variant {i}"
+                ),
+                file_path: format!("src/agents/agent-validation-{i}.test.ts"),
+                error_message: format!("AssertionError: expected 403 to be 201 (case {i})"),
+                stack_trace: None,
+            })
+            .collect();
+        let result = make_result(664, failures);
+
+        let compact = result.format_compact();
+
+        // Header + overflow announcement are present.
+        assert!(compact.starts_with("PASS (664) FAIL (49)"));
+        assert!(compact.contains("Remaining 44 failures:"));
+
+        // Every variant 1..=49 is named in the output.
+        for i in 1..=49 {
+            assert!(
+                compact.contains(&format!("variant {i}")),
+                "failure {i} must be visible in compact output (issue #1813)"
+            );
+        }
+        // Overflow entries 6..=49 must carry their file_path bracket.
+        for i in 6..=49 {
+            assert!(
+                compact.contains(&format!("[src/agents/agent-validation-{i}.test.ts]")),
+                "overflow entry {i} should include its file_path bracket"
+            );
+        }
+        // Compact still comes out structurally smaller than the verbose dump
+        // even with every name preserved — the per-failure stack-trace preview
+        // verbose adds keeps it the larger of the two modes.
+        let verbose = result.format_verbose();
+        assert!(
+            compact.len() < verbose.len(),
+            "compact ({} chars) must stay smaller than verbose ({} chars)",
+            compact.len(),
+            verbose.len(),
         );
     }
 }
