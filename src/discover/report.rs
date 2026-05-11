@@ -1,7 +1,11 @@
 //! Data types for reporting which commands RTK can and cannot optimize.
 
-use crate::hooks::constants::{CURSOR_DIR, HOOKS_SUBDIR, REWRITE_HOOK_FILE};
+use crate::hooks::constants::{
+    CURSOR_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
+    HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+};
 use serde::Serialize;
+use std::path::Path;
 
 /// RTK support status for a command.
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +48,36 @@ pub struct UnsupportedEntry {
     pub example: String,
 }
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AgentIntegrationStatus {
+    pub cursor_hook_installed: bool,
+    pub hermes_plugin_installed: bool,
+}
+
+impl AgentIntegrationStatus {
+    pub fn detect() -> Self {
+        dirs::home_dir()
+            .map(|home| Self::detect_from_home(&home))
+            .unwrap_or_default()
+    }
+
+    fn detect_from_home(home: &Path) -> Self {
+        Self {
+            cursor_hook_installed: home
+                .join(CURSOR_DIR)
+                .join(HOOKS_SUBDIR)
+                .join(REWRITE_HOOK_FILE)
+                .exists(),
+            hermes_plugin_installed: home
+                .join(HERMES_DIR)
+                .join(HERMES_PLUGINS_SUBDIR)
+                .join(HERMES_PLUGIN_NAME)
+                .join(HERMES_PLUGIN_MANIFEST_FILE)
+                .is_file(),
+        }
+    }
+}
+
 /// Full discover report.
 #[derive(Debug, Serialize)]
 pub struct DiscoverReport {
@@ -56,6 +90,7 @@ pub struct DiscoverReport {
     pub parse_errors: usize,
     pub rtk_disabled_count: usize,
     pub rtk_disabled_examples: Vec<String>,
+    pub agent_status: AgentIntegrationStatus,
 }
 
 impl DiscoverReport {
@@ -94,6 +129,7 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     if report.supported.is_empty() && report.unsupported.is_empty() {
         out.push_str("\nNo missed savings found. RTK usage looks good!\n");
+        append_agent_notes(&mut out, report.agent_status);
         return out;
     }
 
@@ -168,22 +204,23 @@ pub fn format_text(report: &DiscoverReport, limit: usize, verbose: bool) -> Stri
 
     out.push_str("\n~estimated from tool_result output sizes\n");
 
-    // Cursor note: check if Cursor hooks are installed
-    if let Some(home) = dirs::home_dir() {
-        let cursor_hook = home
-            .join(CURSOR_DIR)
-            .join(HOOKS_SUBDIR)
-            .join(REWRITE_HOOK_FILE);
-        if cursor_hook.exists() {
-            out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
-        }
-    }
+    append_agent_notes(&mut out, report.agent_status);
 
     if verbose && report.parse_errors > 0 {
         out.push_str(&format!("Parse errors skipped: {}\n", report.parse_errors));
     }
 
     out
+}
+
+fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
+    if status.cursor_hook_installed {
+        out.push_str("\nNote: Cursor sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+    }
+
+    if status.hermes_plugin_installed {
+        out.push_str("\nNote: Hermes plugin is installed; Hermes sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+    }
 }
 
 /// Format report as JSON.
@@ -230,6 +267,7 @@ mod tests {
             parse_errors: 0,
             rtk_disabled_count: 0,
             rtk_disabled_examples: vec![],
+            agent_status: AgentIntegrationStatus::default(),
         }
     }
 
@@ -266,5 +304,70 @@ mod tests {
         let report = make_report(1000, 1000);
         let output = format_text(&report, 10, false);
         assert!(output.contains("100.0%"));
+    }
+
+    #[test]
+    fn test_agent_status_detects_hermes_plugin_manifest() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let manifest = temp_home
+            .path()
+            .join(HERMES_DIR)
+            .join(HERMES_PLUGINS_SUBDIR)
+            .join(HERMES_PLUGIN_NAME)
+            .join(HERMES_PLUGIN_MANIFEST_FILE);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, "name: rtk-rewrite\n").unwrap();
+
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+
+        assert!(status.hermes_plugin_installed);
+        assert!(!status.cursor_hook_installed);
+    }
+
+    #[test]
+    fn test_agent_status_ignores_hermes_plugin_dir_without_manifest() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let plugin_dir = temp_home
+            .path()
+            .join(HERMES_DIR)
+            .join(HERMES_PLUGINS_SUBDIR)
+            .join(HERMES_PLUGIN_NAME);
+        std::fs::create_dir_all(plugin_dir).unwrap();
+
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+
+        assert!(!status.hermes_plugin_installed);
+    }
+
+    #[test]
+    fn test_format_text_reports_hermes_plugin_detected() {
+        let mut report = make_report(0, 0);
+        report.agent_status = AgentIntegrationStatus {
+            hermes_plugin_installed: true,
+            ..AgentIntegrationStatus::default()
+        };
+
+        let output = format_text(&report, 10, false);
+
+        assert!(
+            output.contains("Hermes plugin is installed"),
+            "Expected Hermes installed note in output but got:\n{}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_format_json_includes_agent_status() {
+        let mut report = make_report(0, 0);
+        report.agent_status = AgentIntegrationStatus {
+            cursor_hook_installed: true,
+            hermes_plugin_installed: true,
+        };
+
+        let output = format_json(&report);
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(json["agent_status"]["cursor_hook_installed"], true);
+        assert_eq!(json["agent_status"]["hermes_plugin_installed"], true);
     }
 }
