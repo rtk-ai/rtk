@@ -2073,7 +2073,7 @@ fn run_cli() -> Result<i32> {
             } else if agent == Some(AgentTarget::Droid) {
                 hooks::init::run_droid_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Qoder) {
-                hooks::init::run_qoder_mode(global, cli.verbose)?;
+                hooks::init::run_qoder_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;

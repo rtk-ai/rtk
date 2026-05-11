@@ -4456,19 +4456,28 @@ fn resolve_qoder_dir() -> Result<PathBuf> {
 }
 
 /// Entry point for `rtk init --agent qoder`
-pub fn run_qoder_mode(global: bool, verbose: u8) -> Result<()> {
+pub fn run_qoder_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+
     if global {
         let qoder_dir = resolve_qoder_dir()?;
-        fs::create_dir_all(&qoder_dir).with_context(|| {
-            format!("Failed to create Qoder config dir: {}", qoder_dir.display())
-        })?;
+        if !dry_run {
+            fs::create_dir_all(&qoder_dir).with_context(|| {
+                format!("Failed to create Qoder config dir: {}", qoder_dir.display())
+            })?;
+        }
 
         // 1. Write RTK awareness instructions
         let rtk_md_path = qoder_dir.join(RTK_MD);
-        write_if_changed(&rtk_md_path, RTK_SLIM_QODER, RTK_MD, verbose)?;
+        write_if_changed(&rtk_md_path, RTK_SLIM_QODER, RTK_MD, ctx)?;
 
         // 2. Patch ~/.qoder/settings.json with PreToolUse hook
-        let hook_status = patch_qoder_settings(&qoder_dir, verbose)?;
+        let hook_status = patch_qoder_settings(&qoder_dir, ctx)?;
+
+        if dry_run {
+            print_dry_run_footer();
+            return Ok(());
+        }
 
         println!("\nRTK configured for Qoder CLI (global).\n");
         println!("  RTK.md:        {}", rtk_md_path.display());
@@ -4490,20 +4499,27 @@ pub fn run_qoder_mode(global: bool, verbose: u8) -> Result<()> {
     } else {
         // Project-scoped: write RTK.md to CWD and patch AGENTS.md
         let rtk_md_path = PathBuf::from(RTK_MD);
-        write_if_changed(&rtk_md_path, RTK_SLIM_QODER, RTK_MD, verbose)?;
+        write_if_changed(&rtk_md_path, RTK_SLIM_QODER, RTK_MD, ctx)?;
 
         let agents_md_path = PathBuf::from(AGENTS_MD);
-        let added_ref = patch_agents_md(&agents_md_path, RTK_MD_REF, verbose)?;
+        let added_ref = patch_agents_md(&agents_md_path, RTK_MD_REF, ctx)?;
 
         // Write project-scoped hook config
         let project_qoder_dir = PathBuf::from(QODER_DIR);
-        fs::create_dir_all(&project_qoder_dir).with_context(|| {
-            format!(
-                "Failed to create Qoder config dir: {}",
-                project_qoder_dir.display()
-            )
-        })?;
-        let hook_status = patch_qoder_settings(&project_qoder_dir, verbose)?;
+        if !dry_run {
+            fs::create_dir_all(&project_qoder_dir).with_context(|| {
+                format!(
+                    "Failed to create Qoder config dir: {}",
+                    project_qoder_dir.display()
+                )
+            })?;
+        }
+        let hook_status = patch_qoder_settings(&project_qoder_dir, ctx)?;
+
+        if dry_run {
+            print_dry_run_footer();
+            return Ok(());
+        }
 
         println!("\nRTK configured for Qoder CLI (project-scoped).\n");
         println!("  RTK.md:    {}", rtk_md_path.display());
@@ -4546,7 +4562,8 @@ enum QoderHookStatus {
 }
 
 /// Patch Qoder settings.json with the PreToolUse hook for rtk
-fn patch_qoder_settings(qoder_dir: &Path, verbose: u8) -> Result<QoderHookStatus> {
+fn patch_qoder_settings(qoder_dir: &Path, ctx: InitContext) -> Result<QoderHookStatus> {
+    let InitContext { verbose, .. } = ctx;
     let settings_path = qoder_dir.join(SETTINGS_JSON);
     let target_command = "rtk hook qoder";
 
@@ -4579,7 +4596,7 @@ fn patch_qoder_settings(qoder_dir: &Path, verbose: u8) -> Result<QoderHookStatus
                             &mut settings,
                             &pre_tool_use_pointer,
                             old_cmd,
-                            verbose,
+                            ctx,
                         );
                     }
                 }
@@ -4588,7 +4605,7 @@ fn patch_qoder_settings(qoder_dir: &Path, verbose: u8) -> Result<QoderHookStatus
     }
 
     // No existing RTK hook — add new entry
-    install_fresh_hook(&settings_path, &mut settings, verbose)?;
+    install_fresh_hook(&settings_path, &mut settings, ctx)?;
     Ok(QoderHookStatus::Installed)
 }
 
@@ -4598,8 +4615,9 @@ fn upgrade_existing_hook(
     settings: &mut serde_json::Value,
     pre_tool_use_pointer: &str,
     old_command: String,
-    verbose: u8,
+    ctx: InitContext,
 ) -> Result<QoderHookStatus> {
+    let InitContext { verbose, dry_run } = ctx;
     // Navigate to the hooks array and replace the command
     if let Some(arr) = settings
         .pointer_mut(pre_tool_use_pointer)
@@ -4623,10 +4641,21 @@ fn upgrade_existing_hook(
         }
     }
 
-    atomic_write(settings_path, &serde_json::to_string_pretty(&settings)?)
-        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+    let serialized = serde_json::to_string_pretty(&settings)?;
+    if dry_run {
+        println!(
+            "[dry-run] would upgrade Qoder hook in: {}",
+            settings_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+    } else {
+        atomic_write(settings_path, &serialized)
+            .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+    }
 
-    if verbose > 0 {
+    if verbose > 0 && !dry_run {
         eprintln!(
             "Upgraded Qoder hook from `{}` to `rtk hook qoder`",
             old_command
@@ -4640,8 +4669,9 @@ fn upgrade_existing_hook(
 fn install_fresh_hook(
     settings_path: &Path,
     settings: &mut serde_json::Value,
-    verbose: u8,
+    ctx: InitContext,
 ) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
     let hook_entry = serde_json::json!({
         "matcher": "Bash",
         "hooks": [{
@@ -4679,7 +4709,19 @@ fn install_fresh_hook(
             .unwrap_or_else(|| vec![entry_for_fallback]),
     );
 
-    atomic_write(settings_path, &serde_json::to_string_pretty(&settings)?)
+    let serialized = serde_json::to_string_pretty(&settings)?;
+    if dry_run {
+        println!(
+            "[dry-run] would patch Qoder settings.json: {}",
+            settings_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(());
+    }
+
+    atomic_write(settings_path, &serialized)
         .with_context(|| format!("Failed to write {}", settings_path.display()))?;
 
     if verbose > 0 {
@@ -8101,7 +8143,7 @@ mod tests {
     #[test]
     fn test_qoder_patch_creates_new() {
         let dir = TempDir::new().unwrap();
-        let status = patch_qoder_settings(dir.path(), 0).unwrap();
+        let status = patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
         assert!(
             matches!(status, QoderHookStatus::Installed),
             "Fresh init should return Installed"
@@ -8132,7 +8174,7 @@ mod tests {
         )
         .unwrap();
 
-        let status = patch_qoder_settings(dir.path(), 0).unwrap();
+        let status = patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
         match &status {
             QoderHookStatus::Upgraded(old) => {
                 assert!(
@@ -8151,9 +8193,9 @@ mod tests {
     #[test]
     fn test_qoder_patch_idempotent() {
         let dir = TempDir::new().unwrap();
-        let s1 = patch_qoder_settings(dir.path(), 0).unwrap();
+        let s1 = patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
         assert!(matches!(s1, QoderHookStatus::Installed));
-        let s2 = patch_qoder_settings(dir.path(), 0).unwrap();
+        let s2 = patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
         assert!(
             matches!(s2, QoderHookStatus::AlreadyInstalled),
             "Second call should return AlreadyInstalled"
@@ -8173,7 +8215,7 @@ mod tests {
         )
         .unwrap();
 
-        patch_qoder_settings(dir.path(), 0).unwrap();
+        patch_qoder_settings(dir.path(), InitContext::default()).unwrap();
         let content = fs::read_to_string(dir.path().join("settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
 
@@ -8186,5 +8228,23 @@ mod tests {
             v.pointer("/hooks/PreToolUse").is_some(),
             "Hook must be added alongside existing config"
         );
+    }
+
+    #[test]
+    fn test_qoder_patch_dry_run_writes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let settings_path = dir.path().join("settings.json");
+
+        let status = patch_qoder_settings(
+            dir.path(),
+            InitContext {
+                dry_run: true,
+                ..InitContext::default()
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(status, QoderHookStatus::Installed));
+        assert!(!settings_path.exists());
     }
 }
