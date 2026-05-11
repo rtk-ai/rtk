@@ -23,7 +23,7 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, summary, tree, wc_cmd,
+    patch, read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -107,9 +107,37 @@ enum Commands {
         /// Keep only last N lines
         #[arg(long, conflicts_with = "max_lines")]
         tail_lines: Option<usize>,
+        /// Read only an inclusive line range (START:END, 1-based)
+        #[arg(long, conflicts_with_all = ["max_lines", "tail_lines"])]
+        lines: Option<String>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Input encoding for file decoding
+        #[arg(long, value_enum, default_value = "auto")]
+        encoding: core::text_encoding::TextEncoding,
+    },
+
+    /// Encoding-aware file patch helper (best-effort roundtrip)
+    Patch {
+        /// File to patch
+        #[arg(long)]
+        file: PathBuf,
+        /// Input/output encoding
+        #[arg(long, value_enum, default_value = "auto")]
+        encoding: core::text_encoding::TextEncoding,
+        /// Replace exactly one match by default
+        #[arg(long = "replace")]
+        old: String,
+        /// Replacement string
+        #[arg(long = "with")]
+        new: String,
+        /// Replace all matches
+        #[arg(long)]
+        all: bool,
+        /// Write `<file>.bak` before patching
+        #[arg(long)]
+        backup: bool,
     },
 
     /// Generate 2-line technical summary (heuristic-based)
@@ -306,6 +334,7 @@ enum Commands {
     },
 
     /// Compact grep - strips whitespace, truncates, groups by file
+    #[command(alias = "fgrep")]
     Grep {
         /// Pattern to search
         pattern: String,
@@ -327,6 +356,12 @@ enum Commands {
         /// Show line numbers (always on, accepted for grep/rg compatibility)
         #[arg(short = 'n', long)]
         line_numbers: bool,
+        /// Treat pattern as a literal string (fixed)
+        #[arg(long, conflicts_with = "regex")]
+        fixed: bool,
+        /// Treat pattern as a regular expression
+        #[arg(long, conflicts_with = "fixed")]
+        regex: bool,
         /// Extra ripgrep arguments (e.g., -i, -A 3, -w, --glob)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -1580,6 +1615,25 @@ fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<S
     }
 }
 
+fn parse_line_range(spec: &str) -> std::result::Result<(usize, usize), String> {
+    let (start_s, end_s) = spec
+        .split_once(':')
+        .ok_or_else(|| "expected START:END".to_string())?;
+    let start: usize = start_s
+        .parse()
+        .map_err(|_| "START must be a positive integer".to_string())?;
+    let end: usize = end_s
+        .parse()
+        .map_err(|_| "END must be a positive integer".to_string())?;
+    if start == 0 || end == 0 {
+        return Err("START and END must be >= 1".to_string());
+    }
+    if end < start {
+        return Err("END must be >= START".to_string());
+    }
+    Ok((start, end))
+}
+
 fn main() {
     let code = match run_cli() {
         Ok(code) => code,
@@ -1651,10 +1705,23 @@ fn run_cli() -> Result<i32> {
             level,
             max_lines,
             tail_lines,
+            lines,
             line_numbers,
+            encoding,
         } => {
             let mut had_error = false;
             let mut stdin_seen = false;
+            let line_range = match lines.as_deref() {
+                None => Ok(None),
+                Some(spec) => parse_line_range(spec).map(Some),
+            };
+            let line_range = match line_range {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("rtk read: invalid --lines '{}': {}", lines.unwrap_or_default(), e);
+                    return Ok(2);
+                }
+            };
             for file in &files {
                 let result = if file == Path::new("-") {
                     if stdin_seen {
@@ -1662,14 +1729,24 @@ fn run_cli() -> Result<i32> {
                         continue;
                     }
                     stdin_seen = true;
-                    read::run_stdin(level, max_lines, tail_lines, line_numbers, cli.verbose)
+                    read::run_stdin(
+                        level,
+                        max_lines,
+                        tail_lines,
+                        line_range,
+                        line_numbers,
+                        encoding,
+                        cli.verbose,
+                    )
                 } else {
                     read::run(
                         file,
                         level,
                         max_lines,
                         tail_lines,
+                        line_range,
                         line_numbers,
+                        encoding,
                         cli.verbose,
                     )
                 };
@@ -1684,6 +1761,25 @@ fn run_cli() -> Result<i32> {
                 0
             }
         }
+
+        Commands::Patch {
+            file,
+            encoding,
+            old,
+            new,
+            all,
+            backup,
+        } => patch::run(
+            patch::PatchArgs {
+                file: &file,
+                encoding,
+                old: &old,
+                new: &new,
+                all,
+                backup,
+            },
+            cli.verbose,
+        )?,
 
         Commands::Smart {
             file,
@@ -2014,17 +2110,25 @@ fn run_cli() -> Result<i32> {
             context_only,
             file_type,
             line_numbers: _, // no-op: line numbers always enabled in grep_cmd::run
+            fixed,
+            regex,
             extra_args,
-        } => grep_cmd::run(
-            &pattern,
-            &path,
-            max_len,
-            max,
-            context_only,
-            file_type.as_deref(),
-            &extra_args,
-            cli.verbose,
-        )?,
+        } => {
+            // Default to fixed/literal search for agent safety; --regex opts into regex mode.
+            // --fixed is accepted as an explicit/no-op compatibility flag.
+            let fixed_mode = fixed || !regex;
+            grep_cmd::run(
+                &pattern,
+                &path,
+                max_len,
+                max,
+                context_only,
+                file_type.as_deref(),
+                fixed_mode,
+                &extra_args,
+                cli.verbose,
+            )?
+        }
 
         Commands::Init {
             global,
@@ -2760,6 +2864,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
         Commands::Ls { .. }
             | Commands::Tree { .. }
             | Commands::Read { .. }
+            | Commands::Patch { .. }
             | Commands::Smart { .. }
             | Commands::Git { .. }
             | Commands::Gh { .. }
