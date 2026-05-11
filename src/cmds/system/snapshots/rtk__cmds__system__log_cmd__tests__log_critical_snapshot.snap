@@ -1,0 +1,28 @@
+---
+source: src/cmds/system/log_cmd.rs
+expression: result
+---
+Log Summary
+   [critical] 3 critical (3 unique)
+   [error] 30 errors (5 unique)
+   [warn] 4 warnings (4 unique)
+   [info] 12 info messages
+   [debug] 5 debug messages
+
+[CRITICALS]
+   2024-01-15 09:17:30.000 ALERT Disk space below 5% on /var/log partition
+   2024-01-15 09:17:24.000 CRITICAL Payment service unreachable, 4821 transactions pending
+   2024-01-15 09:17:36.000 EMERGENCY Database primary node unresponsive, replica promotion triggered
+
+[ERRORS]
+   [×6] 2024-01-15 09:17:00.002 ERROR Connection to cache lost, retrying (attempt 1/5)
+   [×6] 2024-01-15 09:17:01.003 ERROR Connection to cache lost, retrying (attempt 2/5)
+   [×6] 2024-01-15 09:17:02.004 ERROR Connection to cache lost, retrying (attempt 3/5)
+   [×6] 2024-01-15 09:17:03.005 ERROR Connection to cache lost, retrying (attempt 4/5)
+   [×6] 2024-01-15 09:17:04.006 ERROR Connection to cache lost, retrying (attempt 5/5)
+
+[WARNINGS]
+   2024-01-15 09:17:00.001 WARN High memory usage: 78% of available RAM
+   2024-01-15 09:17:05.000 WARN High memory usage: 81% of available RAM
+   2024-01-15 09:17:11.000 WARN High memory usage: 85% of available RAM
+   2024-01-15 09:17:24.001 WARN High memory usage: 89% of available RAM
