@@ -18,6 +18,11 @@ pub const OPENCODE_SUBDIR: &str = "opencode";
 pub const PLUGIN_SUBDIR: &str = "plugins";
 pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
 
+pub const AGENTS_DIR: &str = ".agents";
+pub const SKILLS_SUBDIR: &str = "skills";
+pub const RTK_SKILL_DIR: &str = "raw-command-output";
+pub const RTK_SKILL_FILE: &str = "SKILL.md";
+
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
