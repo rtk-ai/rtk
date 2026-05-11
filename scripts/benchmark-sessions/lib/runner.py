@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
+import os
+import tarfile
 import tempfile
 from pathlib import Path
 
@@ -21,11 +22,10 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 def _create_tarball(source_dir: Path) -> str:
-    tarball = tempfile.mktemp(suffix=".tar.gz")
-    subprocess.run(
-        ["tar", "czf", tarball, "-C", str(source_dir), "."],
-        check=True,
-    )
+    fd, tarball = tempfile.mkstemp(suffix=".tar.gz")
+    os.close(fd)
+    with tarfile.open(tarball, "w:gz") as tar:
+        tar.add(str(source_dir), arcname=".")
     return tarball
 
 
@@ -60,12 +60,14 @@ def _tb_to_entry(r) -> TbEntry:
 async def run_benchmark(
     task: TaskConfig,
     vms: int,
-    api_key: str,
-    output_dir: Path,
+    api_key: str | None = None,
+    output_dir: Path = Path("."),
     cloud_init: Path | None = None,
     terminal_bench: bool = False,
     keep_vms: bool = False,
 ) -> RunManifest:
+    if api_key is None:
+        api_key = os.environ.get("RTK_API_KEY", "")
     if cloud_init is None:
         cloud_init = ROOT_DIR / "cloud-init-base.yaml"
 
