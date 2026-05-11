@@ -15,7 +15,7 @@ pub const NOISE_DIRS: &[&str] = &[
     ".venv",
     "venv",
     "env",
-    ".env",
+    // NOTE: .env is intentionally absent — it is a file containing secrets and must never be hidden
     "coverage",
     ".nyc_output",
     ".DS_Store",
