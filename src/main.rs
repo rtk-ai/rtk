@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Hermes CLI
     Hermes,
+    /// Augment Code (Auggie)
+    Auggie,
 }
 
 #[derive(Parser)]
@@ -774,6 +776,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Augment Code (Auggie) PreToolUse hook (reads JSON from stdin)
+    Auggie,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1807,17 +1811,36 @@ fn run_cli() -> Result<i32> {
                 dry_run,
             };
             if show {
-                hooks::init::show_config(codex)?;
+                if agent == Some(AgentTarget::Auggie) {
+                    hooks::init::show_auggie_config()?;
+                } else {
+                    hooks::init::show_config(codex)?;
+                }
             } else if uninstall {
-                uninstall_init_dispatch(
-                    agent,
-                    global,
-                    gemini,
-                    codex,
-                    ctx,
-                    hooks::init::uninstall_hermes,
-                    hooks::init::uninstall,
-                )?;
+                if agent == Some(AgentTarget::Auggie) {
+                    let removed = hooks::init::uninstall_auggie(cli.verbose)?;
+                    if removed.is_empty() {
+                        println!("RTK Auggie support was not installed (nothing to remove)");
+                    } else {
+                        println!("RTK uninstalled (Auggie):");
+                        for item in &removed {
+                            println!("  - {}", item);
+                        }
+                        println!("\nRestart Augment Code to apply changes.");
+                    }
+                } else {
+                    uninstall_init_dispatch(
+                        agent,
+                        global,
+                        gemini,
+                        codex,
+                        ctx,
+                        hooks::init::uninstall_hermes,
+                        hooks::init::uninstall,
+                    )?;
+                }
+            } else if agent == Some(AgentTarget::Auggie) {
+                hooks::init::run_auggie_mode(cli.verbose)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2174,6 +2197,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Auggie => {
+                hooks::hook_cmd::run_auggie()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {

@@ -41,6 +41,7 @@ Agent runs "cargo test"
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
+| Augment Code (Auggie) | Rust binary (`PreToolUse`) | Yes |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
@@ -138,6 +139,14 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 ```
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
+
+### Augment Code (Auggie)
+
+```bash
+rtk init --agent auggie    # patches ~/.augment/settings.json
+```
+
+Uses a `PreToolUse` hook with `launch-process` matcher. The payload format matches Claude Code (`tool_input.command` in, `hookSpecificOutput.updatedInput.command` out). Restart Augment Code after installation.
 
 ### Mistral Vibe (planned)
 

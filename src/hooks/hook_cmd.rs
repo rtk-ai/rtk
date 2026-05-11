@@ -397,6 +397,54 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── Auggie (Augment Code) native hook ─────────────────────────
+
+/// Run the Augment Code (Auggie) PreToolUse hook natively.
+/// The Auggie payload format matches Claude Code (tool_input.command / hookSpecificOutput),
+/// so we reuse the same payload processor.
+pub fn run_auggie() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_auggie_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Cursor on Windows ships hook payloads with one or more leading
@@ -778,6 +826,86 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Auggie (Augment Code) handler ---
+
+    fn auggie_input(cmd: &str) -> String {
+        json!({
+            "tool_name": "launch-process",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_auggie_rewrite_git_status() {
+        let result = run_auggie_inner(&auggie_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_auggie_rewrite_cargo_test() {
+        let result = run_auggie_inner(&auggie_input("cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk cargo test");
+    }
+
+    #[test]
+    fn test_auggie_passthrough_no_output() {
+        assert!(run_auggie_inner(&auggie_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_auggie_already_rtk_passthrough() {
+        assert!(run_auggie_inner(&auggie_input("rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_auggie_empty_command_passthrough() {
+        let input = json!({
+            "tool_name": "launch-process",
+            "tool_input": { "command": "" }
+        })
+        .to_string();
+        assert!(run_auggie_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_auggie_json_output_structure() {
+        let result = run_auggie_inner(&auggie_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert!(hook["updatedInput"].is_object());
+        assert!(hook["updatedInput"]["command"].is_string());
+    }
+
+    #[test]
+    fn test_auggie_compound_command() {
+        let result = run_auggie_inner(&auggie_input("git add . && cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git add . && rtk cargo test");
+    }
+
+    #[test]
+    fn test_auggie_malformed_json_passthrough() {
+        assert!(run_auggie_inner("not valid json {{{").is_none());
     }
 
     // --- Cursor handler ---
