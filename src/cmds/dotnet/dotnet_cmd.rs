@@ -1141,6 +1141,31 @@ fn format_test_output(
     .join("\n")
 }
 
+/// Pipe-mode filter for `dotnet test` stdout (`rtk pipe --filter dotnet-test`).
+///
+/// Used when test output is captured externally (e.g. WSL invoking the Windows
+/// `dotnet` via `cmd.exe`) and rtk's `dotnet test` wrapper can't be invoked
+/// directly. Parses the same regexes as the wrapper but without a binlog,
+/// infers success from the parsed counts, and renders the standard
+/// `format_test_output` summary.
+pub(crate) fn filter_dotnet_test_text(input: &str) -> String {
+    let test_summary = binlog::parse_test_from_text(input);
+    let build_summary = binlog::parse_build_from_text(input);
+
+    let command_success = test_summary.failed == 0
+        && test_summary.failed_tests.is_empty()
+        && build_summary.errors.is_empty();
+
+    let summary = normalize_test_summary(test_summary, command_success);
+    let dummy_binlog_path = PathBuf::new();
+    format_test_output(
+        &summary,
+        &build_summary.errors,
+        &build_summary.warnings,
+        &dummy_binlog_path,
+    )
+}
+
 /// Format the restore summary for stdout.
 ///
 /// `_binlog_path` is intentionally unused — the binlog is a temporary file
@@ -2447,5 +2472,52 @@ mod tests {
         cleanup_temp_file(&missing_file);
 
         assert!(!missing_file.exists());
+    }
+
+    #[test]
+    fn test_filter_dotnet_test_text_passing_run() {
+        // Real-world dotnet test stdout (success case, single project)
+        let input = "  Joko.NINA.Plugins.HocusFocus.Tests -> /repo/bin/Debug/Tests.dll\n\
+                     Test run for /repo/bin/Debug/Tests.dll (.NETCoreApp,Version=v8.0)\n\
+                     A total of 1 test files matched the specified pattern.\n\
+                     \n\
+                     Passed!  - Failed:     0, Passed:   672, Skipped:     0, Total:   672, \
+                     Duration: 2 s - Tests.dll (net8.0)\n";
+
+        let output = filter_dotnet_test_text(input);
+        assert!(output.starts_with("ok"), "verdict should be 'ok': {}", output);
+        assert!(output.contains("672 tests passed"), "out={}", output);
+        // Filter must compress: real input is ~300+ bytes, output should be much smaller
+        assert!(output.len() < input.len(), "filter should shrink output");
+    }
+
+    #[test]
+    fn test_filter_dotnet_test_text_failing_run() {
+        let input = "Test run for /repo/bin/Debug/Tests.dll (.NETCoreApp,Version=v8.0)\n\
+                     Failed MyTests.ShouldFail [10 ms]\n\
+                     Error Message:\n\
+                       Expected: 5\n\
+                       But was:  4\n\
+                     Stack Trace:\n\
+                        at MyTests.ShouldFail() in /repo/MyTests.cs:line 42\n\
+                     \n\
+                     Failed!  - Failed:     1, Passed:   670, Skipped:     0, Total:   671, \
+                     Duration: 2 s - Tests.dll (net8.0)\n";
+
+        let output = filter_dotnet_test_text(input);
+        assert!(
+            output.starts_with("fail") || output.contains("\nfail "),
+            "verdict should be 'fail': {}",
+            output
+        );
+        assert!(output.contains("MyTests.ShouldFail"), "out={}", output);
+        assert!(output.contains("1 failed"), "out={}", output);
+    }
+
+    #[test]
+    fn test_filter_dotnet_test_text_empty_input_is_safe() {
+        let output = filter_dotnet_test_text("");
+        // Empty input should not panic; produces a degenerate "binlog-only" header.
+        assert!(!output.is_empty());
     }
 }

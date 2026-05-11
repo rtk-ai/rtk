@@ -20,6 +20,7 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
         "prettier" => Some(crate::cmds::js::prettier_cmd::filter_prettier_output),
+        "dotnet-test" => Some(crate::cmds::dotnet::dotnet_cmd::filter_dotnet_test_text),
         _ => None,
     }
 }
@@ -169,6 +170,15 @@ pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
         return vitest_wrapper;
     }
 
+    // dotnet test: "Test run for <path>" appears once per project, and the
+    // verdict line "Passed!  -" / "Failed!  -" is unique to the dotnet CLI.
+    if first_1k.contains("Test run for ")
+        || first_1k.contains("Passed!  - ")
+        || first_1k.contains("Failed!  - ")
+    {
+        return crate::cmds::dotnet::dotnet_cmd::filter_dotnet_test_text;
+    }
+
     // find/fd: all non-empty lines look like file paths, minimum 3 lines
     let path_like_lines: usize = first_1k
         .lines()
@@ -220,7 +230,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
                  tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 mypy, ruff-check, ruff-format, prettier",
+                 mypy, ruff-check, ruff-format, prettier, dotnet-test",
                 name
             )
         })?,
@@ -530,5 +540,62 @@ mod tests {
         let f = auto_detect_filter(input);
         let out = f(input);
         assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_filter_dotnet_test() {
+        assert!(resolve_filter("dotnet-test").is_some());
+    }
+
+    #[test]
+    fn test_auto_detect_dotnet_test_passed() {
+        let input = "Test run for /repo/bin/Debug/Tests.dll (.NETCoreApp,Version=v8.0)\n\
+                     A total of 1 test files matched the specified pattern.\n\
+                     \n\
+                     Passed!  - Failed:     0, Passed:   672, Skipped:     0, Total:   672, \
+                     Duration: 2 s - Tests.dll (net8.0)\n";
+        let f = auto_detect_filter(input);
+        let out = f(input);
+        assert!(out.contains("dotnet test"), "out={}", out);
+        assert!(out.contains("672"), "out={}", out);
+    }
+
+    #[test]
+    fn test_dotnet_test_pipe_filter_compresses_real_output() {
+        // Mirrors a real WSL-via-cmd.exe `dotnet test` run: ~50 lines of MSBuild
+        // file-copy noise followed by the one summary line that actually matters.
+        let mut input = String::from(
+            "  Determining projects to restore...\n\
+             Microsoft (R) Build Engine version 17.8.3+195e7f5a3 for .NET\n\
+             Copyright (C) Microsoft Corporation. All rights reserved.\n\n",
+        );
+        for i in 0..40 {
+            input.push_str(&format!(
+                "  /repo/bin/Debug/net8.0/Dep{}.dll\n  1 File(s) copied\n",
+                i
+            ));
+        }
+        input.push_str(
+            "  Joko.NINA.Plugins.HocusFocus.Tests -> /repo/bin/Debug/Tests.dll\n\
+             Test run for /repo/bin/Debug/Tests.dll (.NETCoreApp,Version=v8.0)\n\
+             A total of 1 test files matched the specified pattern.\n\
+             \n\
+             Passed!  - Failed:     0, Passed:   672, Skipped:     0, Total:   672, \
+             Duration: 2 s - Tests.dll (net8.0)\n",
+        );
+
+        let f = resolve_filter("dotnet-test").expect("dotnet-test filter must exist");
+        let output = f(&input);
+
+        assert!(output.contains("672 tests passed"), "out={}", output);
+        // Filter target: ≥60% savings on realistic dotnet test output.
+        let savings = 100.0 - (output.len() as f64 / input.len() as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "dotnet-test filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
+            savings,
+            input.len(),
+            output.len()
+        );
     }
 }
