@@ -2743,6 +2743,15 @@ fn rtk_skill_path() -> Result<PathBuf> {
         .join(RTK_SKILL_FILE))
 }
 
+/// Return Claude Code skill path: ~/.claude/skills/raw-command-output/SKILL.md
+fn claude_skill_path() -> Result<PathBuf> {
+    let home = resolve_home_subdir(CLAUDE_DIR)?;
+    Ok(home
+        .join(SKILLS_SUBDIR)
+        .join(RTK_SKILL_DIR)
+        .join(RTK_SKILL_FILE))
+}
+
 /// Prepare OpenCode plugin directory and return install path
 fn prepare_opencode_plugin_path() -> Result<PathBuf> {
     let opencode_dir = resolve_opencode_dir()?;
@@ -2768,21 +2777,32 @@ fn ensure_opencode_plugin_installed(path: &Path, ctx: InitContext) -> Result<boo
     write_if_changed(path, OPENCODE_PLUGIN, "OpenCode plugin", ctx)
 }
 
-/// Write RTK skill file (~/.agents/skills/) if missing or outdated
+/// Write RTK skill file to ~/.agents/skills/ and ~/.claude/skills/
 fn ensure_rtk_skill_installed(ctx: InitContext) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
-    let path = rtk_skill_path()?;
-    if !dry_run {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create skills directory: {}",
-                    parent.display()
-                )
-            })?;
+    let mut changed = false;
+
+    // Install to each supported skill directory
+    let paths = [rtk_skill_path(), claude_skill_path()];
+    for path_result in &paths {
+        if let Ok(path) = path_result {
+            if !dry_run {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!(
+                            "Failed to create skills directory: {}",
+                            parent.display()
+                        )
+                    })?;
+                }
+            }
+            if write_if_changed(path, OPENCODE_SKILL, "RTK skill", ctx)? {
+                changed = true;
+            }
         }
     }
-    write_if_changed(&path, OPENCODE_SKILL, "RTK skill", ctx)
+
+    Ok(changed)
 }
 
 /// Remove OpenCode plugin and RTK skill files
@@ -2805,19 +2825,21 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
         removed.push(path);
     }
 
-    // Also remove the RTK skill
-    if let Ok(skill_path) = rtk_skill_path() {
-        if skill_path.exists() {
-            if dry_run {
-                println!("[dry-run] would remove RTK skill: {}", skill_path.display());
-            } else {
-                fs::remove_file(&skill_path)
-                    .with_context(|| format!("Failed to remove RTK skill: {}", skill_path.display()))?;
-                if verbose > 0 {
-                    eprintln!("Removed RTK skill: {}", skill_path.display());
+    // Also remove the RTK skill from all locations
+    for skill_path_result in &[rtk_skill_path(), claude_skill_path()] {
+        if let Ok(skill_path) = skill_path_result {
+            if skill_path.exists() {
+                if dry_run {
+                    println!("[dry-run] would remove RTK skill: {}", skill_path.display());
+                } else {
+                    fs::remove_file(skill_path)
+                        .with_context(|| format!("Failed to remove RTK skill: {}", skill_path.display()))?;
+                    if verbose > 0 {
+                        eprintln!("Removed RTK skill: {}", skill_path.display());
+                    }
                 }
+                removed.push(skill_path.clone());
             }
-            removed.push(skill_path);
         }
     }
 
@@ -3308,13 +3330,21 @@ fn show_claude_config() -> Result<()> {
         println!("[--] OpenCode: config dir not found");
     }
 
-    // Check RTK skill
-    if let Ok(skill_path) = rtk_skill_path() {
-        if skill_path.exists() {
-            println!("[ok] Skill: RTK_DISABLED opt-out ({})", skill_path.display());
-        } else {
-            println!("[--] Skill: not found");
+    // Check RTK skill (all install locations)
+    let mut skill_found = false;
+    for (label, path_result) in [
+        ("~/.agents", rtk_skill_path()),
+        ("~/.claude", claude_skill_path()),
+    ] {
+        if let Ok(skill_path) = path_result {
+            if skill_path.exists() {
+                println!("[ok] Skill: RTK_DISABLED opt-out [{}] ({})", label, skill_path.display());
+                skill_found = true;
+            }
         }
+    }
+    if !skill_found {
+        println!("[--] Skill: not found");
     }
 
     // Check Cursor hooks
@@ -3449,7 +3479,12 @@ fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
     if !dry_run {
         println!("\nOpenCode plugin installed (global).\n");
         println!("  Plugin: {}", opencode_plugin_path.display());
-        println!("  Skill:  {}", rtk_skill_path()?.display());
+        if let Ok(p) = rtk_skill_path() {
+            println!("  Skill:  {}", p.display());
+        }
+        if let Ok(p) = claude_skill_path() {
+            println!("  Skill:  {}", p.display());
+        }
         println!("  Restart OpenCode. Test with: git status\n");
     }
     Ok(())
