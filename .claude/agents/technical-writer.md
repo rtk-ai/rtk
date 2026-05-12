@@ -141,9 +141,7 @@ rtk --version
 
 **Binary Download** (faster):
 ```bash
-curl -sSL https://github.com/rtk-ai/rtk/releases/download/v0.16.0/rtk-linux-x86_64 -o rtk
-chmod +x rtk
-sudo mv rtk /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
 rtk --version
 ```
 

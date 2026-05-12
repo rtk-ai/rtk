@@ -187,9 +187,9 @@ gh release view v0.17.0
 
 ### 3. Installation Verification
 ```bash
-# Test installation from release
-curl -sSL https://github.com/rtk-ai/rtk/releases/download/v0.17.0/rtk-macos-latest -o rtk
-chmod +x rtk
+# Test installation from release (replace VERSION + ARCH as needed)
+curl -sSL https://github.com/rtk-ai/rtk/releases/download/v0.17.0/rtk-aarch64-apple-darwin.tar.gz -o rtk.tar.gz
+tar xzf rtk.tar.gz
 ./rtk --version
 # Should show v0.17.0
 ```

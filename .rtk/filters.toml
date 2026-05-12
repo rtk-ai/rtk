@@ -1,6 +1,6 @@
 # Project-local RTK filters — commit this file with your repo.
 # Filters here override user-global and built-in filters.
-# Docs: https://github.com/rtk-ai/rtk#custom-filters
+# Docs: https://github.com/rtk-ai/rtk/blob/HEAD/src/filters/README.md
 schema_version = 1
 
 # Example: suppress build noise from a custom tool
