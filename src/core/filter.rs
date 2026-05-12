@@ -49,6 +49,7 @@ pub enum Language {
     Cpp,
     Java,
     Ruby,
+    Lua,
     Shell,
     /// Data formats (JSON, YAML, TOML, XML, CSV) — no comment stripping
     Data,
@@ -67,6 +68,7 @@ impl Language {
             "cpp" | "cc" | "cxx" | "hpp" | "hh" => Language::Cpp,
             "java" => Language::Java,
             "rb" => Language::Ruby,
+            "lua" => Language::Lua,
             "sh" | "bash" | "zsh" => Language::Shell,
             "json" | "jsonc" | "json5" | "yaml" | "yml" | "toml" | "xml" | "csv" | "tsv"
             | "graphql" | "gql" | "sql" | "md" | "markdown" | "txt" | "env" | "lock" => {
@@ -108,6 +110,13 @@ impl Language {
                 line: Some("#"),
                 block_start: Some("=begin"),
                 block_end: Some("=end"),
+                doc_line: None,
+                doc_block_start: None,
+            },
+            Language::Lua => CommentPatterns {
+                line: Some("--"),
+                block_start: Some("--[["),
+                block_end: Some("]]"),
                 doc_line: None,
                 doc_block_start: None,
             },
@@ -236,7 +245,7 @@ lazy_static! {
     static ref IMPORT_PATTERN: Regex =
         Regex::new(r"^(use |import |from |require\(|#include)").unwrap();
     static ref FUNC_SIGNATURE: Regex = Regex::new(
-        r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+"
+        r"^(pub\s+)?(async\s+)?(fn|def|function\s+[\w.:]+|local\s+function\s+\w+|func|class|struct|enum|trait|interface|type)\s*"
     )
     .unwrap();
 }
@@ -383,6 +392,7 @@ mod tests {
         assert_eq!(Language::from_extension("rs"), Language::Rust);
         assert_eq!(Language::from_extension("py"), Language::Python);
         assert_eq!(Language::from_extension("js"), Language::JavaScript);
+        assert_eq!(Language::from_extension("lua"), Language::Lua);
     }
 
     #[test]
@@ -468,6 +478,28 @@ fn main() {
         let result = filter.filter(code, &Language::Rust);
         assert!(!result.contains("// This is a comment"));
         assert!(result.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_minimal_filter_removes_lua_comments() {
+        let code = r#"
+-- module comment
+local M = {}
+
+--[[
+long explanatory block
+]]
+function M.run()
+    return true -- keep inline code
+end
+"#;
+        let filter = MinimalFilter;
+        let result = filter.filter(code, &Language::Lua);
+        assert!(!result.contains("module comment"));
+        assert!(!result.contains("long explanatory block"));
+        assert!(result.contains("local M = {}"));
+        assert!(result.contains("function M.run()"));
+        assert!(result.contains("return true"));
     }
 
     // --- truncation accuracy ---

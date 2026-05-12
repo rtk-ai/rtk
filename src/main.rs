@@ -16,6 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::gradlew_cmd;
+use cmds::lua::{busted_cmd, luacheck_cmd};
 use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
@@ -696,6 +697,20 @@ enum Commands {
     /// RSpec test runner with compact output (Rails/Ruby)
     Rspec {
         /// RSpec arguments (e.g., spec/models, --tag focus)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Luacheck linter with compact output
+    Luacheck {
+        /// Luacheck arguments (e.g., --codes src)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Busted Lua test runner with compact output
+    Busted {
+        /// Busted arguments (e.g., spec --pattern _spec)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2121,6 +2136,10 @@ fn run_cli() -> Result<i32> {
 
         Commands::Rspec { args } => rspec_cmd::run(&args, cli.verbose)?,
 
+        Commands::Luacheck { args } => luacheck_cmd::run(&args, cli.verbose)?,
+
+        Commands::Busted { args } => busted_cmd::run(&args, cli.verbose)?,
+
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
         Commands::Go { command } => match command {
@@ -2480,6 +2499,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
+            | Commands::Luacheck { .. }
+            | Commands::Busted { .. }
             | Commands::Pip { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
@@ -3137,6 +3158,21 @@ mod tests {
                 assert_eq!(args, vec!["cowsay", "hello"]);
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
+        }
+    }
+
+    #[test]
+    fn test_lua_commands_parse_trailing_args() {
+        let cli = Cli::try_parse_from(["rtk", "luacheck", "--codes", "src"]).unwrap();
+        match cli.command {
+            Commands::Luacheck { args } => assert_eq!(args, vec!["--codes", "src"]),
+            _ => panic!("Expected Commands::Luacheck"),
+        }
+
+        let cli = Cli::try_parse_from(["rtk", "busted", "--pattern", "_spec"]).unwrap();
+        match cli.command {
+            Commands::Busted { args } => assert_eq!(args, vec!["--pattern", "_spec"]),
+            _ => panic!("Expected Commands::Busted"),
         }
     }
 }

@@ -40,6 +40,7 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
         "GitHub" => 200,
         "GitLab" => 200,
         "PackageManager" => 150,
+        "Lua" => 120,
         _ => 150,
     }
 }
@@ -3821,6 +3822,18 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("gt log", &[]),
             Some("rtk gt log".into())
+        );
+    }
+
+    #[test]
+    fn test_lua_commands_rewrite() {
+        assert_eq!(
+            rewrite_command_no_prefixes("luacheck --codes src", &[]),
+            Some("rtk luacheck --codes src".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("busted spec", &[]),
+            Some("rtk busted spec".into())
         );
     }
 

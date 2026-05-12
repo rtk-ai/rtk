@@ -122,6 +122,7 @@ fn lang_display_name(lang: &Language) -> &'static str {
         Language::Cpp => "C++",
         Language::Java => "Java",
         Language::Ruby => "Ruby",
+        Language::Lua => "Lua",
         Language::Shell => "Shell",
         Language::Data => "Data",
         Language::Unknown => "Code",
@@ -136,6 +137,7 @@ fn extract_imports(content: &str, lang: &Language) -> Vec<String> {
             r#"(?:import.*from\s+['"]([^'"]+)['"]|require\(['"]([^'"]+)['"]\))"#
         }
         Language::Go => r#"^\s*"([^"]+)"$"#,
+        Language::Lua => r#"require\s*\(?\s*['"]([^'"]+)['"]"#,
         _ => return Vec::new(),
     };
 
@@ -175,6 +177,9 @@ fn extract_functions(content: &str, lang: &Language) -> Vec<String> {
             r"(?:async\s+)?function\s+([a-zA-Z_][a-zA-Z0-9_]*)|(?:const|let|var)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s+)?\("
         }
         Language::Go => r"func\s+(?:\([^)]+\)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)",
+        Language::Lua => {
+            r"(?:local\s+function\s+|function\s+(?:[A-Za-z_][A-Za-z0-9_]*[.:])?)([A-Za-z_][A-Za-z0-9_]*)"
+        }
         _ => return Vec::new(),
     };
 
