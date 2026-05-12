@@ -31,6 +31,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
+| Devin | `rtk init --agent devin` | Hook in `~/.config/devin/config.json` | `config.json` (uses Claude-compatible format) |
 
 
 ## Integrity Verification

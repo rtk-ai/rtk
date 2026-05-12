@@ -1,6 +1,7 @@
 pub const REWRITE_HOOK_FILE: &str = "rtk-rewrite.sh";
 pub const GEMINI_HOOK_FILE: &str = "rtk-hook-gemini.sh";
 pub const CLAUDE_DIR: &str = ".claude";
+pub const DEVIN_DIR: &str = ".config/devin";
 pub const HOOKS_SUBDIR: &str = "hooks";
 pub const SETTINGS_JSON: &str = "settings.json";
 pub const SETTINGS_LOCAL_JSON: &str = "settings.local.json";

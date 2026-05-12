@@ -12,7 +12,7 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, DEVIN_DIR,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
     REWRITE_HOOK_FILE, SETTINGS_JSON,
@@ -2773,6 +2773,228 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
     }
 
     Ok(removed)
+}
+
+// ─── Devin for Terminal support ───────────────────────────────────────
+
+pub fn run_devin_mode(ctx: InitContext) -> Result<()> {
+    run_devin_mode_at(ctx)
+}
+
+fn resolve_devin_dir() -> Result<PathBuf> {
+    resolve_home_subdir(DEVIN_DIR)
+}
+
+fn run_devin_mode_at(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let devin_dir = resolve_devin_dir()?;
+
+    // Create .devin directory if it doesn't exist
+    if !dry_run {
+        fs::create_dir_all(&devin_dir).with_context(|| {
+            format!("Failed to create Devin directory: {}", devin_dir.display())
+        })?;
+    }
+
+    // Patch config.json with hook (Devin uses same format as Claude Code)
+    let patch_result = patch_devin_config(CLAUDE_HOOK_COMMAND, PatchMode::Auto, ctx)?;
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nRTK configured for Devin for Terminal.\n");
+        match patch_result {
+            PatchResult::Patched => {
+                println!("  config.json: hook registered");
+            }
+            PatchResult::AlreadyPresent => {
+                println!("  config.json: hook already present");
+            }
+            PatchResult::Declined | PatchResult::Skipped => {
+                println!("  config.json: manual configuration required");
+            }
+            PatchResult::WouldPatch => {}
+        }
+        println!("\n  Restart Devin. Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_devin(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let devin_dir = resolve_devin_dir()?;
+    let removed = uninstall_devin_at(&devin_dir, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK Devin support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Devin:"
+        } else {
+            "RTK uninstalled for Devin:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+fn uninstall_devin_at(devin_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { dry_run, .. } = ctx;
+    let mut removed = Vec::new();
+
+    let config_path = devin_dir.join("config.json");
+    if config_path.exists() {
+        let unpatched = unpatch_devin_config(&config_path, ctx)?;
+        if unpatched {
+            removed.push("config.json: removed RTK hook".to_string());
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(removed)
+}
+
+fn patch_devin_config(
+    hook_command: &str,
+    _mode: PatchMode,
+    ctx: InitContext,
+) -> Result<PatchResult> {
+    let InitContext { verbose, dry_run } = ctx;
+    let devin_dir = resolve_devin_dir()?;
+    let config_path = devin_dir.join("config.json");
+
+    // Read or create config.json
+    let mut root = if config_path.exists() {
+        let content = fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {} as JSON", config_path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    // Check if hook is already present
+    if devin_hook_already_present(&root, hook_command) {
+        if verbose > 0 {
+            eprintln!("  Devin hook already present in config.json");
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    // Add the hook using the standard insert_hook_entry function for correct structure
+    insert_hook_entry(&mut root, hook_command)?;
+
+    // Write the updated config
+    if dry_run {
+        println!(
+            "[dry-run] would update Devin config: {}",
+            config_path.display()
+        );
+        return Ok(PatchResult::WouldPatch);
+    }
+
+    let content =
+        serde_json::to_string_pretty(&root).with_context(|| "Failed to serialize config.json")?;
+
+    atomic_write(&config_path, &content)
+        .with_context(|| format!("Failed to write {}", config_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("  Updated Devin config: {}", config_path.display());
+    }
+
+    Ok(PatchResult::Patched)
+}
+
+fn devin_hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    let pre_tool_use_array = match root
+        .get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    pre_tool_use_array
+        .iter()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd == hook_command || cmd.contains(REWRITE_HOOK_FILE))
+}
+
+fn unpatch_devin_config(config_path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+
+    let content = fs::read_to_string(config_path)
+        .with_context(|| format!("Failed to read {}", config_path.display()))?;
+
+    let mut root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", config_path.display()))?;
+
+    let pre_tool_use = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return Ok(false),
+    };
+
+    let original_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| {
+        // Check the nested hooks array for RTK commands
+        if let Some(hooks_array) = entry.get("hooks").and_then(|h| h.as_array()) {
+            !hooks_array.iter().any(|hook| {
+                let cmd = hook.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                cmd.contains("rtk") || cmd.contains(REWRITE_HOOK_FILE)
+            })
+        } else {
+            true
+        }
+    });
+
+    if pre_tool_use.len() == original_len {
+        return Ok(false);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would update Devin config: {}",
+            config_path.display()
+        );
+        return Ok(true);
+    }
+
+    let content =
+        serde_json::to_string_pretty(&root).with_context(|| "Failed to serialize config.json")?;
+
+    atomic_write(config_path, &content)
+        .with_context(|| format!("Failed to write {}", config_path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("  Updated Devin config: {}", config_path.display());
+    }
+
+    Ok(true)
 }
 
 // ─── Cursor Agent support ─────────────────────────────────────────────
