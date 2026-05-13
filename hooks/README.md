@@ -39,6 +39,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
+- **[`omp/`](omp/README.md)** — TypeScript hook, OMP `tool_call` rewrite via `./.omp/hooks/pre/rtk.ts` or `~/.omp/agent/hooks/pre/rtk.ts`
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 
@@ -54,6 +55,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
+| Oh My Pi (OMP) | TypeScript hook (`tool_call`) | In-place mutation | Yes (`event.input`) |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 

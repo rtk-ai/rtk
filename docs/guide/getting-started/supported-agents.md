@@ -36,6 +36,7 @@ Agent runs "cargo test"
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
+| Oh My Pi (OMP) | TypeScript hook (`tool_call`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
@@ -122,6 +123,15 @@ rtk init --windsurf    # creates .windsurfrules in current project
 ```bash
 rtk init --codex    # creates AGENTS.md or patches existing one
 ```
+
+### Oh My Pi
+
+```bash
+rtk init --agent omp      # creates ./.omp/hooks/pre/rtk.ts
+rtk init -g --agent omp   # creates ~/.omp/agent/hooks/pre/rtk.ts
+```
+
+Oh My Pi loads project hooks from `.omp/hooks/pre/` and user hooks from `~/.omp/agent/hooks/pre/`. RTK installs a dedicated `rtk.ts` hook that intercepts `bash` tool calls and delegates rewrite decisions to `rtk rewrite`.
 
 ### Kilo Code
 
