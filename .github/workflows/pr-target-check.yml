@@ -36,7 +36,7 @@ jobs:
             });
 
             // Post comment
-            const body = `Automatic message from CI checks : It seems like this branche is targeting the wrong branch, any contribution should target develop branch.
+            const body = `Automatic message from CI checks : It seems like this branch is targeting the wrong branch, any contribution should target develop branch.
 
             See [CONTRIBUTING.md](https://github.com/rtk-ai/rtk/blob/master/CONTRIBUTING.md) for details.`;
 
