@@ -901,6 +901,33 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     // If user provided flags, apply minimal filtering
     if !args.is_empty() {
+        // -s/-sb/-bs/--short flags produce porcelain-like output — route through compact formatter
+        let is_short = args.iter().all(|a| {
+            matches!(
+                a.as_str(),
+                "-s" | "--short" | "-b" | "--branch" | "-sb" | "-bs"
+            )
+        });
+
+        if is_short {
+            // Run with --porcelain -b to feed format_status_output
+            let mut raw_cmd = git_cmd(global_args);
+            raw_cmd.args(["status", "--porcelain", "-b"]);
+            let raw_out = exec_capture(&mut raw_cmd)
+                .map(|r| r.stdout)
+                .unwrap_or_default();
+
+            let formatted = format_status_output(&raw_out);
+            println!("{}", formatted);
+            timer.track(
+                &format!("git status {}", args.join(" ")),
+                &format!("rtk git status {}", args.join(" ")),
+                &raw_out,
+                &formatted,
+            );
+            return Ok(0);
+        }
+
         let mut cmd = git_cmd(global_args);
         cmd.arg("status").args(args);
         let result = exec_capture(&mut cmd).context("Failed to run git status")?;

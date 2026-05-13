@@ -21,7 +21,7 @@ use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
     deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, pipe_cmd,
-    read, summary, tree, wc_cmd,
+    read, summary, tree, wc_cmd, winget_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -388,6 +388,13 @@ enum Commands {
         #[arg(short = 'O', long = "output-document", allow_hyphen_values = true)]
         output: Option<String>,
         /// Additional wget arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Windows Package Manager with compact output (strips spinners, progress bars)
+    Winget {
+        /// winget arguments (subcommand + options)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1881,6 +1888,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
+        Commands::Winget { args } => winget_cmd::run(&args, cli.verbose)?,
+
         Commands::Gain {
             project, // added
             graph,
@@ -2484,6 +2493,8 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Wc { .. }
+            | Commands::Winget { .. }
     )
 }
 

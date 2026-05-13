@@ -124,7 +124,12 @@ fn check_and_warn() -> Option<()> {
 pub fn parse_hook_version(content: &str) -> u8 {
     // Version tag must be in the first 5 lines (shebang + header convention)
     for line in content.lines().take(5) {
-        if let Some(rest) = line.strip_prefix("# rtk-hook-version:") {
+        // Unix: "# rtk-hook-version: N"
+        let rest = line
+            .strip_prefix("# rtk-hook-version:")
+            // Windows .cmd: "REM rtk-hook-version: N"
+            .or_else(|| line.strip_prefix("REM rtk-hook-version:"));
+        if let Some(rest) = rest {
             if let Ok(v) = rest.trim().parse::<u8>() {
                 return v;
             }
@@ -135,15 +140,24 @@ pub fn parse_hook_version(content: &str) -> u8 {
 
 fn hook_installed_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    let path = home
-        .join(CLAUDE_DIR)
-        .join(HOOKS_SUBDIR)
-        .join(REWRITE_HOOK_FILE);
-    if path.exists() {
-        Some(path)
-    } else {
-        None
+    let base = home.join(CLAUDE_DIR).join(HOOKS_SUBDIR);
+
+    // Primary: Unix shell script
+    let sh = base.join(REWRITE_HOOK_FILE);
+    if sh.exists() {
+        return Some(sh);
     }
+
+    // Windows fallback: .cmd wrapper
+    #[cfg(target_os = "windows")]
+    {
+        let cmd = base.join("rtk-rewrite.cmd");
+        if cmd.exists() {
+            return Some(cmd);
+        }
+    }
+
+    None
 }
 
 fn warn_marker_path() -> Option<PathBuf> {

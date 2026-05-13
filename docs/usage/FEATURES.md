@@ -870,6 +870,31 @@ Auto-detecte : `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `Gemfil
 
 ---
 
+## Windows Package Manager
+
+### `rtk winget` -- winget
+
+| Commande | Description | Economies |
+|----------|-------------|----------|
+| `rtk winget list` | Paquets upgradeables + compteur a jour | ~70% |
+| `rtk winget upgrade` | Liste compacte des mises a jour disponibles | ~73% |
+| `rtk winget install <id>` | Installe en supprimant spinners et boilerplate | ~60% |
+| `rtk winget uninstall <id>` | Desinstalle en supprimant le bruit | ~60% |
+| Autres sous-commandes | Passthrough avec suppression des spinners | — |
+
+Les colonnes Available et Source de winget sont parfois separees par un seul espace — RTK gere ce cas particulier.
+
+**Avant / Apres :**
+```
+# winget upgrade (sortie brute ~80 tokens)       # rtk winget upgrade (~22 tokens)
+Nom    Identifiant          Version  Disponible   upgrades (3):
+Docker Docker.DockerDesktop 4.38.0   4.39.0 ...     Docker.DockerDesktop: 4.38.0→4.39.0
+Git    Git.Git              2.47.1   2.48.0 ...     Git.Git: 2.47.1→2.48.0
+GitHub GitHub.cli           2.63.2   2.65.0 ...     GitHub.cli: 2.63.2→2.65.0
+```
+
+---
+
 ## Conteneurs et orchestration
 
 ### `rtk docker` -- Docker

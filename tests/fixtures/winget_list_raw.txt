@@ -1,0 +1,16 @@
+Имя                                   Идентификатор                          Версия           Доступно         Источник
+-------------------------------------------------------------------------------------------------------------------------------------------
+BlueStacks                             BlueStack.BlueStacks                   5.22.51.1038       5.22.166.1003 winget
+Docker Desktop                         Docker.DockerDesktop                   4.38.0             4.39.0           winget
+GitHub CLI                             GitHub.cli                             2.63.2             2.65.0           winget
+NVM for Windows 1.2.2                  CoreyButler.NVMforWindows              1.2.2                               winget
+Git                                    Git.Git                                2.47.1.2           2.48.0           winget
+Node.js                                OpenJS.NodeJS.LTS                      22.13.1                             winget
+Visual Studio Code                     Microsoft.VisualStudioCode             1.96.2             1.97.0           winget
+7-Zip 24.09 (x64)                      7zip.7zip                              24.09                               winget
+Python 3.11.9 (64-bit)                 Python.Python.3.11                     3.11.9             3.12.0           winget
+Microsoft Edge                         Microsoft.Edge                         131.0.2903.112                      winget
+PowerShell 7.4.6.0                     Microsoft.PowerShell                   7.4.6.0                             winget
+Rust toolchain installer               Rustlang.Rustup                        1.27.1             1.28.0           winget
+Windows Terminal                       Microsoft.WindowsTerminal              1.21.3231.0                         winget
+ARP\{A1B2C3D4}                         ARP\SomePkg                            1.0.0                               ARP

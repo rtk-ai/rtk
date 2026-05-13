@@ -230,6 +230,14 @@ rtk kubectl logs <pod>          # Deduplicated logs
 rtk kubectl services            # Compact service list
 ```
 
+### Windows Package Manager
+```powershell
+rtk winget list                 # Upgradeable packages + up-to-date count
+rtk winget upgrade              # Compact list of available updates
+rtk winget install <id>         # Install, stripping spinners and boilerplate
+rtk winget uninstall <id>       # Uninstall, stripping noise
+```
+
 ### Data & Analytics
 ```bash
 rtk json config.json            # Structure without values
@@ -345,8 +353,9 @@ rtk git status
 | Feature | WSL | Native Windows |
 |---------|-----|----------------|
 | Filters (cargo, git, etc.) | Full | Full |
-| Auto-rewrite hook | Yes | No (CLAUDE.md fallback) |
-| `rtk init -g` | Hook mode | CLAUDE.md mode |
+| `rtk winget` | N/A | Full |
+| Auto-rewrite hook | Yes | Yes (`.cmd` wrapper) |
+| `rtk init -g` | Hook mode | Hook mode |
 | `rtk gain` / analytics | Full | Full |
 
 ## Supported AI Tools

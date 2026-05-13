@@ -1,0 +1,10 @@
+Имя                                   Идентификатор                          Версия           Доступно         Источник
+-------------------------------------------------------------------------------------------------------------------------------------------
+BlueStacks                             BlueStack.BlueStacks                   5.22.51.1038       5.22.166.1003    winget
+Docker Desktop                         Docker.DockerDesktop                   4.38.0             4.39.0           winget
+GitHub CLI                             GitHub.cli                             2.63.2             2.65.0           winget
+Git                                    Git.Git                                2.47.1.2           2.48.0           winget
+Visual Studio Code                     Microsoft.VisualStudioCode             1.96.2             1.97.0           winget
+Python 3.11.9 (64-bit)                 Python.Python.3.11                     3.11.9             3.12.0           winget
+Rust toolchain installer               Rustlang.Rustup                        1.27.1             1.28.0           winget
+5 обновлений доступно.
