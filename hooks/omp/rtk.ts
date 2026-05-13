@@ -29,16 +29,26 @@ export async function rewrite(command: string): Promise<RewriteResult | null> {
     //   2 = deny rule matched (passthrough — host tool handles denial)
     //   3 = ask rule matched (prompt user before applying)
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
         const proc = spawner.spawn(["rtk", "rewrite", command], {
             stdout: "pipe", stderr: "pipe",
         });
-        timeout = setTimeout(() => proc.kill(), 2_000);
+        timeout = setTimeout(() => {
+            timedOut = true;
+            proc.kill();
+        }, 2_000);
         const [exitCode, stdout, stderr] = await Promise.all([
             proc.exited,
             new Response(proc.stdout).text(),
             new Response(proc.stderr).text(),
         ]);
+
+        if (timedOut) {
+            warn("rtk rewrite timed out");
+            return null;
+        }
+
         const rewritten = stdout.trim();
 
         if (exitCode === 1 || exitCode === 2) return null;
@@ -64,8 +74,15 @@ function warn(message: string): void {
     console.error(`rtk: omp hook warning: ${message}`);
 }
 
+let rtkMissingWarned = false;
+
 export default function (pi: HookAPI): void {
     const hasRtk = Boolean($which("rtk"));
+
+    if (!hasRtk && !rtkMissingWarned) {
+        rtkMissingWarned = true;
+        warn("rtk binary not found in PATH; OMP hook not registered");
+    }
 
     pi.on("tool_call", async (event, ctx) => {
         if (event.toolName !== "bash") return;

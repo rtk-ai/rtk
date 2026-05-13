@@ -15,8 +15,8 @@ use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    OMP_GLOBAL_HOOK_PATH, OMP_PROJECT_HOOK_PATH, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SETTINGS_JSON,
+    OMP_GLOBAL_HOOK_PATH, OMP_PROJECT_HOOK_PATH, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -832,24 +832,43 @@ pub fn uninstall(
 }
 
 fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
     let base_dir = if global {
-        dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?
+        resolve_omp_agent_dir()?
     } else {
         std::env::current_dir()?
     };
-    uninstall_omp_at(&base_dir, global, ctx)
+    let removed = uninstall_omp_at(&base_dir, global, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK was not installed for Oh My Pi (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Oh My Pi:"
+        } else {
+            "RTK uninstalled for Oh My Pi:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
 }
 
-fn uninstall_omp_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+fn uninstall_omp_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<Vec<String>> {
     let InitContext { verbose, dry_run } = ctx;
     let hook_path = omp_hook_path(base_dir, global);
+    let mut removed = Vec::new();
 
     let content = match fs::read_to_string(&hook_path) {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("RTK was not installed for Oh My Pi (nothing to remove)");
-            return Ok(());
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(removed),
         Err(e) => {
             return Err(e)
                 .with_context(|| format!("Failed to read OMP hook: {}", hook_path.display()));
@@ -858,7 +877,7 @@ fn uninstall_omp_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<(
 
     if omp_hook_matches_stock(&content) {
         if dry_run {
-            println!("[dry-run] Would remove OMP hook: {}", hook_path.display());
+            println!("[dry-run] would remove OMP hook: {}", hook_path.display());
         } else {
             fs::remove_file(&hook_path)
                 .with_context(|| format!("Failed to remove OMP hook: {}", hook_path.display()))?;
@@ -866,9 +885,8 @@ fn uninstall_omp_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<(
                 eprintln!("Removed OMP hook: {}", hook_path.display());
             }
         }
-        println!("RTK uninstalled for Oh My Pi:");
-        println!("  - Hook: {}", hook_path.display());
-        return Ok(());
+        removed.push(format!("Hook: {}", hook_path.display()));
+        return Ok(removed);
     }
 
     if omp_hook_contains_rtk(&content) {
@@ -878,8 +896,7 @@ fn uninstall_omp_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<(
         );
     }
 
-    println!("RTK was not installed for Oh My Pi (nothing to remove)");
-    Ok(())
+    Ok(removed)
 }
 
 fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
@@ -2432,8 +2449,8 @@ fn run_omp_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()
 }
 pub fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
     if global {
-        let home = dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?;
-        run_omp_mode_at(&home, global, ctx)
+        let agent_dir = resolve_omp_agent_dir()?;
+        run_omp_mode_at(&agent_dir, global, ctx)
     } else {
         run_omp_mode_at(&std::env::current_dir()?, global, ctx)
     }
@@ -2868,6 +2885,31 @@ fn resolve_hermes_home_from_env(
         .map(|home| home.join(HERMES_DIR))
         .context("Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.")
 }
+fn resolve_omp_agent_dir() -> Result<PathBuf> {
+    resolve_omp_agent_dir_from_env(
+        dirs::home_dir(),
+        std::env::var_os("PI_CODING_AGENT_DIR"),
+        std::env::var_os("PI_CONFIG_DIR"),
+    )
+}
+
+fn resolve_omp_agent_dir_from_env(
+    home_dir: Option<PathBuf>,
+    omp_agent_dir: Option<OsString>,
+    config_dir: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(path) = omp_agent_dir.filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    let config_dir = config_dir.filter(|v| !v.is_empty());
+    let config_subdir: &Path = config_dir
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new(".omp"));
+    home_dir
+        .map(|home| home.join(config_subdir).join("agent"))
+        .context("Cannot determine OMP agent directory. Set $PI_CODING_AGENT_DIR or $HOME.")
+}
 
 fn codex_rtk_md_ref(codex_dir: &Path) -> String {
     format!("@{}", codex_dir.join(RTK_MD).display())
@@ -3279,9 +3321,9 @@ fn print_omp_hook_status(label: &str, hook_path: &Path) -> Result<()> {
 }
 
 fn show_omp_config() -> Result<()> {
-    let home = dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?;
+    let agent_dir = resolve_omp_agent_dir()?;
     let cwd = std::env::current_dir()?;
-    let global_hook = omp_hook_path(&home, true);
+    let global_hook = omp_hook_path(&agent_dir, true);
     let project_hook = omp_hook_path(&cwd, false);
 
     println!("rtk Configuration (Oh My Pi):\n");

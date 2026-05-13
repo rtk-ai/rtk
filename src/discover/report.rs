@@ -363,6 +363,19 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_status_detects_omp_hook_file() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let hook = temp_home.path().join(OMP_GLOBAL_HOOK_PATH);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "// RTK - Rust Token Killer\n").unwrap();
+
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+
+        assert!(status.omp_hook_installed);
+        assert!(!status.cursor_hook_installed);
+    }
+
+    #[test]
     fn test_format_text_reports_omp_hook_installed() {
         let mut report = make_report(1, 0);
         report.agent_status.omp_hook_installed = true;
