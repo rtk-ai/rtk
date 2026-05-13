@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -21,7 +22,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 def _create_tarball(source_dir: Path) -> str:
-    tarball = tempfile.mktemp(suffix=".tar.gz")
+    fd, tarball = tempfile.mkstemp(suffix=".tar.gz")
+    os.close(fd)
     subprocess.run(
         ["tar", "czf", tarball, "-C", str(source_dir), "."],
         check=True,
