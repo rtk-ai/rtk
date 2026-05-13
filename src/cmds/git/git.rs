@@ -692,7 +692,7 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
         }
 
         match status.chars().nth(1).unwrap_or(' ') {
-            'M' | 'D' => {
+            'M' | 'D' | 'A' => {
                 modified += 1;
                 modified_files.push(file);
             }
@@ -2529,6 +2529,23 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let porcelain = "## main\nA  🎉-party.txt\n M 日本語ファイル.rs\n";
         let result = format_status_output(porcelain);
         assert!(result.contains("* main"));
+    }
+
+    /// Regression test: files added with `git add -N` (intent-to-add) have
+    /// porcelain status ` A` (space + A). They must not be silently dropped,
+    /// which would cause a false "clean — nothing to commit" result.
+    #[test]
+    fn test_format_status_output_intent_to_add() {
+        let porcelain = "## main\n A new_file.txt\n";
+        let result = format_status_output(porcelain);
+        assert!(
+            !result.contains("clean"),
+            "intent-to-add files should not produce a 'clean' status: {result}"
+        );
+        assert!(
+            result.contains("new_file.txt"),
+            "intent-to-add file should appear in status output: {result}"
+        );
     }
 
     /// Regression test: --oneline and other user format flags must preserve all commits.
