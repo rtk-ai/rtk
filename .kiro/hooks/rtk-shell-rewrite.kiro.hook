@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "name": "RTK Shell Rewrite Reminder",
+  "description": "Before executing shell commands, reminds the agent to prefix commands with rtk for token-optimized output",
+  "version": "1",
+  "when": {
+    "type": "preToolUse",
+    "toolTypes": ["shell"]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Before running this shell command, check: is it prefixed with 'rtk'? If not, and it's a supported command (git, cargo, ls, grep, find, read, docker, kubectl, aws, npm, pnpm, pytest, jest, vitest, go test, etc.), rewrite it to use 'rtk <original command>' for token-optimized output. Do NOT add rtk prefix to: interactive commands, rtk commands that are already prefixed, or commands that rtk doesn't support."
+  }
+}

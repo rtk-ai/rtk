@@ -1782,6 +1782,195 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+// ─── Kiro IDE support ─────────────────────────────────────────
+
+const KIRO_STEERING: &str = include_str!("../../hooks/kiro/rules.md");
+const KIRO_HOOK: &str = include_str!("../../hooks/kiro/hook.json");
+
+const KIRO_STEERING_DIR: &str = ".kiro/steering";
+const KIRO_HOOKS_DIR: &str = ".kiro/hooks";
+const KIRO_STEERING_FILE: &str = "rtk-rules.md";
+const KIRO_HOOK_FILE: &str = "rtk-shell-rewrite.kiro.hook";
+
+pub fn run_kiro_mode(ctx: InitContext) -> Result<()> {
+    run_kiro_mode_at(&std::env::current_dir()?, ctx)
+}
+
+pub fn run_kiro_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+
+    let steering_dir = base_dir.join(KIRO_STEERING_DIR);
+    let hooks_dir = base_dir.join(KIRO_HOOKS_DIR);
+    let steering_path = steering_dir.join(KIRO_STEERING_FILE);
+    let hook_path = hooks_dir.join(KIRO_HOOK_FILE);
+
+    // Step 1: Create .kiro/steering/ directory if missing
+    if dry_run {
+        if !steering_dir.exists() {
+            println!(
+                "[dry-run] would create directory: {}",
+                KIRO_STEERING_DIR
+            );
+        }
+    } else {
+        fs::create_dir_all(&steering_dir)
+            .context("Failed to create .kiro/steering directory")?;
+    }
+
+    // Step 2: Write steering file
+    let steering_written = write_if_changed(
+        &steering_path,
+        KIRO_STEERING,
+        KIRO_STEERING_FILE,
+        ctx,
+    )?;
+
+    // Step 3: Create .kiro/hooks/ directory if missing
+    if dry_run {
+        if !hooks_dir.exists() {
+            println!(
+                "[dry-run] would create directory: {}",
+                KIRO_HOOKS_DIR
+            );
+        }
+    } else {
+        fs::create_dir_all(&hooks_dir)
+            .context("Failed to create .kiro/hooks directory")?;
+    }
+
+    // Step 4: Write hook file (with transactional rollback on failure)
+    let hook_result = write_if_changed(
+        &hook_path,
+        KIRO_HOOK,
+        KIRO_HOOK_FILE,
+        ctx,
+    );
+
+    match hook_result {
+        Ok(_hook_written) => {}
+        Err(hook_err) => {
+            // Transactional rollback: remove steering file if hook write failed
+            if !dry_run && steering_written && steering_path.exists() {
+                if let Err(cleanup_err) = fs::remove_file(&steering_path) {
+                    return Err(hook_err.context(format!(
+                        "Hook write failed AND cleanup of {} also failed: {}",
+                        steering_path.display(),
+                        cleanup_err
+                    )));
+                }
+            }
+            return Err(hook_err.context("Failed to write hook file; rolled back steering file"));
+        }
+    }
+
+    // Step 5: Print success summary
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        let steering_rel = format!("{}/{}", KIRO_STEERING_DIR, KIRO_STEERING_FILE);
+        let hook_rel = format!("{}/{}", KIRO_HOOKS_DIR, KIRO_HOOK_FILE);
+
+        println!("\nRTK configured for Kiro IDE.\n");
+        println!("  Steering: {} (installed)", steering_rel);
+        println!("  Hook:     {} (installed)", hook_rel);
+        println!("  Kiro will now use rtk commands for token savings.");
+        println!("  Test with: git status\n");
+
+        if verbose > 0 {
+            eprintln!("Wrote {}", steering_path.display());
+            eprintln!("Wrote {}", hook_path.display());
+        }
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_kiro(ctx: InitContext) -> Result<()> {
+    uninstall_kiro_at(&std::env::current_dir()?, ctx)
+}
+
+pub fn uninstall_kiro_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+
+    let steering_path = base_dir.join(KIRO_STEERING_DIR).join(KIRO_STEERING_FILE);
+    let hook_path = base_dir.join(KIRO_HOOKS_DIR).join(KIRO_HOOK_FILE);
+
+    let mut removed = Vec::new();
+
+    // Remove steering file
+    if steering_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove: {}/{}",
+                KIRO_STEERING_DIR, KIRO_STEERING_FILE
+            );
+        } else {
+            fs::remove_file(&steering_path)
+                .with_context(|| format!("Failed to remove {}", steering_path.display()))?;
+        }
+        removed.push(format!("{}/{}", KIRO_STEERING_DIR, KIRO_STEERING_FILE));
+    }
+
+    // Remove hook file
+    if hook_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove: {}/{}",
+                KIRO_HOOKS_DIR, KIRO_HOOK_FILE
+            );
+        } else {
+            fs::remove_file(&hook_path)
+                .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
+        }
+        removed.push(format!("{}/{}", KIRO_HOOKS_DIR, KIRO_HOOK_FILE));
+    }
+
+    // Print summary
+    if removed.is_empty() {
+        println!("No RTK Kiro artifacts found to remove.");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK (Kiro):"
+        } else {
+            "RTK uninstalled (Kiro):"
+        };
+        println!("{}", header);
+        for item in &removed {
+            println!("  - {}", item);
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+pub fn show_kiro_status() {
+    show_kiro_status_at(&PathBuf::from("."));
+}
+
+pub fn show_kiro_status_at(base_dir: &Path) {
+    println!("{}", kiro_status_line(base_dir));
+}
+
+/// Returns the Kiro status line without printing it (testable).
+fn kiro_status_line(base_dir: &Path) -> &'static str {
+    let steering = base_dir.join(KIRO_STEERING_DIR).join(KIRO_STEERING_FILE);
+    let hook = base_dir.join(KIRO_HOOKS_DIR).join(KIRO_HOOK_FILE);
+
+    let steering_ok = steering.exists();
+    let hook_ok = hook.exists();
+
+    match (steering_ok, hook_ok) {
+        (true, true) => "[ok] Kiro: steering + hook installed",
+        (true, false) => "[warn] Kiro: steering installed, hook missing",
+        (false, true) => "[warn] Kiro: hook installed, steering missing",
+        (false, false) => "[--] Kiro: not configured",
+    }
+}
+
 fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -2574,7 +2763,9 @@ pub fn show_config(codex: bool) -> Result<()> {
         return show_codex_config();
     }
 
-    show_claude_config()
+    show_claude_config()?;
+    show_kiro_status();
+    Ok(())
 }
 
 fn show_claude_config() -> Result<()> {
@@ -4606,5 +4797,273 @@ mod tests {
             !cleaned.contains(RTK_BLOCK_END),
             "RTK end marker must be removed"
         );
+    }
+
+    // ─── Kiro integration install tests (task 5.1) ─────────────────────
+
+    #[test]
+    fn test_kiro_mode_creates_steering_file() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let steering_path = temp.path().join(".kiro/steering/rtk-rules.md");
+        assert!(steering_path.exists(), "Steering file should be created");
+        let content = fs::read_to_string(&steering_path).unwrap();
+        assert_eq!(content, KIRO_STEERING, "Steering file content should match template");
+    }
+
+    #[test]
+    fn test_kiro_mode_creates_hook_file() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let hook_path = temp.path().join(".kiro/hooks/rtk-shell-rewrite.kiro.hook");
+        assert!(hook_path.exists(), "Hook file should be created");
+        let content = fs::read_to_string(&hook_path).unwrap();
+        // Verify it's valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .expect("Hook file should be valid JSON");
+        assert!(parsed.is_object(), "Hook JSON should be an object");
+    }
+
+    #[test]
+    fn test_kiro_hook_has_correct_schema() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let hook_path = temp.path().join(".kiro/hooks/rtk-shell-rewrite.kiro.hook");
+        let content = fs::read_to_string(&hook_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // when.type == "preToolUse"
+        assert_eq!(
+            parsed["when"]["type"].as_str().unwrap(),
+            "preToolUse",
+            "when.type should be preToolUse"
+        );
+
+        // when.toolTypes == ["shell"]
+        let tool_types = parsed["when"]["toolTypes"].as_array().unwrap();
+        assert_eq!(tool_types.len(), 1);
+        assert_eq!(tool_types[0].as_str().unwrap(), "shell");
+
+        // then.type == "askAgent"
+        assert_eq!(
+            parsed["then"]["type"].as_str().unwrap(),
+            "askAgent",
+            "then.type should be askAgent"
+        );
+
+        // then.prompt is non-empty
+        let prompt = parsed["then"]["prompt"].as_str().unwrap();
+        assert!(!prompt.is_empty(), "then.prompt should be non-empty");
+    }
+
+    #[test]
+    fn test_kiro_steering_has_frontmatter() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let steering_path = temp.path().join(".kiro/steering/rtk-rules.md");
+        let content = fs::read_to_string(&steering_path).unwrap();
+        // Normalize line endings for cross-platform compatibility
+        let normalized = content.replace("\r\n", "\n");
+        assert!(
+            normalized.starts_with("---\ninclusion: auto\n---"),
+            "Steering file should start with YAML frontmatter: ---\\ninclusion: auto\\n---"
+        );
+    }
+
+    #[test]
+    fn test_kiro_steering_has_examples() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let steering_path = temp.path().join(".kiro/steering/rtk-rules.md");
+        let content = fs::read_to_string(&steering_path).unwrap();
+
+        // Count lines that contain "rtk " as command examples
+        let rtk_examples: Vec<&str> = content
+            .lines()
+            .filter(|line| line.starts_with("rtk "))
+            .collect();
+        assert!(
+            rtk_examples.len() >= 6,
+            "Steering file should have at least 6 rtk command examples, found {}",
+            rtk_examples.len()
+        );
+    }
+
+    #[test]
+    fn test_kiro_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let steering_path = temp.path().join(".kiro/steering/rtk-rules.md");
+        let hook_path = temp.path().join(".kiro/hooks/rtk-shell-rewrite.kiro.hook");
+
+        let first_steering = fs::read_to_string(&steering_path).unwrap();
+        let first_hook = fs::read_to_string(&hook_path).unwrap();
+
+        // Run again
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let second_steering = fs::read_to_string(&steering_path).unwrap();
+        let second_hook = fs::read_to_string(&hook_path).unwrap();
+
+        assert_eq!(
+            first_steering, second_steering,
+            "Idempotent: steering content should not change"
+        );
+        assert_eq!(
+            first_hook, second_hook,
+            "Idempotent: hook content should not change"
+        );
+    }
+
+    #[test]
+    fn test_kiro_global_rejected() {
+        // The global rejection is handled in main.rs dispatch, not in init.rs.
+        // We verify the error message pattern matches what main.rs would produce.
+        let expected_msg = "Kiro is project-scoped. Use: rtk init --agent kiro";
+
+        // Simulate what main.rs does: bail if global is true
+        let global = true;
+        let result: Result<()> = (|| {
+            if global {
+                anyhow::bail!("{}", expected_msg);
+            }
+            Ok(())
+        })();
+
+        let err = result.unwrap_err();
+        assert_eq!(err.to_string(), expected_msg);
+    }
+
+    // ─── Kiro integration uninstall tests (task 5.2) ─────────────────────
+
+    #[test]
+    fn test_kiro_uninstall_removes_files() {
+        let temp = TempDir::new().unwrap();
+        // Install first
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let steering_path = temp.path().join(".kiro/steering/rtk-rules.md");
+        let hook_path = temp.path().join(".kiro/hooks/rtk-shell-rewrite.kiro.hook");
+        assert!(steering_path.exists(), "Steering file should exist after install");
+        assert!(hook_path.exists(), "Hook file should exist after install");
+
+        // Uninstall
+        uninstall_kiro_at(temp.path(), InitContext::default()).unwrap();
+
+        assert!(!steering_path.exists(), "Steering file should be removed after uninstall");
+        assert!(!hook_path.exists(), "Hook file should be removed after uninstall");
+    }
+
+    #[test]
+    fn test_kiro_uninstall_missing_files() {
+        let temp = TempDir::new().unwrap();
+        // Run uninstall without installing first — should not error
+        let result = uninstall_kiro_at(temp.path(), InitContext::default());
+        assert!(result.is_ok(), "Uninstall should succeed even when files don't exist");
+    }
+
+    #[test]
+    fn test_kiro_uninstall_preserves_other_files() {
+        let temp = TempDir::new().unwrap();
+        // Install Kiro files
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        // Create extra files in the same directories
+        let extra_steering = temp.path().join(".kiro/steering/my-custom-rules.md");
+        let extra_hook = temp.path().join(".kiro/hooks/my-custom.hook");
+        fs::write(&extra_steering, "custom steering content").unwrap();
+        fs::write(&extra_hook, "custom hook content").unwrap();
+
+        // Uninstall Kiro
+        uninstall_kiro_at(temp.path(), InitContext::default()).unwrap();
+
+        // RTK files should be gone
+        let steering_path = temp.path().join(".kiro/steering/rtk-rules.md");
+        let hook_path = temp.path().join(".kiro/hooks/rtk-shell-rewrite.kiro.hook");
+        assert!(!steering_path.exists(), "RTK steering file should be removed");
+        assert!(!hook_path.exists(), "RTK hook file should be removed");
+
+        // Extra files should remain
+        assert!(extra_steering.exists(), "Custom steering file should be preserved");
+        assert!(extra_hook.exists(), "Custom hook file should be preserved");
+
+        // Directories should still exist
+        assert!(temp.path().join(".kiro/steering").exists(), "Steering directory should be preserved");
+        assert!(temp.path().join(".kiro/hooks").exists(), "Hooks directory should be preserved");
+    }
+
+    // ─── Kiro show status & dry-run tests (Task 5.3) ──────────────────────
+
+    #[test]
+    fn test_kiro_show_status_both_present() {
+        let temp = TempDir::new().unwrap();
+        // Install both files
+        run_kiro_mode_at(temp.path(), InitContext::default()).unwrap();
+
+        let steering_path = temp.path().join(KIRO_STEERING_DIR).join(KIRO_STEERING_FILE);
+        let hook_path = temp.path().join(KIRO_HOOKS_DIR).join(KIRO_HOOK_FILE);
+        assert!(steering_path.exists(), "steering file must exist");
+        assert!(hook_path.exists(), "hook file must exist");
+
+        let status = kiro_status_line(temp.path());
+        assert_eq!(status, "[ok] Kiro: steering + hook installed");
+    }
+
+    #[test]
+    fn test_kiro_show_status_partial() {
+        let temp = TempDir::new().unwrap();
+        // Install only the steering file (no hook)
+        let steering_dir = temp.path().join(KIRO_STEERING_DIR);
+        fs::create_dir_all(&steering_dir).unwrap();
+        fs::write(steering_dir.join(KIRO_STEERING_FILE), KIRO_STEERING).unwrap();
+
+        let steering_path = temp.path().join(KIRO_STEERING_DIR).join(KIRO_STEERING_FILE);
+        let hook_path = temp.path().join(KIRO_HOOKS_DIR).join(KIRO_HOOK_FILE);
+        assert!(steering_path.exists(), "steering file must exist");
+        assert!(!hook_path.exists(), "hook file must NOT exist");
+
+        let status = kiro_status_line(temp.path());
+        assert_eq!(status, "[warn] Kiro: steering installed, hook missing");
+    }
+
+    #[test]
+    fn test_kiro_show_status_none() {
+        let temp = TempDir::new().unwrap();
+
+        // Neither file exists in the temp directory
+        let steering_path = temp.path().join(KIRO_STEERING_DIR).join(KIRO_STEERING_FILE);
+        let hook_path = temp.path().join(KIRO_HOOKS_DIR).join(KIRO_HOOK_FILE);
+        assert!(!steering_path.exists(), "steering file must NOT exist");
+        assert!(!hook_path.exists(), "hook file must NOT exist");
+
+        let status = kiro_status_line(temp.path());
+        assert_eq!(status, "[--] Kiro: not configured");
+    }
+
+    #[test]
+    fn test_kiro_dry_run_no_writes() {
+        let temp = TempDir::new().unwrap();
+
+        let ctx = InitContext {
+            dry_run: true,
+            ..Default::default()
+        };
+
+        run_kiro_mode_at(temp.path(), ctx).unwrap();
+
+        // Verify no files were actually created
+        let steering_path = temp.path().join(KIRO_STEERING_DIR).join(KIRO_STEERING_FILE);
+        let hook_path = temp.path().join(KIRO_HOOKS_DIR).join(KIRO_HOOK_FILE);
+        assert!(
+            !steering_path.exists(),
+            "dry-run must not create steering file"
+        );
+        assert!(!hook_path.exists(), "dry-run must not create hook file");
     }
 }

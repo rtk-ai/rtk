@@ -45,6 +45,8 @@ pub enum AgentTarget {
     Kilocode,
     /// Google Antigravity
     Antigravity,
+    /// Kiro IDE
+    Kiro,
 }
 
 #[derive(Parser)]
@@ -1776,8 +1778,15 @@ fn run_cli() -> Result<i32> {
             if show {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
-                let cursor = agent == Some(AgentTarget::Cursor);
-                hooks::init::uninstall(global, gemini, codex, cursor, ctx)?;
+                if agent == Some(AgentTarget::Kiro) {
+                    if global {
+                        anyhow::bail!("Kiro is project-scoped. Use: rtk init --agent kiro");
+                    }
+                    hooks::init::uninstall_kiro(ctx)?;
+                } else {
+                    let cursor = agent == Some(AgentTarget::Cursor);
+                    hooks::init::uninstall(global, gemini, codex, cursor, ctx)?;
+                }
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1801,6 +1810,11 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Kiro) {
+                if global {
+                    anyhow::bail!("Kiro is project-scoped. Use: rtk init --agent kiro");
+                }
+                hooks::init::run_kiro_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
