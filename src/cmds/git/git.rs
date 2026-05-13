@@ -692,7 +692,11 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
         }
 
         match status.chars().nth(1).unwrap_or(' ') {
-            'M' | 'D' => {
+            // 'A' in working-tree position indicates intent-to-add (`git add -N`):
+            // the path is registered in the index as an empty blob but the actual
+            // content is still unstaged. Git shows it under "Changes not staged",
+            // so we must not treat the repo as clean.
+            'M' | 'D' | 'A' => {
                 modified += 1;
                 modified_files.push(file);
             }
@@ -2264,6 +2268,53 @@ A  added.rs
         assert!(result.contains("modified.rs"));
         assert!(result.contains("? Untracked: 1 files"));
         assert!(result.contains("untracked.txt"));
+    }
+
+    #[test]
+    fn test_format_status_output_intent_to_add() {
+        // `git add -N file` records the path with an empty blob (intent-to-add).
+        // git status --porcelain -b shows it as " A file" (space-A), meaning
+        // nothing is staged vs HEAD but the working-tree entry is new.
+        // RTK must not report "clean — nothing to commit" in this state.
+        let porcelain = "## main\n A new_file.txt\n";
+        let result = format_status_output(porcelain);
+        assert!(
+            !result.contains("clean"),
+            "intent-to-add file should not produce clean message, got: {result}"
+        );
+        assert!(
+            result.contains("new_file.txt"),
+            "intent-to-add file should appear in output, got: {result}"
+        );
+        assert!(
+            result.contains("~ Modified"),
+            "intent-to-add file should appear under Modified section, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_format_status_output_intent_to_add_multiple() {
+        // Multiple intent-to-add files should all be visible
+        let porcelain = "## feature/wip\n A alpha.rs\n A beta.rs\n";
+        let result = format_status_output(porcelain);
+        assert!(!result.contains("clean"), "got: {result}");
+        assert!(result.contains("alpha.rs"), "got: {result}");
+        assert!(result.contains("beta.rs"), "got: {result}");
+        assert!(result.contains("~ Modified: 2 files"), "got: {result}");
+    }
+
+    #[test]
+    fn test_format_status_output_intent_to_add_with_other_changes() {
+        // Intent-to-add alongside normally staged and untracked files
+        let porcelain = "## main\nA  staged.rs\n A intent.rs\n?? untracked.txt\n";
+        let result = format_status_output(porcelain);
+        assert!(!result.contains("clean"), "got: {result}");
+        assert!(result.contains("+ Staged: 1 files"), "got: {result}");
+        assert!(result.contains("staged.rs"), "got: {result}");
+        assert!(result.contains("~ Modified: 1 files"), "got: {result}");
+        assert!(result.contains("intent.rs"), "got: {result}");
+        assert!(result.contains("? Untracked: 1 files"), "got: {result}");
+        assert!(result.contains("untracked.txt"), "got: {result}");
     }
 
     #[test]
