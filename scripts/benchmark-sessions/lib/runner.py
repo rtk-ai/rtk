@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -21,11 +22,16 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 def _create_tarball(source_dir: Path) -> str:
-    tarball = tempfile.mktemp(suffix=".tar.gz")
-    subprocess.run(
-        ["tar", "czf", tarball, "-C", str(source_dir), "."],
-        check=True,
-    )
+    fd, tarball = tempfile.mkstemp(suffix=".tar.gz")
+    os.close(fd)
+    try:
+        subprocess.run(
+            ["tar", "czf", tarball, "-C", str(source_dir), "."],
+            check=True,
+        )
+    except Exception:
+        Path(tarball).unlink(missing_ok=True)
+        raise
     return tarball
 
 
@@ -73,6 +79,7 @@ async def run_benchmark(
 
     total_steps = 5 if terminal_bench else 4
     vm_names: list[str] = []
+    local_tarball: str | None = None
 
     manifest = RunManifest(
         task_name=task.name,
@@ -86,7 +93,6 @@ async def run_benchmark(
         print(f"  VMs ready: {', '.join(vm_names)}")
 
         _print_step(2, total_steps, "Setting up codebases")
-        local_tarball = None
         if not task.codebase.is_github:
             local_tarball = _create_tarball(task.codebase.local_path())
 
@@ -147,6 +153,8 @@ async def run_benchmark(
         print(f"\n  Manifest written to {output_dir / 'manifest.json'}")
 
     finally:
+        if local_tarball:
+            Path(local_tarball).unlink(missing_ok=True)
         if not keep_vms and vm_names:
             print("\nCleaning up VMs...")
             await destroy_vm_pool(vm_names)
