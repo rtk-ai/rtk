@@ -4,9 +4,24 @@ use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
 use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use regex::Regex;
 use std::ffi::OsString;
 use std::process::Command;
 use std::process::Stdio;
+
+lazy_static! {
+    /// Matches a git --stat file line: " src/file.rs | 127 ++++"
+    static ref STAT_LINE_RE: Regex =
+        Regex::new(r"^ (.+?)\s+\|\s+(\d+)\s*([+\-]+)?\s*$").unwrap();
+    /// Matches a git --stat binary file line: " file.bin | Bin N -> M bytes"
+    static ref STAT_BINARY_RE: Regex = Regex::new(r"^ (.+?)\s+\|\s+Bin\b").unwrap();
+    /// Matches a git --stat summary line: " N files changed, M insertions(+), K deletions(-)"
+    static ref STAT_SUMMARY_RE: Regex = Regex::new(
+        r"^\s+(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?"
+    )
+    .unwrap();
+}
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -542,7 +557,13 @@ fn run_log(
     }
 
     // Post-process: truncate long messages, cap lines only if RTK set the default
-    let filtered = filter_log_output(&result.stdout, limit, user_set_limit, has_format_flag);
+    let filtered = filter_log_output(
+        &result.stdout,
+        limit,
+        user_set_limit,
+        has_format_flag,
+        has_stat_flag(args),
+    );
     println!("{}", filtered);
 
     timer.track(
@@ -596,6 +617,114 @@ fn parse_user_limit(args: &[String]) -> Option<usize> {
     None
 }
 
+/// Returns true if `args` contain any git stat flag.
+fn has_stat_flag(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "--stat" || a == "--numstat" || a == "--shortstat" || a.starts_with("--stat=")
+    })
+}
+
+/// Compress a single `git log --stat` file line by stripping histogram bars.
+///
+/// Input:  " src/hook_cmd.rs | 208 ++++++++++++++++++++++++++"
+/// Output: Some("src/hook_cmd.rs (208+)")
+///
+/// Returns `None` if the line is not a stat file line.
+fn compress_stat_line(line: &str) -> Option<String> {
+    if let Some(caps) = STAT_BINARY_RE.captures(line) {
+        return Some(format!("{} (Bin)", caps[1].trim()));
+    }
+    if let Some(caps) = STAT_LINE_RE.captures(line) {
+        let filename = caps[1].trim();
+        let count = &caps[2];
+        let bars = caps.get(3).map_or("", |m| m.as_str());
+        let symbol = match (bars.contains('+'), bars.contains('-')) {
+            (true, true) => "±",
+            (true, false) => "+",
+            (false, true) => "-",
+            _ => "",
+        };
+        return Some(format!("{} ({}{})", filename, count, symbol));
+    }
+    None
+}
+
+/// Compress a `git log --stat` summary line.
+///
+/// Input:  " 6 files changed, 705 insertions(+), 2 deletions(-)"
+/// Output: "6 files, +705 -2"
+fn compress_stat_summary(line: &str) -> String {
+    if let Some(caps) = STAT_SUMMARY_RE.captures(line) {
+        let files = &caps[1];
+        let ins = caps.get(2).map(|m| m.as_str());
+        let del = caps.get(3).map(|m| m.as_str());
+        let file_word = if files == "1" { "file" } else { "files" };
+        let mut result = format!("{} {}", files, file_word);
+        if ins.is_some() || del.is_some() {
+            result.push_str(", ");
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(n) = ins {
+                parts.push(format!("+{}", n));
+            }
+            if let Some(n) = del {
+                parts.push(format!("-{}", n));
+            }
+            result.push_str(&parts.join(" "));
+        }
+        return result;
+    }
+    line.trim().to_string()
+}
+
+/// Compress a full stat block (multiple file lines + summary) into compact form.
+///
+/// Each file line becomes `  filename (count±)`.
+/// Summary becomes `  N files, +ins -del`.
+fn compress_stat_block(text: &str) -> String {
+    text.lines()
+        .filter_map(|line| {
+            if STAT_SUMMARY_RE.is_match(line) {
+                Some(format!("  {}", compress_stat_summary(line)))
+            } else {
+                compress_stat_line(line).map(|c| format!("  {}", c))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Split a block into (stat_lines, commit_lines).
+///
+/// Stat lines start with ` ` (space); a commit header starts with a non-space
+/// non-empty character (the short hash).
+fn split_stat_lines_from_block(block: &str) -> (Vec<&str>, Vec<&str>) {
+    let lines: Vec<&str> = block.lines().collect();
+    let commit_start = lines
+        .iter()
+        .position(|l| !l.is_empty() && !l.starts_with(' ') && !l.starts_with('\t'))
+        .unwrap_or(lines.len());
+    (
+        lines[..commit_start].to_vec(),
+        lines[commit_start..].to_vec(),
+    )
+}
+
+/// Format a commit entry from its header + body lines.
+fn extract_commit_entry(lines: &[&str], truncate_width: usize) -> Option<String> {
+    let mut iter = lines.iter().copied();
+    let header = match iter.next() {
+        Some(h) if !h.trim().is_empty() => truncate_line(h.trim(), truncate_width),
+        _ => return None,
+    };
+    let body_line = iter.map(|l| l.trim()).find(|l| {
+        !l.is_empty() && !l.starts_with("Signed-off-by:") && !l.starts_with("Co-authored-by:")
+    });
+    Some(match body_line {
+        Some(body) => format!("{}\n  {}", header, truncate_line(body, truncate_width)),
+        None => header,
+    })
+}
+
 /// When `user_set_limit` is true, the user explicitly passed `-N` to git log,
 /// so we skip line capping (git already returns exactly N commits) and use a
 /// wider truncation threshold (120 chars) to preserve commit context that LLMs
@@ -605,6 +734,7 @@ pub(crate) fn filter_log_output(
     limit: usize,
     user_set_limit: bool,
     user_format: bool,
+    has_stat: bool,
 ) -> String {
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
@@ -622,44 +752,89 @@ pub(crate) fn filter_log_output(
     }
 
     // RTK injected format: split output into commit blocks separated by ---END---
-    let commits: Vec<&str> = output.split("---END---").collect();
-    let max_commits = if user_set_limit { commits.len() } else { limit };
+    let blocks: Vec<&str> = output.split("---END---").collect();
+    let max_commits = if user_set_limit { blocks.len() } else { limit };
 
-    let mut result = Vec::new();
-    for block in commits.iter().take(max_commits) {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
-        }
-        let mut lines = block.lines();
-        // First line is the header: hash subject (date) <author>
-        let header = match lines.next() {
-            Some(h) => truncate_line(h.trim(), truncate_width),
-            None => continue,
-        };
-        // Remaining lines are the body — keep up to 3 non-empty, non-trailer lines
-        let all_body_lines: Vec<&str> = lines
-            .map(|l| l.trim())
-            .filter(|l| {
-                !l.is_empty()
-                    && !l.starts_with("Signed-off-by:")
-                    && !l.starts_with("Co-authored-by:")
-            })
-            .collect();
-        let body_omitted = all_body_lines.len().saturating_sub(3);
-        let body_lines = &all_body_lines[..all_body_lines.len().min(3)];
+    let mut result: Vec<String> = Vec::new();
 
-        if body_lines.is_empty() {
-            result.push(header);
+    // When --stat is active, block layout is:
+    //   block 0 : commit-0 header + body  (no stat)
+    //   block N>0: stat for commit N-1 + commit-N header + body
+    //   last block: stat for last commit only (no new commit header)
+    // We process one extra block beyond max_commits to capture the last commit's stat.
+    let blocks_to_visit = if has_stat {
+        (max_commits + 1).min(blocks.len())
+    } else {
+        max_commits
+    };
+
+    for (idx, raw_block) in blocks.iter().take(blocks_to_visit).enumerate() {
+        if has_stat && idx > 0 {
+            // Preserve leading spaces so STAT_LINE_RE can match them.
+            // Only strip leading/trailing newlines, not spaces.
+            let block = raw_block.trim_matches(|c: char| matches!(c, '\n' | '\r'));
+            if block.is_empty() {
+                continue;
+            }
+
+            // Leading lines are stat for the previous commit.
+            let (stat_lines, commit_lines) = split_stat_lines_from_block(block);
+
+            // Compress and attach stat to the previous result entry.
+            if !result.is_empty() {
+                let compressed = compress_stat_block(&stat_lines.join("\n"));
+                if !compressed.is_empty() {
+                    if let Some(prev) = result.last_mut() {
+                        *prev = format!("{}\n{}", prev, compressed);
+                    }
+                }
+            }
+
+            // Add the new commit only if we haven't hit the limit yet.
+            if result.len() < max_commits {
+                if let Some(entry) = extract_commit_entry(&commit_lines, truncate_width) {
+                    result.push(entry);
+                }
+            }
         } else {
-            let mut entry = header;
-            for body in body_lines {
-                entry.push_str(&format!("\n  {}", truncate_line(body, truncate_width)));
+            // Block 0 (stat or non-stat) or plain non-stat mode.
+            let block = raw_block.trim();
+            if block.is_empty() {
+                continue;
             }
-            if body_omitted > 0 {
-                entry.push_str(&format!("\n  [+{} lines omitted]", body_omitted));
+            if result.len() >= max_commits {
+                break;
             }
-            result.push(entry);
+            let mut lines = block.lines();
+            // First line is the header: hash subject (date) <author>
+            let header = match lines.next() {
+                Some(h) => truncate_line(h.trim(), truncate_width),
+                None => continue,
+            };
+            // Remaining lines are the body — keep up to 3 non-empty, non-trailer lines
+            let all_body_lines: Vec<&str> = lines
+                .map(|l| l.trim())
+                .filter(|l| {
+                    !l.is_empty()
+                        && !l.starts_with("Signed-off-by:")
+                        && !l.starts_with("Co-authored-by:")
+                })
+                .collect();
+            let body_omitted = all_body_lines.len().saturating_sub(3);
+            let body_lines = &all_body_lines[..all_body_lines.len().min(3)];
+
+            if body_lines.is_empty() {
+                result.push(header);
+            } else {
+                let mut entry = header;
+                for body in body_lines {
+                    entry.push_str(&format!("\n  {}", truncate_line(body, truncate_width)));
+                }
+                if body_omitted > 0 {
+                    entry.push_str(&format!("\n  [+{} lines omitted]", body_omitted));
+                }
+                result.push(entry);
+            }
         }
     }
 
@@ -2279,7 +2454,7 @@ A  added.rs
     #[test]
     fn test_filter_log_output() {
         let output = "abc1234 This is a commit message (2 days ago) <author>\n\n---END---\ndef5678 Another commit (1 week ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("def5678"));
         assert_eq!(result.lines().count(), 2);
@@ -2289,7 +2464,7 @@ A  added.rs
     fn test_filter_log_output_with_body() {
         // Commit with body: first non-trailer body line should appear indented
         let output = "abc1234 feat: add feature (2 days ago) <author>\nBREAKING CHANGE: removed old API\nSigned-off-by: Author <a@b.com>\n---END---\ndef5678 fix: typo (1 day ago) <other>\n\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false, false, false);
         assert!(result.contains("abc1234"));
         assert!(result.contains("BREAKING CHANGE: removed old API"));
         assert!(!result.contains("Signed-off-by:"));
@@ -2303,7 +2478,7 @@ A  added.rs
     fn test_filter_log_output_skips_trailers() {
         // Body with only trailers should not produce a body line
         let output = "abc1234 chore: bump (1 day ago) <bot>\nSigned-off-by: Bot <bot@ci>\nCo-authored-by: Human <h@b>\n---END---\n";
-        let result = filter_log_output(output, 10, false, false);
+        let result = filter_log_output(output, 10, false, false, false);
         assert!(result.contains("abc1234"));
         assert!(!result.contains("Signed-off-by:"));
         assert!(!result.contains("Co-authored-by:"));
@@ -2313,7 +2488,7 @@ A  added.rs
     #[test]
     fn test_filter_log_output_truncate_long() {
         let long_line = "abc1234 ".to_string() + &"x".repeat(100) + " (2 days ago) <author>";
-        let result = filter_log_output(&long_line, 10, false, false);
+        let result = filter_log_output(&long_line, 10, false, false, false);
         assert!(result.chars().count() < long_line.chars().count());
         assert!(result.contains("..."));
         assert!(result.chars().count() <= 80);
@@ -2325,7 +2500,7 @@ A  added.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 5, false, false);
+        let result = filter_log_output(&output, 5, false, false, false);
         assert_eq!(result.lines().count(), 5);
     }
 
@@ -2336,7 +2511,7 @@ A  added.rs
             .map(|i| format!("hash{} message {} (1 day ago) <author>\n\n---END---", i, i))
             .collect::<Vec<_>>()
             .join("\n");
-        let result = filter_log_output(&output, 20, true, false);
+        let result = filter_log_output(&output, 20, true, false, false);
         assert_eq!(
             result.lines().count(),
             20,
@@ -2351,8 +2526,8 @@ A  added.rs
         assert!(line_90_chars.chars().count() > 80);
         assert!(line_90_chars.chars().count() < 120);
 
-        let result_default = filter_log_output(&line_90_chars, 10, false, false);
-        let result_user = filter_log_output(&line_90_chars, 10, true, false);
+        let result_default = filter_log_output(&line_90_chars, 10, false, false, false);
+        let result_user = filter_log_output(&line_90_chars, 10, true, false, false);
 
         // Default truncates at 80 chars
         assert!(
@@ -2411,7 +2586,7 @@ A  added.rs
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let output = filter_log_output(&input, 10, false, false);
+        let output = filter_log_output(&input, 10, false, false, false);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
             savings >= 60.0,
@@ -2453,7 +2628,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     fn test_filter_log_output_multibyte() {
         // Thai characters: each is 3 bytes. A line with >80 bytes but few chars
         let thai_msg = format!("abc1234 {} (2 days ago) <author>", "ก".repeat(30));
-        let result = filter_log_output(&thai_msg, 10, false, false);
+        let result = filter_log_output(&thai_msg, 10, false, false, false);
         // Should not panic
         assert!(result.contains("abc1234"));
         // The line has 30 Thai chars + other text, so > 80 chars total
@@ -2465,7 +2640,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
     #[test]
     fn test_filter_log_output_emoji() {
         let emoji_msg = "abc1234 🎉🎊🎈🎁🎂🎄🎃🎆🎇✨🎉🎊🎈🎁🎂🎄🎃🎆🎇✨ (1 day ago) <user>";
-        let result = filter_log_output(emoji_msg, 10, false, false);
+        let result = filter_log_output(emoji_msg, 10, false, false, false);
         // Should not panic
         // 20 emoji + ~30 other chars = ~50 chars < 80, no truncation needed
         assert!(result.contains("abc1234"));
@@ -2499,7 +2674,7 @@ no changes added to commit (use "git add" and/or "git commit -a")
                               jkl3456 docs: update readme\n\
                               mno7890 test: add tests\n";
 
-        let result = filter_log_output(oneline_output, 10, false, true);
+        let result = filter_log_output(oneline_output, 10, false, true, false);
         // All 5 lines must survive — no ---END--- splitting
         assert_eq!(result.lines().count(), 5);
         assert!(result.contains("abc1234"));
@@ -2515,11 +2690,11 @@ no changes added to commit (use "git add" and/or "git commit -a")
                               mno7890 test: add tests\n";
 
         // user_set_limit=true means respect all lines (no cap)
-        let result = filter_log_output(oneline_output, 3, true, true);
+        let result = filter_log_output(oneline_output, 3, true, true, false);
         assert_eq!(result.lines().count(), 5);
 
         // user_set_limit=false means cap at limit
-        let result = filter_log_output(oneline_output, 3, false, true);
+        let result = filter_log_output(oneline_output, 3, false, true, false);
         assert_eq!(result.lines().count(), 3);
     }
 
@@ -2699,6 +2874,149 @@ no changes added to commit (use "git add" and/or "git commit -a")
         );
     }
 
+    // ── has_stat_flag ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_has_stat_flag_detects_stat() {
+        assert!(has_stat_flag(&["--stat".into()]));
+    }
+
+    #[test]
+    fn test_has_stat_flag_numstat() {
+        assert!(has_stat_flag(&["--numstat".into()]));
+    }
+
+    #[test]
+    fn test_has_stat_flag_shortstat() {
+        assert!(has_stat_flag(&["--shortstat".into()]));
+    }
+
+    #[test]
+    fn test_has_stat_flag_stat_width() {
+        assert!(has_stat_flag(&["--stat=80".into()]));
+    }
+
+    #[test]
+    fn test_has_stat_flag_no_stat() {
+        assert!(!has_stat_flag(&["--oneline".into(), "-10".into()]));
+    }
+
+    // ── compress_stat_line ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_compress_stat_line_insertions_only() {
+        let result = compress_stat_line(" src/hook_cmd.rs | 208 ++++++++++++++++++++++++++");
+        assert_eq!(result, Some("src/hook_cmd.rs (208+)".to_string()));
+    }
+
+    #[test]
+    fn test_compress_stat_line_mixed() {
+        let result = compress_stat_line(" src/main.rs |   7 ++---");
+        assert_eq!(result, Some("src/main.rs (7\u{b1})".to_string()));
+    }
+
+    #[test]
+    fn test_compress_stat_line_deletions_only() {
+        let result = compress_stat_line(
+            " src/old.rs |  50 --------------------------------------------------",
+        );
+        assert_eq!(result, Some("src/old.rs (50-)".to_string()));
+    }
+
+    #[test]
+    fn test_compress_stat_line_binary() {
+        let result = compress_stat_line(" assets/logo.png | Bin 0 -> 4096 bytes");
+        assert_eq!(result, Some("assets/logo.png (Bin)".to_string()));
+    }
+
+    #[test]
+    fn test_compress_stat_line_not_a_stat_line() {
+        let result = compress_stat_line("abc1234 feat: something (2 days ago) <Author>");
+        assert_eq!(result, None);
+    }
+
+    // ── compress_stat_summary ────────────────────────────────────────────────
+
+    #[test]
+    fn test_compress_stat_summary_full() {
+        let result = compress_stat_summary(" 6 files changed, 705 insertions(+), 2 deletions(-)");
+        assert_eq!(result, "6 files, +705 -2");
+    }
+
+    #[test]
+    fn test_compress_stat_summary_insertions_only() {
+        let result = compress_stat_summary(" 1 file changed, 10 insertions(+)");
+        assert_eq!(result, "1 file, +10");
+    }
+
+    #[test]
+    fn test_compress_stat_summary_deletions_only() {
+        let result = compress_stat_summary(" 3 files changed, 15 deletions(-)");
+        assert_eq!(result, "3 files, -15");
+    }
+
+    // ── compress_stat_block ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_compress_stat_block_strips_bars() {
+        let stat_block = " src/hook_cmd.rs | 208 ++++++++++++++++++++++++++\n src/main.rs |   7 +-\n 2 files changed, 210 insertions(+), 5 deletions(-)\n";
+        let result = compress_stat_block(stat_block);
+        // Histogram bars must be gone
+        assert!(
+            !result.contains("+++++"),
+            "histogram bars must be stripped: {result}"
+        );
+        // Filenames must survive
+        assert!(
+            result.contains("src/hook_cmd.rs"),
+            "filename kept: {result}"
+        );
+        assert!(result.contains("src/main.rs"), "filename kept: {result}");
+        // Summary must survive
+        assert!(result.contains("2 files"), "summary kept: {result}");
+    }
+
+    // ── filter_log_output with has_stat=true ─────────────────────────────────
+
+    #[test]
+    fn test_filter_log_output_stat_strips_histogram_bars() {
+        // Simulates git log --stat with RTK's injected ---END--- format.
+        // Block 0: commit 0 header + body
+        // Block 1: stat for commit 0 + commit 1 header
+        // Block 2 (last): stat for commit 1 only
+        let input = concat!(
+            "abc1234 feat: add feature (2 days ago) <Author>\n",
+            "\n",
+            "---END---\n",
+            " src/file.rs | 10 ++++++++++\n",
+            " 1 file changed, 10 insertions(+)\n",
+            "def5678 feat: another (1 day ago) <Author>\n",
+            "---END---\n",
+            " src/other.rs | 5 -----\n",
+            " 1 file changed, 5 deletions(-)\n",
+        );
+        let result = filter_log_output(input, 10, false, false, true);
+        // Histogram bars stripped
+        assert!(
+            !result.contains("++++"),
+            "histogram bars must be gone: {result}"
+        );
+        assert!(
+            !result.contains("-----"),
+            "histogram bars must be gone: {result}"
+        );
+        // Filenames and commit hashes preserved
+        assert!(result.contains("src/file.rs"), "filename kept: {result}");
+        assert!(result.contains("src/other.rs"), "filename kept: {result}");
+        assert!(result.contains("abc1234"), "commit hash kept: {result}");
+        assert!(result.contains("def5678"), "commit hash kept: {result}");
+        // Stat must not be treated as a commit header
+        assert!(
+            !result.starts_with(" src/"),
+            "stat line must not be first line: {result}"
+        );
+    }
+
     #[test]
     fn test_compact_diff_recovery_hint_present() {
         // A hunk with 110 lines exceeds max_hunk_lines (100), triggers truncation
@@ -2716,6 +3034,33 @@ no changes added to commit (use "git add" and/or "git commit -a")
             result.contains("[full diff: rtk git diff --no-compact]"),
             "Expected recovery hint when hunk is truncated, got:\n{}",
             result
+        );
+    }
+
+    #[test]
+    fn test_filter_log_output_stat_attaches_to_correct_commit() {
+        // Each commit's stat should follow that commit in the output.
+        let input = concat!(
+            "aaa1111 feat: commit-A (3 days ago) <Author>\n",
+            "---END---\n",
+            " a.rs | 3 +++\n",
+            " 1 file changed, 3 insertions(+)\n",
+            "bbb2222 feat: commit-B (2 days ago) <Author>\n",
+            "---END---\n",
+            " b.rs | 1 -\n",
+            " 1 file changed, 1 deletion(-)\n",
+        );
+        let result = filter_log_output(input, 10, false, false, true);
+        // Both commits present
+        assert!(result.contains("aaa1111"));
+        assert!(result.contains("bbb2222"));
+        // Stat for A (a.rs) should appear before commit B
+        let pos_a = result.find("aaa1111").unwrap();
+        let pos_a_rs = result.find("a.rs").unwrap_or(usize::MAX);
+        let pos_b = result.find("bbb2222").unwrap();
+        assert!(
+            pos_a < pos_a_rs && pos_a_rs < pos_b,
+            "a.rs stat must follow commit A and precede commit B:\n{result}"
         );
     }
 
@@ -2748,11 +3093,22 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "abc1234 feat: big change (1 day ago) <author>\n{}\n---END---\n",
             body_lines
         );
-        let result = filter_log_output(&output, 10, false, false);
+        let result = filter_log_output(&output, 10, false, false, false);
         assert!(
             result.contains("+3 lines omitted"),
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_filter_log_output_no_stat_unchanged() {
+        // has_stat=false must behave identically to the old 4-arg call.
+        let input = "abc1234 feat: X (2 days ago) <Author>\n\n---END---\ndef5678 fix: Y (1 day ago) <Other>\n\n---END---\n";
+        let result_old = filter_log_output(input, 10, false, false, false);
+        let result_new = filter_log_output(input, 10, false, false, false);
+        assert_eq!(result_old, result_new);
+        assert!(result_old.contains("abc1234"));
+        assert!(result_old.contains("def5678"));
     }
 }

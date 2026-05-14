@@ -29,7 +29,7 @@ fn go_test_wrapper(input: &str) -> String {
 }
 
 fn git_log_wrapper(input: &str) -> String {
-    crate::cmds::git::git::filter_log_output(input, 50, false, false)
+    crate::cmds::git::git::filter_log_output(input, 50, false, false, false)
 }
 
 fn git_diff_wrapper(input: &str) -> String {
