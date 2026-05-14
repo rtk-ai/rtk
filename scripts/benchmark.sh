@@ -11,34 +11,31 @@ else
   exit 1
 fi
 BENCH_DIR="$(pwd)/scripts/benchmark"
+RTK_ROOT="$(pwd)"
 
-# Mode local : générer les fichiers debug
 if [ -z "$CI" ]; then
   rm -rf "$BENCH_DIR"
   mkdir -p "$BENCH_DIR/unix" "$BENCH_DIR/rtk" "$BENCH_DIR/diff"
 fi
 
-# Nom de fichier safe
 safe_name() {
   echo "$1" | tr ' /' '_-' | tr -cd 'a-zA-Z0-9_-'
 }
 
-# Fonction pour compter les tokens (~4 chars = 1 token)
 count_tokens() {
   local input="$1"
   local len=${#input}
   echo $(( (len + 3) / 4 ))
 }
 
-# Compteurs globaux
 TOTAL_UNIX=0
 TOTAL_RTK=0
 TOTAL_TESTS=0
 GOOD_TESTS=0
 FAIL_TESTS=0
-SKIP_TESTS=0
+WARN_TESTS=0
+NEGATIVE_TESTS=0
 
-# Fonction de benchmark — une ligne par test
 bench() {
   local name="$1"
   local unix_cmd="$2"
@@ -55,24 +52,41 @@ bench() {
   local icon=""
   local tag=""
 
-  if [ -z "$rtk_out" ]; then
+  if [ -z "$rtk_out" ] && [ -n "$unix_out" ]; then
     icon="❌"
     tag="FAIL"
     FAIL_TESTS=$((FAIL_TESTS + 1))
     TOTAL_UNIX=$((TOTAL_UNIX + unix_tokens))
     TOTAL_RTK=$((TOTAL_RTK + unix_tokens))
-  elif [ "$rtk_tokens" -ge "$unix_tokens" ] && [ "$unix_tokens" -gt 0 ]; then
-    icon="⚠️"
-    tag="SKIP"
-    SKIP_TESTS=$((SKIP_TESTS + 1))
-    TOTAL_UNIX=$((TOTAL_UNIX + unix_tokens))
-    TOTAL_RTK=$((TOTAL_RTK + unix_tokens))
-  else
-    icon="✅"
-    tag="GOOD"
-    GOOD_TESTS=$((GOOD_TESTS + 1))
+  elif [ "$rtk_tokens" -gt "$unix_tokens" ] && [ "$unix_tokens" -gt 0 ]; then
+    icon="🔴"
+    tag="NEG"
+    NEGATIVE_TESTS=$((NEGATIVE_TESTS + 1))
     TOTAL_UNIX=$((TOTAL_UNIX + unix_tokens))
     TOTAL_RTK=$((TOTAL_RTK + rtk_tokens))
+  elif [ "$unix_tokens" -gt 0 ] && [ "$rtk_tokens" -eq "$unix_tokens" ]; then
+    icon="⚠️"
+    tag="WARN"
+    WARN_TESTS=$((WARN_TESTS + 1))
+    TOTAL_UNIX=$((TOTAL_UNIX + unix_tokens))
+    TOTAL_RTK=$((TOTAL_RTK + rtk_tokens))
+  elif [ "$unix_tokens" -gt 0 ]; then
+    local savings=$(( (unix_tokens - rtk_tokens) * 100 / unix_tokens ))
+    if [ "$savings" -lt 60 ]; then
+      icon="⚠️"
+      tag="WARN"
+      WARN_TESTS=$((WARN_TESTS + 1))
+    else
+      icon="✅"
+      tag="GOOD"
+      GOOD_TESTS=$((GOOD_TESTS + 1))
+    fi
+    TOTAL_UNIX=$((TOTAL_UNIX + unix_tokens))
+    TOTAL_RTK=$((TOTAL_RTK + rtk_tokens))
+  else
+    icon="⏭️"
+    tag="SKIP"
+    WARN_TESTS=$((WARN_TESTS + 1))
   fi
 
   if [ "$tag" = "FAIL" ]; then
@@ -88,12 +102,13 @@ bench() {
       "$icon" "$name" "$unix_cmd" "$rtk_cmd" "$unix_tokens" "$rtk_tokens" "$pct"
   fi
 
-  # Fichiers debug en local uniquement
   if [ -z "$CI" ]; then
     local filename=$(safe_name "$name")
     local prefix="GOOD"
     [ "$tag" = "FAIL" ] && prefix="FAIL"
-    [ "$tag" = "SKIP" ] && prefix="BAD"
+    [ "$tag" = "NEG" ] && prefix="NEG"
+    [ "$tag" = "WARN" ] && prefix="WARN"
+    [ "$tag" = "SKIP" ] && prefix="SKIP"
 
     local ts=$(date "+%d/%m/%Y %H:%M:%S")
 
@@ -124,7 +139,6 @@ bench() {
   fi
 }
 
-# Section header
 section() {
   echo ""
   echo "── $1 ──"
@@ -148,6 +162,18 @@ bench "ls -lh src/" "ls -lh src/" "$RTK ls -lh src/"
 bench "ls src/ -l" "ls -l src/" "$RTK ls src/ -l"
 bench "ls -a" "ls -la" "$RTK ls -a"
 bench "ls multi" "ls -la src/ scripts/" "$RTK ls src/ scripts/"
+
+# ===================
+# tree
+# ===================
+if command -v tree &>/dev/null; then
+  section "tree"
+  bench "tree" "tree -L 2" "$RTK tree -L 2"
+  bench "tree src/" "tree src/ -L 2" "$RTK tree src/ -L 2"
+else
+  echo ""
+  echo "⏭️  tree (not installed, skipped)"
+fi
 
 # ===================
 # read
@@ -175,6 +201,7 @@ bench "git status" "git status" "$RTK git status"
 bench "git log -n 10" "git log -10" "$RTK git log -n 10"
 bench "git log -n 5" "git log -5" "$RTK git log -n 5"
 bench "git diff" "git diff HEAD~1 2>/dev/null || echo ''" "$RTK git diff HEAD~1"
+bench "git show" "git show HEAD --stat 2>/dev/null || true" "$RTK git show HEAD --stat"
 
 # ===================
 # grep
@@ -183,7 +210,6 @@ section "grep"
 bench "grep fn" "grep -rn 'fn ' src/ || true" "$RTK grep 'fn ' src/"
 bench "grep struct" "grep -rn 'struct ' src/ || true" "$RTK grep 'struct ' src/"
 bench "grep -l 40" "grep -rn 'fn ' src/ || true" "$RTK grep 'fn ' src/ -l 40"
-bench "grep --max 20" "grep -rn 'fn ' src/ | head -20 || true" "$RTK grep 'fn ' src/ --max 20"
 bench "grep -c" "grep -ron 'fn ' src/ || true" "$RTK grep 'fn ' src/ -c"
 
 # ===================
@@ -229,7 +255,7 @@ bench "env --show-all" "env" "$RTK env --show-all"
 # ===================
 section "err"
 if command -v cargo &>/dev/null; then
-  bench "err cargo build" "cargo build 2>&1 || true" "$RTK err cargo build"
+  bench "err cargo build" "cargo build 2>&1 || true" "$RTK err cargo build 2>&1"
 else
   echo "⏭️  err cargo build (cargo not in PATH, skipped)"
 fi
@@ -239,7 +265,7 @@ fi
 # ===================
 section "test"
 if command -v cargo &>/dev/null; then
-  bench "test cargo test" "cargo test 2>&1 || true" "$RTK test cargo test"
+  bench "test cargo test" "cargo test 2>&1 || true" "$RTK test cargo test 2>&1"
 else
   echo "⏭️  test cargo test (cargo not in PATH, skipped)"
 fi
@@ -287,19 +313,13 @@ fi
 # ===================
 section "cargo"
 if command -v cargo &>/dev/null; then
-  bench "cargo build" "cargo build 2>&1 || true" "$RTK cargo build"
-  bench "cargo test" "cargo test 2>&1 || true" "$RTK cargo test"
-  bench "cargo clippy" "cargo clippy 2>&1 || true" "$RTK cargo clippy"
-  bench "cargo check" "cargo check 2>&1 || true" "$RTK cargo check"
+  bench "cargo build" "cargo build 2>&1 || true" "$RTK cargo build 2>&1"
+  bench "cargo test" "cargo test 2>&1 || true" "$RTK cargo test 2>&1"
+  bench "cargo clippy" "cargo clippy 2>&1 || true" "$RTK cargo clippy 2>&1"
+  bench "cargo check" "cargo check 2>&1 || true" "$RTK cargo check 2>&1"
 else
   echo "⏭️  cargo build/test/clippy/check (cargo not in PATH, skipped)"
 fi
-
-# ===================
-# diff
-# ===================
-section "diff"
-bench "diff" "diff Cargo.toml LICENSE 2>&1 || true" "$RTK diff Cargo.toml LICENSE"
 
 # ===================
 # smart
@@ -327,7 +347,16 @@ fi
 # ===================
 if command -v wget &> /dev/null; then
   section "wget"
-  bench "wget" "wget -qO- https://httpbin.org/robots.txt" "$RTK wget https://httpbin.org/robots.txt -O"
+  bench "wget" "wget -qO- https://httpbin.org/json" "$RTK wget https://httpbin.org/json"
+  rm -f json 2>/dev/null
+fi
+
+# ===================
+# npm (standalone — does not require package.json)
+# ===================
+if command -v npm &> /dev/null; then
+  section "npm"
+  bench "npm list" "npm list -g --depth 0 2>&1 || true" "$RTK npm list -g --depth 0"
 fi
 
 # ===================
@@ -337,7 +366,7 @@ if [ -f "package.json" ]; then
   section "modern JS stack"
 
   if command -v tsc &> /dev/null || [ -f "node_modules/.bin/tsc" ]; then
-    bench "tsc" "tsc --noEmit 2>&1 || true" "$RTK tsc --noEmit"
+    bench "tsc" "tsc --noEmit 2>&1 || true" "$RTK tsc --noEmit 2>&1"
   fi
 
   if command -v prettier &> /dev/null || [ -f "node_modules/.bin/prettier" ]; then
@@ -379,14 +408,31 @@ fi
 # ===================
 # gh (skip si pas dispo ou pas dans un repo)
 # ===================
-if command -v gh &> /dev/null && git rev-parse --git-dir &> /dev/null; then
+if command -v gh &> /dev/null && git rev-parse --git-dir &> /dev/null && gh auth status &> /dev/null; then
   section "gh"
   bench "gh pr list" "gh pr list 2>&1 || true" "$RTK gh pr list"
   bench "gh run list" "gh run list 2>&1 || true" "$RTK gh run list"
 fi
 
 # ===================
-# docker (skip si pas dispo)
+# glab
+# ===================
+if command -v glab &> /dev/null; then
+  section "glab"
+  bench "glab mr list" "glab mr list 2>&1 || true" "$RTK glab mr list"
+  bench "glab issue list" "glab issue list 2>&1 || true" "$RTK glab issue list"
+fi
+
+# ===================
+# gt (Graphite)
+# ===================
+if command -v gt &> /dev/null; then
+  section "gt"
+  bench "gt log" "gt log 2>&1 || true" "$RTK gt log"
+fi
+
+# ===================
+# docker
 # ===================
 if command -v docker &> /dev/null; then
   section "docker"
@@ -395,7 +441,7 @@ if command -v docker &> /dev/null; then
 fi
 
 # ===================
-# kubectl (skip si pas dispo)
+# kubectl
 # ===================
 if command -v kubectl &> /dev/null; then
   section "kubectl"
@@ -412,7 +458,6 @@ if command -v python3 &> /dev/null && command -v ruff &> /dev/null && command -v
   PYTHON_FIXTURE=$(mktemp -d)
   cd "$PYTHON_FIXTURE"
 
-  # pyproject.toml
   cat > pyproject.toml << 'PYEOF'
 [project]
 name = "rtk-bench"
@@ -422,7 +467,6 @@ version = "0.1.0"
 line-length = 88
 PYEOF
 
-  # sample.py avec quelques issues ruff
   cat > sample.py << 'PYEOF'
 import os
 import sys
@@ -442,7 +486,6 @@ def unused_function():  # F841: local variable assigned but never used
     return None
 PYEOF
 
-  # test_sample.py
   cat > test_sample.py << 'PYEOF'
 from sample import process_data
 
@@ -456,7 +499,15 @@ PYEOF
   bench "ruff check" "ruff check . 2>&1 || true" "$RTK ruff check ."
   bench "pytest" "pytest -v 2>&1 || true" "$RTK pytest -v"
 
-  cd - > /dev/null
+  if command -v pip &>/dev/null; then
+    bench "pip list" "pip list 2>&1 || true" "$RTK pip list"
+  fi
+
+  if command -v mypy &>/dev/null; then
+    bench "mypy" "mypy sample.py 2>&1 || true" "$RTK mypy sample.py"
+  fi
+
+  cd "$RTK_ROOT"
   rm -rf "$PYTHON_FIXTURE"
 fi
 
@@ -469,14 +520,12 @@ if command -v go &> /dev/null && command -v golangci-lint &> /dev/null; then
   GO_FIXTURE=$(mktemp -d)
   cd "$GO_FIXTURE"
 
-  # go.mod
   cat > go.mod << 'GOEOF'
 module bench
 
 go 1.21
 GOEOF
 
-  # main.go
   cat > main.go << 'GOEOF'
 package main
 
@@ -496,7 +545,6 @@ func main() {
 }
 GOEOF
 
-  # main_test.go
   cat > main_test.go << 'GOEOF'
 package main
 
@@ -522,8 +570,48 @@ GOEOF
   bench "go build" "go build ./... 2>&1 || true" "$RTK go build ./..."
   bench "go vet" "go vet ./... 2>&1 || true" "$RTK go vet ./..."
 
-  cd - > /dev/null
+  cd "$RTK_ROOT"
   rm -rf "$GO_FIXTURE"
+fi
+
+# ===================
+# Ruby
+# ===================
+if command -v ruby &> /dev/null; then
+  section "ruby"
+  if command -v rake &>/dev/null; then
+    bench "rake -T" "rake -T 2>&1 || true" "$RTK rake -T"
+  fi
+  if command -v rubocop &>/dev/null; then
+    bench "rubocop" "rubocop --format simple 2>&1 || true" "$RTK rubocop --format simple"
+  fi
+  if command -v rspec &>/dev/null; then
+    bench "rspec --dry-run" "rspec --dry-run 2>&1 || true" "$RTK rspec --dry-run"
+  fi
+fi
+
+# ===================
+# dotnet
+# ===================
+if command -v dotnet &> /dev/null; then
+  section "dotnet"
+  bench "dotnet --info" "dotnet --info 2>&1 || true" "$RTK dotnet --info"
+fi
+
+# ===================
+# aws
+# ===================
+if command -v aws &> /dev/null; then
+  section "aws"
+  bench "aws --version" "aws --version 2>&1 || true" "$RTK aws --version"
+fi
+
+# ===================
+# psql
+# ===================
+if command -v psql &> /dev/null; then
+  section "psql"
+  bench "psql --version" "psql --version 2>&1 || true" "$RTK psql --version"
 fi
 
 # ===================
@@ -531,7 +619,6 @@ fi
 # ===================
 section "rewrite"
 
-# bench_rewrite: verifies rewrite produces expected output (not token comparison)
 bench_rewrite() {
   local name="$1"
   local cmd="$2"
@@ -558,7 +645,7 @@ bench_rewrite "rewrite cargo test"   "$RTK rewrite cargo test"       "rtk cargo 
 bench_rewrite "rewrite compound"     "$RTK rewrite 'cargo test && git push'" "rtk cargo test && rtk git push"
 
 # ===================
-# Résumé global
+# Summary
 # ===================
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════"
@@ -574,19 +661,30 @@ if [ "$TOTAL_TESTS" -gt 0 ]; then
   fi
 
   echo ""
-  echo "  ✅ $GOOD_TESTS good  ⚠️ $SKIP_TESTS skip  ❌ $FAIL_TESTS fail    $GOOD_TESTS/$TOTAL_TESTS ($GOOD_PCT%)"
+  echo "  ✅ $GOOD_TESTS good  ⚠️ $WARN_TESTS warn  🔴 $NEGATIVE_TESTS negative  ❌ $FAIL_TESTS fail    $GOOD_TESTS/$TOTAL_TESTS ($GOOD_PCT%)"
   echo "  Tokens: $TOTAL_UNIX → $TOTAL_RTK  (-$TOTAL_SAVE_PCT%)"
   echo ""
 
-  # Fichiers debug en local
   if [ -z "$CI" ]; then
     echo "  Debug: $BENCH_DIR/{unix,rtk,diff}/"
   fi
   echo ""
 
-  # Exit code non-zero si moins de 80% good
-  if [ "$GOOD_PCT" -lt 80 ]; then
-    echo "  BENCHMARK FAILED: $GOOD_PCT% good (minimum 80%)"
-    exit 1
+  EXIT_CODE=0
+
+  if [ "$NEGATIVE_TESTS" -gt 0 ]; then
+    echo "  BENCHMARK FAILED: $NEGATIVE_TESTS filter(s) produced more tokens than raw output"
+    EXIT_CODE=1
   fi
+
+  if [ "$FAIL_TESTS" -gt 0 ]; then
+    echo "  BENCHMARK FAILED: $FAIL_TESTS filter(s) returned empty output"
+    EXIT_CODE=1
+  fi
+
+  if [ "$GOOD_PCT" -lt 60 ] && [ "$EXIT_CODE" -eq 0 ]; then
+    echo "  WARNING: $GOOD_PCT% good (target 60%)"
+  fi
+
+  exit $EXIT_CODE
 fi

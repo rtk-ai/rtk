@@ -683,6 +683,8 @@ pub fn parse_build_from_text(text: &str) -> BuildSummary {
             issue.message.clone(),
         );
 
+        // this avoid needing to clone the key for the second case
+        #[allow(clippy::collapsible_match)]
         match captures.name("kind").map(|m| m.as_str()) {
             Some("error") => {
                 if seen_errors.insert(key) {
@@ -1008,16 +1010,19 @@ pub fn parse_restore_issues_from_text(text: &str) -> (Vec<BinlogIssue>, Vec<Binl
             issue.message.clone(),
         );
 
+        // this avoid needing to clone the key for the second case
+        #[allow(clippy::collapsible_match)]
         match captures
             .name("kind")
             .map(|m| m.as_str().to_ascii_lowercase())
+            .as_deref()
         {
-            Some(kind) if kind == "error" => {
+            Some("error") => {
                 if seen_errors.insert(key) {
                     errors.push(issue);
                 }
             }
-            Some(kind) if kind == "warning" => {
+            Some("warning") => {
                 if seen_warnings.insert(key) {
                     warnings.push(issue);
                 }

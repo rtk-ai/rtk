@@ -343,19 +343,13 @@ pub fn resolved_command(name: &str) -> Command {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
             // wasn't found — always warn so users have a signal.
             // On Unix, this is less common; only log in debug builds.
-            #[cfg(target_os = "windows")]
-            eprintln!(
-                "rtk: Failed to resolve '{}' via PATH, falling back to direct exec: {}",
-                name, e
-            );
-            #[cfg(not(target_os = "windows"))]
-            {
-                #[cfg(debug_assertions)]
+            if cfg!(any(target_os = "windows", debug_assertions)) {
                 eprintln!(
                     "rtk: Failed to resolve '{}' via PATH, falling back to direct exec: {}",
                     name, e
                 );
             }
+
             Command::new(name)
         }
     }

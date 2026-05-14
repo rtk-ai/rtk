@@ -13,7 +13,16 @@ pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 /// Native Rust hook command for Cursor (replaces rtk-rewrite.sh).
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 
-pub const OPENCODE_PLUGIN_PATH: &str = ".config/opencode/plugins/rtk.ts";
+pub const CONFIG_DIR: &str = ".config";
+pub const OPENCODE_SUBDIR: &str = "opencode";
+pub const PLUGIN_SUBDIR: &str = "plugins";
+pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
+
 pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 pub const GEMINI_DIR: &str = ".gemini";
+pub const HERMES_DIR: &str = ".hermes";
+pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
+pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
+pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
+pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";

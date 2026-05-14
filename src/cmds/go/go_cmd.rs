@@ -46,7 +46,9 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("test");
 
-    if !args.iter().any(|a| a == "-json") {
+    let skip_json = args.iter().any(|a| a == "-json" || a.starts_with("-bench"));
+
+    if !skip_json {
         cmd.arg("-json");
     }
 
@@ -55,14 +57,24 @@ pub fn run_test(args: &[String], verbose: u8) -> Result<i32> {
     }
 
     if verbose > 0 {
-        eprintln!("Running: go test -json {}", args.join(" "));
+        eprintln!(
+            "Running: go test {}{}",
+            if !skip_json { "-json " } else { "" },
+            args.join(" ")
+        );
     }
+
+    let filter: fn(&str) -> String = if skip_json {
+        |s: &str| s.to_string()
+    } else {
+        filter_go_test_json
+    };
 
     runner::run_filtered(
         cmd,
         "go test",
         &args.join(" "),
-        filter_go_test_json,
+        filter,
         crate::core::runner::RunOptions::stdout_only().tee("go_test"),
     )
 }
@@ -329,10 +341,8 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
         let pkg_result = packages.entry(package.clone()).or_default();
 
         match event.action.as_str() {
-            "pass" => {
-                if event.test.is_some() {
-                    pkg_result.pass += 1;
-                }
+            "pass" if event.test.is_some() => {
+                pkg_result.pass += 1;
             }
             "fail" => {
                 if let Some(test) = &event.test {
@@ -358,10 +368,8 @@ pub(crate) fn filter_go_test_json(output: &str) -> String {
                     pkg_result.package_failed = true;
                 }
             }
-            "skip" => {
-                if event.test.is_some() {
-                    pkg_result.skip += 1;
-                }
+            "skip" if event.test.is_some() => {
+                pkg_result.skip += 1;
             }
             "output" => {
                 if let Some(output_text) = &event.output {
@@ -614,9 +622,7 @@ fn is_go_build_error_line(line: &str) -> bool {
 
     // Canonical compiler/config error locations: file:line:col: ...
     let is_go_config_location = !lower.starts_with("go: ")
-        && (lower.contains("go.mod:")
-            || lower.contains("go.work:")
-            || lower.contains("go.sum:"));
+        && (lower.contains("go.mod:") || lower.contains("go.work:") || lower.contains("go.sum:"));
     if trimmed.contains(".go:") || is_go_config_location {
         return true;
     }
@@ -883,9 +889,7 @@ go: downloading golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2"#;
     #[test]
     fn test_is_go_build_error_line_recognizes_real_compiler_errors() {
         assert!(is_go_build_error_line("undefined: missingFunc"));
-        assert!(is_go_build_error_line(
-            "cannot find package \"foo/bar\""
-        ));
+        assert!(is_go_build_error_line("cannot find package \"foo/bar\""));
         assert!(is_go_build_error_line(
             "found packages a (a.go) and b (b.go) in /tmp/rtk-go-build-probe-mix"
         ));
@@ -969,7 +973,9 @@ go: cannot load module missing listed in go.work file: open missing/go.mod: no s
 
         let result = filter_go_build(output);
         assert!(result.contains("3 errors"));
-        assert!(result.contains("go.mod file not found in current directory or any parent directory"));
+        assert!(
+            result.contains("go.mod file not found in current directory or any parent directory")
+        );
         assert!(result.contains("no Go files in /tmp/example"));
         assert!(result.contains("go: cannot load module missing listed in go.work file"));
     }
