@@ -926,6 +926,9 @@ enum ComposeCommands {
     Logs {
         /// Optional service name
         service: Option<String>,
+        /// Number of log lines to fetch
+        #[arg(long, default_value_t = 100)]
+        tail: u32,
     },
     /// Build compose services (summary)
     Build {
@@ -1707,8 +1710,8 @@ fn run_cli() -> Result<i32> {
             }
             DockerCommands::Compose { command: compose } => match compose {
                 ComposeCommands::Ps => container::run_compose_ps(cli.verbose)?,
-                ComposeCommands::Logs { service } => {
-                    container::run_compose_logs(service.as_deref(), cli.verbose)?
+                ComposeCommands::Logs { service, tail } => {
+                    container::run_compose_logs(service.as_deref(), tail, cli.verbose)?
                 }
                 ComposeCommands::Build { service } => {
                     container::run_compose_build(service.as_deref(), cli.verbose)?
