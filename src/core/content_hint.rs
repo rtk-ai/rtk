@@ -9,9 +9,6 @@ use super::constants::RTK_DATA_DIR;
 use crate::core::config::Config;
 use std::path::PathBuf;
 
-/// Minimum output size to save (smaller outputs don't need recovery)
-pub const MIN_CONTENT_SIZE: usize = 500;
-
 /// Default max files to keep
 pub const DEFAULT_MAX_FILES: usize = 20;
 
@@ -161,16 +158,22 @@ fn hints_disabled() -> bool {
     false
 }
 
+/// Check if hints should be generated.
+/// Returns false if env disabled or content too small.
+pub fn should_hint(content: &str) -> bool {
+    if hints_disabled() {
+        return false;
+    }
+    if content.is_empty() {
+        return false;
+    }
+    true
+}
+
 /// Save content to file and return the file path.
-/// The caller is responsible for checking conditions (size, etc.).
 /// Returns None if save fails or hints are disabled.
 pub fn save_output(content: &str, slug: &str, ext: &str) -> Option<PathBuf> {
-    // Check env override (disable)
-    if hints_disabled() {
-        return None;
-    }
-
-    if content.is_empty() {
+    if !should_hint(content) {
         return None;
     }
 
@@ -200,62 +203,6 @@ pub fn save_output(content: &str, slug: &str, ext: &str) -> Option<PathBuf> {
 /// Returns None if save fails or hints are disabled.
 pub fn save_output_and_hint(content: &str, slug: &str, ext: &str) -> Option<String> {
     let path = save_output(content, slug, ext)?;
-    Some(format_hint(&path))
-}
-
-/// Save content to file only if exit_code != 0.
-/// Convenience for "save on failure" pattern.
-/// Returns None if save fails, skipped, or exit_code == 0.
-pub fn save_output_on_failure(
-    content: &str,
-    slug: &str,
-    ext: &str,
-    exit_code: i32,
-) -> Option<String> {
-    // Check env override (disable)
-    if hints_disabled() {
-        return None;
-    }
-
-    // Only save on failure
-    if exit_code == 0 {
-        return None;
-    }
-
-    let config = Config::load().ok()?;
-
-    // Check config
-    if !config.tee.enabled {
-        return None;
-    }
-
-    match config.tee.mode {
-        super::tee::TeeMode::Never => return None,
-        super::tee::TeeMode::Always => {}
-        super::tee::TeeMode::Failures => {
-            // Already checked exit_code != 0 above
-        }
-    }
-
-    // Skip if output too small
-    if content.len() < MIN_CONTENT_SIZE {
-        return None;
-    }
-
-    let hint_dir = get_hint_dir(&config)?;
-    let hint_dir = std::fs::create_dir_all(&hint_dir)
-        .ok()
-        .and(Some(hint_dir))?;
-
-    let path = write_content_file(
-        content,
-        slug,
-        &hint_dir,
-        ext,
-        config.tee.max_file_size,
-        config.tee.max_files,
-    )?;
-
     Some(format_hint(&path))
 }
 
@@ -304,6 +251,26 @@ mod tests {
             let filename = format!("{:010}_{}.json", 1000000 + i, "test");
             assert!(!dir.join(&filename).exists());
         }
+    }
+
+    #[test]
+    fn test_should_hint_respects_env_disable() {
+        std::env::set_var("RTK_HINTS", "0");
+        assert!(!should_hint("test"));
+        std::env::remove_var("RTK_HINTS");
+
+        std::env::set_var("RTK_TEE", "0");
+        assert!(!should_hint("test"));
+        std::env::remove_var("RTK_TEE");
+
+        // Verify env is cleared
+        assert!(should_hint("test"));
+    }
+
+    #[test]
+    fn test_should_hint_respects_empty() {
+        assert!(!should_hint("")); // Empty
+        assert!(should_hint("test")); // Not empty
     }
 
     #[test]

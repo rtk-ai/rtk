@@ -2,13 +2,36 @@
 //! This module is kept for backward compatibility.
 //! New code should use content_hint module instead.
 
+use crate::core::config::Config;
 use crate::core::content_hint as ch;
 use std::path::PathBuf;
 
+/// Check if tee should be performed based on config and conditions.
+/// Returns true if tee should proceed.
+fn should_tee(config: &TeeConfig, exit_code: i32) -> bool {
+    if !config.enabled {
+        return false;
+    }
+
+    match config.mode {
+        TeeMode::Never => false,
+        TeeMode::Always => true,
+        TeeMode::Failures => exit_code != 0,
+    }
+}
+
 /// Convenience: tee + format hint in one call.
+/// Respects TeeMode (Always/Failures/Never).
 /// Returns hint string if file was written, None if skipped.
 pub fn tee_and_hint(raw: &str, command_slug: &str, exit_code: i32) -> Option<String> {
-    ch::save_output_on_failure(raw, command_slug, ".log", exit_code)
+    let config = Config::load().ok()?;
+
+    if !should_tee(&config.tee, exit_code) {
+        return None;
+    }
+
+    let path = ch::save_output(raw, command_slug, ".log")?;
+    Some(ch::format_hint(&path))
 }
 
 /// Returns `[full output: ~/path]`, or None if tee is disabled/skipped.
@@ -66,6 +89,48 @@ impl Default for TeeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_should_tee_disabled() {
+        let config = TeeConfig {
+            enabled: false,
+            ..TeeConfig::default()
+        };
+        assert!(!should_tee(&config, 0));
+        assert!(!should_tee(&config, 1));
+    }
+
+    #[test]
+    fn test_should_tee_never_mode() {
+        let config = TeeConfig {
+            mode: TeeMode::Never,
+            ..TeeConfig::default()
+        };
+        assert!(!should_tee(&config, 0));
+        assert!(!should_tee(&config, 1));
+    }
+
+    #[test]
+    fn test_should_tee_failures_mode_success() {
+        let config = TeeConfig::default(); // mode = Failures
+        assert!(!should_tee(&config, 0));
+    }
+
+    #[test]
+    fn test_should_tee_failures_mode_failure() {
+        let config = TeeConfig::default(); // mode = Failures
+        assert!(should_tee(&config, 1));
+    }
+
+    #[test]
+    fn test_should_tee_always_mode() {
+        let config = TeeConfig {
+            mode: TeeMode::Always,
+            ..TeeConfig::default()
+        };
+        assert!(should_tee(&config, 0));
+        assert!(should_tee(&config, 1));
+    }
 
     #[test]
     fn test_tee_config_default() {
