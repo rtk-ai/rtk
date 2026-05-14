@@ -561,9 +561,10 @@ pub fn run_compose_ps(verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-pub fn run_compose_logs(service: Option<&str>, verbose: u8) -> Result<i32> {
+pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("docker");
-    cmd.args(["compose", "logs", "--tail", "100"]);
+    let tail_str = tail.to_string();
+    cmd.args(["compose", "logs", "--tail", &tail_str]);
     if let Some(svc) = service {
         cmd.arg(svc);
     }
