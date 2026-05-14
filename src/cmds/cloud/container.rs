@@ -86,24 +86,8 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
 
     for line in stdout.lines().take(15) {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 4 {
-            let id = &parts[0][..12.min(parts[0].len())];
-            let name = parts[1];
-            let short_image = parts
-                .get(3)
-                .unwrap_or(&"")
-                .split('/')
-                .next_back()
-                .unwrap_or("");
-            let ports = compact_ports(parts.get(4).unwrap_or(&""));
-            if ports == "-" {
-                rtk.push_str(&format!("  {} {} ({})\n", id, name, short_image));
-            } else {
-                rtk.push_str(&format!(
-                    "  {} {} ({}) [{}]\n",
-                    id, name, short_image, ports
-                ));
-            }
+        if let Some(formatted) = format_docker_ps_line(&parts) {
+            rtk.push_str(&formatted);
         }
     }
     if count > 15 {
@@ -401,7 +385,7 @@ pub fn format_compose_ps(raw: &str) -> String {
             let status = parts[2];
             let ports = parts[3];
 
-            let short_image = image.split('/').next_back().unwrap_or(image);
+            let short_image = trim_image_registry(image);
 
             let port_str = if ports.trim().is_empty() {
                 String::new()
@@ -494,6 +478,37 @@ pub fn format_compose_build(raw: &str) -> String {
     }
 
     result.trim_end().to_string()
+}
+
+/// Prefix added to status when a container's health check is failing.
+const UNHEALTHY_PREFIX: &str = "[!]";
+
+/// Format a single tab-separated `docker ps --format` line. Returns `None` for malformed input.
+pub(crate) fn format_docker_ps_line(parts: &[&str]) -> Option<String> {
+    if parts.len() < 4 {
+        return None;
+    }
+    let id = &parts[0][..12.min(parts[0].len())];
+    let name = parts[1];
+    let raw_status = parts[2].trim();
+    let status = if raw_status.contains("(unhealthy)") {
+        format!("{} {}", UNHEALTHY_PREFIX, raw_status)
+    } else {
+        raw_status.to_string()
+    };
+    let short_img = trim_image_registry(parts[3]);
+    let ports = compact_ports(parts.get(4).unwrap_or(&""));
+    let line = if ports == "-" {
+        format!("  {} {} {} ({})\n", id, name, status, short_img)
+    } else {
+        format!("  {} {} {} ({}) [{}]\n", id, name, status, short_img, ports)
+    };
+    Some(line)
+}
+
+/// Strip the registry/namespace prefix from an image name, e.g. `registry.io/org/nginx:1` → `nginx:1`.
+fn trim_image_registry(image: &str) -> &str {
+    image.split('/').next_back().unwrap_or(image)
 }
 
 fn compact_ports(ports: &str) -> String {
@@ -750,5 +765,168 @@ api-1  | Connected to database";
     fn test_compact_ports_many() {
         let result = compact_ports("0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp, 0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp");
         assert!(result.contains("..."), "should truncate for >3 ports");
+    }
+
+    // ── format_docker_ps_line ─────────────────────────────
+
+    /// Build the parts slice that `format_docker_ps_line` expects from named fields.
+    fn ps_parts<'a>(
+        id: &'a str,
+        name: &'a str,
+        status: &'a str,
+        image: &'a str,
+        ports: &'a str,
+    ) -> Vec<&'a str> {
+        vec![id, name, status, image, ports]
+    }
+
+    #[test]
+    fn test_docker_ps_preserves_healthy_status() {
+        let parts = ps_parts(
+            "abc123def456",
+            "my-api",
+            "Up 3 hours (healthy)",
+            "nginx:latest",
+            "0.0.0.0:80->80/tcp",
+        );
+        let out = format_docker_ps_line(&parts).expect("should produce a line");
+
+        assert!(
+            out.contains("Up 3 hours (healthy)"),
+            "healthy status should appear verbatim in output; got: {}",
+            out
+        );
+        assert!(
+            !out.contains("[!]"),
+            "healthy container must NOT be flagged with [!]; got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_marks_unhealthy_prominently() {
+        let parts = ps_parts(
+            "deadbeef1234",
+            "broken-svc",
+            "Up 1 hour (unhealthy)",
+            "myapp:1.0",
+            "",
+        );
+        let out = format_docker_ps_line(&parts).expect("should produce a line");
+
+        assert!(
+            out.contains("[!]"),
+            "unhealthy container must be flagged with [!]; got: {}",
+            out
+        );
+        assert!(
+            out.contains("unhealthy"),
+            "unhealthy keyword must still be present in output; got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_shows_status_without_health_check() {
+        let parts = ps_parts("cafe00112233", "simple-worker", "Up 5 minutes", "redis:7", "");
+        let out = format_docker_ps_line(&parts).expect("should produce a line");
+
+        assert!(
+            out.contains("Up 5 minutes"),
+            "plain status should appear in output; got: {}",
+            out
+        );
+        assert!(
+            !out.contains("[!]"),
+            "container without health check must NOT be flagged with [!]; got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_exited_no_flag() {
+        // "Exited (1) 5 minutes ago" must NOT get a [!] prefix
+        let parts = ps_parts(
+            "1234567890ab",
+            "crashed-job",
+            "Exited (1) 5 minutes ago",
+            "python:3.12",
+            "",
+        );
+        let out = format_docker_ps_line(&parts).expect("should produce a line");
+
+        assert!(
+            out.contains("Exited (1) 5 minutes ago"),
+            "exited status should appear verbatim; got: {}",
+            out
+        );
+        assert!(
+            !out.contains("[!]"),
+            "Exited container must NOT be flagged with [!]; got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_restarting_no_flag() {
+        // "Restarting (0) 2 seconds ago" must NOT get a [!] prefix
+        let parts = ps_parts(
+            "abcdef012345",
+            "flaky-svc",
+            "Restarting (0) 2 seconds ago",
+            "myapp:2.1",
+            "",
+        );
+        let out = format_docker_ps_line(&parts).expect("should produce a line");
+
+        assert!(
+            out.contains("Restarting (0) 2 seconds ago"),
+            "restarting status should appear verbatim; got: {}",
+            out
+        );
+        assert!(
+            !out.contains("[!]"),
+            "Restarting container must NOT be flagged with [!]; got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_line_too_few_parts_returns_none() {
+        // Fewer than 4 fields → None (malformed line)
+        let parts = vec!["abc123", "only-two-fields"];
+        assert!(
+            format_docker_ps_line(&parts).is_none(),
+            "should return None for malformed lines with <4 fields"
+        );
+    }
+
+    #[test]
+    fn test_docker_ps_formats_all_five_containers() {
+        // docker_ps() receives --format tab-separated output (already compact);
+        // savings are measured at the docker images / kubectl level where output is larger.
+        // This test verifies correct formatting of all container states.
+        let cases = [
+            ("abc123def45600", "web",    "Up 2 hours (healthy)",       "nginx:1.25",                      "0.0.0.0:80->80/tcp"),
+            ("deadbeef123400", "api",    "Up 1 hour (unhealthy)",       "mycompany/backend-service:v2.3.1", "0.0.0.0:3000->3000/tcp"),
+            ("cafe00112233",   "worker", "Up 5 minutes",                "python:3.12-slim",                ""),
+            ("111122223333",   "db",     "Up 3 days",                   "postgres:16-alpine",               "0.0.0.0:5432->5432/tcp"),
+            ("aaaabbbbcccc",   "cache",  "Exited (1) 10 minutes ago",   "redis:7",                         ""),
+        ];
+
+        for (id, name, status, image, ports) in &cases {
+            let parts = ps_parts(id, name, status, image, ports);
+            let out = format_docker_ps_line(&parts).expect("should produce a line");
+            assert!(out.contains(name),   "name missing for {}: {}", name, out);
+            assert!(out.contains(status) || out.contains("[!]"),
+                "status missing for {}: {}", name, out);
+        }
+
+        // Unhealthy gets [!]; others do not
+        let unhealthy = ps_parts("deadbeef123400", "api", "Up 1 hour (unhealthy)", "img:1", "");
+        assert!(format_docker_ps_line(&unhealthy).unwrap().contains("[!]"));
+
+        let healthy = ps_parts("abc123def456", "web", "Up 2 hours (healthy)", "img:1", "");
+        assert!(!format_docker_ps_line(&healthy).unwrap().contains("[!]"));
     }
 }
