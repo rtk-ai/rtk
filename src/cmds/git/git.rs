@@ -1094,7 +1094,7 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
     let stdout = String::from_utf8_lossy(&output.stdout);
     let raw = format!("{}{}", stdout, stderr);
 
-    if output.status.success() {
+    if output.status.success() && !push_output_has_rejection(&stderr) {
         let compact = if stderr.contains("Everything up-to-date") {
             "ok (up-to-date)".to_string()
         } else {
@@ -1131,10 +1131,30 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         if !stdout.trim().is_empty() {
             eprintln!("{}", stdout);
         }
-        return Ok(exit_code_from_output(&output, "git push"));
+        let exit_code = push_failure_exit_code(
+            output.status.success(),
+            exit_code_from_output(&output, "git push"),
+        );
+        return Ok(exit_code);
     }
 
     Ok(0)
+}
+
+fn push_output_has_rejection(stderr: &str) -> bool {
+    let stderr_lower = stderr.to_ascii_lowercase();
+    stderr.contains("! [remote rejected]")
+        || stderr_lower.contains("remote: error:")
+        || stderr_lower.contains("push declined")
+        || stderr_lower.contains("gh013")
+}
+
+fn push_failure_exit_code(status_success: bool, git_exit_code: i32) -> i32 {
+    if status_success {
+        1
+    } else {
+        git_exit_code
+    }
 }
 
 fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -2064,6 +2084,48 @@ mod tests {
             args,
             "bare words must never trigger -- injection even when a same-named file exists"
         );
+    }
+
+    #[test]
+    fn test_push_output_has_rejection_for_github_ruleset() {
+        let stderr = "\
+remote: error: GH013: Repository rule violations found for refs/heads/alpha.
+remote: - Changes must be made through a pull request.
+To https://github.com/example/repo.git
+ ! [remote rejected] alpha -> alpha (push declined due to repository rule violations)
+error: failed to push some refs to 'https://github.com/example/repo.git'
+";
+        assert!(push_output_has_rejection(stderr));
+    }
+
+    #[test]
+    fn test_push_output_has_rejection_for_remote_error() {
+        let stderr = "remote: error: branch is protected\nEverything up-to-date\n";
+        assert!(push_output_has_rejection(stderr));
+    }
+
+    #[test]
+    fn test_push_output_has_rejection_ignores_normal_up_to_date() {
+        assert!(!push_output_has_rejection("Everything up-to-date\n"));
+    }
+
+    #[test]
+    fn test_push_output_has_rejection_ignores_normal_push() {
+        let stderr = "\
+To https://github.com/example/repo.git
+   1234567..89abcde  feature -> feature
+";
+        assert!(!push_output_has_rejection(stderr));
+    }
+
+    #[test]
+    fn test_push_failure_exit_code_for_rejected_success_status() {
+        assert_eq!(push_failure_exit_code(true, 0), 1);
+    }
+
+    #[test]
+    fn test_push_failure_exit_code_preserves_git_failure_status() {
+        assert_eq!(push_failure_exit_code(false, 128), 128);
     }
 
     #[test]
