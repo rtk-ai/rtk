@@ -1,6 +1,5 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
-use crate::core::config;
 use crate::core::stream::{exec_capture, CaptureResult};
 use crate::core::tracking;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
@@ -43,6 +42,35 @@ fn git_cmd(global_args: &[String]) -> Command {
 fn git_cmd_c_locale(global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.env("LC_ALL", "C");
+    cmd
+}
+
+fn uses_compact_status_path(args: &[String]) -> bool {
+    if args.is_empty() {
+        return true;
+    }
+
+    let mut saw_branch = false;
+    for arg in args {
+        match arg.as_str() {
+            "-b" | "--branch" => saw_branch = true,
+            "-sb" | "-bs" => return true,
+            "-s" | "--short" => {}
+            _ => return false,
+        }
+    }
+
+    saw_branch
+}
+
+fn build_status_command(args: &[String], global_args: &[String]) -> Command {
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("status");
+    if uses_compact_status_path(args) {
+        cmd.args(["--porcelain", "-b", "-uall"]);
+    } else {
+        cmd.args(args);
+    }
     cmd
 }
 
@@ -648,117 +676,37 @@ fn truncate_line(line: &str, width: usize) -> String {
     }
 }
 
+/// Preserve RTK's branch/clean framing while keeping porcelain file lines intact.
 pub(crate) fn format_status_output(porcelain: &str) -> String {
-    let lines: Vec<&str> = porcelain.lines().collect();
+    let lines: Vec<&str> = porcelain
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
 
     if lines.is_empty() {
         return "Clean working tree".to_string();
     }
 
-    let mut output = String::new();
+    let mut output = Vec::new();
 
-    // Parse branch info
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
-            output.push_str(&format!("* {}\n", branch));
+            output.push(format!("* {}", branch));
+        } else {
+            output.push((*branch_line).to_string());
         }
     }
-
-    // Count changes by type
-    let mut staged = 0;
-    let mut modified = 0;
-    let mut untracked = 0;
-    let mut conflicts = 0;
-
-    let mut staged_files = Vec::new();
-    let mut modified_files = Vec::new();
-    let mut untracked_files = Vec::new();
 
     for line in lines.iter().skip(1) {
-        if line.len() < 3 {
-            continue;
-        }
-        let status = line.get(0..2).unwrap_or("  ");
-        let file = line.get(3..).unwrap_or("");
-
-        match status.chars().next().unwrap_or(' ') {
-            'M' | 'A' | 'D' | 'R' | 'C' => {
-                staged += 1;
-                staged_files.push(file);
-            }
-            'U' => conflicts += 1,
-            _ => {}
-        }
-
-        match status.chars().nth(1).unwrap_or(' ') {
-            'M' | 'D' => {
-                modified += 1;
-                modified_files.push(file);
-            }
-            _ => {}
-        }
-
-        if status == "??" {
-            untracked += 1;
-            untracked_files.push(file);
-        }
+        output.push((*line).to_string());
     }
 
-    // Build summary
-    let limits = config::limits();
-    let max_files = limits.status_max_files;
-    let max_untracked = limits.status_max_untracked;
-
-    if staged > 0 {
-        output.push_str(&format!("+ Staged: {} files\n", staged));
-        for f in staged_files.iter().take(max_files) {
-            output.push_str(&format!("   {}\n", f));
-        }
-        if staged_files.len() > max_files {
-            output.push_str(&format!(
-                "   ... +{} more\n",
-                staged_files.len() - max_files
-            ));
-        }
+    if lines.len() == 1 && lines[0].starts_with("##") {
+        output.push("clean — nothing to commit".to_string());
     }
 
-    if modified > 0 {
-        output.push_str(&format!("~ Modified: {} files\n", modified));
-        for f in modified_files.iter().take(max_files) {
-            output.push_str(&format!("   {}\n", f));
-        }
-        if modified_files.len() > max_files {
-            output.push_str(&format!(
-                "   ... +{} more\n",
-                modified_files.len() - max_files
-            ));
-        }
-    }
-
-    if untracked > 0 {
-        output.push_str(&format!("? Untracked: {} files\n", untracked));
-        for f in untracked_files.iter().take(max_untracked) {
-            output.push_str(&format!("   {}\n", f));
-        }
-        if untracked_files.len() > max_untracked {
-            output.push_str(&format!(
-                "   ... +{} more\n",
-                untracked_files.len() - max_untracked
-            ));
-        }
-    }
-
-    if conflicts > 0 {
-        output.push_str(&format!("conflicts: {} files\n", conflicts));
-    }
-
-    // When working tree is clean (only branch line, no changes)
-    if staged == 0 && modified == 0 && untracked == 0 && conflicts == 0 {
-        output.push_str("clean — nothing to commit\n");
-    }
-
-    output.trim_end().to_string()
+    output.join("\n")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -899,10 +847,10 @@ fn filter_status_with_args(output: &str) -> String {
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // If user provided flags, apply minimal filtering
-    if !args.is_empty() {
-        let mut cmd = git_cmd(global_args);
-        cmd.arg("status").args(args);
+    // Keep a narrow compact path for no-arg status and branch/short-only flags.
+    // More complex explicit args still use the existing minimal-filter path.
+    if !uses_compact_status_path(args) {
+        let mut cmd = build_status_command(args, global_args);
         let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
         if !result.success() {
@@ -936,22 +884,30 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(0);
     }
 
-    // Default RTK compact mode (no args provided)
-    // Get raw git status for tracking
     let mut raw_cmd = git_cmd_c_locale(global_args);
-    raw_cmd.args(["status"]);
+    raw_cmd.arg("status");
+    raw_cmd.args(args);
     let raw_output = exec_capture(&mut raw_cmd)
         .map(|r| r.stdout)
         .unwrap_or_default();
 
-    let mut cmd = git_cmd(global_args);
-    cmd.args(["status", "--porcelain", "-b"]);
+    let mut cmd = build_status_command(args, global_args);
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
     if !result.stderr.is_empty() && result.stderr.contains("not a git repository") {
         let message = "Not a git repository".to_string();
         eprintln!("{}", message);
-        timer.track("git status", "rtk git status", &raw_output, &message);
+        let original_cmd = if args.is_empty() {
+            "git status".to_string()
+        } else {
+            format!("git status {}", args.join(" "))
+        };
+        let rtk_cmd = if args.is_empty() {
+            "rtk git status".to_string()
+        } else {
+            format!("rtk git status {}", args.join(" "))
+        };
+        timer.track(&original_cmd, &rtk_cmd, &raw_output, &message);
         return Ok(result.exit_code);
     }
 
@@ -967,8 +923,18 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
 
     println!("{}", final_output);
 
-    // Track for statistics
-    timer.track("git status", "rtk git status", &raw_output, &final_output);
+    let original_cmd = if args.is_empty() {
+        "git status".to_string()
+    } else {
+        format!("git status {}", args.join(" "))
+    };
+    let rtk_cmd = if args.is_empty() {
+        "rtk git status".to_string()
+    } else {
+        format!("rtk git status {}", args.join(" "))
+    };
+
+    timer.track(&original_cmd, &rtk_cmd, &raw_output, &final_output);
 
     Ok(0)
 }
@@ -1870,6 +1836,42 @@ mod tests {
     }
 
     #[test]
+    fn test_build_status_command_default_includes_uall() {
+        let cmd = build_status_command(&[], &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, vec!["status", "--porcelain", "-b", "-uall"]);
+    }
+
+    #[test]
+    fn test_uses_compact_status_path_for_branch_and_short_flags() {
+        assert!(uses_compact_status_path(&["-b".to_string()]));
+        assert!(uses_compact_status_path(&["--branch".to_string()]));
+        assert!(uses_compact_status_path(&["-sb".to_string()]));
+        assert!(uses_compact_status_path(&["-s".to_string(), "-b".to_string()]));
+        assert!(uses_compact_status_path(&["--short".to_string(), "--branch".to_string()]));
+        assert!(!uses_compact_status_path(&["-s".to_string()]));
+        assert!(!uses_compact_status_path(&["--short".to_string()]));
+        assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
+        assert!(!uses_compact_status_path(&["-uno".to_string()]));
+    }
+
+    #[test]
+    fn test_build_status_command_with_user_args_passthrough() {
+        let args = vec!["--short".to_string(), "--branch".to_string()];
+        let cmd = build_status_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b", "-uall"]);
+    }
+
+    #[test]
+    fn test_build_status_command_with_incompatible_user_args_passthrough() {
+        let args = vec!["--porcelain".to_string(), "-uno".to_string()];
+        let cmd = build_status_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
+    }
+
+    #[test]
     fn test_compact_diff() {
         let diff = r#"diff --git a/foo.rs b/foo.rs
 --- a/foo.rs
@@ -2150,9 +2152,9 @@ mod tests {
 
     #[test]
     fn test_format_status_output_clean() {
-        let porcelain = "";
+        let porcelain = "## main...origin/main\n";
         let result = format_status_output(porcelain);
-        assert_eq!(result, "Clean working tree");
+        assert_eq!(result, "* main...origin/main\nclean — nothing to commit");
     }
 
     #[test]
@@ -2224,27 +2226,17 @@ mod tests {
     }
 
     #[test]
-    fn test_format_status_output_modified_files() {
-        let porcelain = "## main...origin/main\n M src/main.rs\n M src/lib.rs\n";
+    fn test_format_status_output_preserves_nested_untracked_paths() {
+        let porcelain = "## main\n?? tmp/c.txt\n?? tmp/nested/d.txt\n";
         let result = format_status_output(porcelain);
-        assert!(result.contains("* main...origin/main"));
-        assert!(result.contains("~ Modified: 2 files"));
-        assert!(result.contains("src/main.rs"));
-        assert!(result.contains("src/lib.rs"));
-        assert!(!result.contains("Staged"));
-        assert!(!result.contains("Untracked"));
-    }
-
-    #[test]
-    fn test_format_status_output_untracked_files() {
-        let porcelain = "## feature/new\n?? temp.txt\n?? debug.log\n?? test.sh\n";
-        let result = format_status_output(porcelain);
-        assert!(result.contains("* feature/new"));
-        assert!(result.contains("? Untracked: 3 files"));
-        assert!(result.contains("temp.txt"));
-        assert!(result.contains("debug.log"));
-        assert!(result.contains("test.sh"));
-        assert!(!result.contains("Modified"));
+        assert!(result.contains("* main"));
+        assert!(result.contains("?? tmp/c.txt"));
+        assert!(result.contains("?? tmp/nested/d.txt"));
+        assert!(
+            result.lines().all(|line| line != "?? tmp/"),
+            "Nested untracked files must not collapse back to a directory marker:\n{}",
+            result
+        );
     }
 
     #[test]
@@ -2257,59 +2249,24 @@ A  added.rs
 "#;
         let result = format_status_output(porcelain);
         assert!(result.contains("* main"));
-        assert!(result.contains("+ Staged: 2 files"));
-        assert!(result.contains("staged.rs"));
-        assert!(result.contains("added.rs"));
-        assert!(result.contains("~ Modified: 1 files"));
-        assert!(result.contains("modified.rs"));
-        assert!(result.contains("? Untracked: 1 files"));
-        assert!(result.contains("untracked.txt"));
+        assert!(result.contains("M  staged.rs"));
+        assert!(result.contains(" M modified.rs"));
+        assert!(result.contains("A  added.rs"));
+        assert!(result.contains("?? untracked.txt"));
+        assert!(!result.contains("Staged"));
+        assert!(!result.contains("Modified"));
+        assert!(!result.contains("Untracked"));
     }
 
     #[test]
-    fn test_format_status_output_truncation() {
-        // Test that >15 staged files show "... +N more"
-        let mut porcelain = String::from("## main\n");
-        for i in 1..=20 {
-            porcelain.push_str(&format!("M  file{}.rs\n", i));
-        }
-        let result = format_status_output(&porcelain);
-        assert!(result.contains("+ Staged: 20 files"));
-        assert!(result.contains("file1.rs"));
-        assert!(result.contains("file15.rs"));
-        assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file16.rs"));
-        assert!(!result.contains("file20.rs"));
-    }
-
-    #[test]
-    fn test_format_status_modified_truncation() {
-        // Test that >15 modified files show "... +N more"
-        let mut porcelain = String::from("## main\n");
-        for i in 1..=20 {
-            porcelain.push_str(&format!(" M file{}.rs\n", i));
-        }
-        let result = format_status_output(&porcelain);
-        assert!(result.contains("~ Modified: 20 files"));
-        assert!(result.contains("file1.rs"));
-        assert!(result.contains("file15.rs"));
-        assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file16.rs"));
-    }
-
-    #[test]
-    fn test_format_status_untracked_truncation() {
-        // Test that >10 untracked files show "... +N more"
-        let mut porcelain = String::from("## main\n");
-        for i in 1..=15 {
-            porcelain.push_str(&format!("?? file{}.rs\n", i));
-        }
-        let result = format_status_output(&porcelain);
-        assert!(result.contains("? Untracked: 15 files"));
-        assert!(result.contains("file1.rs"));
-        assert!(result.contains("file10.rs"));
-        assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file11.rs"));
+    fn test_format_status_output_preserves_rename_and_conflict_lines() {
+        let porcelain = "## main\nR  old.rs -> new.rs\nUU conflict.rs\nMM mixed.rs\n";
+        let result = format_status_output(porcelain);
+        assert!(result.contains("* main"));
+        assert!(result.contains("R  old.rs -> new.rs"));
+        assert!(result.contains("UU conflict.rs"));
+        assert!(result.contains("MM mixed.rs"));
+        assert!(!result.contains("conflicts:"));
     }
 
     #[test]
@@ -2719,22 +2676,25 @@ no changes added to commit (use "git add" and/or "git commit -a")
     // --- truncation accuracy ---
 
     #[test]
-    fn test_format_status_overflow_count_exact() {
-        // 25 staged files, default status_max_files = 15
-        // Should show 15, overflow = 25 - 15 = 10, report "+10 more"
+    fn test_format_status_output_shows_every_file_when_many_are_dirty() {
         let mut porcelain = String::from("## main...origin/main\n");
         for i in 0..25 {
             porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
         assert!(
-            result.contains("+10 more"),
-            "Expected '+10 more' for 25 staged files (max_files=15), got:\n{}",
+            result.contains("staged_file_24.rs"),
+            "Expected the last staged file to remain visible, got:\n{}",
             result
         );
         assert!(
-            result.contains("Staged: 25 files"),
-            "Expected 'Staged: 25 files', got:\n{}",
+            result.lines().count() == 26,
+            "Expected branch + all 25 staged files, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("... +"),
+            "Status output must not hide dirty paths behind overflow markers:\n{}",
             result
         );
     }
