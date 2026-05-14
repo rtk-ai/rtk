@@ -440,11 +440,9 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                     hunk_skipped += 1;
                 }
             } else if hunk_shown < max_hunk_lines && !line.starts_with("\\") {
-                // Context line
-                if hunk_shown > 0 {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                }
+                // Context line — always emit (before and after changes)
+                result.push(format!("  {}", line));
+                hunk_shown += 1;
             }
         }
 
@@ -2752,6 +2750,39 @@ no changes added to commit (use "git add" and/or "git commit -a")
         assert!(
             result.contains("+3 lines omitted"),
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compact_diff_preserves_context_before_first_change() {
+        // Context lines BEFORE the first +/- in a hunk must be preserved.
+        // Regression test: previously `if hunk_shown > 0` dropped them.
+        let diff = r#"diff --git a/foo.rs b/foo.rs
+--- a/foo.rs
++++ b/foo.rs
+@@ -1,5 +1,5 @@
+ fn setup() {
+     let x = 1;
+     let y = 2;
+-    let z = 3;
++    let z = 999;
+ }
+"#;
+        let result = compact_diff(diff, 100);
+        assert!(
+            result.contains("fn setup()"),
+            "Expected context line 'fn setup()' before first change, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("let x = 1"),
+            "Expected context line 'let x = 1' before first change, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("let y = 2"),
+            "Expected context line 'let y = 2' before first change, got:\n{}",
             result
         );
     }
