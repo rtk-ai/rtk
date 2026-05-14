@@ -807,6 +807,27 @@ fn extract_state_header(raw: &str) -> Option<String> {
     None
 }
 
+/// Replace the porcelain "HEAD (no branch)" label with the detached HEAD info
+/// from the raw status output, which includes the commit SHA.
+///
+/// Porcelain v1 reports detached HEAD as `## HEAD (no branch)` — losing the SHA.
+/// Raw `git status` shows `HEAD detached at <sha>`, which is what agents need.
+fn enrich_detached_head(formatted: &str, raw: &str) -> String {
+    if !formatted.contains("HEAD (no branch)") {
+        return formatted.to_string();
+    }
+
+    // Look for "HEAD detached at <sha>" in the raw output
+    for line in raw.lines() {
+        let stripped = line.trim();
+        if stripped.starts_with("HEAD detached at ") {
+            return formatted.replace("HEAD (no branch)", stripped);
+        }
+    }
+
+    formatted.to_string()
+}
+
 /// Minimal filtering for git status with user-provided args
 fn filter_status_with_args(output: &str) -> String {
     let mut result = Vec::new();
@@ -920,6 +941,10 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         Some(state) => format!("{}\n{}", state, formatted),
         None => formatted,
     };
+
+    // Porcelain v1 loses the detached HEAD commit SHA (shows "HEAD (no branch)"
+    // instead of "HEAD detached at <sha>"). Recover the SHA from the raw output.
+    let final_output = enrich_detached_head(&final_output, &raw_output);
 
     println!("{}", final_output);
 
@@ -2754,5 +2779,30 @@ no changes added to commit (use "git add" and/or "git commit -a")
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn test_enrich_detached_head_replaces_no_branch() {
+        let formatted = "* HEAD (no branch)\nclean — nothing to commit";
+        let raw = "HEAD detached at 77a04d3\nnothing to commit, working tree clean\n";
+        let result = enrich_detached_head(formatted, raw);
+        assert!(
+            result.contains("HEAD detached at 77a04d3"),
+            "Expected detached HEAD with SHA, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("(no branch)"),
+            "Should not contain '(no branch)' after enrichment, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_enrich_detached_head_noop_on_normal_branch() {
+        let formatted = "* main...origin/main\nclean — nothing to commit";
+        let raw = "On branch main\nnothing to commit, working tree clean\n";
+        let result = enrich_detached_head(formatted, raw);
+        assert_eq!(result, formatted, "Should not modify non-detached output");
     }
 }
