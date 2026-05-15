@@ -1,5 +1,6 @@
 # Build
 /target
+/dist
 
 # Environment & Secrets
 .env
