@@ -3,7 +3,16 @@
 #
 # Handles two hook events:
 #   PreToolUse:Bash  → Classify & rewrite unknown CLI commands through RTK
-#   PostToolUse:mcp__* → Compress large MCP tool outputs
+#   PostToolUse:mcp__* → Source-level trimming on large MCP tool outputs
+#
+# Both CLI fallback and MCP output use the same source-level trimming logic:
+#   - Strip blank lines (collapse consecutive blanks to zero)
+#   - Strip decorative separators (═╔╗╚╝║─=-#*~ 3+ chars)
+#   - Strip banners ([ok] Command: ...)
+#   - Strip list count lines (3 items, 15 entries, etc.)
+#   - Strip markdown header prefix (# ## ### etc.) — keep the text
+#   - Strip bullet prefix (•·▪▸▹➤) — keep the text
+#   NO content reformatting, NO truncation, NO key=value compaction.
 #
 # Installation in ~/.claude/settings.json:
 #   {
@@ -38,21 +47,95 @@ FALLBACK_WRAP="sofam aiag-cli dima apc"
 # Trivial commands → skip (no benefit to wrap)
 SKIP_CMDS="echo printf which type export source cd pwd true false exit set unset alias unalias history clear reset rtk claude date uname hostname id whoami env printenv test"
 
-# Maximum MCP output characters before compression (approx 2000 tokens)
-MAX_OUTPUT_CHARS=8000
-# Maximum characters for a single string value in structured JSON
-MAX_VALUE_CHARS=2000
-# Maximum array items before truncation
-MAX_ARRAY_ITEMS=50
-MAX_ARRAY_KEEP=30
-# Minimum compression ratio to accept rtk pipe result
-MIN_COMPRESSION_RATIO=0.85
-
 # ── Guards ─────────────────────────────────────────────────────────────────
 
 if ! command -v jq &>/dev/null; then
   exit 0
 fi
+
+# ── Helper: source-level trim (matches Rust filter_fallback_output) ───────
+#
+# Strips blank lines, decorative separators, banners, markdown headers,
+# bullet prefixes, and list count lines. Does NOT reformat or truncate content.
+
+_source_level_trim() {
+  local text
+  text=$(cat)
+
+  [[ -z "$text" ]] && { echo ""; return; }
+
+  local result=()
+  local prev_blank=0
+
+  while IFS= read -r line; do
+    local trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+
+    # Skip blank lines (collapse consecutive blanks to zero)
+    if [[ -z "$trimmed" ]]; then
+      if [[ $prev_blank -eq 0 && ${#result[@]} -gt 0 ]]; then
+        prev_blank=1
+      fi
+      continue
+    fi
+
+    # Skip decorative separators (═╔╗╚╝║─=-#*~ 3+ chars)
+    local is_separator=0
+    echo "$trimmed" | grep -qxE '[═╔╗╚╝║─=#*~\-]{3,}[[:space:]]*' 2>/dev/null && is_separator=1 || true
+    if [[ $is_separator -eq 1 ]]; then
+      continue
+    fi
+
+    # Skip banners like "[ok] Command: ..."
+    local is_banner=0
+    echo "$trimmed" | grep -qxE '\[ok\][[:space:]]+Command:.*' 2>/dev/null && is_banner=1 || true
+    if [[ $is_banner -eq 1 ]]; then
+      continue
+    fi
+
+    # Skip list count lines like "3 items" or "15 entries"
+    local is_list_count=0
+    echo "$trimmed" | grep -qxE '[0-9]+[[:space:]]+(items?|entries?|rows?|results?|records?|lines?)[[:space:]]*' 2>/dev/null && is_list_count=1 || true
+    if [[ $is_list_count -eq 1 ]]; then
+      continue
+    fi
+
+    prev_blank=0
+
+    # Strip markdown header prefix (# ## ### etc.) — keep the text
+    local is_header=0
+    echo "$line" | grep -qxE '#{1,6}[[:space:]].*' 2>/dev/null && is_header=1 || true
+    if [[ $is_header -eq 1 ]]; then
+      local cleaned
+      cleaned=$(echo "$line" | sed -E 's/^#{1,6}[[:space:]]+//')
+      result+=("$cleaned")
+      continue
+    fi
+
+    # Strip bullet prefix (•·▪▸▹➤) — keep the text
+    local is_bullet=0
+    echo "$line" | grep -qE '^[[:space:]]*[•·▪▸▹➤][[:space:]]' 2>/dev/null && is_bullet=1 || true
+    if [[ $is_bullet -eq 1 ]]; then
+      local cleaned
+      cleaned=$(echo "$line" | sed -E 's/^[[:space:]]*[•·▪▸▹➤][[:space:]]*//')
+      result+=("$cleaned")
+      continue
+    fi
+
+    result+=("$line")
+  done <<< "$text"
+
+  # Join lines with newline
+  local first=1
+  for line in "${result[@]}"; do
+    if [[ $first -eq 1 ]]; then
+      printf '%s' "$line"
+      first=0
+    else
+      printf '\n%s' "$line"
+    fi
+  done
+}
 
 # ── Helper: classify a single command segment ──────────────────────────────
 
@@ -172,13 +255,12 @@ handle_pre_tool_use() {
 
   if [[ $is_compound -eq 1 ]]; then
     # Split on operators, classify each segment
-    # Use sed to split while preserving operators as separate tokens
     local rewritten_cmd=""
     local has_deny=0
     local has_ask=0
     local any_changed=0
 
-    # Split on &&, ||, ; keeping delimiters
+    # Split on &&, ||, ; keeping delimiters as separate tokens
     local IFS_SAVE="$IFS"
     local segments=()
     local ops=()
@@ -251,7 +333,7 @@ handle_pre_tool_use() {
         rewritten_cmd+="$rw"
       else
         any_changed=1
-        # result is "rewrite:...", "err:...", or "summary:..."
+        # result is "rewrite:...", "err:...", "summary:...", or "fallback:..."
         local rw="${result#*:}"
         rewritten_cmd+="$rw"
       fi
@@ -342,7 +424,7 @@ handle_pre_tool_use() {
         }
       }'
   else
-    # rewrite, err, or summary
+    # rewrite, err, summary, or fallback
     local rw="${result#*:}"
     local action="${result%%:*}"
     local reason="RTK ${action}"
@@ -376,139 +458,41 @@ handle_post_tool_use() {
     exit 0
   fi
 
-  local tool_result_len
-  tool_result_len=$(echo "$input" | jq -r '.tool_result // empty' | wc -c | tr -d ' ')
+  # Extract tool_result as string
+  local tool_result
+  tool_result=$(echo "$input" | jq -r '.tool_result // empty')
 
-  # Nothing to compress
-  if [[ "$tool_result_len" -le "$MAX_OUTPUT_CHARS" ]]; then
+  # Nothing to trim
+  if [[ -z "$tool_result" ]]; then
     exit 0
   fi
 
-  # Extract tool_result as string
+  # Apply source-level trim (same logic as Rust filter_fallback_output)
+  local trimmed
+  trimmed=$(printf '%s' "$tool_result" | _source_level_trim)
+
+  # If trimmed is identical to original, passthrough
+  if [[ "$trimmed" == "$tool_result" ]]; then
+    exit 0
+  fi
+
+  # Update tool_result with trimmed version
   local tool_result_type
   tool_result_type=$(echo "$input" | jq -r '.tool_result | type')
 
   if [[ "$tool_result_type" == "string" ]]; then
-    # String result — try rtk pipe first, then smart truncation
-    local compressed=""
-    if command -v rtk &>/dev/null; then
-      compressed=$(echo "$input" | jq -r '.tool_result' | timeout 1 rtk pipe 2>/dev/null) || true
-      if [[ -n "$compressed" ]]; then
-        local comp_len=${#compressed}
-        local orig_len=$((tool_result_len - 1))  # wc -c includes newline
-        if [[ $orig_len -gt 0 ]] && [[ $(echo "scale=2; $comp_len / $orig_len" | bc) < $MIN_COMPRESSION_RATIO ]]; then
-          # Good compression — use it
-          echo "$input" | jq --arg compressed "$compressed" '.tool_result = $compressed'
-          return
-        fi
-      fi
-    fi
-
-    # Fallback: smart truncation preserving important lines
-    local truncated
-    truncated=$(echo "$input" | jq -r '.tool_result' | _smart_truncate)
-    echo "$input" | jq --arg truncated "$truncated" '.tool_result = $truncated'
-    return
-
+    echo "$input" | jq --arg trimmed "$trimmed" '.tool_result = $trimmed'
   elif [[ "$tool_result_type" == "object" || "$tool_result_type" == "array" ]]; then
-    # Structured result — compress long string values and truncate arrays
-    local compressed_json
-    compressed_json=$(echo "$input" | jq -r '.tool_result' | _compress_json_value)
-    echo "$input" | jq --argjson compressed "$compressed_json" '.tool_result = $compressed'
-    return
-  fi
-
-  # Unknown type — passthrough
-  exit 0
-}
-
-# ── Smart truncation: preserve error/warn/success lines ────────────────────
-
-_smart_truncate() {
-  local text
-  text=$(cat)
-
-  if [[ ${#text} -le $MAX_OUTPUT_CHARS ]]; then
-    echo "$text"
-    return
-  fi
-
-  # Keywords that match at line start only (after optional whitespace)
-  local important_pattern='^[[:space:]]*(error|Error|ERROR|fail|Fail|FAIL|warn|Warn|WARN|warning|Warning|exception|Exception|EXCEPTION|success|Success|SUCCESS)\b'
-
-  local important_lines=()
-  local other_lines=()
-  local line
-
-  while IFS= read -r line; do
-    if echo "$line" | grep -qE "$important_pattern"; then
-      important_lines+=("$line")
-    else
-      other_lines+=("$line")
-    fi
-  done <<< "$text"
-
-  local important_text
-  important_text=$(printf '%s\n' "${important_lines[@]+"${important_lines[@]}"}")
-
-  if [[ ${#important_text} -le $((MAX_OUTPUT_CHARS * 8 / 10)) ]]; then
-    # Show important lines + truncated other lines
-    local budget=$((MAX_OUTPUT_CHARS - ${#important_text} - 100))
-    local other_text
-    other_text=$(printf '%s\n' "${other_lines[@]+"${other_lines[@]}"}" | head -c "$budget")
-    local omitted=$(( ${#other_lines[@]} - $(echo "$other_text" | wc -l | tr -d ' ') ))
-    printf '%s\n\n... [truncated: %d lines omitted] ...\n\n%s\n' "$other_text" "$omitted" "$important_text"
+    # For structured results, convert to string, trim, and put back as string
+    local json_str
+    json_str=$(echo "$input" | jq -c '.tool_result')
+    local trimmed_json
+    trimmed_json=$(echo "$json_str" | _source_level_trim)
+    echo "$input" | jq --arg trimmed "$trimmed_json" '.tool_result = $trimmed'
   else
-    # Last resort: head + tail
-    local head_size=$((MAX_OUTPUT_CHARS / 2))
-    local tail_size=$((MAX_OUTPUT_CHARS / 4))
-    printf '%s\n\n... [truncated: %d chars omitted] ...\n\n%s\n' \
-      "${text:0:$head_size}" \
-      "$(( ${#text} - head_size - tail_size ))" \
-      "${text: -$tail_size}"
+    # Unknown type — passthrough
+    exit 0
   fi
-}
-
-# ── Recursive JSON value compression ──────────────────────────────────────
-
-_compress_json_value() {
-  # Reads JSON from stdin, recursively compresses long string values
-  # and truncates large arrays. Outputs compressed JSON.
-  local json
-  json=$(cat)
-
-  # Check total size
-  local json_len=${#json}
-  if [[ $json_len -le $MAX_OUTPUT_CHARS ]]; then
-    echo "$json"
-    return
-  fi
-
-  # Use jq to recursively process:
-  # 1. If string > MAX_VALUE_CHARS, truncate
-  # 2. If array > MAX_ARRAY_ITEMS, keep first MAX_ARRAY_KEEP + notice
-  echo "$json" | jq --arg max_val "$MAX_VALUE_CHARS" --arg max_items "$MAX_ARRAY_ITEMS" --arg max_keep "$MAX_ARRAY_KEEP" '
-    def truncate_str:
-      if length > ($max_val | tonumber) then
-        .[0:($max_val | tonumber)] + "... [truncated]"
-      else
-        .
-      end;
-    def compress:
-      if type == "string" then truncate_str
-      elif type == "array" then
-        if length > ($max_items | tonumber) then
-          .[0:($max_keep | tonumber)] + ["... [truncated: \(length - ($max_keep | tonumber)) more items]"]
-        else
-          map(compress)
-        end
-      elif type == "object" then
-        to_entries | map(.value |= compress) | from_entries
-      else
-        .
-      end;
-    compress
-  ' 2>/dev/null || echo "$json"
 }
 
 # ── Main dispatch ─────────────────────────────────────────────────────────
