@@ -334,16 +334,19 @@ fn print_codex_summary() {
     }
 
     let mut sessions: usize = 0;
-    let mut total_calls: usize = 0;
     let mut total_tokens: u64 = 0;
     let mut total_input: u64 = 0;
     let mut total_output: u64 = 0;
     let mut total_cached: u64 = 0;
 
+    let mut total_cmds: usize = 0;
+    let mut total_rtk: usize = 0;
+
     for path in &paths {
         if let Ok(s) = codex::parse_session(path) {
             sessions += 1;
-            total_calls += s.tool_calls;
+            total_cmds += s.total_cmds;
+            total_rtk += s.rtk_cmds;
             total_tokens += s.total_tokens;
             total_input += s.input_tokens;
             total_output += s.output_tokens;
@@ -355,10 +358,19 @@ fn print_codex_summary() {
         return;
     }
 
+    let avg_adoption = if total_cmds > 0 {
+        total_rtk as f64 / total_cmds as f64 * 100.0
+    } else {
+        0.0
+    };
+
     println!("{}", styled("Codex Activity (last 30d)", true));
     println!("──────────────────────────────────────────────────────────");
     print_kpi("Sessions", sessions.to_string());
-    print_kpi("CLI calls (exec_command)", total_calls.to_string());
+    print_kpi(
+        "RTK adoption",
+        format!("{}/{} cmds ({:.0}%)", total_rtk, total_cmds, avg_adoption),
+    );
     print_kpi(
         "Total tokens",
         format!(

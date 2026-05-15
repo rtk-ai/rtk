@@ -1,15 +1,21 @@
 //! Codex session analytics: parses ~/.codex/sessions/**/*.jsonl to extract
-//! tool call counts and cumulative token usage per session.
+//! tool call counts, RTK adoption, and cumulative token usage per session.
 //!
 //! Each Codex session file is a newline-delimited JSON log. Relevant entry
 //! types:
 //! - `session_meta`  — session UUID, cwd, model_provider
-//! - `response_item` — tool calls (`type=function_call`, `name=exec_command`)
+//! - `response_item` — tool calls (`type=function_call`, `name=exec_command`,
+//!                     `arguments` is a JSON-encoded string with a `cmd` field)
 //! - `event_msg`     — token snapshots (`type=token_count`, `info.total_token_usage`)
+//!
+//! RTK adoption uses the same `classify_command` + `split_command_chain`
+//! logic as Claude Code sessions: a command is covered if it starts with
+//! `rtk ` or would be rewritten by the hook.
 //!
 //! Token counts in `total_token_usage` are cumulative across the session;
 //! the last entry is the authoritative total.
 
+use crate::discover::registry::{classify_command, split_command_chain, Classification};
 use anyhow::Result;
 use serde::Deserialize;
 use std::fs;
@@ -27,13 +33,24 @@ pub struct CodexSessionSummary {
     pub id: String,
     /// Human-readable age: "Today", "Yesterday", "Nd ago".
     pub date: String,
-    /// Number of `exec_command` function calls (CLI commands run by Codex).
-    pub tool_calls: usize,
+    /// Total command parts across all `exec_command` calls (after chain split).
+    pub total_cmds: usize,
+    /// Command parts classified as RTK-covered (explicit `rtk ` or hook-rewritten).
+    pub rtk_cmds: usize,
     /// Cumulative total tokens (input + output + reasoning) at session end.
     pub total_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_input_tokens: u64,
+}
+
+impl CodexSessionSummary {
+    pub fn adoption_pct(&self) -> f64 {
+        if self.total_cmds == 0 {
+            return 0.0;
+        }
+        self.rtk_cmds as f64 / self.total_cmds as f64 * 100.0
+    }
 }
 
 // ── JSONL Deserialization ──
@@ -64,6 +81,15 @@ struct ResponseItemPayload {
     #[serde(rename = "type")]
     kind: String,
     name: Option<String>,
+    /// JSON-encoded string: `{"cmd":"...","workdir":"...","yield_time_ms":N,...}`
+    arguments: Option<String>,
+}
+
+/// Inner JSON of `exec_command` arguments — only `cmd` is needed.
+#[derive(Deserialize)]
+struct ExecArgs {
+    #[serde(default)]
+    cmd: String,
 }
 
 #[derive(Deserialize)]
@@ -182,7 +208,26 @@ pub fn parse_session(path: &Path) -> Result<CodexSessionSummary> {
                     if item.payload.kind == "function_call"
                         && item.payload.name.as_deref() == Some("exec_command")
                     {
-                        summary.tool_calls += 1;
+                        let cmd = item
+                            .payload
+                            .arguments
+                            .as_deref()
+                            .and_then(|a| serde_json::from_str::<ExecArgs>(a).ok())
+                            .map(|a| a.cmd)
+                            .unwrap_or_default();
+
+                        let parts = split_command_chain(&cmd);
+                        for part in &parts {
+                            summary.total_cmds += 1;
+                            if part.starts_with("rtk ")
+                                || matches!(
+                                    classify_command(part),
+                                    Classification::Supported { .. }
+                                )
+                            {
+                                summary.rtk_cmds += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -263,13 +308,53 @@ mod tests {
     fn test_parse_session_counts_exec_command() {
         let f = write_session(&[
             r#"{"type":"session_meta","payload":{"id":"019e2704-19e7-7a81-b927-399029e88020","timestamp":"2026-05-14T15:04:00.743Z","cwd":"/home/user/proj","originator":"codex-tui","cli_version":"0.130.0","source":{},"thread_source":"user","model_provider":"openai","base_instructions":{"text":""},"session_context_window":null}}"#,
-            r#"{"type":"response_item","timestamp":"2026-05-14T15:04:01Z","payload":{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"c1"}}"#,
-            r#"{"type":"response_item","timestamp":"2026-05-14T15:04:02Z","payload":{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"c2"}}"#,
+            r#"{"type":"response_item","timestamp":"2026-05-14T15:04:01Z","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rtk git status\",\"workdir\":\"/proj\",\"yield_time_ms\":1000,\"max_output_tokens\":4000}","call_id":"c1"}}"#,
+            r#"{"type":"response_item","timestamp":"2026-05-14T15:04:02Z","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo hello\",\"workdir\":\"/proj\",\"yield_time_ms\":1000,\"max_output_tokens\":4000}","call_id":"c2"}}"#,
             r#"{"type":"response_item","timestamp":"2026-05-14T15:04:03Z","payload":{"type":"function_call","name":"write_stdin","arguments":"{}","call_id":"c3"}}"#,
         ]);
         let s = parse_session(f.path()).unwrap();
-        assert_eq!(s.tool_calls, 2, "only exec_command counts");
+        assert_eq!(s.total_cmds, 2, "two exec_command calls = two command parts");
+        assert_eq!(s.rtk_cmds, 1, "only rtk git status is RTK-covered");
         assert_eq!(s.total_tokens, 0, "no token_count entry");
+    }
+
+    #[test]
+    fn test_parse_session_rtk_adoption_explicit_prefix() {
+        let f = write_session(&[
+            r#"{"type":"session_meta","payload":{"id":"aabbccdd-1111-0000-0000-000000000000","timestamp":"2026-05-14T15:04:00.743Z","cwd":"/","originator":"codex-tui","cli_version":"0.130.0","source":{},"thread_source":"user","model_provider":"openai","base_instructions":{"text":""},"session_context_window":null}}"#,
+            r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rtk read AGENTS.md\"}","call_id":"c1"}}"#,
+            r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rtk git status\"}","call_id":"c2"}}"#,
+            r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rtk grep foo src/\"}","call_id":"c3"}}"#,
+        ]);
+        let s = parse_session(f.path()).unwrap();
+        assert_eq!(s.total_cmds, 3);
+        assert_eq!(s.rtk_cmds, 3, "all three start with 'rtk '");
+        assert_eq!(s.adoption_pct(), 100.0);
+    }
+
+    #[test]
+    fn test_parse_session_rtk_adoption_hook_rewritten() {
+        // "git status" would be rewritten by the hook → counted as RTK-covered
+        let f = write_session(&[
+            r#"{"type":"session_meta","payload":{"id":"aabbccdd-2222-0000-0000-000000000000","timestamp":"2026-05-14T15:04:00.743Z","cwd":"/","originator":"codex-tui","cli_version":"0.130.0","source":{},"thread_source":"user","model_provider":"openai","base_instructions":{"text":""},"session_context_window":null}}"#,
+            r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git status\"}","call_id":"c1"}}"#,
+            r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo hello\"}","call_id":"c2"}}"#,
+        ]);
+        let s = parse_session(f.path()).unwrap();
+        assert_eq!(s.total_cmds, 2);
+        assert_eq!(s.rtk_cmds, 1, "git status is hook-rewritten, echo is not");
+    }
+
+    #[test]
+    fn test_parse_session_chained_commands() {
+        // "cd /tmp && git status" → 2 parts: cd (not covered) + git status (covered)
+        let f = write_session(&[
+            r#"{"type":"session_meta","payload":{"id":"aabbccdd-3333-0000-0000-000000000000","timestamp":"2026-05-14T15:04:00.743Z","cwd":"/","originator":"codex-tui","cli_version":"0.130.0","source":{},"thread_source":"user","model_provider":"openai","base_instructions":{"text":""},"session_context_window":null}}"#,
+            r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cd /tmp && rtk git status\"}","call_id":"c1"}}"#,
+        ]);
+        let s = parse_session(f.path()).unwrap();
+        assert_eq!(s.total_cmds, 2, "chain splits into cd + rtk git status");
+        assert_eq!(s.rtk_cmds, 1, "only rtk git status is covered");
     }
 
     #[test]
@@ -301,7 +386,8 @@ mod tests {
     fn test_parse_session_empty_file() {
         let f = write_session(&[]);
         let s = parse_session(f.path()).unwrap();
-        assert_eq!(s.tool_calls, 0);
+        assert_eq!(s.total_cmds, 0);
+        assert_eq!(s.rtk_cmds, 0);
         assert_eq!(s.total_tokens, 0);
     }
 
@@ -310,10 +396,11 @@ mod tests {
         let f = write_session(&[
             r#"{"type":"session_meta","payload":{"id":"aaaabbbb-0000-0000-0000-000000000000","timestamp":"2026-05-14T15:04:00.743Z","cwd":"/","originator":"codex-tui","cli_version":"0.130.0","source":{},"thread_source":"user","model_provider":"openai","base_instructions":{"text":""},"session_context_window":null}}"#,
             "not valid json at all",
-            r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call","name":"exec_command","arguments":"{}","call_id":"x"}}"#,
+            r#"{"type":"response_item","timestamp":"t","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rtk git status\"}","call_id":"x"}}"#,
         ]);
         let s = parse_session(f.path()).unwrap();
-        assert_eq!(s.tool_calls, 1);
+        assert_eq!(s.total_cmds, 1);
+        assert_eq!(s.rtk_cmds, 1);
     }
 
     #[test]

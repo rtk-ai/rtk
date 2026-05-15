@@ -200,7 +200,7 @@ fn show_codex_sessions(_verbose: u8) -> Result<()> {
     let mut rows = Vec::new();
     for path in &paths {
         if let Ok(s) = codex::parse_session(path) {
-            if s.tool_calls > 0 || s.total_tokens > 0 {
+            if s.total_cmds > 0 || s.total_tokens > 0 {
                 rows.push(s);
             }
         }
@@ -211,32 +211,42 @@ fn show_codex_sessions(_verbose: u8) -> Result<()> {
     }
 
     println!();
-    println!("Codex Sessions (last 10)");
-    println!("{}", "-".repeat(56));
-    println!("{:<12} {:<12} {:>7} {:>12}", "Session", "Date", "Calls", "Tokens");
-    println!("{}", "-".repeat(56));
+    println!("Codex RTK Adoption (last 10)");
+    println!("{}", "-".repeat(70));
+    println!(
+        "{:<12} {:<12} {:>5} {:>5} {:>9} {:<7} {:>8}",
+        "Session", "Date", "Cmds", "RTK", "Adoption", "", "Tokens"
+    );
+    println!("{}", "-".repeat(70));
 
-    let mut total_calls: usize = 0;
-    let mut total_tokens: u64 = 0;
+    let mut total_cmds: usize = 0;
+    let mut total_rtk: usize = 0;
 
     for s in &rows {
-        total_calls += s.tool_calls;
-        total_tokens += s.total_tokens;
+        let pct = s.adoption_pct();
+        let bar = progress_bar(pct, 5);
+        total_cmds += s.total_cmds;
+        total_rtk += s.rtk_cmds;
         println!(
-            "{:<12} {:<12} {:>7} {:>12}",
+            "{:<12} {:<12} {:>5} {:>5} {:>8.0}% {:<7} {:>8}",
             s.id,
             s.date,
-            s.tool_calls,
+            s.total_cmds,
+            s.rtk_cmds,
+            pct,
+            bar,
             format_tokens(s.total_tokens as usize),
         );
     }
 
-    println!("{}", "-".repeat(56));
-    println!(
-        "Total: {} exec_command calls, {} tokens",
-        total_calls,
-        format_tokens(total_tokens as usize),
-    );
+    println!("{}", "-".repeat(70));
+
+    let avg_adoption = if total_cmds > 0 {
+        total_rtk as f64 / total_cmds as f64 * 100.0
+    } else {
+        0.0
+    };
+    println!("Average adoption: {:.0}%", avg_adoption);
 
     Ok(())
 }
