@@ -560,7 +560,8 @@ fn rewrite_compound(
                 let is_pipe_incompatible = seg.starts_with("find ")
                     || seg == "find"
                     || seg.starts_with("fd ")
-                    || seg == "fd";
+                    || seg == "fd"
+                    || starts_with_rg_files(seg, transparent_prefixes);
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
@@ -648,6 +649,60 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn starts_with_rg_files(cmd: &str, transparent_prefixes: &[String]) -> bool {
+    starts_with_rg_files_inner(cmd, transparent_prefixes, 0)
+}
+
+fn starts_with_rg_files_inner(cmd: &str, transparent_prefixes: &[String], depth: usize) -> bool {
+    if depth >= MAX_PREFIX_DEPTH {
+        return false;
+    }
+
+    let trimmed = cmd.trim();
+    let (env_prefix, rest_after_env) = strip_disabled_prefix(trimmed);
+    if !env_prefix.is_empty() {
+        return starts_with_rg_files_inner(rest_after_env, transparent_prefixes, depth + 1);
+    }
+
+    for &prefix in SHELL_PREFIX_BUILTINS {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            return starts_with_rg_files_inner(rest, transparent_prefixes, depth + 1);
+        }
+    }
+
+    for prefix in transparent_prefixes {
+        if let Some(rest) = strip_word_prefix(trimmed, prefix) {
+            return starts_with_rg_files_inner(rest, transparent_prefixes, depth + 1);
+        }
+    }
+
+    strip_word_prefix(trimmed, "rg")
+        .and_then(|rg_args| strip_word_prefix(rg_args, "--files"))
+        .is_some()
+}
+
+fn rewrite_rg_files(rest_after_files: &str, redirect_suffix: &str) -> Option<String> {
+    let path = rest_after_files.trim();
+
+    if path.is_empty() || path == "." {
+        return Some(format!(
+            "rtk find '*' . --max 50 --file-type f{}",
+            redirect_suffix
+        ));
+    }
+
+    let tokens = tokenize(path);
+    // `rtk find` cannot preserve extra ripgrep flags, globs, or multiple roots.
+    if tokens.len() != 1 || tokens[0].kind != TokenKind::Arg || tokens[0].value.starts_with('-') {
+        return None;
+    }
+
+    Some(format!(
+        "rtk find '*' {} --max 50 --file-type f{}",
+        tokens[0].value, redirect_suffix
+    ))
 }
 
 /// Shell prefix builtins that modify how the shell runs a command
@@ -785,6 +840,17 @@ fn rewrite_segment_inner(
 
     if cmd_part.starts_with("head -") || cmd_part.starts_with("tail ") {
         return rewrite_line_range(cmd_part).map(|r| format!("{}{}", r, redirect_suffix));
+    }
+
+    if let Some(rg_args) = strip_word_prefix(cmd_part, "rg") {
+        if let Some(rest_after_files) = strip_word_prefix(rg_args, "--files") {
+            let stripped = ENV_PREFIX.replace(cmd_part, "");
+            let cmd_clean = stripped.trim();
+            if is_excluded(cmd_clean, excluded) {
+                return None;
+            }
+            return rewrite_rg_files(rest_after_files, redirect_suffix);
+        }
     }
 
     // Most cat flags (-v, -A, -e, -t, -s, -b, --show-all, etc.) have different
@@ -1502,6 +1568,19 @@ mod tests {
     fn test_rewrite_find_pipe_xargs_wc() {
         assert_eq!(
             rewrite_command_no_prefixes("find src -type f | wc -l", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_pipe_skipped() {
+        assert_eq!(rewrite_command_no_prefixes("rg --files | wc -l", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_rg_files_pipe_skipped_with_shell_prefix() {
+        assert_eq!(
+            rewrite_command_no_prefixes("command rg --files | wc -l", &[]),
             None
         );
     }
@@ -3829,6 +3908,79 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("python3 -m pytest tests/", &[]),
             Some("rtk pytest tests/".into())
+        );
+    }
+
+    #[test]
+    fn test_rg_files_rewrites_to_find() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files", &[]),
+            Some("rtk find '*' . --max 50 --file-type f".into())
+        );
+    }
+
+    #[test]
+    fn test_rg_files_path_rewrites_to_find_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files src", &[]),
+            Some("rtk find '*' src --max 50 --file-type f".into())
+        );
+    }
+
+    #[test]
+    fn test_rg_files_quoted_path_rewrites_to_find_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files 'src dir'", &[]),
+            Some("rtk find '*' 'src dir' --max 50 --file-type f".into())
+        );
+    }
+
+    #[test]
+    fn test_rg_files_dot_dash_path_rewrites_to_find_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files ./-dash", &[]),
+            Some("rtk find '*' ./-dash --max 50 --file-type f".into())
+        );
+    }
+
+    #[test]
+    fn test_rg_files_multiple_roots_are_not_rewritten() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files src tests", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rg_files_redirect_is_preserved() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files src > files.txt", &[]),
+            Some("rtk find '*' src --max 50 --file-type f > files.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_rg_files_transparent_prefix_rewrites() {
+        let prefixes = vec!["shadowenv exec --".to_string()];
+        assert_eq!(
+            super::rewrite_command("shadowenv exec -- rg --files src", &[], &prefixes),
+            Some("shadowenv exec -- rtk find '*' src --max 50 --file-type f".into())
+        );
+    }
+
+    #[test]
+    fn test_rg_files_respects_exclude_commands() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files", &["rg".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rg_files_with_extra_flag_is_not_rewritten() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --files --hidden", &[]),
+            None
         );
     }
 
