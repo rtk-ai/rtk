@@ -37,6 +37,7 @@ Agent runs "cargo test"
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
+| Oh My Pi (OMP) | TypeScript extension (`tool_call`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
@@ -124,6 +125,13 @@ rtk init --agent hermes
 Creates `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled` in the Hermes config. Hermes loads Python plugins, so the plugin entrypoint is Python, but it is only a thin adapter. It mutates the Hermes `terminal` tool `command` before execution and delegates all rewrite decisions to Rust through `rtk rewrite`. The repository source and tests for that adapter live in `hooks/hermes/`; only installed runtime files use the `~/.hermes/plugins/rtk-rewrite/` path.
 
 The plugin fails open. If `rtk` is missing at load time, the hook is not registered. If `rtk rewrite` errors, the tool is not `terminal`, the payload has no string `command`, or the plugin raises an exception, Hermes runs the original command unchanged. The same `rtk rewrite` limitations apply: already-prefixed `rtk` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
+
+### Oh My Pi
+
+```bash
+rtk init --omp       # creates ./.omp/extensions/rtk.ts
+rtk init -g --omp    # creates ~/.omp/agent/extensions/rtk.ts
+```
 
 ### Cline / Roo Code
 

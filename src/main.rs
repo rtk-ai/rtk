@@ -337,6 +337,10 @@ enum Commands {
         #[arg(long)]
         opencode: bool,
 
+        /// Install Oh My Pi extension
+        #[arg(long)]
+        omp: bool,
+
         /// Initialize for Gemini CLI instead of Claude Code
         #[arg(long)]
         gemini: bool,
@@ -1813,6 +1817,7 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            omp,
             dry_run,
         } => {
             let ctx = hooks::init::InitContext {
@@ -1820,17 +1825,21 @@ fn run_cli() -> Result<i32> {
                 dry_run,
             };
             if show {
-                hooks::init::show_config(codex)?;
+                hooks::init::show_config(codex, omp)?;
             } else if uninstall {
-                uninstall_init_dispatch(
-                    agent,
-                    global,
-                    gemini,
-                    codex,
-                    ctx,
-                    hooks::init::uninstall_hermes,
-                    hooks::init::uninstall,
-                )?;
+                if omp {
+                    hooks::init::uninstall_omp(global, ctx)?;
+                } else {
+                    uninstall_init_dispatch(
+                        agent,
+                        global,
+                        gemini,
+                        codex,
+                        ctx,
+                        hooks::init::uninstall_hermes,
+                        hooks::init::uninstall,
+                    )?;
+                }
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1858,6 +1867,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if omp {
+                hooks::init::run_omp_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2682,6 +2693,33 @@ mod tests {
                 agent, uninstall, ..
             } => {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
+                assert!(uninstall);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_omp() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--omp"]).unwrap();
+        match cli.command {
+            Commands::Init { omp, .. } => assert!(omp),
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_omp_global_uninstall() {
+        let cli = Cli::try_parse_from(["rtk", "init", "-g", "--omp", "--uninstall"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                global,
+                omp,
+                uninstall,
+                ..
+            } => {
+                assert!(global);
+                assert!(omp);
                 assert!(uninstall);
             }
             _ => panic!("Expected Init command"),
