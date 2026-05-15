@@ -1,5 +1,6 @@
 //! Compares RTK-routed vs raw commands in a coding session.
 
+use crate::analytics::codex;
 use crate::core::utils::format_tokens;
 use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
 use crate::discover::registry::{classify_command, split_command_chain, Classification};
@@ -184,6 +185,58 @@ pub fn run(_verbose: u8) -> Result<()> {
     };
     println!("Average adoption: {:.0}%", avg_adoption);
     println!("Tip: Run `rtk discover` to find missed RTK opportunities");
+
+    show_codex_sessions(_verbose)
+}
+
+fn show_codex_sessions(_verbose: u8) -> Result<()> {
+    let mut paths = codex::discover_sessions(Some(30));
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    paths.truncate(10);
+
+    let mut rows = Vec::new();
+    for path in &paths {
+        if let Ok(s) = codex::parse_session(path) {
+            if s.tool_calls > 0 || s.total_tokens > 0 {
+                rows.push(s);
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("Codex Sessions (last 10)");
+    println!("{}", "-".repeat(56));
+    println!("{:<12} {:<12} {:>7} {:>12}", "Session", "Date", "Calls", "Tokens");
+    println!("{}", "-".repeat(56));
+
+    let mut total_calls: usize = 0;
+    let mut total_tokens: u64 = 0;
+
+    for s in &rows {
+        total_calls += s.tool_calls;
+        total_tokens += s.total_tokens;
+        println!(
+            "{:<12} {:<12} {:>7} {:>12}",
+            s.id,
+            s.date,
+            s.tool_calls,
+            format_tokens(s.total_tokens as usize),
+        );
+    }
+
+    println!("{}", "-".repeat(56));
+    println!(
+        "Total: {} exec_command calls, {} tokens",
+        total_calls,
+        format_tokens(total_tokens as usize),
+    );
 
     Ok(())
 }
