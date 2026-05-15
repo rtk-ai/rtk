@@ -351,7 +351,7 @@ rtk git status
 
 ## Supported AI Tools
 
-RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
+RTK supports 14 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -361,6 +361,7 @@ RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rt
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
+| **Rovo Dev** | `rtk init --agent rovodev` | AGENTS.md memory file (inlined) |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |

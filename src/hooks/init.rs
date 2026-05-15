@@ -15,7 +15,7 @@ use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SETTINGS_JSON,
+    REWRITE_HOOK_FILE, ROVODEV_DIR, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -25,6 +25,7 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const RTK_SLIM_ROVODEV: &str = include_str!("../../hooks/rovodev/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -2284,6 +2285,140 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+// ─── Rovo Dev support ─────────────────────────────────────────
+
+pub fn run_rovodev_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let agents_md_path = if global {
+        resolve_rovodev_dir()?.join(AGENTS_MD)
+    } else {
+        PathBuf::from(AGENTS_MD)
+    };
+
+    run_rovodev_mode_with_paths(agents_md_path, global, ctx)
+}
+
+fn run_rovodev_mode_with_paths(
+    agents_md_path: PathBuf,
+    global: bool,
+    ctx: InitContext,
+) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    if global && !dry_run {
+        if let Some(parent) = agents_md_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Rovo Dev config directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    // Rovo Dev does not auto-expand @file references inside AGENTS.md, so we
+    // inline the RTK awareness directly between markers (the same approach
+    // used by the legacy --claude-md mode and Kilo Code / Antigravity rules).
+    let existing = if agents_md_path.exists() {
+        fs::read_to_string(&agents_md_path)
+            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?
+    } else {
+        String::new()
+    };
+
+    let (new_content, action) = upsert_rtk_block(&existing, RTK_SLIM_ROVODEV);
+    let action_str = match action {
+        RtkBlockUpsert::Added => "added",
+        RtkBlockUpsert::Updated => "updated",
+        RtkBlockUpsert::Unchanged => "already up to date",
+        RtkBlockUpsert::Malformed => {
+            anyhow::bail!(
+                "AGENTS.md at {} contains an unterminated RTK block (opening marker without closing). \
+                Please fix manually before re-running.",
+                agents_md_path.display()
+            );
+        }
+    };
+
+    if action != RtkBlockUpsert::Unchanged {
+        if dry_run {
+            println!(
+                "[dry-run] would {} RTK block in {}",
+                action_str,
+                agents_md_path.display()
+            );
+            if verbose > 0 {
+                println!("[dry-run] content:\n{}", new_content);
+            }
+        } else {
+            atomic_write(&agents_md_path, &new_content).with_context(|| {
+                format!("Failed to write AGENTS.md: {}", agents_md_path.display())
+            })?;
+        }
+    }
+
+    if !dry_run {
+        println!("\nRTK configured for Rovo Dev.\n");
+        println!("  AGENTS.md: {} ({})", agents_md_path.display(), action_str);
+        if global {
+            println!("  Applies to all `acli rovodev` sessions for this user.");
+        } else {
+            println!("  Commit AGENTS.md to share RTK awareness with your team.");
+        }
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_rovodev(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let agents_md_path = if global {
+        resolve_rovodev_dir()?.join(AGENTS_MD)
+    } else {
+        PathBuf::from(AGENTS_MD)
+    };
+    let mut removed = Vec::new();
+
+    if agents_md_path.exists() {
+        let content = fs::read_to_string(&agents_md_path)
+            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
+
+        if content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&content);
+            if did_remove {
+                if dry_run {
+                    println!(
+                        "[dry-run] would remove RTK block from {}",
+                        agents_md_path.display()
+                    );
+                } else {
+                    atomic_write(&agents_md_path, &cleaned).with_context(|| {
+                        format!("Failed to write AGENTS.md: {}", agents_md_path.display())
+                    })?;
+                }
+                removed.push(format!(
+                    "AGENTS.md: removed RTK block ({})",
+                    agents_md_path.display()
+                ));
+            }
+        }
+    }
+
+    if removed.is_empty() {
+        println!("RTK was not installed for Rovo Dev (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Rovo Dev:"
+        } else {
+            "RTK uninstalled for Rovo Dev:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    Ok(())
+}
+
 fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -2699,6 +2834,13 @@ fn resolve_codex_dir_from(
 
 fn resolve_hermes_home() -> Result<PathBuf> {
     resolve_hermes_home_from_env(dirs::home_dir(), std::env::var_os("HERMES_HOME"))
+}
+
+fn resolve_rovodev_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("RTK_ROVODEV_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    resolve_home_subdir(ROVODEV_DIR)
 }
 
 fn resolve_hermes_home_from_env(

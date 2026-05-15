@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Hermes CLI
     Hermes,
+    /// Rovo Dev
+    Rovodev,
 }
 
 #[derive(Parser)]
@@ -1353,21 +1355,25 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+fn uninstall_init_dispatch<UninstallHermes, UninstallRovodev, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
+    uninstall_rovodev: UninstallRovodev,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallRovodev: FnOnce(bool, hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Rovodev) {
+        uninstall_rovodev(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         uninstall_standard(global, gemini, codex, cursor, ctx)
@@ -1809,6 +1815,7 @@ fn run_cli() -> Result<i32> {
                     codex,
                     ctx,
                     hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_rovodev,
                     hooks::init::uninstall,
                 )?;
             } else if gemini {
@@ -1836,6 +1843,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Rovodev) {
+                hooks::init::run_rovodev_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2675,6 +2684,9 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
+            |_, _| {
+                panic!("rovodev uninstall should not be called for Hermes");
+            },
             |_, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
@@ -2683,6 +2695,74 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(hermes_called.get());
+        assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_rovodev() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "rovodev"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Rovodev));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_rovodev_global_uninstall() {
+        let cli = Cli::try_parse_from(["rtk", "init", "-g", "--agent", "rovodev", "--uninstall"])
+            .unwrap();
+        match cli.command {
+            Commands::Init {
+                agent,
+                uninstall,
+                global,
+                ..
+            } => {
+                assert_eq!(agent, Some(AgentTarget::Rovodev));
+                assert!(uninstall);
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_rovodev_to_rovodev_cleanup() {
+        let rovodev_called = Cell::new(false);
+        let hermes_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 0,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Rovodev),
+            true,
+            false,
+            false,
+            ctx,
+            |_| {
+                hermes_called.set(true);
+                Ok(())
+            },
+            |global, ctx| {
+                rovodev_called.set(true);
+                assert!(global);
+                assert!(ctx.dry_run);
+                Ok(())
+            },
+            |_, _, _, _, _| {
+                standard_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(rovodev_called.get());
+        assert!(!hermes_called.get());
         assert!(!standard_called.get());
     }
 
