@@ -691,28 +691,29 @@ fn contains_unquoted_glob_meta(cmd_part: &str) -> bool {
     false
 }
 
-fn push_grep_short_flag(flags: &mut Vec<String>, flag: char) -> bool {
-    match flag {
+fn push_grep_short_flag(program: &str, flags: &mut Vec<String>, flag: char) -> bool {
+    match (program, flag) {
         // rg already prints line numbers and is recursive by default. It also uses
         // regex syntax by default, so GNU grep's -E is a compatibility no-op here.
-        'n' | 'E' | 'r' | 'R' => true,
-        'i' | 'o' | 'c' | 'F' | 'w' => {
+        ("grep", 'n' | 'E' | 'r' | 'R') => true,
+        ("rg", 'n') => true,
+        (_, 'i' | 'o' | 'c' | 'F' | 'w') => {
             flags.push(format!("-{}", flag));
             true
         }
-        'H' => {
+        (_, 'H') => {
             flags.push("--with-filename".to_string());
             true
         }
-        'h' => {
+        ("grep", 'h') | ("rg", 'I') => {
             flags.push("--no-filename".to_string());
             true
         }
-        'l' => {
+        (_, 'l') => {
             flags.push("--files-with-matches".to_string());
             true
         }
-        'L' => {
+        ("grep", 'L') => {
             flags.push("--files-without-match".to_string());
             true
         }
@@ -808,14 +809,14 @@ fn rewrite_grep_like_command(cmd_part: &str, redirect_suffix: &str) -> Option<St
                         }
                         break;
                     }
-                    if !push_grep_short_flag(&mut flags, ch) {
+                    if !push_grep_short_flag(program, &mut flags, ch) {
                         return None;
                     }
                 }
             }
             _ if arg.starts_with('-') => {
                 let ch = arg.chars().nth(1)?;
-                if !push_grep_short_flag(&mut flags, ch) {
+                if !push_grep_short_flag(program, &mut flags, ch) {
                     return None;
                 }
             }
@@ -1664,13 +1665,28 @@ mod tests {
     #[test]
     fn test_rewrite_grep_h_flags_avoid_clap_help_collision() {
         assert_eq!(
-            rewrite_command_no_prefixes("rg -h foo .", &[]),
+            rewrite_command_no_prefixes("grep -h foo .", &[]),
             Some("rtk grep foo . --no-filename".into())
         );
+        assert_eq!(rewrite_command_no_prefixes("rg -h foo .", &[]), None);
         assert_eq!(
             rewrite_command_no_prefixes("rg -H foo .", &[]),
             Some("rtk grep foo . --with-filename".into())
         );
+        assert_eq!(
+            rewrite_command_no_prefixes("rg -I foo .", &[]),
+            Some("rtk grep foo . --no-filename".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_conflicting_short_flags_are_skipped() {
+        assert_eq!(rewrite_command_no_prefixes("rg -L TODO .", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("rg -r replacement TODO", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("rg -R TODO .", &[]), None);
     }
 
     #[test]
