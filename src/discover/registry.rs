@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
 use super::lexer::{split_on_operators, tokenize, TokenKind};
-use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+use super::rules::{RtkRule, IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -626,6 +626,43 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     None
 }
 
+fn rewrite_vitest_command(cmd_part: &str, rule: &RtkRule, redirect_suffix: &str) -> Option<String> {
+    let rest = rule
+        .rewrite_prefixes
+        .iter()
+        .find_map(|prefix| strip_word_prefix(cmd_part, prefix))?;
+
+    let first_arg = rest.split_whitespace().next().unwrap_or("");
+    if matches!(
+        first_arg,
+        "--version" | "-v" | "version" | "--help" | "-h" | "help"
+    ) {
+        return None;
+    }
+
+    let rest = rest.trim();
+    let rest = if let Some(run_rest) =
+        strip_word_prefix(rest, "run").or_else(|| strip_word_prefix(rest, "--run"))
+    {
+        run_rest.trim()
+    } else if rest.is_empty()
+        || first_arg.starts_with('-')
+        || first_arg.contains('/')
+        || first_arg.contains('\\')
+        || first_arg.contains('.')
+    {
+        rest
+    } else {
+        return None;
+    };
+
+    if rest.is_empty() {
+        Some(format!("rtk vitest run{}", redirect_suffix))
+    } else {
+        Some(format!("rtk vitest run {}{}", rest, redirect_suffix))
+    }
+}
+
 /// Shell prefix builtins that modify how the shell runs a command
 /// but don't change which command runs. Strip before routing, re-prepend after.
 const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
@@ -811,6 +848,10 @@ fn rewrite_segment_inner(
         {
             return None;
         }
+    }
+
+    if rule.rtk_cmd == "rtk vitest" {
+        return rewrite_vitest_command(cmd_part, rule, redirect_suffix);
     }
 
     // Try each rewrite prefix (longest first) with word-boundary check
@@ -2827,11 +2868,74 @@ mod tests {
         for command in commands {
             assert_eq!(
                 rewrite_command_no_prefixes(command, &[]),
-                Some("rtk vitest".into()),
+                Some("rtk vitest run".into()),
                 "Failed for command: {}",
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_vitest_run_flag() {
+        assert_eq!(
+            rewrite_command_no_prefixes("vitest --run", &[]),
+            Some("rtk vitest run".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npx vitest --run src/foo.test.ts", &[]),
+            Some("rtk vitest run src/foo.test.ts".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_vitest_file_filter() {
+        assert_eq!(
+            rewrite_command_no_prefixes("vitest src/foo.test.ts", &[]),
+            Some("rtk vitest run src/foo.test.ts".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("npx vitest test/unit", &[]),
+            Some("rtk vitest run test/unit".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_vitest_explicit_non_run_passthrough() {
+        for cmd in ["vitest watch", "npx vitest bench", "pnpm vitest list"] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "{cmd} should not rewrite"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_vitest_metadata_passthrough() {
+        for cmd in [
+            "vitest --version",
+            "npx vitest --version",
+            "pnpm vitest --version",
+            "vitest -v",
+            "vitest version",
+            "vitest --help",
+            "npx vitest --help",
+            "pnpm vitest help",
+        ] {
+            assert_eq!(
+                rewrite_command_no_prefixes(cmd, &[]),
+                None,
+                "{cmd} should not rewrite"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_vitest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm vitest run", &[]),
+            Some("rtk vitest run".into())
+        );
     }
 
     #[test]
@@ -2969,7 +3073,7 @@ mod tests {
         );
         assert_eq!(
             rewrite_command_no_prefixes("npm exec vitest", &[]),
-            Some("rtk vitest".to_string()),
+            Some("rtk vitest run".to_string()),
         );
     }
 
