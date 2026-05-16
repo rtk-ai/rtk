@@ -1,0 +1,23 @@
+[filters.yq]
+description = "Compact yq output — truncate large YAML results"
+match_command = "^yq\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+]
+max_lines = 40
+truncate_lines_at = 120
+
+[[tests.yq]]
+name = "short output passes through"
+input = """
+name: my-service
+version: "1.0"
+replicas: 3
+"""
+expected = "name: my-service\nversion: \"1.0\"\nreplicas: 3"
+
+[[tests.yq]]
+name = "empty input passes through"
+input = ""
+expected = ""
