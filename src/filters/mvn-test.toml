@@ -1,0 +1,116 @@
+[filters.mvn-test]
+description = "Compact Maven test output — strip download/lifecycle noise, preserve failures and summaries"
+match_command = "^mvn\\s+(test|verify|integration-test)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\[INFO\\] ---",
+  "^\\[INFO\\] Building\\s",
+  "^\\[INFO\\] Downloading\\s",
+  "^\\[INFO\\] Downloaded\\s",
+  "^\\[INFO\\]\\s*$",
+  "^\\[INFO\\] -------+$",
+  "^\\s*$",
+  "^Downloading:",
+  "^Downloaded:",
+  "^Progress",
+  "^\\[INFO\\] Scanning for projects",
+  "^\\[INFO\\] Surefire report directory:",
+  "^\\[INFO\\] .*maven-surefire-plugin.*",
+  "^\\[INFO\\] .*maven-failsafe-plugin.*",
+  "^\\[INFO\\] .*maven-resources-plugin.*",
+  "^\\[INFO\\] .*maven-compiler-plugin.*",
+  "^\\[INFO\\] Nothing to compile",
+  "^\\[INFO\\] No tests to run",
+  "^\\[INFO\\] skip non existing resourceDirectory",
+  "^\\[INFO\\] Copying \\d+ resource",
+  "^\\[INFO\\] Changes detected - recompiling",
+  "^\\[INFO\\] Compiling \\d+ source file",
+]
+match_output = [
+  { pattern = "Tests run: \\d+, Failures: 0, Errors: 0", message = "mvn test: ok (all tests passed)", unless = "\\[ERROR\\]|BUILD FAILURE|Tests run:.*Failures: [1-9]|Tests run:.*Errors: [1-9]" },
+]
+max_lines = 80
+on_empty = "mvn test: ok"
+
+[[tests.mvn-test]]
+name = "strips lifecycle noise, preserves test failure details"
+input = """
+[INFO] Scanning for projects...
+[INFO] ---
+[INFO] Building myapp 1.0-SNAPSHOT
+[INFO] ---
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources)
+[INFO] Copying 3 resources
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile)
+[INFO] Nothing to compile - all classes are up to date
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test)
+[INFO] Surefire report directory: /home/user/myapp/target/surefire-reports
+[INFO]
+ T E S T S
+-------------------------------------------------------
+Running com.example.MyTest
+Tests run: 3, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.123 s <<< FAILURE!
+testAdd(com.example.MyTest)  Time elapsed: 0.012 s  <<< FAILURE!
+java.lang.AssertionError: expected:<4> but was:<5>
+\tat org.junit.Assert.assertEquals(Assert.java:115)
+\tat com.example.MyTest.testAdd(MyTest.java:15)
+
+Results :
+
+Failed tests:   testAdd(com.example.MyTest): expected:<4> but was:<5>
+
+Tests run: 3, Failures: 1, Errors: 0, Skipped: 0
+
+[INFO] BUILD FAILURE
+[INFO] Total time: 3.456 s
+"""
+expected = " T E S T S\n-------------------------------------------------------\nRunning com.example.MyTest\nTests run: 3, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.123 s <<< FAILURE!\ntestAdd(com.example.MyTest)  Time elapsed: 0.012 s  <<< FAILURE!\njava.lang.AssertionError: expected:<4> but was:<5>\n\tat org.junit.Assert.assertEquals(Assert.java:115)\n\tat com.example.MyTest.testAdd(MyTest.java:15)\nResults :\nFailed tests:   testAdd(com.example.MyTest): expected:<4> but was:<5>\nTests run: 3, Failures: 1, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE\n[INFO] Total time: 3.456 s"
+
+[[tests.mvn-test]]
+name = "successful test run short-circuits to ok message"
+input = """
+[INFO] Scanning for projects...
+[INFO] ---
+[INFO] Building myapp 1.0-SNAPSHOT
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test)
+[INFO]
+ T E S T S
+-------------------------------------------------------
+Running com.example.MyTest
+Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.456 s
+
+Results :
+
+Tests run: 5, Failures: 0, Errors: 0, Skipped: 0
+
+[INFO] BUILD SUCCESS
+[INFO] Total time: 4.123 s
+"""
+expected = "mvn test: ok (all tests passed)"
+
+[[tests.mvn-test]]
+name = "download noise stripped, test results preserved"
+input = """
+[INFO] Scanning for projects...
+[INFO] Downloading org.apache.maven:maven-core:3.9.6
+[INFO] Downloaded org.apache.maven:maven-core:3.9.6
+Downloading: https://repo.maven.apache.org/maven2/commons-lang3.jar
+Downloaded: https://repo.maven.apache.org/maven2/commons-lang3.jar
+Progress (1): 100%
+[INFO] ---
+[INFO] Building myapp 1.0-SNAPSHOT
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test)
+[INFO]
+ T E S T S
+-------------------------------------------------------
+Running com.example.AppTest
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 1, Time elapsed: 0.089 s
+
+Results :
+
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 1
+
+[INFO] BUILD SUCCESS
+[INFO] Total time: 12.345 s
+"""
+expected = " T E S T S\n-------------------------------------------------------\nRunning com.example.AppTest\nTests run: 2, Failures: 0, Errors: 0, Skipped: 1, Time elapsed: 0.089 s\nResults :\nTests run: 2, Failures: 0, Errors: 0, Skipped: 1\n[INFO] BUILD SUCCESS\n[INFO] Total time: 12.345 s"
