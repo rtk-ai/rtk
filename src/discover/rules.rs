@@ -834,12 +834,12 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^uv\s+(sync|pip\s+install)\b",
+        pattern: r"^uv\s+(sync|run)\b",
         rtk_cmd: "rtk uv",
         rewrite_prefixes: &["uv"],
         category: "Python",
-        savings_pct: 65.0,
-        subcmd_savings: &[],
+        savings_pct: 80.0,
+        subcmd_savings: &[("sync", 80.0), ("run", 90.0)],
         subcmd_status: &[],
     },
     RtkRule {

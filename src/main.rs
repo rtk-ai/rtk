@@ -16,7 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::gradlew_cmd;
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
@@ -703,6 +703,13 @@ enum Commands {
     /// Pip package manager with compact output (auto-detects uv)
     Pip {
         /// Pip arguments (e.g., list, outdated, install)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// uv package manager/runner with first-class subcommand dispatch
+    Uv {
+        /// uv arguments (e.g., run, pip, sync)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2126,6 +2133,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
+        Commands::Uv { args } => uv_cmd::run(&args, cli.verbose)?,
+
         Commands::Go { command } => match command {
             GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,
             GoCommands::Build { args } => go_cmd::run_build(&args, cli.verbose)?,
@@ -2487,6 +2496,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
+            | Commands::Uv { .. }
     )
 }
 
@@ -3140,6 +3150,17 @@ mod tests {
                 assert_eq!(args, vec!["cowsay", "hello"]);
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
+        }
+    }
+
+    #[test]
+    fn test_uv_is_operational_command() {
+        let cli = Cli::try_parse_from(["rtk", "uv", "run", "pytest"]).unwrap();
+        match cli.command {
+            Commands::Uv { args } => {
+                assert_eq!(args, vec!["run", "pytest"]);
+            }
+            _ => panic!("Expected Commands::Uv"),
         }
     }
 }
