@@ -1,0 +1,31 @@
+[filters.argocd]
+description = "Compact ArgoCD CLI output — strip sync noise, preserve status and errors"
+match_command = "^argocd\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^TIMESTAMP\\s+",
+  "^time=",
+  "^FATA\\[\\d+\\].*context deadline",
+]
+truncate_lines_at = 120
+max_lines = 50
+on_empty = "argocd: ok"
+
+[[tests.argocd]]
+name = "app get preserves status"
+input = """
+Name:               my-app
+Project:            default
+Namespace:          production
+
+GROUP  KIND        NAMESPACE   NAME     STATUS  HEALTH   HOOK  MESSAGE
+       Service     production  my-app   Synced  Healthy
+apps   Deployment  production  my-app   Synced  Healthy
+"""
+expected = "Name:               my-app\nProject:            default\nNamespace:          production\nGROUP  KIND        NAMESPACE   NAME     STATUS  HEALTH   HOOK  MESSAGE\n       Service     production  my-app   Synced  Healthy\napps   Deployment  production  my-app   Synced  Healthy"
+
+[[tests.argocd]]
+name = "strips time prefix logs"
+input = "time=\"2024-01-15T10:30:00Z\" level=info msg=\"Sync completed\"\nApplication 'my-app' is synced"
+expected = "Application 'my-app' is synced"

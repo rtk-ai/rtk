@@ -1,0 +1,33 @@
+[filters.az]
+description = "Compact Azure CLI output — truncate JSON results, strip upgrade warnings"
+match_command = "^az\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^WARNING:",
+  "^  Please let us know",
+  "^  You can use",
+]
+truncate_lines_at = 120
+max_lines = 50
+
+[[tests.az]]
+name = "strips warnings, preserves JSON output"
+input = """
+WARNING: The default value for this argument will change
+  Please let us know how you feel about this change.
+
+{
+  "name": "my-resource-group",
+  "location": "eastus",
+  "properties": {
+    "provisioningState": "Succeeded"
+  }
+}
+"""
+expected = "{\n  \"name\": \"my-resource-group\",\n  \"location\": \"eastus\",\n  \"properties\": {\n    \"provisioningState\": \"Succeeded\"\n  }\n}"
+
+[[tests.az]]
+name = "short output passes through"
+input = "Command group 'az aks' is in preview."
+expected = "Command group 'az aks' is in preview."
