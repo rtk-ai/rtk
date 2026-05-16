@@ -178,7 +178,9 @@ rtk playwright test             # E2E results (failures only)
 rtk pytest                      # Python tests (-90%)
 rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
-rtk mvn test                    # Maven tests (keeps failures + summaries)
+rtk mvn test                    # Maven Surefire tests (keeps failures + summaries)
+rtk mvn verify                  # Maven Surefire + Failsafe integration tests
+rtk mvn integration-test        # Maven Failsafe IT runs
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
 rtk err <cmd>                   # Filter errors only from any command

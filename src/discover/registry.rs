@@ -939,6 +939,23 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_mvn_verify_and_integration_test() {
+        for cmd in ["mvn verify", "mvn clean verify", "mvn integration-test"] {
+            assert_eq!(
+                classify_command(cmd),
+                Classification::Supported {
+                    rtk_equivalent: "rtk mvn",
+                    category: "Build",
+                    estimated_savings_pct: 80.0,
+                    status: RtkStatus::Existing,
+                },
+                "classify({}) did not return the verify/integration-test savings",
+                cmd
+            );
+        }
+    }
+
+    #[test]
     fn test_classify_npx_tsc() {
         assert_eq!(
             classify_command("npx tsc --noEmit"),
@@ -1285,6 +1302,18 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("mvn clean test", &[]),
             Some("rtk mvn clean test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn verify", &[]),
+            Some("rtk mvn verify".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn clean verify -DskipITs=false", &[]),
+            Some("rtk mvn clean verify -DskipITs=false".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn integration-test", &[]),
+            Some("rtk mvn integration-test".into())
         );
     }
 

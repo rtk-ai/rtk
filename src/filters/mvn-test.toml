@@ -1,6 +1,6 @@
 [filters.mvn-test]
-description = "Compact Maven test output"
-match_command = "^mvn(?:\\s+\\S+)*\\s+test\\b"
+description = "Compact Maven Surefire/Failsafe test output"
+match_command = "^mvn(?:\\s+\\S+)*\\s+(?:test|verify|integration-test)\\b"
 strip_ansi = true
 strip_lines_matching = [
   "^\\[INFO\\] Scanning for projects",
@@ -100,3 +100,23 @@ expected = "[ERROR] /repo/src/test/java/com/example/FooTest.java:[12,13] cannot 
 name = "quiet successful test run reports ok"
 input = ""
 expected = "mvn test: ok"
+
+[[tests.mvn-test]]
+name = "failsafe integration-test output keeps failure summary"
+input = """
+[INFO] --- maven-failsafe-plugin:3.2.5:integration-test (default) @ app ---
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.AppIT
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.301 s <<< FAILURE! -- in com.example.AppIT
+[ERROR] com.example.AppIT.shouldReturn200 -- Time elapsed: 0.290 s <<< FAILURE!
+java.lang.AssertionError: status code mismatch
+    at com.example.AppIT.shouldReturn200(AppIT.java:55)
+[INFO] Results:
+[ERROR] Failures:
+[ERROR]   AppIT.shouldReturn200:55 status code mismatch
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+"""
+expected = "[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.301 s <<< FAILURE! -- in com.example.AppIT\n[ERROR] com.example.AppIT.shouldReturn200 -- Time elapsed: 0.290 s <<< FAILURE!\njava.lang.AssertionError: status code mismatch\n    at com.example.AppIT.shouldReturn200(AppIT.java:55)\n[INFO] Results:\n[ERROR] Failures:\n[ERROR]   AppIT.shouldReturn200:55 status code mismatch\n[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE"
