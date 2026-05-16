@@ -926,6 +926,19 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_mvn_test_with_global_options() {
+        assert_eq!(
+            classify_command("mvn -q -Dtest=UserServiceTest test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
     fn test_classify_npx_tsc() {
         assert_eq!(
             classify_command("npx tsc --noEmit"),
@@ -1256,6 +1269,22 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test", &[]),
             Some("rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvn_test_variants() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn test", &[]),
+            Some("rtk mvn test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn -q -Dtest=UserServiceTest test", &[]),
+            Some("rtk mvn -q -Dtest=UserServiceTest test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn clean test", &[]),
+            Some("rtk mvn clean test".into())
         );
     }
 

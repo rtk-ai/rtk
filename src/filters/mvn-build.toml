@@ -1,6 +1,21 @@
 [filters.mvn-build]
 description = "Compact Maven build output"
-match_command = "^mvn\\s+(compile|package|clean|install)\\b"
+# Match Maven build goals while excluding any invocation that also carries a
+# bare `test` goal (those belong to mvn-test). Filters are loaded in alphabetical
+# order and find_filter_in is first-match-wins, so `mvn-build` is checked before
+# `mvn-test`; we must therefore reject `mvn clean test` here even though `clean`
+# is in the build alternation.
+#
+# The `regex` crate has no lookahead, so "not exactly `test`" is enumerated as:
+#   t | te | tes                            — shorter prefixes of `test`
+#   [^t\s]\S*                               — token not starting with `t`
+#   t[^e\s]\S*, te[^s\s]\S*, tes[^t\s]\S*   — token diverging from `test` at
+#                                             position 2, 3, or 4
+#   test\S+                                 — token starting with `test` plus
+#                                             more chars (e.g. `testCompile`)
+# The block is applied to every space-separated token before and after the
+# captured build goal.
+match_command = "^mvn(?:\\s+(?:t|te|tes|[^t\\s]\\S*|t[^e\\s]\\S*|te[^s\\s]\\S*|tes[^t\\s]\\S*|test\\S+))*\\s+(compile|package|clean|install)\\b(?:\\s+(?:t|te|tes|[^t\\s]\\S*|t[^e\\s]\\S*|te[^s\\s]\\S*|tes[^t\\s]\\S*|test\\S+))*$"
 strip_ansi = true
 strip_lines_matching = [
   "^\\[INFO\\] ---",

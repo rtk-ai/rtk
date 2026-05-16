@@ -47,6 +47,13 @@ Typical savings: 60-99%.
 | `cargo check` | 80% | Errors and warnings only |
 | `cargo clippy` | 80% | Lint warnings grouped by file |
 
+## JVM
+
+| Command | Savings | What changes |
+|---------|---------|--------------|
+| `mvn test` | 80% | Maven/Surefire noise stripped, failures and summaries preserved |
+| `mvn package` | 70% | Download/build boilerplate stripped, errors and summaries kept |
+
 ## JavaScript / TypeScript
 
 | Command | Savings | What changes |
