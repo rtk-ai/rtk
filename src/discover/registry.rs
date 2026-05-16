@@ -3,7 +3,7 @@
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
 
-use super::lexer::{split_on_operators, tokenize, TokenKind};
+use super::lexer::{shell_split, split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
 
 /// Result of classifying a command.
@@ -650,6 +650,199 @@ fn rewrite_line_range(cmd: &str) -> Option<String> {
     None
 }
 
+fn shell_quote_arg(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '~')
+        })
+    {
+        arg.to_string()
+    } else if !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c.is_ascii_whitespace() || matches!(c, '_' | '-' | '.')
+        })
+    {
+        format!("\"{}\"", arg)
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
+fn contains_unquoted_glob_meta(cmd_part: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in cmd_part.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '*' | '?' | '[' if !in_single && !in_double => return true,
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn push_grep_short_flag(flags: &mut Vec<String>, flag: char) -> bool {
+    match flag {
+        // rg already prints line numbers and is recursive by default. It also uses
+        // regex syntax by default, so GNU grep's -E is a compatibility no-op here.
+        'n' | 'E' | 'r' | 'R' => true,
+        'i' | 'o' | 'c' | 'F' | 'w' => {
+            flags.push(format!("-{}", flag));
+            true
+        }
+        'H' => {
+            flags.push("--with-filename".to_string());
+            true
+        }
+        'h' => {
+            flags.push("--no-filename".to_string());
+            true
+        }
+        'l' => {
+            flags.push("--files-with-matches".to_string());
+            true
+        }
+        'L' => {
+            flags.push("--files-without-match".to_string());
+            true
+        }
+        _ => false,
+    }
+}
+
+fn rewrite_grep_like_command(cmd_part: &str, redirect_suffix: &str) -> Option<String> {
+    if cmd_part.contains('$')
+        || cmd_part.contains('`')
+        || cmd_part.contains("''")
+        || cmd_part.contains("\"\"")
+        || contains_unquoted_glob_meta(cmd_part)
+    {
+        return None;
+    }
+
+    let tokens = shell_split(cmd_part);
+    let (program, args) = tokens.split_first()?;
+    if program != "grep" && program != "rg" {
+        return None;
+    }
+
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--version" | "-V" | "--help"))
+    {
+        return None;
+    }
+
+    let mut flags = Vec::new();
+    let mut positionals = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--" => {
+                positionals.extend(args[i + 1..].iter().cloned());
+                break;
+            }
+            "-A" | "-B" | "-C" | "-m" | "--after-context" | "--before-context" | "--context"
+            | "--max-count" | "-g" | "--glob" => {
+                let value = args.get(i + 1)?;
+                let normalized = match arg.as_str() {
+                    "--after-context" => "-A",
+                    "--before-context" => "-B",
+                    "--context" => "-C",
+                    "--max-count" => "-m",
+                    "-g" => "--glob",
+                    other => other,
+                };
+                flags.push(normalized.to_string());
+                flags.push(value.clone());
+                i += 2;
+                continue;
+            }
+            "--line-number" | "--extended-regexp" | "--recursive" => {
+                i += 1;
+                continue;
+            }
+            "--ignore-case"
+            | "--only-matching"
+            | "--count"
+            | "--fixed-strings"
+            | "--word-regexp"
+            | "--with-filename"
+            | "--no-filename"
+            | "--files-with-matches"
+            | "--files-without-match" => {
+                flags.push(arg.clone());
+                i += 1;
+                continue;
+            }
+            _ if arg.starts_with("--glob=") => {
+                flags.push("--glob".to_string());
+                flags.push(arg["--glob=".len()..].to_string());
+                i += 1;
+                continue;
+            }
+            _ if arg.starts_with('-') && arg.len() > 2 => {
+                let mut chars = arg[1..].chars().peekable();
+                while let Some(ch) = chars.next() {
+                    if matches!(ch, 'A' | 'B' | 'C' | 'm') {
+                        let value: String = chars.collect();
+                        if value.is_empty() {
+                            let next = args.get(i + 1)?;
+                            flags.push(format!("-{}", ch));
+                            flags.push(next.clone());
+                            i += 1;
+                        } else {
+                            flags.push(format!("-{}", ch));
+                            flags.push(value);
+                        }
+                        break;
+                    }
+                    if !push_grep_short_flag(&mut flags, ch) {
+                        return None;
+                    }
+                }
+            }
+            _ if arg.starts_with('-') => {
+                let ch = arg.chars().nth(1)?;
+                if !push_grep_short_flag(&mut flags, ch) {
+                    return None;
+                }
+            }
+            _ => positionals.push(arg.clone()),
+        }
+        i += 1;
+    }
+
+    let pattern = positionals.first()?;
+    if positionals.len() > 2 {
+        return None;
+    }
+
+    let mut parts = vec![
+        "rtk".to_string(),
+        "grep".to_string(),
+        shell_quote_arg(pattern),
+    ];
+    if let Some(path) = positionals.get(1) {
+        parts.push(shell_quote_arg(path));
+    } else if !flags.is_empty() {
+        parts.push(".".to_string());
+    }
+    parts.extend(flags.iter().map(|arg| shell_quote_arg(arg)));
+    Some(format!("{}{}", parts.join(" "), redirect_suffix))
+}
+
 /// Shell prefix builtins that modify how the shell runs a command
 /// but don't change which command runs. Strip before routing, re-prepend after.
 const SHELL_PREFIX_BUILTINS: &[&str] = &["noglob", "command", "builtin", "exec", "nocorrect"];
@@ -835,6 +1028,10 @@ fn rewrite_segment_inner(
         {
             return None;
         }
+    }
+
+    if rule.rtk_cmd == "rtk grep" {
+        return rewrite_grep_like_command(cmd_part, redirect_suffix);
     }
 
     // Try each rewrite prefix (longest first) with word-boundary check
@@ -1418,6 +1615,61 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
             Some("rtk grep \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_flags_before_pattern_are_normalized() {
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -n -A 40 begin{abstract} paper.tex", &[]),
+            Some("rtk grep 'begin{abstract}' paper.tex -A 40".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -ic warning /tmp/bib.log", &[]),
+            Some("rtk grep warning /tmp/bib.log -i -c".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -oE '[A-Z]+ Bias' notes.txt", &[]),
+            Some("rtk grep '[A-Z]+ Bias' notes.txt -o".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_glob_is_normalized() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg -n \"Project Guidelines\" --glob 'CLAUDE.md' .", &[]),
+            Some("rtk grep \"Project Guidelines\" . --glob CLAUDE.md".into())
+        );
+        assert_eq!(rewrite_command_no_prefixes("rg --version", &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_grep_preserves_shell_expansion_by_skipping() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg \"$PATTERN\" src", &[]),
+            None
+        );
+        assert_eq!(rewrite_command_no_prefixes("rg '' src", &[]), None);
+        assert_eq!(rewrite_command_no_prefixes("grep foo *.rs", &[]), None);
+        assert_eq!(
+            rewrite_command_no_prefixes("grep '[A-Z]+ Bias' notes.txt", &[]),
+            Some("rtk grep '[A-Z]+ Bias' notes.txt".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("rg TODO ~/src", &[]),
+            Some("rtk grep TODO ~/src".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_h_flags_avoid_clap_help_collision() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg -h foo .", &[]),
+            Some("rtk grep foo . --no-filename".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("rg -H foo .", &[]),
+            Some("rtk grep foo . --with-filename".into())
         );
     }
 
