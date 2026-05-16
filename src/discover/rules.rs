@@ -928,6 +928,8 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "while ",
     "if ",
     "case ",
+    "dbg ",
+    "gdbg ",
 ];
 
 pub const IGNORED_EXACT: &[&str] = &[
