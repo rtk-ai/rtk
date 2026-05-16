@@ -771,6 +771,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^bats\b",
+        rtk_cmd: "rtk bats",
+        rewrite_prefixes: &["bats"],
+        category: "Shell",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^shopify\s+theme\s+(push|pull)",
         rtk_cmd: "rtk shopify",
         rewrite_prefixes: &["shopify"],
