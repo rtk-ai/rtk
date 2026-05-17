@@ -85,6 +85,49 @@ impl<H: BlockHandler> StreamFilter for BlockStreamFilter<H> {
     }
 }
 
+/// Counterpart to [`BlockHandler`] for line-oriented streams.
+///
+/// Default behaviour is KEEP — every line is emitted unchanged. Implementors
+/// opt in to dropping noise via [`LineHandler::should_skip`] and may capture
+/// state for the final summary via [`LineHandler::observe_line`].
+pub trait LineHandler {
+    fn should_skip(&mut self, _line: &str) -> bool {
+        false
+    }
+
+    fn observe_line(&mut self, _line: &str) {}
+
+    fn format_summary(&self, exit_code: i32, raw: &str) -> Option<String>;
+}
+
+pub struct LineStreamFilter<H: LineHandler> {
+    handler: H,
+}
+
+impl<H: LineHandler> LineStreamFilter<H> {
+    pub fn new(handler: H) -> Self {
+        Self { handler }
+    }
+}
+
+impl<H: LineHandler> StreamFilter for LineStreamFilter<H> {
+    fn feed_line(&mut self, line: &str) -> Option<String> {
+        if self.handler.should_skip(line) {
+            return None;
+        }
+        self.handler.observe_line(line);
+        Some(format!("{}\n", line))
+    }
+
+    fn flush(&mut self) -> String {
+        String::new()
+    }
+
+    fn on_exit(&mut self, exit_code: i32, raw: &str) -> Option<String> {
+        self.handler.format_summary(exit_code, raw)
+    }
+}
+
 #[cfg(test)] // available for command modules; currently used in tests only
 pub struct RegexBlockFilter {
     start_re: Regex,
@@ -980,5 +1023,98 @@ pub(crate) mod tests {
             result.raw_stderr.contains("real error on stderr"),
             "raw_stderr should capture all stderr lines"
         );
+    }
+
+    struct CountingLineHandler {
+        observed: Vec<String>,
+        skip_prefixes: Vec<String>,
+        summary_tag: &'static str,
+    }
+
+    impl LineHandler for CountingLineHandler {
+        fn should_skip(&mut self, line: &str) -> bool {
+            self.skip_prefixes.iter().any(|p| line.starts_with(p))
+        }
+
+        fn observe_line(&mut self, line: &str) {
+            self.observed.push(line.to_string());
+        }
+
+        fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+            Some(format!(
+                "{}: {} kept, exit={}\n",
+                self.summary_tag,
+                self.observed.len(),
+                exit_code
+            ))
+        }
+    }
+
+    fn run_line_filter(filter: &mut dyn StreamFilter, input: &str, exit_code: i32) -> String {
+        let mut out = String::new();
+        for line in input.lines() {
+            if let Some(s) = filter.feed_line(line) {
+                out.push_str(&s);
+            }
+        }
+        out.push_str(&filter.flush());
+        if let Some(post) = filter.on_exit(exit_code, input) {
+            out.push_str(&post);
+        }
+        out
+    }
+
+    #[test]
+    fn test_line_filter_defaults_keep_all() {
+        struct DefaultHandler;
+        impl LineHandler for DefaultHandler {
+            fn format_summary(&self, _: i32, _: &str) -> Option<String> {
+                None
+            }
+        }
+        let mut f = LineStreamFilter::new(DefaultHandler);
+        let result = run_line_filter(&mut f, "a\nb\nc\n", 0);
+        assert_eq!(result, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn test_line_filter_skip_drops_matching_lines() {
+        let handler = CountingLineHandler {
+            observed: Vec::new(),
+            skip_prefixes: vec!["NOISE:".to_string()],
+            summary_tag: "demo",
+        };
+        let mut f = LineStreamFilter::new(handler);
+        let input = "NOISE: progress 10%\nkeep me\nNOISE: progress 90%\nalso keep\n";
+        let result = run_line_filter(&mut f, input, 0);
+        assert!(!result.contains("NOISE:"), "got: {}", result);
+        assert!(result.contains("keep me\n"));
+        assert!(result.contains("also keep\n"));
+        assert!(result.contains("demo: 2 kept, exit=0\n"));
+    }
+
+    #[test]
+    fn test_line_filter_summary_propagates_exit_code() {
+        let handler = CountingLineHandler {
+            observed: Vec::new(),
+            skip_prefixes: Vec::new(),
+            summary_tag: "demo",
+        };
+        let mut f = LineStreamFilter::new(handler);
+        let result = run_line_filter(&mut f, "one\n", 42);
+        assert!(result.contains("exit=42"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_line_filter_observe_only_called_for_kept_lines() {
+        let handler = CountingLineHandler {
+            observed: Vec::new(),
+            skip_prefixes: vec!["DROP".to_string()],
+            summary_tag: "demo",
+        };
+        let mut f = LineStreamFilter::new(handler);
+        let result = run_line_filter(&mut f, "DROP a\nDROP b\nkeep\n", 0);
+        // Only "keep" was observed, so summary says "1 kept"
+        assert!(result.contains("demo: 1 kept"), "got: {}", result);
     }
 }
