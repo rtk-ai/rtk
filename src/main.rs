@@ -1395,11 +1395,8 @@ fn run_cli() -> Result<i32> {
     };
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
-    if matches!(cli.command, Commands::Init { .. }) {
-        // Skip for Init — it is about to install/update hooks itself.
-        eprintln!("[rtk] Installing RTK hook");
-    } else if !matches!(cli.command, Commands::Gain { .. }) {
-        // Skip for Gain — it shows its own inline hook warning.
+    // Skip for Gain (own inline hook warning) and Init (about to install/update hooks itself).
+    if !matches!(cli.command, Commands::Gain { .. } | Commands::Init { .. }) {
         hooks::hook_check::maybe_warn();
     }
 
