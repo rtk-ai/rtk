@@ -919,6 +919,34 @@ select {
   gap: 12px;
 }
 
+.item-form__estimate {
+  display: grid;
+  gap: 8px;
+}
+
+.estimate-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.estimate-presets button {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid rgba(56, 189, 248, 0.34);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.1);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.estimate-presets button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
 .item-form__submit {
   margin-top: 6px;
 }
@@ -1038,6 +1066,104 @@ select {
 .goals-page__header h1 {
   margin: 0;
   font-size: 32px;
+}
+
+.goal-compose {
+  max-width: 1160px;
+  margin: 0 auto 18px;
+  padding: 18px;
+  border: 1px solid rgba(52, 211, 153, 0.34);
+  border-radius: 8px;
+  background: rgba(14, 22, 38, 0.9);
+  box-shadow: var(--shadow);
+}
+
+.goal-form,
+.goal-edit-form {
+  display: grid;
+  gap: 14px;
+}
+
+.goal-form h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.goal-form label,
+.goal-edit-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.goal-form input,
+.goal-form textarea,
+.goal-form select,
+.goal-edit-form input,
+.goal-edit-form textarea,
+.goal-edit-form select {
+  width: 100%;
+  border: 1px solid #2b3954;
+  border-radius: 8px;
+  background: #0b1220;
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+.goal-form textarea,
+.goal-edit-form textarea {
+  resize: vertical;
+}
+
+.goal-form__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.42fr);
+  gap: 12px;
+}
+
+.goal-form__actions,
+.goal-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.goal-card__button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.1);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.goal-card__button--primary {
+  border-color: rgba(52, 211, 153, 0.48);
+  background: rgba(52, 211, 153, 0.14);
+}
+
+.goal-card__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.goal-card__button:focus-visible,
+.goal-form input:focus-visible,
+.goal-form textarea:focus-visible,
+.goal-form select:focus-visible,
+.goal-edit-form input:focus-visible,
+.goal-edit-form textarea:focus-visible,
+.goal-edit-form select:focus-visible {
+  border-color: var(--blue);
+  outline: 2px solid rgba(56, 189, 248, 0.18);
+  outline-offset: 1px;
 }
 
 .goal-grid {
@@ -1188,7 +1314,8 @@ select {
     grid-column: auto;
   }
 
-  .item-form__grid {
+  .item-form__grid,
+  .goal-form__grid {
     grid-template-columns: 1fr;
   }
 
