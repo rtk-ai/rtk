@@ -1,6 +1,8 @@
 import type { Goal, Milestone, WorkspaceItem } from "../../domain/types";
 import { supabase } from "../../lib/supabase";
 
+const goalSelect = "id, workspace_id, title, description, status, target_date, progress_mode, manual_progress_value";
+
 interface GoalRow {
   id: string;
   workspace_id: string;
@@ -48,6 +50,14 @@ export interface GoalBundle {
   linkedItems: WorkspaceItem[];
 }
 
+export interface GoalInput {
+  workspaceId: string;
+  title: string;
+  description: string | null;
+  status: Goal["status"];
+  targetDate: string | null;
+}
+
 export async function loadGoals(workspaceId: string): Promise<GoalBundle> {
   const [
     { data: goals, error: goalsError },
@@ -68,6 +78,43 @@ export async function loadGoals(workspaceId: string): Promise<GoalBundle> {
     milestones: ((milestones as MilestoneRow[] | null) ?? []).map(mapMilestone),
     linkedItems: ((items as LinkedItemRow[] | null) ?? []).map(mapLinkedItem),
   };
+}
+
+export async function createGoal(input: GoalInput): Promise<Goal> {
+  const { data, error } = await supabase
+    .from("goals")
+    .insert({
+      workspace_id: input.workspaceId,
+      title: input.title,
+      description: input.description,
+      status: input.status,
+      target_date: input.targetDate,
+      progress_mode: "manual",
+      manual_progress_value: 0,
+    })
+    .select(goalSelect)
+    .single();
+
+  if (error) throw error;
+  return mapGoal(data as GoalRow);
+}
+
+export async function updateGoal(goalId: string, input: GoalInput): Promise<Goal> {
+  const { data, error } = await supabase
+    .from("goals")
+    .update({
+      title: input.title,
+      description: input.description,
+      status: input.status,
+      target_date: input.targetDate,
+    })
+    .eq("id", goalId)
+    .eq("workspace_id", input.workspaceId)
+    .select(goalSelect)
+    .single();
+
+  if (error) throw error;
+  return mapGoal(data as GoalRow);
 }
 
 function mapGoal(row: GoalRow): Goal {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { supabase } from "../../lib/supabase";
-import { loadGoals } from "./goalApi";
+import { createGoal, loadGoals, updateGoal } from "./goalApi";
 
 vi.mock("../../lib/supabase", () => ({
   supabase: {
@@ -116,6 +116,118 @@ describe("loadGoals", () => {
     });
   });
 });
+
+describe("goal mutations", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("creates a manual progress goal", async () => {
+    const insert = vi.fn(() => ({
+      select: vi.fn(() => ({
+        single: vi.fn(() =>
+          Promise.resolve({
+            data: goalRow({ id: "goal-new", title: "Build portfolio" }),
+            error: null,
+          }),
+        ),
+      })),
+    }));
+    vi.mocked(supabase.from).mockReturnValue({ insert } as never);
+
+    await expect(
+      createGoal({
+        workspaceId: "workspace-1",
+        title: "Build portfolio",
+        description: "Ship the first version",
+        status: "active",
+        targetDate: "2026-06-20",
+      }),
+    ).resolves.toEqual({
+      id: "goal-new",
+      workspaceId: "workspace-1",
+      title: "Build portfolio",
+      description: "Ship the first version",
+      status: "active",
+      targetDate: "2026-06-20",
+      progressMode: "manual",
+      manualProgressValue: 0,
+    });
+
+    expect(supabase.from).toHaveBeenCalledWith("goals");
+    expect(insert).toHaveBeenCalledWith({
+      workspace_id: "workspace-1",
+      title: "Build portfolio",
+      description: "Ship the first version",
+      status: "active",
+      target_date: "2026-06-20",
+      progress_mode: "manual",
+      manual_progress_value: 0,
+    });
+  });
+
+  it("updates goal fields within the workspace", async () => {
+    const single = vi.fn(() =>
+      Promise.resolve({
+        data: goalRow({
+          title: "Launch portfolio",
+          description: null,
+          status: "paused",
+          target_date: null,
+        }),
+        error: null,
+      }),
+    );
+    const builder = {
+      update: vi.fn(() => builder),
+      eq: vi.fn(() => builder),
+      select: vi.fn(() => ({ single })),
+    };
+    vi.mocked(supabase.from).mockReturnValue(builder as never);
+
+    await expect(
+      updateGoal("goal-1", {
+        workspaceId: "workspace-1",
+        title: "Launch portfolio",
+        description: null,
+        status: "paused",
+        targetDate: null,
+      }),
+    ).resolves.toEqual({
+      id: "goal-1",
+      workspaceId: "workspace-1",
+      title: "Launch portfolio",
+      description: null,
+      status: "paused",
+      targetDate: null,
+      progressMode: "manual",
+      manualProgressValue: 0,
+    });
+
+    expect(builder.update).toHaveBeenCalledWith({
+      title: "Launch portfolio",
+      description: null,
+      status: "paused",
+      target_date: null,
+    });
+    expect(builder.eq).toHaveBeenNthCalledWith(1, "id", "goal-1");
+    expect(builder.eq).toHaveBeenNthCalledWith(2, "workspace_id", "workspace-1");
+  });
+});
+
+function goalRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "goal-1",
+    workspace_id: "workspace-1",
+    title: "Build portfolio",
+    description: "Ship the first version",
+    status: "active",
+    target_date: "2026-06-20",
+    progress_mode: "manual",
+    manual_progress_value: 0,
+    ...overrides,
+  };
+}
 
 function chain(result: { data: unknown; error: unknown }): never {
   const builder = {
