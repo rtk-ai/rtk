@@ -1,0 +1,54 @@
+2024-01-15 09:15:00.000 INFO Application started successfully
+2024-01-15 09:15:01.001 INFO Loading configuration from /etc/app/config.toml
+2024-01-15 09:15:02.002 INFO Connected to PostgreSQL at db.internal:5432
+2024-01-15 09:15:03.003 INFO Redis cache connected at cache.internal:6379
+2024-01-15 09:15:04.004 DEBUG Worker pool initialized with 8 threads
+2024-01-15 09:15:05.005 DEBUG Health check scheduler started, interval=30s
+2024-01-15 09:15:06.006 INFO API server listening on 0.0.0.0:8080
+2024-01-15 09:16:00.000 INFO Health check passed
+2024-01-15 09:16:30.000 INFO Health check passed
+2024-01-15 09:17:00.000 INFO Health check passed
+2024-01-15 09:17:00.001 WARN High memory usage: 78% of available RAM
+2024-01-15 09:17:00.002 ERROR Connection to cache lost, retrying (attempt 1/5)
+2024-01-15 09:17:01.003 ERROR Connection to cache lost, retrying (attempt 2/5)
+2024-01-15 09:17:02.004 ERROR Connection to cache lost, retrying (attempt 3/5)
+2024-01-15 09:17:03.005 ERROR Connection to cache lost, retrying (attempt 4/5)
+2024-01-15 09:17:04.006 ERROR Connection to cache lost, retrying (attempt 5/5)
+2024-01-15 09:17:05.000 WARN High memory usage: 81% of available RAM
+2024-01-15 09:17:06.001 ERROR Connection to cache lost, retrying (attempt 1/5)
+2024-01-15 09:17:07.002 ERROR Connection to cache lost, retrying (attempt 2/5)
+2024-01-15 09:17:08.003 ERROR Connection to cache lost, retrying (attempt 3/5)
+2024-01-15 09:17:09.004 ERROR Connection to cache lost, retrying (attempt 4/5)
+2024-01-15 09:17:10.005 ERROR Connection to cache lost, retrying (attempt 5/5)
+2024-01-15 09:17:11.000 WARN High memory usage: 85% of available RAM
+2024-01-15 09:17:12.001 ERROR Connection to cache lost, retrying (attempt 1/5)
+2024-01-15 09:17:13.002 ERROR Connection to cache lost, retrying (attempt 2/5)
+2024-01-15 09:17:14.003 ERROR Connection to cache lost, retrying (attempt 3/5)
+2024-01-15 09:17:15.004 ERROR Connection to cache lost, retrying (attempt 4/5)
+2024-01-15 09:17:16.005 ERROR Connection to cache lost, retrying (attempt 5/5)
+2024-01-15 09:17:17.000 DEBUG Attempting fallback to secondary cache endpoint
+2024-01-15 09:17:18.001 DEBUG Secondary endpoint health check initiated
+2024-01-15 09:17:19.002 ERROR Connection to cache lost, retrying (attempt 1/5)
+2024-01-15 09:17:20.003 ERROR Connection to cache lost, retrying (attempt 2/5)
+2024-01-15 09:17:21.004 ERROR Connection to cache lost, retrying (attempt 3/5)
+2024-01-15 09:17:22.005 ERROR Connection to cache lost, retrying (attempt 4/5)
+2024-01-15 09:17:23.006 ERROR Connection to cache lost, retrying (attempt 5/5)
+2024-01-15 09:17:24.000 CRITICAL Payment service unreachable, 4821 transactions pending
+2024-01-15 09:17:24.001 WARN High memory usage: 89% of available RAM
+2024-01-15 09:17:25.000 ERROR Connection to cache lost, retrying (attempt 1/5)
+2024-01-15 09:17:26.001 ERROR Connection to cache lost, retrying (attempt 2/5)
+2024-01-15 09:17:27.002 ERROR Connection to cache lost, retrying (attempt 3/5)
+2024-01-15 09:17:28.003 ERROR Connection to cache lost, retrying (attempt 4/5)
+2024-01-15 09:17:29.004 ERROR Connection to cache lost, retrying (attempt 5/5)
+2024-01-15 09:17:30.000 ALERT Disk space below 5% on /var/log partition
+2024-01-15 09:17:31.001 ERROR Connection to cache lost, retrying (attempt 1/5)
+2024-01-15 09:17:32.002 ERROR Connection to cache lost, retrying (attempt 2/5)
+2024-01-15 09:17:33.003 ERROR Connection to cache lost, retrying (attempt 3/5)
+2024-01-15 09:17:34.004 ERROR Connection to cache lost, retrying (attempt 4/5)
+2024-01-15 09:17:35.005 ERROR Connection to cache lost, retrying (attempt 5/5)
+2024-01-15 09:17:36.000 EMERGENCY Database primary node unresponsive, replica promotion triggered
+2024-01-15 09:17:37.001 INFO Fallback to secondary cache endpoint succeeded
+2024-01-15 09:17:38.002 INFO Replica promotion completed, new primary at db-replica.internal:5432
+2024-01-15 09:18:00.000 INFO Health check passed
+2024-01-15 09:18:00.001 DEBUG Metrics collection completed: 312 events processed
+2024-01-15 09:18:30.000 INFO Health check passed

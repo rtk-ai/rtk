@@ -1,7 +1,8 @@
 //! Deduplicates repeated log lines and shows counts instead.
 
 use crate::core::tracking;
-use anyhow::Result;
+use crate::core::utils::truncate;
+use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
@@ -28,7 +29,8 @@ pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
         eprintln!("Analyzing log: {}", file.display());
     }
 
-    let content = fs::read_to_string(file)?;
+    let content = fs::read_to_string(file)
+        .with_context(|| format!("Failed to read log file: {}", file.display()))?;
     let result = analyze_logs(&content);
     println!("{}", result);
     timer.track(
@@ -66,143 +68,137 @@ pub fn run_stdin_str(content: &str) -> String {
 
 fn analyze_logs(content: &str) -> String {
     let mut result = Vec::new();
+    let mut critical_counts: HashMap<String, usize> = HashMap::new();
     let mut error_counts: HashMap<String, usize> = HashMap::new();
     let mut warn_counts: HashMap<String, usize> = HashMap::new();
-    let mut info_counts: HashMap<String, usize> = HashMap::new();
-    let mut unique_errors: Vec<String> = Vec::new();
-    let mut unique_warnings: Vec<String> = Vec::new();
-
-    // Use module-level lazy_static regexes for normalization
+    let mut info_total: usize = 0;
+    // DEBUG is high-volume: show count only, no per-line detail block
+    let mut debug_total: usize = 0;
+    let mut critical_originals: HashMap<String, String> = HashMap::new();
+    let mut error_originals: HashMap<String, String> = HashMap::new();
+    let mut warn_originals: HashMap<String, String> = HashMap::new();
 
     for line in content.lines() {
         let line_lower = line.to_lowercase();
-
-        // Normalize for deduplication
         let normalized =
             normalize_log_line(line, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
 
-        // Categorize
-        if line_lower.contains("error")
+        // CRITICAL/ALERT/EMERGENCY checked first (highest severity)
+        if line_lower.contains("critical")
+            || line_lower.contains("alert")
+            || line_lower.contains("emergency")
+        {
+            let count = critical_counts.entry(normalized.clone()).or_insert(0);
+            if *count == 0 {
+                critical_originals.insert(normalized.clone(), line.to_string());
+            }
+            *count += 1;
+        } else if line_lower.contains("error")
             || line_lower.contains("fatal")
             || line_lower.contains("panic")
         {
             let count = error_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
-                unique_errors.push(line.to_string());
+                error_originals.insert(normalized.clone(), line.to_string());
             }
             *count += 1;
         } else if line_lower.contains("warn") {
             let count = warn_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
-                unique_warnings.push(line.to_string());
+                warn_originals.insert(normalized.clone(), line.to_string());
             }
             *count += 1;
         } else if line_lower.contains("info") {
-            *info_counts.entry(normalized).or_insert(0) += 1;
+            info_total += 1;
+        } else if line_lower.contains("debug") {
+            debug_total += 1;
         }
     }
 
-    // Summary
+    let total_criticals: usize = critical_counts.values().sum();
     let total_errors: usize = error_counts.values().sum();
     let total_warnings: usize = warn_counts.values().sum();
-    let total_info: usize = info_counts.values().sum();
 
     result.push("Log Summary".to_string());
-    result.push(format!(
-        "   [error] {} errors ({} unique)",
-        total_errors,
-        error_counts.len()
-    ));
-    result.push(format!(
-        "   [warn] {} warnings ({} unique)",
-        total_warnings,
-        warn_counts.len()
-    ));
-    result.push(format!("   [info] {} info messages", total_info));
+    if total_criticals > 0 {
+        result.push(format!(
+            "   [critical] {} critical ({} unique)",
+            total_criticals,
+            critical_counts.len()
+        ));
+    }
+    if total_errors > 0 {
+        result.push(format!(
+            "   [error] {} errors ({} unique)",
+            total_errors,
+            error_counts.len()
+        ));
+    }
+    if total_warnings > 0 {
+        result.push(format!(
+            "   [warn] {} warnings ({} unique)",
+            total_warnings,
+            warn_counts.len()
+        ));
+    }
+    if info_total > 0 {
+        result.push(format!("   [info] {} info messages", info_total));
+    }
+    if debug_total > 0 {
+        result.push(format!("   [debug] {} debug messages", debug_total));
+    }
     result.push(String::new());
 
+    // Criticals with counts (shown first — highest severity)
+    if !critical_originals.is_empty() {
+        result.push("[CRITICALS]".to_string());
+        render_entries(&critical_counts, &critical_originals, 10, &mut result, "criticals");
+        result.push(String::new());
+    }
+
     // Errors with counts
-    if !unique_errors.is_empty() {
+    if !error_originals.is_empty() {
         result.push("[ERRORS]".to_string());
-
-        // Sort by count
-        let mut error_list: Vec<_> = error_counts.iter().collect();
-        error_list.sort_by(|a, b| b.1.cmp(a.1));
-
-        for (normalized, count) in error_list.iter().take(10) {
-            // Find original message
-            let original = unique_errors
-                .iter()
-                .find(|e| {
-                    &normalize_log_line(e, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE)
-                        == *normalized
-                })
-                .map(|s| s.as_str())
-                .unwrap_or(normalized);
-
-            let truncated = if original.len() > 100 {
-                let t: String = original.chars().take(97).collect();
-                format!("{}...", t)
-            } else {
-                original.to_string()
-            };
-
-            if **count > 1 {
-                result.push(format!("   [×{}] {}", count, truncated));
-            } else {
-                result.push(format!("   {}", truncated));
-            }
-        }
-
-        if error_list.len() > 10 {
-            result.push(format!(
-                "   ... +{} more unique errors",
-                error_list.len() - 10
-            ));
-        }
+        render_entries(&error_counts, &error_originals, 10, &mut result, "errors");
         result.push(String::new());
     }
 
     // Warnings with counts
-    if !unique_warnings.is_empty() {
+    if !warn_originals.is_empty() {
         result.push("[WARNINGS]".to_string());
-
-        let mut warn_list: Vec<_> = warn_counts.iter().collect();
-        warn_list.sort_by(|a, b| b.1.cmp(a.1));
-
-        for (normalized, count) in warn_list.iter().take(5) {
-            let original = unique_warnings
-                .iter()
-                .find(|w| {
-                    &normalize_log_line(w, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE)
-                        == *normalized
-                })
-                .map(|s| s.as_str())
-                .unwrap_or(normalized);
-
-            let truncated = if original.len() > 100 {
-                let t: String = original.chars().take(97).collect();
-                format!("{}...", t)
-            } else {
-                original.to_string()
-            };
-
-            if **count > 1 {
-                result.push(format!("   [×{}] {}", count, truncated));
-            } else {
-                result.push(format!("   {}", truncated));
-            }
-        }
-
-        if warn_list.len() > 5 {
-            result.push(format!(
-                "   ... +{} more unique warnings",
-                warn_list.len() - 5
-            ));
-        }
+        render_entries(&warn_counts, &warn_originals, 5, &mut result, "warnings");
     }
 
     result.join("\n")
+}
+
+fn render_entries(
+    counts: &HashMap<String, usize>,
+    originals: &HashMap<String, String>,
+    limit: usize,
+    result: &mut Vec<String>,
+    label: &str,
+) {
+    let mut list: Vec<_> = counts.iter().collect();
+    // Secondary sort by key ensures deterministic output when counts are equal
+    list.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+
+    for (normalized, count) in list.iter().take(limit) {
+        let original = originals
+            .get(*normalized)
+            .map(|s| s.as_str())
+            .unwrap_or(normalized);
+        let line = truncate(original, 100);
+        if **count > 1 {
+            result.push(format!("   [×{}] {}", count, line));
+        } else {
+            result.push(format!("   {}", line));
+        }
+    }
+
+    if list.len() > limit {
+        result.push(format!("   ... +{} more unique {}", list.len() - limit, label));
+    }
 }
 
 fn normalize_log_line(
@@ -224,6 +220,36 @@ fn normalize_log_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_snapshot;
+
+    fn count_tokens(text: &str) -> usize {
+        text.split_whitespace().count()
+    }
+
+    #[test]
+    fn test_log_critical_snapshot() {
+        let input = include_str!("../../../tests/fixtures/log_critical_raw.txt");
+        let result = analyze_logs(input);
+        assert_snapshot!(result);
+    }
+
+    #[test]
+    fn test_log_critical_token_savings() {
+        let input = include_str!("../../../tests/fixtures/log_critical_raw.txt");
+        let result = analyze_logs(input);
+
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(
+            savings >= 60.0,
+            "Expected >=60% token savings, got {:.1}% (input: {} tokens, output: {} tokens)",
+            savings,
+            input_tokens,
+            output_tokens
+        );
+    }
 
     #[test]
     fn test_analyze_logs() {
@@ -237,6 +263,24 @@ mod tests {
         let result = analyze_logs(logs);
         assert!(result.contains("×3"));
         assert!(result.contains("ERRORS"));
+    }
+
+    #[test]
+    fn test_critical_level_not_silently_discarded() {
+        let logs = "\
+[ERROR] Connection failed\n\
+[CRITICAL] Payment service unreachable, 4821 pending transactions\n\
+[INFO] Health check ok\n\
+[ALERT] Disk space below 5%\n\
+[EMERGENCY] Database corruption detected\n\
+[DEBUG] Processing request id=42\n";
+        let result = analyze_logs(logs);
+        assert!(result.contains("CRITICALS"), "CRITICAL/ALERT/EMERGENCY must appear in output");
+        assert!(result.contains("Payment service unreachable"), "CRITICAL message must not be discarded");
+        assert!(result.contains("Disk space below"), "ALERT message must not be discarded");
+        assert!(result.contains("Database corruption"), "EMERGENCY message must not be discarded");
+        assert!(result.contains("[critical]"), "summary must count critical lines");
+        assert!(result.contains("[debug]"), "summary must count debug lines");
     }
 
     #[test]
