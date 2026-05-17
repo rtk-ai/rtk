@@ -1,5 +1,6 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
@@ -15,17 +16,18 @@ use crate::parser::{
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]
 struct PnpmListOutput {
+    name: String,
     #[serde(flatten)]
-    packages: HashMap<String, PnpmPackage>,
+    package: PackageJsonListItem,
 }
 
 #[derive(Debug, Deserialize)]
-struct PnpmPackage {
+struct PackageJsonListItem {
     version: Option<String>,
     #[serde(rename = "dependencies", default)]
-    dependencies: HashMap<String, PnpmPackage>,
+    dependencies: HashMap<String, PackageJsonListItem>,
     #[serde(rename = "devDependencies", default)]
-    dev_dependencies: HashMap<String, PnpmPackage>,
+    dev_dependencies: HashMap<String, PackageJsonListItem>,
 }
 
 /// pnpm outdated JSON output structure
@@ -52,13 +54,19 @@ impl OutputParser for PnpmListParser {
 
     fn parse(input: &str) -> ParseResult<DependencyState> {
         // Tier 1: Try JSON parsing
-        match serde_json::from_str::<PnpmListOutput>(input) {
+        match serde_json::from_str::<Vec<PnpmListOutput>>(input) {
             Ok(json) => {
                 let mut dependencies = Vec::new();
                 let mut total_count = 0;
 
-                for (name, pkg) in &json.packages {
-                    collect_dependencies(name, pkg, false, &mut dependencies, &mut total_count);
+                for pkg in &json {
+                    collect_dependencies(
+                        pkg.name.as_str(),
+                        &pkg.package,
+                        false,
+                        &mut dependencies,
+                        &mut total_count,
+                    );
                 }
 
                 let result = DependencyState {
@@ -88,7 +96,7 @@ impl OutputParser for PnpmListParser {
 /// Recursively collect dependencies from pnpm package tree
 fn collect_dependencies(
     name: &str,
-    pkg: &PnpmPackage,
+    pkg: &PackageJsonListItem,
     is_dev: bool,
     deps: &mut Vec<Dependency>,
     count: &mut usize,
@@ -262,34 +270,18 @@ fn extract_outdated_text(output: &str) -> Option<DependencyState> {
     }
 }
 
-/// Validates npm package name according to official rules
-fn is_valid_package_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 214 {
-        return false;
-    }
-
-    // No path traversal
-    if name.contains("..") {
-        return false;
-    }
-
-    // Only safe characters
-    name.chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '@' | '/' | '-' | '_' | '.'))
-}
-
 #[derive(Debug, Clone)]
 pub enum PnpmCommand {
     List { depth: usize },
     Outdated,
-    Install { packages: Vec<String> },
+    Install,
 }
 
 pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         PnpmCommand::List { depth } => run_list(depth, args, verbose),
         PnpmCommand::Outdated => run_outdated(args, verbose),
-        PnpmCommand::Install { packages } => run_install(&packages, args, verbose),
+        PnpmCommand::Install => run_install(args, verbose),
     }
 }
 
@@ -305,18 +297,15 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run pnpm list")?;
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm list")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprint!("{}", stderr);
-        return Ok(crate::core::utils::exit_code_from_output(&output, "pnpm"));
+    if !result.success() {
+        eprint!("{}", result.stderr);
+        return Ok(result.exit_code);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
     // Parse output using PnpmListParser
-    let parse_result = PnpmListParser::parse(&stdout);
+    let parse_result = PnpmListParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -343,7 +332,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
     timer.track(
         &format!("pnpm list --depth={}", depth),
         &format!("rtk pnpm list --depth={}", depth),
-        &stdout,
+        &result.stdout,
         &filtered,
     );
 
@@ -362,13 +351,11 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run pnpm outdated")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm outdated")?;
+    let combined = result.combined();
 
     // Parse output using PnpmOutdatedParser
-    let parse_result = PnpmOutdatedParser::parse(&stdout);
+    let parse_result = PnpmOutdatedParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -401,25 +388,11 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<i32> {
+fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-
-    // Validate package names to prevent command injection
-    for pkg in packages {
-        if !is_valid_package_name(pkg) {
-            anyhow::bail!(
-                "Invalid package name: '{}' (contains unsafe characters)",
-                pkg
-            );
-        }
-    }
 
     let mut cmd = resolved_command("pnpm");
     cmd.arg("install");
-
-    for pkg in packages {
-        cmd.arg(pkg);
-    }
 
     for arg in args {
         cmd.arg(arg);
@@ -429,26 +402,19 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<i32>
         eprintln!("pnpm install running...");
     }
 
-    let output = cmd.output().context("Failed to run pnpm install")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm install")?;
 
-    if !output.status.success() {
-        eprint!("{}", stderr);
-        return Ok(crate::core::utils::exit_code_from_output(&output, "pnpm"));
+    if !result.success() {
+        eprint!("{}", result.stderr);
+        return Ok(result.exit_code);
     }
 
-    let combined = format!("{}{}", stdout, stderr);
+    let combined = result.combined();
     let filtered = filter_pnpm_install(&combined);
 
     println!("{}", filtered);
 
-    timer.track(
-        &format!("pnpm install {}", packages.join(" ")),
-        &format!("rtk pnpm install {}", packages.join(" ")),
-        &combined,
-        &filtered,
-    );
+    timer.track("pnpm install", "rtk pnpm install", &combined, &filtered);
 
     Ok(0)
 }
@@ -502,8 +468,9 @@ mod tests {
 
     #[test]
     fn test_pnpm_list_parser_json() {
-        let json = r#"{
-            "my-project": {
+        let json = r#"[
+            {
+                "name": "my-project",
                 "version": "1.0.0",
                 "dependencies": {
                     "express": {
@@ -511,7 +478,7 @@ mod tests {
                     }
                 }
             }
-        }"#;
+        ]"#;
 
         let result = PnpmListParser::parse(json);
         assert_eq!(result.tier(), 1);
@@ -538,14 +505,6 @@ mod tests {
         let data = result.unwrap();
         assert_eq!(data.outdated_count, 1);
         assert_eq!(data.dependencies[0].name, "express");
-    }
-
-    #[test]
-    fn test_package_name_validation() {
-        assert!(is_valid_package_name("lodash"));
-        assert!(is_valid_package_name("@clerk/express"));
-        assert!(!is_valid_package_name("../../../etc/passwd"));
-        assert!(!is_valid_package_name("lodash; rm -rf /"));
     }
 
     #[test]

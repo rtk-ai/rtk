@@ -15,7 +15,7 @@ use anyhow::Result;
 /// `rails test` which handles single files, multiple files, and line-number
 /// syntax (`file.rb:15`) natively.
 fn select_runner(args: &[String]) -> (&'static str, Vec<String>) {
-    let has_test_subcommand = args.first().map_or(false, |a| a == "test");
+    let has_test_subcommand = args.first().is_some_and(|a| a == "test");
     if !has_test_subcommand {
         return ("rake", args.to_vec());
     }

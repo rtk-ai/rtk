@@ -1,6 +1,7 @@
 ---
 model: sonnet
 description: RTK Code Review — Review locale pre-PR avec auto-fix
+argument-hint: "[--fix] [file-pattern]"
 ---
 
 # RTK Code Review
@@ -229,12 +230,12 @@ Glob tests/fixtures/<cmd>_raw.txt
            └────────┬────────┘
                     │
                     ▼
-           ┌──────────────────────┐
-           │  3. Quality gate     │
-           │  cargo fmt --all     │
-           │  cargo clippy        │
-           │  cargo test          │
-           └────────┬─────────────┘
+     ┌─────────────────────────────┐
+     │  3. Quality gate            │
+     │  cargo fmt --all            │
+     │  cargo clippy --all-targets │
+     │  cargo test                 │
+     └──────────────┬──────────────┘
                     │
               Loop ←┘ (max N iterations)
 ```

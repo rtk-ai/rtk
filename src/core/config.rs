@@ -29,6 +29,28 @@ pub struct HooksConfig {
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
     #[serde(default)]
     pub exclude_commands: Vec<String>,
+
+    /// Wrapper prefixes that should be transparently stripped before routing
+    /// to a filter, then re-prepended on the rewrite. For example, with
+    /// `transparent_prefixes = ["docker exec mycontainer"]`, the command
+    /// `docker exec mycontainer git status` rewrites to
+    /// `docker exec mycontainer rtk git status` instead of passing through
+    /// unrewritten.
+    ///
+    /// Useful for any per-project env wrapper that sits in front of every
+    /// command — e.g. `docker exec mycontainer`, `direnv exec .`, `poetry run`,
+    /// or `bundle exec`.
+    ///
+    /// Matching is literal, not pattern-based. Configure the exact concrete
+    /// prefix you actually use, such as `docker exec mycontainer`.
+    ///
+    /// Extends the built-in `SHELL_PREFIX_BUILTINS` list (`noglob`, `command`,
+    /// `builtin`, `exec`, `nocorrect`) with user- or organization-specific
+    /// wrappers. Matching is strict: a configured prefix `"foo bar"` matches
+    /// a command that starts with `"foo bar "` (or strictly equals `"foo bar"`),
+    /// not anything else.
+    #[serde(default)]
+    pub transparent_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,15 +110,13 @@ impl Default for FilterConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     pub enabled: bool,
-}
-
-impl Default for TelemetryConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_given: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_date: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -128,11 +148,6 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
-}
-
-/// Check if telemetry is enabled in config. Returns None if config can't be loaded.
-pub fn telemetry_enabled() -> Option<bool> {
-    Config::load().ok().map(|c| c.telemetry.enabled)
 }
 
 impl Config {
@@ -208,6 +223,32 @@ exclude_commands = ["curl", "gh"]
     fn test_hooks_config_default_empty() {
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(config.hooks.transparent_prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_hooks_config_transparent_prefixes_deserialize() {
+        let toml = r#"
+[hooks]
+transparent_prefixes = ["direnv exec .", "nix develop --command"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(
+            config.hooks.transparent_prefixes,
+            vec!["direnv exec .", "nix develop --command"]
+        );
+    }
+
+    #[test]
+    fn test_hooks_config_transparent_prefixes_missing_is_empty() {
+        // Older configs that predate this field must still parse.
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.hooks.exclude_commands, vec!["curl"]);
+        assert!(config.hooks.transparent_prefixes.is_empty());
     }
 
     #[test]
@@ -219,5 +260,40 @@ history_days = 90
 "#;
         let config: Config = toml::from_str(toml).expect("valid toml");
         assert!(config.hooks.exclude_commands.is_empty());
+    }
+
+    #[test]
+    fn test_old_toml_without_consent_fields() {
+        let toml = r#"
+[telemetry]
+enabled = true
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.telemetry.enabled);
+        assert!(config.telemetry.consent_given.is_none());
+        assert!(config.telemetry.consent_date.is_none());
+    }
+
+    #[test]
+    fn test_telemetry_default_disabled() {
+        let config = Config::default();
+        assert!(!config.telemetry.enabled);
+        assert!(config.telemetry.consent_given.is_none());
+    }
+
+    #[test]
+    fn test_telemetry_consent_roundtrip() {
+        let toml = r#"
+[telemetry]
+enabled = true
+consent_given = true
+consent_date = "2026-04-10T12:00:00Z"
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.telemetry.consent_given, Some(true));
+        assert_eq!(
+            config.telemetry.consent_date.as_deref(),
+            Some("2026-04-10T12:00:00Z")
+        );
     }
 }

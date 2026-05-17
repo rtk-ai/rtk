@@ -4,6 +4,7 @@ use crate::core::tracking;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::env;
+use std::fmt::Write;
 
 /// Show filtered environment variables (hide sensitive data)
 pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
@@ -123,7 +124,10 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         println!("\nTotal: {} vars (showing {} relevant)", total, shown);
     }
 
-    let raw: String = vars.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
+    let raw: String = vars.iter().fold(String::new(), |mut output, (k, v)| {
+        let _ = writeln!(output, "{}={}", k, v);
+        output
+    });
     let rtk = format!("{} vars -> {} shown", total, shown);
     timer.track("env", "rtk env", &raw, &rtk);
     Ok(())

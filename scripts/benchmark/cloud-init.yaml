@@ -1,0 +1,315 @@
+#cloud-config
+# RTK Integration Test VM — Ubuntu 24.04
+# Installs all tools needed for comprehensive RTK testing (~200 commands)
+# Usage: multipass launch --name rtk-test --cloud-init scripts/benchmark/cloud-init.yaml --cpus 2 --memory 4G --disk 20G 24.04
+
+package_update: true
+package_upgrade: false
+
+packages:
+  # System tools
+  - curl
+  - wget
+  - jq
+  - git
+  - make
+  - cmake
+  - rsync
+  - sqlite3
+  - shellcheck
+  - yamllint
+  - postgresql-client
+  - docker.io
+  - containerd
+  - python3
+  - python3-pip
+  - python3-venv
+  - pipx
+  # Build essentials (for Rust compilation)
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  - libsqlite3-dev
+  # Misc
+  - hyperfine
+  - unzip
+  - tree
+
+runcmd:
+  # ── Rust toolchain ──
+  - su - ubuntu -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+
+  # ── Node.js 22 + package managers ──
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+  - npm install -g pnpm yarn
+  - npm install -g eslint prettier typescript
+  - npm install -g markdownlint-cli
+
+  # ── Go 1.22 ──
+  - curl -fsSL https://go.dev/dl/go1.22.5.linux-amd64.tar.gz | tar -C /usr/local -xz
+  - echo 'export PATH=$PATH:/usr/local/go/bin:/home/ubuntu/go/bin' >> /home/ubuntu/.bashrc
+  - su - ubuntu -c 'export PATH=$PATH:/usr/local/go/bin && go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest'
+
+  # ── Python tools ──
+  - pipx install ruff
+  - pipx install mypy
+  - pipx install poetry
+  - pip3 install --break-system-packages pytest uv pre-commit
+
+  # ── .NET 8 SDK ──
+  - |
+    wget https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh
+    chmod +x /tmp/dotnet-install.sh
+    /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/local/share/dotnet
+    ln -sf /usr/local/share/dotnet/dotnet /usr/local/bin/dotnet
+    echo 'export DOTNET_ROOT=/usr/local/share/dotnet' >> /home/ubuntu/.bashrc
+
+  # ── Terraform ──
+  - |
+    wget -qO- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list
+    apt-get update && apt-get install -y terraform
+
+  # ── Helm ──
+  - curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+  # ── Hadolint ──
+  - |
+    wget -qO /usr/local/bin/hadolint https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+    chmod +x /usr/local/bin/hadolint
+
+  # ── Docker setup ──
+  - usermod -aG docker ubuntu
+  - systemctl enable docker
+  - systemctl start docker
+
+  # ── kubectl (standalone binary) ──
+  - |
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+    rm kubectl
+
+  # ── ansible ──
+  - pip3 install --break-system-packages ansible-core
+
+  # ── Mock tools (too heavy to install) ──
+  - |
+    cat > /usr/local/bin/gcloud << 'MOCK'
+    #!/bin/bash
+    if [ "$1" = "version" ] || [ "$1" = "--version" ]; then
+      echo "Google Cloud SDK 400.0.0"
+      echo "bq 2.0.80"
+      echo "core 2023.01.01"
+      echo "gsutil 5.17"
+    else
+      echo "gcloud mock: $*"
+    fi
+    MOCK
+    chmod +x /usr/local/bin/gcloud
+
+  - |
+    cat > /usr/local/bin/shopify << 'MOCK'
+    #!/bin/bash
+    echo "Shopify CLI 3.0.0 (mock)"
+    if [ "$1" = "theme" ] && [ "$2" = "check" ]; then
+      echo "Running theme check..."
+      echo "  1 issue found"
+      echo "  [warn] Missing alt text on image"
+    fi
+    MOCK
+    chmod +x /usr/local/bin/shopify
+
+  - |
+    cat > /usr/local/bin/pio << 'MOCK'
+    #!/bin/bash
+    if [ "$1" = "--version" ]; then echo "PlatformIO Core, version 6.1.0"
+    elif [ "$1" = "run" ]; then
+      echo "Processing esp32dev (platform: espressif32; board: esp32dev)"
+      echo "Linking .pio/build/esp32dev/firmware.elf"
+      echo "========================= [SUCCESS] ========================="
+    fi
+    MOCK
+    chmod +x /usr/local/bin/pio
+
+  - |
+    cat > /usr/local/bin/quarto << 'MOCK'
+    #!/bin/bash
+    if [ "$1" = "--version" ]; then echo "1.3.450"
+    elif [ "$1" = "render" ]; then echo "Rendering document..."; echo "Output created: document.html"
+    fi
+    MOCK
+    chmod +x /usr/local/bin/quarto
+
+  - |
+    cat > /usr/local/bin/sops << 'MOCK'
+    #!/bin/bash
+    if [ "$1" = "--version" ]; then echo "sops 3.7.3"; fi
+    MOCK
+    chmod +x /usr/local/bin/sops
+
+  - |
+    cat > /usr/local/bin/swift << 'MOCK'
+    #!/bin/bash
+    if [ "$1" = "--version" ]; then echo "Swift version 5.9.2 (swift-5.9.2-RELEASE)"
+    elif [ "$1" = "build" ]; then echo "Compiling Swift module..."; echo "Build complete! (0.42s)"
+    fi
+    MOCK
+    chmod +x /usr/local/bin/swift
+
+  # ── Fake test projects ──
+
+  # Node.js project with errors
+  - |
+    su - ubuntu -c '
+    mkdir -p /tmp/test-node/src && cd /tmp/test-node
+    npm init -y >/dev/null 2>&1
+    echo "{\"compilerOptions\":{\"strict\":true,\"noEmit\":true,\"target\":\"ES2020\",\"module\":\"ESNext\",\"moduleResolution\":\"node\"},\"include\":[\"src\"]}" > tsconfig.json
+    echo "const x: number = \"not a number\";\nconst unused = 42;\nfunction greet(name: string): string { return name }\ngreet(123);" > src/index.ts
+    echo "{\"rules\":{\"no-unused-vars\":\"error\",\"semi\":[\"error\",\"always\"]}}" > .eslintrc.json
+    echo "const   x   =    1;const y=2;   const z     =3" > src/ugly.ts
+    '
+
+  # Python project with errors
+  - |
+    su - ubuntu -c '
+    mkdir -p /tmp/test-python && cd /tmp/test-python
+    cat > main.py << "PYEOF"
+    import os
+    import sys
+    unused_import = 1
+    def add(a: int, b: int) -> str:
+        return a + b
+    x: int = "hello"
+    PYEOF
+    cat > test_main.py << "PYEOF"
+    def test_pass():
+        assert 1 + 1 == 2
+    def test_fail():
+        assert 1 + 1 == 3, "math is broken"
+    PYEOF
+    cat > pyproject.toml << "PYEOF"
+    [tool.ruff]
+    line-length = 80
+    select = ["E", "F", "W"]
+    [tool.mypy]
+    strict = true
+    [tool.pytest.ini_options]
+    testpaths = ["."]
+    PYEOF
+    '
+
+  # Go project with errors
+  - |
+    su - ubuntu -c '
+    export PATH=$PATH:/usr/local/go/bin
+    mkdir -p /tmp/test-go && cd /tmp/test-go
+    go mod init test-go 2>/dev/null
+    cat > main.go << "GOEOF"
+    package main
+    import "fmt"
+    func main() { fmt.Println("hello") }
+    func unused() { var x int; _ = x }
+    GOEOF
+    cat > main_test.go << "GOEOF"
+    package main
+    import "testing"
+    func TestPass(t *testing.T) { if 1+1 != 2 { t.Fatal("math") } }
+    func TestFail(t *testing.T) { t.Fatal("expected failure") }
+    GOEOF
+    '
+
+  # Rust project with errors
+  - |
+    su - ubuntu -c '
+    export PATH=$HOME/.cargo/bin:$PATH
+    mkdir -p /tmp/test-rust && cd /tmp/test-rust
+    cargo init --name test-rust 2>/dev/null
+    cat > src/main.rs << "RSEOF"
+    fn main() {
+        let x = vec![1, 2, 3];
+        let _y = x.iter().map(|i| i.clone()).collect::<Vec<_>>();
+        println!("hello");
+    }
+    #[cfg(test)]
+    mod tests {
+        #[test] fn test_pass() { assert_eq!(1 + 1, 2); }
+        #[test] fn test_fail() { assert_eq!(1 + 1, 3); }
+    }
+    RSEOF
+    '
+
+  # Dockerfiles for hadolint
+  - |
+    su - ubuntu -c '
+    cat > /tmp/Dockerfile.bad << "DEOF"
+    FROM ubuntu:latest
+    RUN apt-get update && apt-get install -y curl wget git
+    RUN cd /tmp && wget http://example.com/script.sh && bash script.sh
+    EXPOSE 80 443 8080
+    DEOF
+    '
+
+  # Shell/YAML/Markdown test files
+  - |
+    su - ubuntu -c '
+    printf "#!/bin/bash\necho \$foo\nls *.txt\ncd \$(pwd)\n[ -f file ] && rm file\n" > /tmp/test.sh
+    printf "foo: bar\nbaz:  qux\nlist:\n - item1\n -  item2\ntruthy: yes\n" > /tmp/test.yaml
+    printf "#Header without space\nSome text\n\n* List item\n+ Mixed markers\n" > /tmp/test.md
+    '
+
+  # Git repo for testing
+  - |
+    su - ubuntu -c '
+    mkdir -p /tmp/test-git && cd /tmp/test-git
+    git init && git config user.email "test@rtk.dev" && git config user.name "RTK Test"
+    for i in $(seq 1 20); do echo "line $i" >> file.txt && git add file.txt && git commit -m "feat: commit number $i"; done
+    echo "modified" >> file.txt && echo "new file" > new.txt
+    '
+
+  # Large log file for dedup testing
+  - |
+    su - ubuntu -c '
+    for i in $(seq 1 500); do
+      printf "[2026-03-25 10:00:00] INFO Starting service...\n[2026-03-25 10:00:01] WARN Connection timeout\n[2026-03-25 10:00:01] ERROR Failed to connect: refused\n"
+    done > /tmp/large.log
+    for i in $(seq 1 50); do echo "[2026-03-25 10:05:00] FATAL Out of memory"; done >> /tmp/large.log
+    '
+
+  # .env file
+  - |
+    su - ubuntu -c '
+    printf "DATABASE_URL=postgres://user:pass@localhost:5432/db\nAPI_KEY=sk-1234567890abcdef\nSECRET_TOKEN=ghp_xxxx\nNODE_ENV=production\nPORT=3000\n" > /tmp/.env
+    '
+
+  # Makefile
+  - |
+    su - ubuntu -c '
+    printf ".PHONY: all test\nall:\n\t@echo Building...\n\t@echo Build complete\ntest:\n\t@echo Running tests...\n\t@echo 2 tests passed\n" > /tmp/Makefile
+    '
+
+  # Terraform project
+  - |
+    su - ubuntu -c '
+    mkdir -p /tmp/test-terraform && cd /tmp/test-terraform
+    printf "terraform {\n  required_version = \">= 1.0\"\n}\nresource \"null_resource\" \"test\" {\n  triggers = { always = timestamp() }\n}\noutput \"test\" { value = \"hello\" }\n" > main.tf
+    '
+
+  # Helm chart
+  - su - ubuntu -c 'mkdir -p /tmp/test-helm && cd /tmp/test-helm && helm create test-chart 2>/dev/null || true'
+
+  # .NET project
+  - |
+    export DOTNET_ROOT=/usr/local/share/dotnet
+    su - ubuntu -c '
+    export DOTNET_ROOT=/usr/local/share/dotnet && export PATH=$PATH:$DOTNET_ROOT
+    mkdir -p /tmp/test-dotnet && cd /tmp/test-dotnet
+    dotnet new console -n TestApp --force 2>/dev/null || true
+    '
+
+  # Signal completion
+  - touch /home/ubuntu/.cloud-init-complete
+  - chown ubuntu:ubuntu /home/ubuntu/.cloud-init-complete
+  - echo "RTK cloud-init setup complete" | tee /var/log/rtk-setup.log
+
+final_message: "RTK test VM ready in $UPTIME seconds"

@@ -18,7 +18,7 @@
   <a href="https://www.rtk-ai.app">官网</a> &bull;
   <a href="#安装">安装</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">故障排除</a> &bull;
-  <a href="ARCHITECTURE.md">架构</a> &bull;
+  <a href="docs/contributing/ARCHITECTURE.md">架构</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -122,10 +122,11 @@ rtk git push                    # -> "ok main"
 
 ### 测试
 ```bash
-rtk test cargo test             # 仅显示失败（-90%）
-rtk vitest run                  # Vitest 紧凑输出
+rtk jest                        # Jest 紧凑输出
+rtk vitest                      # Vitest 紧凑输出
 rtk pytest                      # Python 测试（-90%）
 rtk go test                     # Go 测试（-90%）
+rtk test <cmd>                  # 仅显示失败（-90%）
 ```
 
 ### 构建 & 检查
@@ -154,7 +155,7 @@ rtk discover                    # 发现遗漏的节省机会
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - 解决常见问题
 - **[INSTALL.md](INSTALL.md)** - 详细安装指南
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - 技术架构
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - 技术架构
 
 ## 贡献
 
@@ -165,3 +166,7 @@ rtk discover                    # 发现遗漏的节省机会
 ## 许可证
 
 MIT 许可证 - 详见 [LICENSE](LICENSE)。
+
+## 免责声明
+
+详见 [DISCLAIMER.md](DISCLAIMER.md)。

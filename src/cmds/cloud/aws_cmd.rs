@@ -376,15 +376,6 @@ fn run_aws_filtered(
     Ok(0)
 }
 
-fn run_sts_identity(extra_args: &[String], verbose: u8) -> Result<i32> {
-    run_aws_filtered(
-        &["sts", "get-caller-identity"],
-        extra_args,
-        verbose,
-        filter_sts_identity,
-    )
-}
-
 fn run_s3_ls(extra_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 

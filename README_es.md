@@ -18,7 +18,7 @@
   <a href="https://www.rtk-ai.app">Sitio web</a> &bull;
   <a href="#instalacion">Instalar</a> &bull;
   <a href="docs/TROUBLESHOOTING.md">Solucion de problemas</a> &bull;
-  <a href="ARCHITECTURE.md">Arquitectura</a> &bull;
+  <a href="docs/contributing/ARCHITECTURE.md">Arquitectura</a> &bull;
   <a href="https://discord.gg/RySmvNF5kF">Discord</a>
 </p>
 
@@ -121,10 +121,12 @@ rtk git push                    # -> "ok main"
 
 ### Tests
 ```bash
-rtk test cargo test             # Solo fallos (-90%)
-rtk vitest run                  # Vitest compacto
+rtk jest                        # Jest compacto
+rtk vitest                      # Vitest compacto
 rtk pytest                      # Tests Python (-90%)
 rtk go test                     # Tests Go (-90%)
+rtk cargo test                  # Tests Rust (-90%)
+rtk test <cmd>                  # Solo fallos (-90%)
 ```
 
 ### Build & Lint
@@ -146,7 +148,7 @@ rtk discover                    # Descubrir ahorros perdidos
 
 - **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Resolver problemas comunes
 - **[INSTALL.md](INSTALL.md)** - Guia de instalacion detallada
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Arquitectura tecnica
+- **[ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md)** - Arquitectura tecnica
 
 ## Contribuir
 
@@ -157,3 +159,7 @@ Unete a la comunidad en [Discord](https://discord.gg/RySmvNF5kF).
 ## Licencia
 
 Licencia MIT - ver [LICENSE](LICENSE) para detalles.
+
+## Descargo de responsabilidad
+
+Ver [DISCLAIMER.md](DISCLAIMER.md).
