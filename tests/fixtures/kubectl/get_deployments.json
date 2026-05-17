@@ -1,0 +1,530 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/revision": "1",
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"annotations\":{},\"name\":\"api\",\"namespace\":\"backend\"},\"spec\":{\"replicas\":6,\"selector\":{\"matchLabels\":{\"app\":\"api\"}},\"template\":{\"metadata\":{\"labels\":{\"app\":\"api\"}},\"spec\":{\"containers\":[{\"image\":\"nginx:alpine\",\"name\":\"api\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-05-17T10:34:17Z",
+                "generation": 1,
+                "name": "api",
+                "namespace": "backend",
+                "resourceVersion": "1079",
+                "uid": "c71818ad-10f5-4ad2-9a97-4dab9a4ea2c4"
+            },
+            "spec": {
+                "progressDeadlineSeconds": 600,
+                "replicas": 6,
+                "revisionHistoryLimit": 10,
+                "selector": {
+                    "matchLabels": {
+                        "app": "api"
+                    }
+                },
+                "strategy": {
+                    "rollingUpdate": {
+                        "maxSurge": "25%",
+                        "maxUnavailable": "25%"
+                    },
+                    "type": "RollingUpdate"
+                },
+                "template": {
+                    "metadata": {
+                        "creationTimestamp": null,
+                        "labels": {
+                            "app": "api"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "image": "nginx:alpine",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "api",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30
+                    }
+                }
+            },
+            "status": {
+                "availableReplicas": 6,
+                "conditions": [
+                    {
+                        "lastTransitionTime": "2026-05-17T10:34:19Z",
+                        "lastUpdateTime": "2026-05-17T10:34:19Z",
+                        "message": "Deployment has minimum availability.",
+                        "reason": "MinimumReplicasAvailable",
+                        "status": "True",
+                        "type": "Available"
+                    },
+                    {
+                        "lastTransitionTime": "2026-05-17T10:34:17Z",
+                        "lastUpdateTime": "2026-05-17T10:34:19Z",
+                        "message": "ReplicaSet \"api-7b89467fdb\" has successfully progressed.",
+                        "reason": "NewReplicaSetAvailable",
+                        "status": "True",
+                        "type": "Progressing"
+                    }
+                ],
+                "observedGeneration": 1,
+                "readyReplicas": 6,
+                "replicas": 6,
+                "updatedReplicas": 6
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/revision": "1",
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"annotations\":{},\"name\":\"web\",\"namespace\":\"default\"},\"spec\":{\"replicas\":18,\"selector\":{\"matchLabels\":{\"app\":\"web\"}},\"template\":{\"metadata\":{\"labels\":{\"app\":\"web\"}},\"spec\":{\"containers\":[{\"image\":\"nginx:alpine\",\"name\":\"nginx\",\"ports\":[{\"containerPort\":80}]}]}}}}\n"
+                },
+                "creationTimestamp": "2026-05-17T10:34:00Z",
+                "generation": 1,
+                "name": "web",
+                "namespace": "default",
+                "resourceVersion": "967",
+                "uid": "112854e3-f99a-463c-925a-e6e5469f8683"
+            },
+            "spec": {
+                "progressDeadlineSeconds": 600,
+                "replicas": 18,
+                "revisionHistoryLimit": 10,
+                "selector": {
+                    "matchLabels": {
+                        "app": "web"
+                    }
+                },
+                "strategy": {
+                    "rollingUpdate": {
+                        "maxSurge": "25%",
+                        "maxUnavailable": "25%"
+                    },
+                    "type": "RollingUpdate"
+                },
+                "template": {
+                    "metadata": {
+                        "creationTimestamp": null,
+                        "labels": {
+                            "app": "web"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "image": "nginx:alpine",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "nginx",
+                                "ports": [
+                                    {
+                                        "containerPort": 80,
+                                        "protocol": "TCP"
+                                    }
+                                ],
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File"
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "terminationGracePeriodSeconds": 30
+                    }
+                }
+            },
+            "status": {
+                "availableReplicas": 18,
+                "conditions": [
+                    {
+                        "lastTransitionTime": "2026-05-17T10:34:13Z",
+                        "lastUpdateTime": "2026-05-17T10:34:13Z",
+                        "message": "Deployment has minimum availability.",
+                        "reason": "MinimumReplicasAvailable",
+                        "status": "True",
+                        "type": "Available"
+                    },
+                    {
+                        "lastTransitionTime": "2026-05-17T10:34:00Z",
+                        "lastUpdateTime": "2026-05-17T10:34:14Z",
+                        "message": "ReplicaSet \"web-599d64b499\" has successfully progressed.",
+                        "reason": "NewReplicaSetAvailable",
+                        "status": "True",
+                        "type": "Progressing"
+                    }
+                ],
+                "observedGeneration": 1,
+                "readyReplicas": 18,
+                "replicas": 18,
+                "updatedReplicas": 18
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/revision": "1"
+                },
+                "creationTimestamp": "2026-05-17T10:33:29Z",
+                "generation": 1,
+                "labels": {
+                    "k8s-app": "kube-dns"
+                },
+                "name": "coredns",
+                "namespace": "kube-system",
+                "resourceVersion": "529",
+                "uid": "7a3ef920-ef34-4d62-98e7-18b252e78a73"
+            },
+            "spec": {
+                "progressDeadlineSeconds": 600,
+                "replicas": 2,
+                "revisionHistoryLimit": 10,
+                "selector": {
+                    "matchLabels": {
+                        "k8s-app": "kube-dns"
+                    }
+                },
+                "strategy": {
+                    "rollingUpdate": {
+                        "maxSurge": "25%",
+                        "maxUnavailable": 1
+                    },
+                    "type": "RollingUpdate"
+                },
+                "template": {
+                    "metadata": {
+                        "creationTimestamp": null,
+                        "labels": {
+                            "k8s-app": "kube-dns"
+                        }
+                    },
+                    "spec": {
+                        "affinity": {
+                            "podAntiAffinity": {
+                                "preferredDuringSchedulingIgnoredDuringExecution": [
+                                    {
+                                        "podAffinityTerm": {
+                                            "labelSelector": {
+                                                "matchExpressions": [
+                                                    {
+                                                        "key": "k8s-app",
+                                                        "operator": "In",
+                                                        "values": [
+                                                            "kube-dns"
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            "topologyKey": "kubernetes.io/hostname"
+                                        },
+                                        "weight": 100
+                                    }
+                                ]
+                            }
+                        },
+                        "containers": [
+                            {
+                                "args": [
+                                    "-conf",
+                                    "/etc/coredns/Corefile"
+                                ],
+                                "image": "registry.k8s.io/coredns/coredns:v1.11.3",
+                                "imagePullPolicy": "IfNotPresent",
+                                "livenessProbe": {
+                                    "failureThreshold": 5,
+                                    "httpGet": {
+                                        "path": "/health",
+                                        "port": 8080,
+                                        "scheme": "HTTP"
+                                    },
+                                    "initialDelaySeconds": 60,
+                                    "periodSeconds": 10,
+                                    "successThreshold": 1,
+                                    "timeoutSeconds": 5
+                                },
+                                "name": "coredns",
+                                "ports": [
+                                    {
+                                        "containerPort": 53,
+                                        "name": "dns",
+                                        "protocol": "UDP"
+                                    },
+                                    {
+                                        "containerPort": 53,
+                                        "name": "dns-tcp",
+                                        "protocol": "TCP"
+                                    },
+                                    {
+                                        "containerPort": 9153,
+                                        "name": "metrics",
+                                        "protocol": "TCP"
+                                    }
+                                ],
+                                "readinessProbe": {
+                                    "failureThreshold": 3,
+                                    "httpGet": {
+                                        "path": "/ready",
+                                        "port": 8181,
+                                        "scheme": "HTTP"
+                                    },
+                                    "periodSeconds": 10,
+                                    "successThreshold": 1,
+                                    "timeoutSeconds": 1
+                                },
+                                "resources": {
+                                    "limits": {
+                                        "memory": "170Mi"
+                                    },
+                                    "requests": {
+                                        "cpu": "100m",
+                                        "memory": "70Mi"
+                                    }
+                                },
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": false,
+                                    "capabilities": {
+                                        "add": [
+                                            "NET_BIND_SERVICE"
+                                        ],
+                                        "drop": [
+                                            "ALL"
+                                        ]
+                                    },
+                                    "readOnlyRootFilesystem": true
+                                },
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/etc/coredns",
+                                        "name": "config-volume",
+                                        "readOnly": true
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "Default",
+                        "nodeSelector": {
+                            "kubernetes.io/os": "linux"
+                        },
+                        "priorityClassName": "system-cluster-critical",
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "serviceAccount": "coredns",
+                        "serviceAccountName": "coredns",
+                        "terminationGracePeriodSeconds": 30,
+                        "tolerations": [
+                            {
+                                "key": "CriticalAddonsOnly",
+                                "operator": "Exists"
+                            },
+                            {
+                                "effect": "NoSchedule",
+                                "key": "node-role.kubernetes.io/control-plane"
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "configMap": {
+                                    "defaultMode": 420,
+                                    "items": [
+                                        {
+                                            "key": "Corefile",
+                                            "path": "Corefile"
+                                        }
+                                    ],
+                                    "name": "coredns"
+                                },
+                                "name": "config-volume"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "availableReplicas": 2,
+                "conditions": [
+                    {
+                        "lastTransitionTime": "2026-05-17T10:33:53Z",
+                        "lastUpdateTime": "2026-05-17T10:33:53Z",
+                        "message": "Deployment has minimum availability.",
+                        "reason": "MinimumReplicasAvailable",
+                        "status": "True",
+                        "type": "Available"
+                    },
+                    {
+                        "lastTransitionTime": "2026-05-17T10:33:34Z",
+                        "lastUpdateTime": "2026-05-17T10:33:53Z",
+                        "message": "ReplicaSet \"coredns-668d6bf9bc\" has successfully progressed.",
+                        "reason": "NewReplicaSetAvailable",
+                        "status": "True",
+                        "type": "Progressing"
+                    }
+                ],
+                "observedGeneration": 1,
+                "readyReplicas": 2,
+                "replicas": 2,
+                "updatedReplicas": 2
+            }
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+                "annotations": {
+                    "deployment.kubernetes.io/revision": "1",
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"annotations\":{},\"name\":\"local-path-provisioner\",\"namespace\":\"local-path-storage\"},\"spec\":{\"replicas\":1,\"selector\":{\"matchLabels\":{\"app\":\"local-path-provisioner\"}},\"template\":{\"metadata\":{\"labels\":{\"app\":\"local-path-provisioner\"}},\"spec\":{\"containers\":[{\"command\":[\"local-path-provisioner\",\"--debug\",\"start\",\"--helper-image\",\"docker.io/kindest/local-path-helper:v20241212-8ac705d0\",\"--config\",\"/etc/config/config.json\"],\"env\":[{\"name\":\"POD_NAMESPACE\",\"valueFrom\":{\"fieldRef\":{\"fieldPath\":\"metadata.namespace\"}}},{\"name\":\"CONFIG_MOUNT_PATH\",\"value\":\"/etc/config/\"}],\"image\":\"docker.io/kindest/local-path-provisioner:v20250214-acbabc1a\",\"imagePullPolicy\":\"IfNotPresent\",\"name\":\"local-path-provisioner\",\"volumeMounts\":[{\"mountPath\":\"/etc/config/\",\"name\":\"config-volume\"}]}],\"nodeSelector\":{\"kubernetes.io/os\":\"linux\"},\"serviceAccountName\":\"local-path-provisioner-service-account\",\"tolerations\":[{\"effect\":\"NoSchedule\",\"key\":\"node-role.kubernetes.io/control-plane\",\"operator\":\"Equal\"},{\"effect\":\"NoSchedule\",\"key\":\"node-role.kubernetes.io/master\",\"operator\":\"Equal\"}],\"volumes\":[{\"configMap\":{\"name\":\"local-path-config\"},\"name\":\"config-volume\"}]}}}}\n"
+                },
+                "creationTimestamp": "2026-05-17T10:33:31Z",
+                "generation": 1,
+                "name": "local-path-provisioner",
+                "namespace": "local-path-storage",
+                "resourceVersion": "520",
+                "uid": "7c396f8a-84d6-425e-948b-fe894d59bf50"
+            },
+            "spec": {
+                "progressDeadlineSeconds": 600,
+                "replicas": 1,
+                "revisionHistoryLimit": 10,
+                "selector": {
+                    "matchLabels": {
+                        "app": "local-path-provisioner"
+                    }
+                },
+                "strategy": {
+                    "rollingUpdate": {
+                        "maxSurge": "25%",
+                        "maxUnavailable": "25%"
+                    },
+                    "type": "RollingUpdate"
+                },
+                "template": {
+                    "metadata": {
+                        "creationTimestamp": null,
+                        "labels": {
+                            "app": "local-path-provisioner"
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "command": [
+                                    "local-path-provisioner",
+                                    "--debug",
+                                    "start",
+                                    "--helper-image",
+                                    "docker.io/kindest/local-path-helper:v20241212-8ac705d0",
+                                    "--config",
+                                    "/etc/config/config.json"
+                                ],
+                                "env": [
+                                    {
+                                        "name": "POD_NAMESPACE",
+                                        "valueFrom": {
+                                            "fieldRef": {
+                                                "apiVersion": "v1",
+                                                "fieldPath": "metadata.namespace"
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "name": "CONFIG_MOUNT_PATH",
+                                        "value": "/etc/config/"
+                                    }
+                                ],
+                                "image": "docker.io/kindest/local-path-provisioner:v20250214-acbabc1a",
+                                "imagePullPolicy": "IfNotPresent",
+                                "name": "local-path-provisioner",
+                                "resources": {},
+                                "terminationMessagePath": "/dev/termination-log",
+                                "terminationMessagePolicy": "File",
+                                "volumeMounts": [
+                                    {
+                                        "mountPath": "/etc/config/",
+                                        "name": "config-volume"
+                                    }
+                                ]
+                            }
+                        ],
+                        "dnsPolicy": "ClusterFirst",
+                        "nodeSelector": {
+                            "kubernetes.io/os": "linux"
+                        },
+                        "restartPolicy": "Always",
+                        "schedulerName": "default-scheduler",
+                        "securityContext": {},
+                        "serviceAccount": "local-path-provisioner-service-account",
+                        "serviceAccountName": "local-path-provisioner-service-account",
+                        "terminationGracePeriodSeconds": 30,
+                        "tolerations": [
+                            {
+                                "effect": "NoSchedule",
+                                "key": "node-role.kubernetes.io/control-plane",
+                                "operator": "Equal"
+                            },
+                            {
+                                "effect": "NoSchedule",
+                                "key": "node-role.kubernetes.io/master",
+                                "operator": "Equal"
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "configMap": {
+                                    "defaultMode": 420,
+                                    "name": "local-path-config"
+                                },
+                                "name": "config-volume"
+                            }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "availableReplicas": 1,
+                "conditions": [
+                    {
+                        "lastTransitionTime": "2026-05-17T10:33:53Z",
+                        "lastUpdateTime": "2026-05-17T10:33:53Z",
+                        "message": "Deployment has minimum availability.",
+                        "reason": "MinimumReplicasAvailable",
+                        "status": "True",
+                        "type": "Available"
+                    },
+                    {
+                        "lastTransitionTime": "2026-05-17T10:33:34Z",
+                        "lastUpdateTime": "2026-05-17T10:33:53Z",
+                        "message": "ReplicaSet \"local-path-provisioner-7dc846544d\" has successfully progressed.",
+                        "reason": "NewReplicaSetAvailable",
+                        "status": "True",
+                        "type": "Progressing"
+                    }
+                ],
+                "observedGeneration": 1,
+                "readyReplicas": 1,
+                "replicas": 1,
+                "updatedReplicas": 1
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

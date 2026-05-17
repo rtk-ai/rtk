@@ -1,0 +1,312 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"annotations\":{},\"name\":\"api\",\"namespace\":\"backend\"},\"spec\":{\"ports\":[{\"port\":8080,\"targetPort\":80}],\"selector\":{\"app\":\"api\"}}}\n"
+                },
+                "creationTimestamp": "2026-05-17T10:34:01Z",
+                "name": "api",
+                "namespace": "backend",
+                "resourceVersion": "684",
+                "uid": "447a6d10-5314-47ae-94c9-5907272be563"
+            },
+            "spec": {
+                "clusterIP": "10.96.115.66",
+                "clusterIPs": [
+                    "10.96.115.66"
+                ],
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": [
+                    "IPv4"
+                ],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {
+                        "port": 8080,
+                        "protocol": "TCP",
+                        "targetPort": 80
+                    }
+                ],
+                "selector": {
+                    "app": "api"
+                },
+                "sessionAffinity": "None",
+                "type": "ClusterIP"
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"annotations\":{},\"name\":\"api-headless\",\"namespace\":\"backend\"},\"spec\":{\"clusterIP\":\"None\",\"ports\":[{\"port\":8080}],\"selector\":{\"app\":\"api\"}}}\n"
+                },
+                "creationTimestamp": "2026-05-17T10:34:01Z",
+                "name": "api-headless",
+                "namespace": "backend",
+                "resourceVersion": "679",
+                "uid": "4771b6ae-e0c8-4491-ac20-89117b237f5d"
+            },
+            "spec": {
+                "clusterIP": "None",
+                "clusterIPs": [
+                    "None"
+                ],
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": [
+                    "IPv4"
+                ],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {
+                        "port": 8080,
+                        "protocol": "TCP",
+                        "targetPort": 8080
+                    }
+                ],
+                "selector": {
+                    "app": "api"
+                },
+                "sessionAffinity": "None",
+                "type": "ClusterIP"
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "creationTimestamp": "2026-05-17T10:33:28Z",
+                "labels": {
+                    "component": "apiserver",
+                    "provider": "kubernetes"
+                },
+                "name": "kubernetes",
+                "namespace": "default",
+                "resourceVersion": "196",
+                "uid": "3b559f07-6f6f-4b1e-9e55-96f32719a0bc"
+            },
+            "spec": {
+                "clusterIP": "10.96.0.1",
+                "clusterIPs": [
+                    "10.96.0.1"
+                ],
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": [
+                    "IPv4"
+                ],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {
+                        "name": "https",
+                        "port": 443,
+                        "protocol": "TCP",
+                        "targetPort": 6443
+                    }
+                ],
+                "sessionAffinity": "None",
+                "type": "ClusterIP"
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"annotations\":{},\"name\":\"web\",\"namespace\":\"default\"},\"spec\":{\"ports\":[{\"port\":80}],\"selector\":{\"app\":\"web\"}}}\n"
+                },
+                "creationTimestamp": "2026-05-17T10:34:00Z",
+                "name": "web",
+                "namespace": "default",
+                "resourceVersion": "646",
+                "uid": "a0312b24-bd92-49e7-bc22-52ed1e1dadea"
+            },
+            "spec": {
+                "clusterIP": "10.96.188.104",
+                "clusterIPs": [
+                    "10.96.188.104"
+                ],
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": [
+                    "IPv4"
+                ],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {
+                        "port": 80,
+                        "protocol": "TCP",
+                        "targetPort": 80
+                    }
+                ],
+                "selector": {
+                    "app": "web"
+                },
+                "sessionAffinity": "None",
+                "type": "ClusterIP"
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"annotations\":{},\"name\":\"web-lb\",\"namespace\":\"default\"},\"spec\":{\"ports\":[{\"port\":443,\"targetPort\":80}],\"selector\":{\"app\":\"web\"},\"type\":\"LoadBalancer\"}}\n"
+                },
+                "creationTimestamp": "2026-05-17T10:34:01Z",
+                "name": "web-lb",
+                "namespace": "default",
+                "resourceVersion": "674",
+                "uid": "597a3951-2a93-45cb-b819-548cabf69cf9"
+            },
+            "spec": {
+                "allocateLoadBalancerNodePorts": true,
+                "clusterIP": "10.96.139.146",
+                "clusterIPs": [
+                    "10.96.139.146"
+                ],
+                "externalTrafficPolicy": "Cluster",
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": [
+                    "IPv4"
+                ],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {
+                        "nodePort": 31272,
+                        "port": 443,
+                        "protocol": "TCP",
+                        "targetPort": 80
+                    }
+                ],
+                "selector": {
+                    "app": "web"
+                },
+                "sessionAffinity": "None",
+                "type": "LoadBalancer"
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"annotations\":{},\"name\":\"web-np\",\"namespace\":\"default\"},\"spec\":{\"ports\":[{\"nodePort\":30080,\"port\":80}],\"selector\":{\"app\":\"web\"},\"type\":\"NodePort\"}}\n"
+                },
+                "creationTimestamp": "2026-05-17T10:34:01Z",
+                "name": "web-np",
+                "namespace": "default",
+                "resourceVersion": "665",
+                "uid": "c55104d5-bdc9-4a77-920b-0723fc57dee4"
+            },
+            "spec": {
+                "clusterIP": "10.96.236.0",
+                "clusterIPs": [
+                    "10.96.236.0"
+                ],
+                "externalTrafficPolicy": "Cluster",
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": [
+                    "IPv4"
+                ],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {
+                        "nodePort": 30080,
+                        "port": 80,
+                        "protocol": "TCP",
+                        "targetPort": 80
+                    }
+                ],
+                "selector": {
+                    "app": "web"
+                },
+                "sessionAffinity": "None",
+                "type": "NodePort"
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "annotations": {
+                    "prometheus.io/port": "9153",
+                    "prometheus.io/scrape": "true"
+                },
+                "creationTimestamp": "2026-05-17T10:33:29Z",
+                "labels": {
+                    "k8s-app": "kube-dns",
+                    "kubernetes.io/cluster-service": "true",
+                    "kubernetes.io/name": "CoreDNS"
+                },
+                "name": "kube-dns",
+                "namespace": "kube-system",
+                "resourceVersion": "225",
+                "uid": "55d701a4-da48-47a7-ac41-ed6690bd0419"
+            },
+            "spec": {
+                "clusterIP": "10.96.0.10",
+                "clusterIPs": [
+                    "10.96.0.10"
+                ],
+                "internalTrafficPolicy": "Cluster",
+                "ipFamilies": [
+                    "IPv4"
+                ],
+                "ipFamilyPolicy": "SingleStack",
+                "ports": [
+                    {
+                        "name": "dns",
+                        "port": 53,
+                        "protocol": "UDP",
+                        "targetPort": 53
+                    },
+                    {
+                        "name": "dns-tcp",
+                        "port": 53,
+                        "protocol": "TCP",
+                        "targetPort": 53
+                    },
+                    {
+                        "name": "metrics",
+                        "port": 9153,
+                        "protocol": "TCP",
+                        "targetPort": 9153
+                    }
+                ],
+                "selector": {
+                    "k8s-app": "kube-dns"
+                },
+                "sessionAffinity": "None",
+                "type": "ClusterIP"
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}

@@ -16,6 +16,8 @@ pub enum ContainerCmd {
     DockerLogs,
     KubectlPods,
     KubectlServices,
+    KubectlDeployments,
+    KubectlIngress,
     KubectlLogs,
 }
 
@@ -26,6 +28,8 @@ pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
         ContainerCmd::DockerLogs => docker_logs(args, verbose),
         ContainerCmd::KubectlPods => kubectl_pods(args, verbose),
         ContainerCmd::KubectlServices => kubectl_services(args, verbose),
+        ContainerCmd::KubectlDeployments => kubectl_deployments(args, verbose),
+        ContainerCmd::KubectlIngress => kubectl_ingress(args, verbose),
         ContainerCmd::KubectlLogs => kubectl_logs(args, verbose),
     }
 }
@@ -230,72 +234,137 @@ fn kubectl_pods(args: &[String], _verbose: u8) -> Result<i32> {
     run_kubectl_json(cmd, "get pods", format_kubectl_pods)
 }
 
-fn format_kubectl_pods(json: &Value) -> String {
-    let Some(pods) = json["items"].as_array().filter(|a| !a.is_empty()) else {
-        return "No pods found\n".to_string();
-    };
-    let (mut running, mut pending, mut failed, mut restarts_total) = (0, 0, 0, 0i64);
-    let mut issues: Vec<String> = Vec::new();
-
-    for pod in pods {
-        let ns = pod["metadata"]["namespace"].as_str().unwrap_or("-");
-        let name = pod["metadata"]["name"].as_str().unwrap_or("-");
-        let phase = pod["status"]["phase"].as_str().unwrap_or("Unknown");
-
-        if let Some(containers) = pod["status"]["containerStatuses"].as_array() {
-            for c in containers {
-                restarts_total += c["restartCount"].as_i64().unwrap_or(0);
+/// Compute a pod's effective status, mirroring kubectl's STATUS column: a
+/// container waiting/terminated reason (CrashLoopBackOff, ImagePullBackOff, …)
+/// takes precedence over the coarse `phase`.
+fn pod_status(pod: &Value) -> String {
+    if let Some(containers) = pod["status"]["containerStatuses"].as_array() {
+        for c in containers {
+            if let Some(reason) = c["state"]["waiting"]["reason"].as_str() {
+                return reason.to_string();
             }
-        }
-
-        match phase {
-            "Running" => running += 1,
-            "Pending" => {
-                pending += 1;
-                issues.push(format!("{}/{} Pending", ns, name));
-            }
-            "Failed" | "Error" => {
-                failed += 1;
-                issues.push(format!("{}/{} {}", ns, name, phase));
-            }
-            _ => {
-                if let Some(containers) = pod["status"]["containerStatuses"].as_array() {
-                    for c in containers {
-                        if let Some(w) = c["state"]["waiting"]["reason"].as_str() {
-                            if w.contains("CrashLoop") || w.contains("Error") {
-                                failed += 1;
-                                issues.push(format!("{}/{} {}", ns, name, w));
-                            }
-                        }
-                    }
+            if let Some(reason) = c["state"]["terminated"]["reason"].as_str() {
+                if reason != "Completed" {
+                    return reason.to_string();
                 }
             }
         }
     }
+    match pod["status"]["phase"].as_str().unwrap_or("Unknown") {
+        "Succeeded" => "Completed".to_string(),
+        other => other.to_string(),
+    }
+}
 
-    let mut parts = Vec::new();
-    if running > 0 {
-        parts.push(format!("{}", running));
+/// Human-readable age from an RFC3339 creation timestamp ("45s", "3h", "14d").
+fn resource_age(ts: &str) -> String {
+    use chrono::{DateTime, Utc};
+    let Ok(created) = DateTime::parse_from_rfc3339(ts) else {
+        return "?".to_string();
+    };
+    let secs = (Utc::now() - created.with_timezone(&Utc))
+        .num_seconds()
+        .max(0);
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
     }
-    if pending > 0 {
-        parts.push(format!("{} pending", pending));
+}
+
+fn format_kubectl_pods(json: &Value) -> String {
+    let Some(pods) = json["items"].as_array().filter(|a| !a.is_empty()) else {
+        return "No pods found\n".to_string();
+    };
+
+    struct PodRow {
+        ns: String,
+        name: String,
+        status: String,
+        ready: String,
+        restarts: i64,
+        age: String,
+        issue: bool,
     }
-    if failed > 0 {
-        parts.push(format!("{} [x]", failed));
+
+    let mut rows: Vec<PodRow> = Vec::new();
+    let mut status_counts: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut restarts_total = 0i64;
+
+    for pod in pods {
+        let ns = pod["metadata"]["namespace"].as_str().unwrap_or("-").to_string();
+        let name = pod["metadata"]["name"].as_str().unwrap_or("-").to_string();
+        let status = pod_status(pod);
+        let age = resource_age(pod["metadata"]["creationTimestamp"].as_str().unwrap_or(""));
+
+        let (mut ready_n, mut ready_total, mut restarts) = (0i64, 0i64, 0i64);
+        if let Some(containers) = pod["status"]["containerStatuses"].as_array() {
+            ready_total = containers.len() as i64;
+            for c in containers {
+                if c["ready"].as_bool().unwrap_or(false) {
+                    ready_n += 1;
+                }
+                restarts += c["restartCount"].as_i64().unwrap_or(0);
+            }
+        }
+        restarts_total += restarts;
+        *status_counts.entry(status.clone()).or_insert(0) += 1;
+
+        // An issue is anything not cleanly Running/Completed, a Running pod
+        // that is not fully ready, or one that has restarted — exactly what
+        // an operator needs to see first. A finished Job sits at 0/N ready
+        // by design, so the ready check only applies to Running pods.
+        let issue = !matches!(status.as_str(), "Running" | "Completed")
+            || (status == "Running" && ready_total > 0 && ready_n < ready_total)
+            || restarts > 0;
+
+        rows.push(PodRow {
+            ns,
+            name,
+            status,
+            ready: format!("{}/{}", ready_n, ready_total),
+            restarts,
+            age,
+            issue,
+        });
     }
+
+    // Issues first, then namespace/name — problems surface at the top.
+    rows.sort_by(|a, b| {
+        b.issue
+            .cmp(&a.issue)
+            .then(a.ns.cmp(&b.ns))
+            .then(a.name.cmp(&b.name))
+    });
+
+    let breakdown: Vec<String> = status_counts
+        .iter()
+        .map(|(s, n)| format!("{} {}", n, s))
+        .collect();
+    let mut out = format!("{} pods · {}", pods.len(), breakdown.join(" · "));
     if restarts_total > 0 {
-        parts.push(format!("{} restarts", restarts_total));
+        out.push_str(&format!(" · {} restarts", restarts_total));
     }
+    out.push('\n');
 
-    let mut out = format!("{} pods: {}\n", pods.len(), parts.join(", "));
-    if !issues.is_empty() {
-        out.push_str("[warn] Issues:\n");
-        for issue in issues.iter().take(10) {
-            out.push_str(&format!("  {}\n", issue));
-        }
-        if issues.len() > 10 {
-            out.push_str(&format!("  ... +{} more", issues.len() - 10));
-        }
+    // TOON table: column names declared once, then dense comma-separated rows.
+    const MAX_ROWS: usize = 80;
+    out.push_str(&format!(
+        "pods[{}]{{ns,name,status,ready,restarts,age}}:\n",
+        rows.len()
+    ));
+    for r in rows.iter().take(MAX_ROWS) {
+        out.push_str(&format!(
+            "  {},{},{},{},{},{}\n",
+            r.ns, r.name, r.status, r.ready, r.restarts, r.age
+        ));
+    }
+    if rows.len() > MAX_ROWS {
+        out.push_str(&format!("  ... +{} more\n", rows.len() - MAX_ROWS));
     }
     out
 }
@@ -313,12 +382,18 @@ fn format_kubectl_services(json: &Value) -> String {
     let Some(services) = json["items"].as_array().filter(|a| !a.is_empty()) else {
         return "No services found\n".to_string();
     };
-    let mut out = format!("{} services:\n", services.len());
 
-    for svc in services.iter().take(15) {
+    let mut type_counts: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut rows: Vec<String> = Vec::new();
+
+    for svc in services {
         let ns = svc["metadata"]["namespace"].as_str().unwrap_or("-");
         let name = svc["metadata"]["name"].as_str().unwrap_or("-");
         let svc_type = svc["spec"]["type"].as_str().unwrap_or("-");
+        let cluster_ip = svc["spec"]["clusterIP"].as_str().unwrap_or("-");
+        *type_counts.entry(svc_type.to_string()).or_insert(0) += 1;
+
+        // Ports joined with ';' — ',' is the TOON field separator.
         let ports: Vec<String> = svc["spec"]["ports"]
             .as_array()
             .map(|arr| {
@@ -338,16 +413,157 @@ fn format_kubectl_services(json: &Value) -> String {
                     .collect()
             })
             .unwrap_or_default();
-        out.push_str(&format!(
-            "  {}/{} {} [{}]\n",
+        rows.push(format!(
+            "  {},{},{},{},{}\n",
             ns,
             name,
             svc_type,
-            ports.join(",")
+            cluster_ip,
+            ports.join(";")
         ));
     }
-    if services.len() > 15 {
-        out.push_str(&format!("  ... +{} more", services.len() - 15));
+
+    let breakdown: Vec<String> = type_counts
+        .iter()
+        .map(|(t, n)| format!("{} {}", n, t))
+        .collect();
+    let mut out = format!("{} services · {}\n", services.len(), breakdown.join(" · "));
+
+    // TOON table: columns declared once, then dense comma-separated rows.
+    const MAX_ROWS: usize = 80;
+    out.push_str("services[");
+    out.push_str(&services.len().to_string());
+    out.push_str("]{ns,name,type,clusterIP,ports}:\n");
+    for row in rows.iter().take(MAX_ROWS) {
+        out.push_str(row);
+    }
+    if rows.len() > MAX_ROWS {
+        out.push_str(&format!("  ... +{} more\n", rows.len() - MAX_ROWS));
+    }
+    out
+}
+
+fn kubectl_deployments(args: &[String], _verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command("kubectl");
+    cmd.args(["get", "deployments", "-o", "json"]);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    run_kubectl_json(cmd, "get deployments", format_kubectl_deployments)
+}
+
+fn format_kubectl_deployments(json: &Value) -> String {
+    let Some(deps) = json["items"].as_array().filter(|a| !a.is_empty()) else {
+        return "No deployments found\n".to_string();
+    };
+
+    struct DeployRow {
+        ns: String,
+        name: String,
+        ready: String,
+        uptodate: i64,
+        available: i64,
+        age: String,
+        issue: bool,
+    }
+
+    let mut rows: Vec<DeployRow> = Vec::new();
+    let mut healthy = 0usize;
+
+    for dep in deps {
+        let ns = dep["metadata"]["namespace"].as_str().unwrap_or("-").to_string();
+        let name = dep["metadata"]["name"].as_str().unwrap_or("-").to_string();
+        let age = resource_age(dep["metadata"]["creationTimestamp"].as_str().unwrap_or(""));
+        let desired = dep["spec"]["replicas"].as_i64().unwrap_or(0);
+        let ready = dep["status"]["readyReplicas"].as_i64().unwrap_or(0);
+        let uptodate = dep["status"]["updatedReplicas"].as_i64().unwrap_or(0);
+        let available = dep["status"]["availableReplicas"].as_i64().unwrap_or(0);
+        // A deployment is an issue when fewer replicas are ready than desired.
+        let issue = ready < desired;
+        if !issue {
+            healthy += 1;
+        }
+        rows.push(DeployRow {
+            ns,
+            name,
+            ready: format!("{}/{}", ready, desired),
+            uptodate,
+            available,
+            age,
+            issue,
+        });
+    }
+
+    // Degraded deployments first, then namespace/name.
+    rows.sort_by(|a, b| {
+        b.issue
+            .cmp(&a.issue)
+            .then(a.ns.cmp(&b.ns))
+            .then(a.name.cmp(&b.name))
+    });
+
+    let mut out = format!(
+        "{} deployments · {} ready · {} degraded\n",
+        deps.len(),
+        healthy,
+        deps.len() - healthy
+    );
+    const MAX_ROWS: usize = 80;
+    out.push_str(&format!(
+        "deployments[{}]{{ns,name,ready,uptodate,available,age}}:\n",
+        rows.len()
+    ));
+    for r in rows.iter().take(MAX_ROWS) {
+        out.push_str(&format!(
+            "  {},{},{},{},{},{}\n",
+            r.ns, r.name, r.ready, r.uptodate, r.available, r.age
+        ));
+    }
+    if rows.len() > MAX_ROWS {
+        out.push_str(&format!("  ... +{} more\n", rows.len() - MAX_ROWS));
+    }
+    out
+}
+
+fn kubectl_ingress(args: &[String], _verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command("kubectl");
+    cmd.args(["get", "ingress", "-o", "json"]);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    run_kubectl_json(cmd, "get ingress", format_kubectl_ingress)
+}
+
+fn format_kubectl_ingress(json: &Value) -> String {
+    let Some(ingresses) = json["items"].as_array().filter(|a| !a.is_empty()) else {
+        return "No ingress found\n".to_string();
+    };
+
+    let mut out = format!("{} ingress\n", ingresses.len());
+    const MAX_ROWS: usize = 80;
+    out.push_str(&format!(
+        "ingress[{}]{{ns,name,class,hosts,age}}:\n",
+        ingresses.len()
+    ));
+    for ing in ingresses.iter().take(MAX_ROWS) {
+        let ns = ing["metadata"]["namespace"].as_str().unwrap_or("-");
+        let name = ing["metadata"]["name"].as_str().unwrap_or("-");
+        let class = ing["spec"]["ingressClassName"].as_str().unwrap_or("-");
+        let age = resource_age(ing["metadata"]["creationTimestamp"].as_str().unwrap_or(""));
+        // Hosts joined with ';' — ',' is the TOON field separator.
+        let hosts: Vec<&str> = ing["spec"]["rules"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|r| r["host"].as_str()).collect())
+            .unwrap_or_default();
+        let hosts_str = if hosts.is_empty() {
+            "*".to_string()
+        } else {
+            hosts.join(";")
+        };
+        out.push_str(&format!("  {},{},{},{},{}\n", ns, name, class, hosts_str, age));
+    }
+    if ingresses.len() > MAX_ROWS {
+        out.push_str(&format!("  ... +{} more\n", ingresses.len() - MAX_ROWS));
     }
     out
 }
@@ -616,6 +832,8 @@ pub fn run_kubectl_get(args: &[String], verbose: u8) -> Result<i32> {
     match kubectl_get_target(args) {
         Some(("pods", rest)) => run(ContainerCmd::KubectlPods, rest, verbose),
         Some(("services", rest)) => run(ContainerCmd::KubectlServices, rest, verbose),
+        Some(("deployments", rest)) => run(ContainerCmd::KubectlDeployments, rest, verbose),
+        Some(("ingress", rest)) => run(ContainerCmd::KubectlIngress, rest, verbose),
         _ => run_kubectl_get_passthrough(args, verbose),
     }
 }
@@ -630,6 +848,8 @@ fn kubectl_get_target(args: &[String]) -> Option<(&'static str, &[String])> {
     match resource {
         "po" | "pod" | "pods" => Some(("pods", rest)),
         "svc" | "service" | "services" => Some(("services", rest)),
+        "deploy" | "deployment" | "deployments" => Some(("deployments", rest)),
+        "ing" | "ingress" | "ingresses" => Some(("ingress", rest)),
         _ => None,
     }
 }
@@ -820,7 +1040,8 @@ api-1  | Connected to database";
 
     #[test]
     fn test_kubectl_get_target_unsupported_resource() {
-        let args = vec!["deployments".to_string()];
+        // configmaps has no dedicated filter — must fall through to passthrough.
+        let args = vec!["configmaps".to_string()];
 
         assert_eq!(kubectl_get_target(&args), None);
     }
@@ -838,6 +1059,175 @@ api-1  | Connected to database";
                 kubectl_get_target(&args),
                 None,
                 "should pass through {output_flag}"
+            );
+        }
+    }
+
+    // ── kubectl TOON filters ───────────────────────────────
+
+    fn count_tokens(s: &str) -> usize {
+        s.split_whitespace().count()
+    }
+
+    const PODS_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/kubectl/get_pods.json");
+    const SERVICES_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/kubectl/get_services.json");
+    const DEPLOYMENTS_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/kubectl/get_deployments.json");
+    const INGRESS_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/kubectl/get_ingress.json");
+
+    #[test]
+    fn test_format_kubectl_pods_toon_structure() {
+        let json: Value = serde_json::from_str(PODS_FIXTURE).unwrap();
+        let out = format_kubectl_pods(&json);
+        // TOON header declares the columns once.
+        assert!(
+            out.contains("]{ns,name,status,ready,restarts,age}:"),
+            "missing TOON header, got:\n{out}"
+        );
+        // Summary line: "<n> pods · <per-status breakdown>".
+        assert!(
+            out.lines().next().unwrap_or("").contains(" pods · "),
+            "missing summary line, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_format_kubectl_pods_keeps_pod_names_and_issues() {
+        let json: Value = serde_json::from_str(PODS_FIXTURE).unwrap();
+        let out = format_kubectl_pods(&json);
+        // Pod names and their problem state survive (the old filter dropped them).
+        assert!(out.contains("badimage,ErrImagePull"), "got:\n{out}");
+        assert!(out.contains("pending-huge,Pending"), "got:\n{out}");
+        // Problem pods sort before healthy Running pods: `badimage` must
+        // appear ahead of any `web-*` pod.
+        let badimage_pos = out.find("badimage,").expect("badimage missing");
+        let web_pos = out.find("web-").expect("web pod missing");
+        assert!(
+            badimage_pos < web_pos,
+            "issues should sort before healthy pods, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_format_kubectl_pods_savings() {
+        let json: Value = serde_json::from_str(PODS_FIXTURE).unwrap();
+        let out = format_kubectl_pods(&json);
+        let savings = 100.0 - (count_tokens(&out) as f64 / count_tokens(PODS_FIXTURE) as f64 * 100.0);
+        assert!(savings >= 60.0, "expected ≥60% savings, got {savings:.1}%");
+    }
+
+    #[test]
+    fn test_format_kubectl_pods_empty() {
+        let json: Value = serde_json::json!({"items": []});
+        assert_eq!(format_kubectl_pods(&json), "No pods found\n");
+    }
+
+    #[test]
+    fn test_format_kubectl_services_toon_structure() {
+        let json: Value = serde_json::from_str(SERVICES_FIXTURE).unwrap();
+        let out = format_kubectl_services(&json);
+        assert!(
+            out.contains("services[") && out.contains("]{ns,name,type,clusterIP,ports}:"),
+            "missing TOON header, got:\n{out}"
+        );
+        assert!(out.contains(",web,"), "service name 'web' missing, got:\n{out}");
+    }
+
+    #[test]
+    fn test_format_kubectl_services_savings() {
+        let json: Value = serde_json::from_str(SERVICES_FIXTURE).unwrap();
+        let out = format_kubectl_services(&json);
+        let savings =
+            100.0 - (count_tokens(&out) as f64 / count_tokens(SERVICES_FIXTURE) as f64 * 100.0);
+        assert!(savings >= 60.0, "expected ≥60% savings, got {savings:.1}%");
+    }
+
+    #[test]
+    fn test_resource_age_formats() {
+        use chrono::{Duration, Utc};
+        let ts = |d: Duration| (Utc::now() - d).to_rfc3339();
+        assert!(resource_age(&ts(Duration::seconds(30))).ends_with('s'));
+        assert!(resource_age(&ts(Duration::minutes(5))).ends_with('m'));
+        assert!(resource_age(&ts(Duration::hours(3))).ends_with('h'));
+        assert!(resource_age(&ts(Duration::days(14))).ends_with('d'));
+        assert_eq!(resource_age("not-a-date"), "?");
+    }
+
+    #[test]
+    fn test_format_kubectl_deployments_toon() {
+        let json: Value = serde_json::from_str(DEPLOYMENTS_FIXTURE).unwrap();
+        let out = format_kubectl_deployments(&json);
+        assert!(
+            out.contains("]{ns,name,ready,uptodate,available,age}:"),
+            "missing TOON header, got:\n{out}"
+        );
+        assert!(
+            out.lines().next().unwrap_or("").contains(" deployments · "),
+            "missing summary, got:\n{out}"
+        );
+        // Deployment names survive.
+        assert!(out.contains(",web,"), "deployment 'web' missing, got:\n{out}");
+    }
+
+    #[test]
+    fn test_format_kubectl_deployments_savings() {
+        let json: Value = serde_json::from_str(DEPLOYMENTS_FIXTURE).unwrap();
+        let out = format_kubectl_deployments(&json);
+        let savings = 100.0
+            - (count_tokens(&out) as f64 / count_tokens(DEPLOYMENTS_FIXTURE) as f64 * 100.0);
+        assert!(savings >= 60.0, "expected ≥60% savings, got {savings:.1}%");
+    }
+
+    #[test]
+    fn test_format_kubectl_deployments_empty() {
+        let json: Value = serde_json::json!({"items": []});
+        assert_eq!(format_kubectl_deployments(&json), "No deployments found\n");
+    }
+
+    #[test]
+    fn test_format_kubectl_ingress_toon() {
+        let json: Value = serde_json::from_str(INGRESS_FIXTURE).unwrap();
+        let out = format_kubectl_ingress(&json);
+        assert!(
+            out.contains("]{ns,name,class,hosts,age}:"),
+            "missing TOON header, got:\n{out}"
+        );
+        // Multiple hosts joined with ';' (',' is the field separator).
+        assert!(
+            out.contains("web.example.com;api.example.com"),
+            "multi-host ingress not joined with ';', got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_format_kubectl_ingress_empty() {
+        let json: Value = serde_json::json!({"items": []});
+        assert_eq!(format_kubectl_ingress(&json), "No ingress found\n");
+    }
+
+    #[test]
+    fn test_kubectl_get_target_deployment_aliases() {
+        for resource in ["deploy", "deployment", "deployments"] {
+            let args = vec![resource.to_string(), "-A".to_string()];
+            assert_eq!(
+                kubectl_get_target(&args),
+                Some(("deployments", &args[1..])),
+                "failed for {resource}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kubectl_get_target_ingress_aliases() {
+        for resource in ["ing", "ingress", "ingresses"] {
+            let args = vec![resource.to_string()];
+            assert_eq!(
+                kubectl_get_target(&args),
+                Some(("ingress", &args[1..])),
+                "failed for {resource}"
             );
         }
     }

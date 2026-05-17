@@ -1,0 +1,111 @@
+{
+    "apiVersion": "v1",
+    "items": [
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"Ingress\",\"metadata\":{\"annotations\":{},\"name\":\"api-ingress\",\"namespace\":\"backend\"},\"spec\":{\"ingressClassName\":\"nginx\",\"rules\":[{\"host\":\"api.internal\",\"http\":{\"paths\":[{\"backend\":{\"service\":{\"name\":\"api\",\"port\":{\"number\":8080}}},\"path\":\"/\",\"pathType\":\"Prefix\"}]}}]}}\n"
+                },
+                "creationTimestamp": "2026-05-17T12:27:41Z",
+                "generation": 1,
+                "name": "api-ingress",
+                "namespace": "backend",
+                "resourceVersion": "8702",
+                "uid": "db7a81c9-e100-4617-a04a-b099ee526bd8"
+            },
+            "spec": {
+                "ingressClassName": "nginx",
+                "rules": [
+                    {
+                        "host": "api.internal",
+                        "http": {
+                            "paths": [
+                                {
+                                    "backend": {
+                                        "service": {
+                                            "name": "api",
+                                            "port": {
+                                                "number": 8080
+                                            }
+                                        }
+                                    },
+                                    "path": "/",
+                                    "pathType": "Prefix"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        },
+        {
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "Ingress",
+            "metadata": {
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"Ingress\",\"metadata\":{\"annotations\":{},\"name\":\"web-ingress\",\"namespace\":\"default\"},\"spec\":{\"rules\":[{\"host\":\"web.example.com\",\"http\":{\"paths\":[{\"backend\":{\"service\":{\"name\":\"web\",\"port\":{\"number\":80}}},\"path\":\"/\",\"pathType\":\"Prefix\"}]}},{\"host\":\"api.example.com\",\"http\":{\"paths\":[{\"backend\":{\"service\":{\"name\":\"web\",\"port\":{\"number\":80}}},\"path\":\"/v1\",\"pathType\":\"Prefix\"}]}}]}}\n"
+                },
+                "creationTimestamp": "2026-05-17T12:27:41Z",
+                "generation": 1,
+                "name": "web-ingress",
+                "namespace": "default",
+                "resourceVersion": "8701",
+                "uid": "9b53ff68-9ba6-496d-a56e-bcc5af037492"
+            },
+            "spec": {
+                "rules": [
+                    {
+                        "host": "web.example.com",
+                        "http": {
+                            "paths": [
+                                {
+                                    "backend": {
+                                        "service": {
+                                            "name": "web",
+                                            "port": {
+                                                "number": 80
+                                            }
+                                        }
+                                    },
+                                    "path": "/",
+                                    "pathType": "Prefix"
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "host": "api.example.com",
+                        "http": {
+                            "paths": [
+                                {
+                                    "backend": {
+                                        "service": {
+                                            "name": "web",
+                                            "port": {
+                                                "number": 80
+                                            }
+                                        }
+                                    },
+                                    "path": "/v1",
+                                    "pathType": "Prefix"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "status": {
+                "loadBalancer": {}
+            }
+        }
+    ],
+    "kind": "List",
+    "metadata": {
+        "resourceVersion": ""
+    }
+}
