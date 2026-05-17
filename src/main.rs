@@ -861,6 +861,43 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List tracked files (compact tree view; --depth N controls grouping, default 1)
+    #[command(name = "ls-files")]
+    LsFiles {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Remove files from index/worktree — summarises as "ok removed N files"
+    Rm {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Tag listing with dates and annotated-tag messages (write ops passed through)
+    Tag {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Cherry-pick with ANSI stripping and exit-code preservation
+    #[command(name = "cherry-pick")]
+    CherryPick {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Rebase with ANSI stripping and exit-code preservation
+    Rebase {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Merge with ANSI stripping and exit-code preservation
+    Merge {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Checkout with ANSI stripping and exit-code preservation
+    Checkout {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1569,6 +1606,55 @@ fn run_cli() -> Result<i32> {
                 )?,
                 GitCommands::Worktree { args } => git::run(
                     git::GitCommand::Worktree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::LsFiles { args } => git::run(
+                    git::GitCommand::LsFiles,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Rm { args } => git::run(
+                    git::GitCommand::Rm,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Tag { args } => git::run(
+                    git::GitCommand::Tag,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::CherryPick { args } => git::run(
+                    git::GitCommand::CherryPick,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Rebase { args } => git::run(
+                    git::GitCommand::Rebase,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Merge { args } => git::run(
+                    git::GitCommand::Merge,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
+                GitCommands::Checkout { args } => git::run(
+                    git::GitCommand::Checkout,
                     &args,
                     None,
                     cli.verbose,

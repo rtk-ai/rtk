@@ -22,6 +22,13 @@ pub enum GitCommand {
     Fetch,
     Stash { subcommand: Option<String> },
     Worktree,
+    LsFiles,
+    Rm,
+    Tag,
+    CherryPick,
+    Rebase,
+    Merge,
+    Checkout,
 }
 
 /// Create a git Command with global options (e.g. -C, -c, --git-dir, --work-tree)
@@ -96,6 +103,13 @@ pub fn run(
             run_stash(subcommand.as_deref(), args, verbose, global_args)
         }
         GitCommand::Worktree => run_worktree(args, verbose, global_args),
+        GitCommand::LsFiles => run_ls_files(args, verbose, global_args),
+        GitCommand::Rm => run_rm(args, verbose, global_args),
+        GitCommand::Tag => run_tag(args, verbose, global_args),
+        GitCommand::CherryPick => run_ansi_strip("cherry-pick", args, verbose, global_args),
+        GitCommand::Rebase => run_ansi_strip("rebase", args, verbose, global_args),
+        GitCommand::Merge => run_ansi_strip("merge", args, verbose, global_args),
+        GitCommand::Checkout => run_ansi_strip("checkout", args, verbose, global_args),
     }
 }
 
@@ -1736,7 +1750,345 @@ fn filter_worktree_list(output: &str) -> String {
     result.join("\n")
 }
 
-/// Runs an unsupported git subcommand by passing it through directly
+
+/// Parse `--depth N` / `--depth=N` from args (RTK-only flag, not forwarded to git).
+/// Returns `(depth, remaining_git_args)`.
+
+fn parse_depth_arg(args: &[String], default: usize) -> (usize, Vec<String>) {
+    let mut depth = default;
+    let mut remaining = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--depth" {
+            if let Some(next) = iter.next() {
+                depth = next.parse().unwrap_or(default);
+            }
+        } else if let Some(val) = arg.strip_prefix("--depth=") {
+            depth = val.parse().unwrap_or(default);
+        } else {
+            remaining.push(arg.clone());
+        }
+    }
+    (depth, remaining)
+}
+
+/// Group file paths by their first `depth` path components.
+/// Root-level files (no `/`) are collected under `.`.
+fn group_by_depth(files: &[&str], depth: usize) -> Vec<(String, usize)> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for file in files {
+        let components: Vec<&str> = file.split('/').collect();
+        let prefix = if components.len() <= depth {
+            if components.len() == 1 {
+                ".".to_string()
+            } else {
+                format!("{}/", components.join("/"))
+            }
+        } else {
+            format!("{}/", components[..depth].join("/"))
+        };
+        *counts.entry(prefix).or_default() += 1;
+    }
+    let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sorted
+}
+
+/// `git ls-files` → compact tree grouped by directory (depth configurable via `--depth N`).
+///
+/// Passes through unchanged when `-z`, `--format`, `-v`, or `--debug` are present
+/// (scripting / custom-format invocations where transformation would break caller).
+fn run_ls_files(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let (depth, git_args) = parse_depth_arg(args, 1);
+
+    // Flags that mean the caller is scripting or wants raw output
+    let passthrough = git_args.iter().any(|a| {
+        a == "-z"
+            || a == "--format"
+            || a.starts_with("--format=")
+            || a == "-v"
+            || a == "--debug"
+    });
+
+    if passthrough {
+        let status = git_cmd(global_args)
+            .arg("ls-files")
+            .args(&git_args)
+            .status()
+            .context("Failed to run git ls-files")?;
+        let args_str = git_args.join(" ");
+        timer.track_passthrough(
+            &format!("git ls-files {}", args_str),
+            &format!("rtk git ls-files {} (passthrough)", args_str),
+        );
+        return Ok(exit_code_from_status(&status, "git ls-files"));
+    }
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("ls-files");
+    for arg in &git_args {
+        cmd.arg(arg);
+    }
+    let result = exec_capture(&mut cmd).context("Failed to run git ls-files")?;
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        return Ok(result.exit_code);
+    }
+
+    let files: Vec<&str> = result.stdout.lines().filter(|l| !l.is_empty()).collect();
+    let total = files.len();
+
+    if total == 0 {
+        let msg = "(no tracked files)";
+        println!("{}", msg);
+        timer.track(
+            &format!("git ls-files {}", git_args.join(" ")),
+            &format!("rtk git ls-files {}", git_args.join(" ")),
+            &result.stdout,
+            msg,
+        );
+        return Ok(0);
+    }
+
+    let grouped = group_by_depth(&files, depth);
+    let mut output_lines: Vec<String> = grouped
+        .iter()
+        .map(|(prefix, count)| format!("  {:<45} ({} files)", prefix, count))
+        .collect();
+    output_lines.push(format!("\n[total: {} tracked files — depth={}]", total, depth));
+    let output = output_lines.join("\n");
+
+    if verbose > 0 {
+        eprintln!("git ls-files: {} files, grouped at depth {}", total, depth);
+    }
+    println!("{}", output);
+    timer.track(
+        &format!("git ls-files {}", git_args.join(" ")),
+        &format!("rtk git ls-files {}", git_args.join(" ")),
+        &result.stdout,
+        &output,
+    );
+    Ok(0)
+}
+
+/// `git rm` → `ok removed N files`.
+/// `--dry-run`/`-n`: always passthrough (caller needs to see what would be removed).
+fn run_rm(args: &[String], _verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let is_dry_run = args.iter().any(|a| a == "--dry-run" || a == "-n");
+
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("rm");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if is_dry_run {
+        let status = cmd.status().context("Failed to run git rm")?;
+        timer.track_passthrough(
+            &format!("git rm {}", args.join(" ")),
+            &format!("rtk git rm {} (dry-run passthrough)", args.join(" ")),
+        );
+        return Ok(exit_code_from_status(&status, "git rm"));
+    }
+
+    let result = exec_capture(&mut cmd).context("Failed to run git rm")?;
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
+
+    if result.success() {
+        let count = result
+            .stdout
+            .lines()
+            .filter(|l| l.trim_start().starts_with("rm '"))
+            .count();
+        let compact = match count {
+            0 => "ok (nothing removed)".to_string(),
+            1 => "ok removed 1 file".to_string(),
+            n => format!("ok removed {} files", n),
+        };
+        println!("{}", compact);
+        timer.track(
+            &format!("git rm {}", args.join(" ")),
+            &format!("rtk git rm {}", args.join(" ")),
+            &raw,
+            &compact,
+        );
+    } else {
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        if !result.stdout.trim().is_empty() {
+            eprint!("{}", result.stdout);
+        }
+        return Ok(result.exit_code);
+    }
+    Ok(0)
+}
+
+/// `git tag` → compact listing with dates and annotated-tag messages.
+/// Annotated-tag creation (`-a`, `-s`) or deletion (`-d`) passthroughs with stdin inherited.
+fn run_tag(args: &[String], _verbose: u8, global_args: &[String]) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    // Create / delete / verify / sign → interactive (may open $EDITOR for annotated tags)
+    let is_write_op = args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-a" | "--annotate" | "-s" | "--sign" | "-f" | "--force" | "-d" | "--delete"
+                | "-v" | "--verify"
+        )
+    });
+
+    // User supplied their own --format → pass through verbatim
+    let has_user_format = args
+        .iter()
+        .any(|a| a == "--format" || a.starts_with("--format="));
+
+    if is_write_op || has_user_format {
+        let output = git_cmd(global_args)
+            .arg("tag")
+            .args(args)
+            .stdin(Stdio::inherit())
+            .output()
+            .context("Failed to run git tag")?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = exit_code_from_output(&output, "git tag");
+        if !stdout.trim().is_empty() {
+            print!("{}", stdout);
+        }
+        if !stderr.trim().is_empty() {
+            eprint!("{}", stderr);
+        }
+        timer.track_passthrough(
+            &format!("git tag {}", args.join(" ")),
+            &format!("rtk git tag {} (passthrough)", args.join(" ")),
+        );
+        return Ok(exit_code);
+    }
+
+    // Listing mode: enrich with dates and annotated-tag messages.
+    // %(objecttype) == "tag"   → annotated tag object
+    // %(objecttype) == "commit" → lightweight tag pointing directly at a commit
+    let fmt = "%(refname:short)|%(creatordate:short)|%(objecttype)|%(contents:subject)";
+    let mut cmd = git_cmd(global_args);
+    cmd.args(["tag", "--format", fmt, "--sort=-version:refname"]);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    let result = exec_capture(&mut cmd).context("Failed to run git tag")?;
+
+    if !result.success() {
+        if !result.stderr.trim().is_empty() {
+            eprint!("{}", result.stderr);
+        }
+        return Ok(result.exit_code);
+    }
+
+    let lines: Vec<&str> = result.stdout.lines().filter(|l| !l.is_empty()).collect();
+    let total = lines.len();
+
+    if total == 0 {
+        let msg = "(no tags)";
+        println!("{}", msg);
+        timer.track(
+            &format!("git tag {}", args.join(" ")),
+            "rtk git tag",
+            &result.stdout,
+            msg,
+        );
+        return Ok(0);
+    }
+
+    const MAX_SHOWN: usize = 20;
+    let mut output_lines: Vec<String> = Vec::new();
+    for line in lines.iter().take(MAX_SHOWN) {
+        // Format: name|date|objecttype|subject
+        let parts: Vec<&str> = line.splitn(4, '|').collect();
+        if parts.len() == 4 {
+            let (name, date, obj_type, subject) = (parts[0], parts[1], parts[2], parts[3].trim());
+            if obj_type == "tag" && !subject.is_empty() {
+                output_lines.push(format!("  {}  {}  ({})", name, date, subject));
+            } else if obj_type == "tag" {
+                output_lines.push(format!("  {}  {}  (annotated)", name, date));
+            } else {
+                output_lines.push(format!("  {}  {}", name, date));
+            }
+        } else if !line.trim().is_empty() {
+            output_lines.push(format!("  {}", line.trim()));
+        }
+    }
+    if total > MAX_SHOWN {
+        output_lines.push(format!(
+            "  ... and {} more — use `git tag -l '<pattern>'` to filter",
+            total - MAX_SHOWN
+        ));
+    }
+
+    let output = output_lines.join("\n");
+    println!("{}", output);
+    timer.track(
+        &format!("git tag {}", args.join(" ")),
+        &format!("rtk git tag {}", args.join(" ")),
+        &result.stdout,
+        &output,
+    );
+    Ok(0)
+}
+
+/// Shared handler for write-op subcommands that mainly benefit from ANSI stripping:
+/// `cherry-pick`, `rebase`, `merge`, `checkout`.
+///
+/// Uses `stdin(Stdio::inherit())` so interactive flows (e.g. `rebase -i` opening
+/// `$EDITOR`) are not broken. Propagates the original exit code so conflict
+/// indicators (exit 1) reach the calling agent.
+fn run_ansi_strip(
+    subcmd: &str,
+    args: &[String],
+    _verbose: u8,
+    global_args: &[String],
+) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let output = git_cmd(global_args)
+        .arg(subcmd)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .output()
+        .with_context(|| format!("Failed to run git {}", subcmd))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exit_code = exit_code_from_output(&output, &format!("git {}", subcmd));
+    let raw = format!("{}{}", stdout, stderr);
+
+    let clean_stdout = crate::core::utils::strip_ansi(&stdout);
+    let clean_stderr = crate::core::utils::strip_ansi(&stderr);
+
+    if !clean_stdout.trim().is_empty() {
+        print!("{}", clean_stdout);
+    }
+    if !clean_stderr.trim().is_empty() {
+        eprint!("{}", clean_stderr);
+    }
+
+    let filtered = format!("{}{}", clean_stdout, clean_stderr);
+    timer.track(
+        &format!("git {} {}", subcmd, args.join(" ")),
+        &format!("rtk git {} {}", subcmd, args.join(" ")),
+        &raw,
+        &filtered,
+    );
+    Ok(exit_code)
+}
+
 pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -1763,6 +2115,99 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- ls-files helpers ---
+
+    #[test]
+    fn test_group_by_depth_1() {
+        let files = vec![
+            "services/auth/main.rs",
+            "services/auth/lib.rs",
+            "services/gateway/main.go",
+            "packages/ui/index.tsx",
+            "README.md",
+        ];
+        let grouped = group_by_depth(&files, 1);
+        // sorted by count desc
+        let prefixes: Vec<&str> = grouped.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(prefixes.contains(&"services/"));
+        assert!(prefixes.contains(&"packages/"));
+        assert!(prefixes.contains(&"."));
+        // all three services/* files collapse to services/ at depth=1
+        let svc = grouped.iter().find(|(p, _)| p == "services/").unwrap();
+        assert_eq!(svc.1, 3);
+    }
+
+    #[test]
+    fn test_group_by_depth_2() {
+        let files = vec![
+            "services/auth/main.rs",
+            "services/auth/lib.rs",
+            "services/gateway/main.go",
+        ];
+        let grouped = group_by_depth(&files, 2);
+        let auth = grouped.iter().find(|(p, _)| p == "services/auth/");
+        let gw = grouped.iter().find(|(p, _)| p == "services/gateway/");
+        assert!(auth.is_some());
+        assert!(gw.is_some());
+        assert_eq!(auth.unwrap().1, 2);
+        assert_eq!(gw.unwrap().1, 1);
+    }
+
+    #[test]
+    fn test_group_by_depth_root_files() {
+        let files = vec!["README.md", "Cargo.toml"];
+        let grouped = group_by_depth(&files, 1);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].0, ".");
+        assert_eq!(grouped[0].1, 2);
+    }
+
+    #[test]
+    fn test_parse_depth_arg_default() {
+        let args: Vec<String> = vec!["--others".into()];
+        let (depth, remaining) = parse_depth_arg(&args, 1);
+        assert_eq!(depth, 1);
+        assert_eq!(remaining, vec!["--others"]);
+    }
+
+    #[test]
+    fn test_parse_depth_arg_two_token() {
+        let args: Vec<String> = vec!["--depth".into(), "3".into(), "--others".into()];
+        let (depth, remaining) = parse_depth_arg(&args, 1);
+        assert_eq!(depth, 3);
+        assert_eq!(remaining, vec!["--others"]);
+    }
+
+    #[test]
+    fn test_parse_depth_arg_equals() {
+        let args: Vec<String> = vec!["--depth=2".into(), "--cached".into()];
+        let (depth, remaining) = parse_depth_arg(&args, 1);
+        assert_eq!(depth, 2);
+        assert_eq!(remaining, vec!["--cached"]);
+    }
+
+    // --- run_rm output counting ---
+
+    #[test]
+    fn test_rm_count_lines() {
+        let output = "rm 'src/foo.rs'\nrm 'src/bar.rs'\nrm 'src/baz.rs'\n";
+        let count = output
+            .lines()
+            .filter(|l| l.trim_start().starts_with("rm '"))
+            .count();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_rm_count_zero() {
+        let output = "Already removed.\n";
+        let count = output
+            .lines()
+            .filter(|l| l.trim_start().starts_with("rm '"))
+            .count();
+        assert_eq!(count, 0);
+    }
 
     #[test]
     fn test_git_cmd_no_global_args() {
