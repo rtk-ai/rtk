@@ -310,7 +310,27 @@ rtk init -g --hook-only     # Hook only, no RTK.md
 rtk init --show             # Verify installation
 ```
 
-After install, **restart Claude Code**.
+After install, **restart your agent** (Claude Code, OpenCode, etc.).
+
+### OpenCode
+
+OpenCode uses a TypeScript plugin instead of the Bash hook used by Claude Code:
+
+```bash
+# Install RTK for OpenCode
+rtk init -g --opencode
+
+# Verify the plugin was installed
+rtk init --show
+```
+
+What this does:
+
+- installs the plugin to `~/.config/opencode/plugins/rtk.ts`
+- intercepts `tool.execute.before` and rewrites shell commands through `rtk rewrite`
+- leaves the command unchanged if rewrite fails, so OpenCode still runs normally
+
+After setup, restart OpenCode and run a shell command like `git status` or `cargo test`. RTK will rewrite it before execution and return the filtered output.
 
 ## Windows
 
