@@ -942,6 +942,12 @@ enum ComposeCommands {
 
 #[derive(Debug, Subcommand)]
 enum KubectlCommands {
+    /// Get Kubernetes resources (compact for pods/services)
+    Get {
+        /// kubectl get arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// List pods
     Pods {
         #[arg(short, long)]
@@ -1724,6 +1730,7 @@ fn run_cli() -> Result<i32> {
         },
 
         Commands::Kubectl { command } => match command {
+            KubectlCommands::Get { args } => container::run_kubectl_get(&args, cli.verbose)?,
             KubectlCommands::Pods { namespace, all } => {
                 let mut args: Vec<String> = Vec::new();
                 if all {
@@ -2637,6 +2644,18 @@ mod tests {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
             }
             _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_kubectl_get_alias() {
+        let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
+
+        match cli.command {
+            Commands::Kubectl {
+                command: KubectlCommands::Get { args },
+            } => assert_eq!(args, vec!["pods", "-n", "default"]),
+            _ => panic!("Expected Kubectl Get command"),
         }
     }
 
