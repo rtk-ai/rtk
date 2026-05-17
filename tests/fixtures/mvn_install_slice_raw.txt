@@ -1,0 +1,39 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] -----------------------< com.example:myapp >------------------------
+[INFO] Building myapp 1.0.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- compiler:3.8.1:compile (default-compile) @ myapp ---
+[INFO] Compiling 12 source files to /path/to/project/target/classes
+[WARNING] /path/to/project/src/main/java/com/example/app/Foo.java: Some input files use or override a deprecated API.
+[WARNING] /path/to/project/src/main/java/com/example/app/Bar.java: Some input files use unchecked or unsafe operations.
+[INFO]
+[INFO] --- surefire:2.22.2:test (default-test) @ myapp ---
+[INFO] Running com.example.app.FooServiceTest
+Jan 15, 2026 10:30:00 AM com.example.app.FooService execute
+SEVERE: null
+com.example.app.AppException: input must not be null
+	at com.example.app.FooService.execute(FooService.java:36)
+	at org.junit.jupiter.api.Assertions.assertThrows(Assertions.java:3007)
+	at sun.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+	at java.util.ArrayList.forEach(ArrayList.java:1259)
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 2.213 s - in com.example.app.FooServiceTest
+[INFO]
+[INFO] Results:
+[INFO]
+[INFO] Tests run: 10, Failures: 0, Errors: 0, Skipped: 0
+[INFO]
+[INFO] --- jar:3.4.0:jar (default-jar) @ myapp ---
+[INFO] Building jar: /path/to/project/target/myapp-1.0.0.jar
+[INFO]
+[INFO] --- install:3.1.1:install (default-install) @ myapp ---
+[INFO] Installing /path/to/project/target/myapp-1.0.0.jar to /home/user/.m2/repository/com/example/myapp/1.0.0/myapp-1.0.0.jar
+[INFO] Installing /path/to/project/pom.xml to /home/user/.m2/repository/com/example/myapp/1.0.0/myapp-1.0.0.pom
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  49.550 s
+[INFO] Finished at: 2026-01-15T10:30:00Z
+[INFO] ------------------------------------------------------------------------

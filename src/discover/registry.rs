@@ -3072,6 +3072,135 @@ mod tests {
         );
     }
 
+    // --- Maven ---
+
+    #[test]
+    fn test_classify_mvn_test() {
+        assert!(matches!(
+            classify_command("mvn test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_integration_test() {
+        assert!(matches!(
+            classify_command("mvn integration-test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_flags_before_goal() {
+        assert!(matches!(
+            classify_command("mvn -B -DskipTests=false clean install"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvnw_wrapper() {
+        assert!(matches!(
+            classify_command("./mvnw verify"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvnw_cmd_wrapper() {
+        assert!(matches!(
+            classify_command("mvnw.cmd package"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_clean_bypassed() {
+        // `clean` deliberately excluded from the alternation to avoid 0-overhead fork.
+        assert!(!matches!(
+            classify_command("mvn clean"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_site_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn site"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_plugin_goal_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn dependency:tree"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_bare_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_version_bypassed() {
+        assert!(!matches!(
+            classify_command("mvn --version"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_mvn_clean_install() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn -B clean install", &[]),
+            Some("rtk mvn -B clean install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvnw_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("./mvnw test", &[]),
+            Some("rtk mvn test".into())
+        );
+    }
+
     // --- Compound operator edge cases ---
 
     #[test]

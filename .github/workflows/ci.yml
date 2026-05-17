@@ -64,6 +64,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all
 
+  mvn-savings-tests:
+    name: Maven full-fixture savings assertions
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ignore-gated savings tests on full gzipped fixtures
+        run: cargo test --all -- --ignored
+
   security:
     name: Security Scan
     needs: clippy

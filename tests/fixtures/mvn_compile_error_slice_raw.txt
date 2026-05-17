@@ -1,0 +1,25 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] -----------------------< com.example:myapp >------------------------
+[INFO] Building myapp 1.0.0
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- compiler:3.8.1:compile (default-compile) @ myapp ---
+[INFO] Changes detected - recompiling the module!
+[INFO] Compiling 12 source files to /path/to/project/target/classes
+[INFO] -------------------------------------------------------------
+[ERROR] COMPILATION ERROR :
+[INFO] -------------------------------------------------------------
+[ERROR] /path/to/project/src/main/java/com/example/app/Foo.java:[42,5] cannot find symbol
+  symbol:   variable bar
+  location: class Foo
+[ERROR] /path/to/project/src/main/java/com/example/app/Bar.java:[10,5] ';' expected
+[INFO] 2 errors
+[INFO] -------------------------------------------------------------
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  4.567 s
+[INFO] Finished at: 2026-01-15T10:30:00Z
+[INFO] ------------------------------------------------------------------------
