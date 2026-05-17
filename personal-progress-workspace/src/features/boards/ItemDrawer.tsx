@@ -30,6 +30,7 @@ export function ItemDrawer({ user, workspaceId, board, item, onClose, onSubmit }
       </header>
       {defaultColumn ? (
         <ItemForm
+          columns={board.columns}
           initialItem={item}
           defaults={{
             workspaceId,
