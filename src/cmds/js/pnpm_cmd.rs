@@ -414,12 +414,7 @@ fn run_install(args: &[String], verbose: u8) -> Result<i32> {
 
     println!("{}", filtered);
 
-    timer.track(
-        &format!("pnpm install"),
-        &format!("rtk pnpm install"),
-        &combined,
-        &filtered,
-    );
+    timer.track("pnpm install", "rtk pnpm install", &combined, &filtered);
 
     Ok(0)
 }

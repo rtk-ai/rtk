@@ -103,10 +103,7 @@ impl BlockHandler for CargoBuildHandler {
             self.finished_line = Some(trimmed.to_string());
             return true;
         }
-        if line.starts_with("warning:")
-            && line.contains("generated")
-            && line.contains("warning")
-        {
+        if line.starts_with("warning:") && line.contains("generated") && line.contains("warning") {
             return true;
         }
         if (line.starts_with("error:") || line.starts_with("error["))
@@ -1133,7 +1130,11 @@ fn filter_cargo_clippy(output: &str) -> String {
                     line.to_string()
                 }
             } else {
-                let prefix = if is_error_line { "error: " } else { "warning: " };
+                let prefix = if is_error_line {
+                    "error: "
+                } else {
+                    "warning: "
+                };
                 line.strip_prefix(prefix).unwrap_or(line).to_string()
             };
         } else if line.trim_start().starts_with("--> ") {
@@ -1194,7 +1195,7 @@ fn filter_cargo_clippy(output: &str) -> String {
 
     // Sort warning rules by frequency
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
-    rule_counts.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    rule_counts.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
     for (rule, locations) in rule_counts.iter().take(15) {
         result.push_str(&format!("  {} ({}x)\n", rule, locations.len()));
@@ -1632,10 +1633,22 @@ error[E0308]: mismatched types
 error: aborting due to 1 previous error
 "#;
         let result = filter_cargo_clippy(output);
-        assert!(result.contains("cargo clippy: 1 errors, 0 warnings"), "got: {}", result);
-        assert!(result.contains("error[E0308]: mismatched types"), "got: {}", result);
+        assert!(
+            result.contains("cargo clippy: 1 errors, 0 warnings"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("error[E0308]: mismatched types"),
+            "got: {}",
+            result
+        );
         assert!(result.contains("src/main.rs:10:5"), "got: {}", result);
-        assert!(result.contains("expected `i32`, found `&str`"), "got: {}", result);
+        assert!(
+            result.contains("expected `i32`, found `&str`"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]

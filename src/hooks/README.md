@@ -19,7 +19,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 
 ## Installation Modes
 
-`rtk init` supports 6 distinct installation flows:
+`rtk init` supports these installation flows:
 
 | Mode | Command | Creates | Patches |
 |------|---------|---------|---------|
@@ -30,6 +30,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
+| Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
 
 
 ## Integrity Verification

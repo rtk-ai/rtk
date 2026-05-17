@@ -83,17 +83,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let user_args = args[start_idx..].to_vec();
 
     match formatter.as_str() {
-        "black" => {
-            // Inject --check if not present for check mode
-            if !user_args.iter().any(|a| a == "--check" || a == "--diff") {
-                cmd.arg("--check");
-            }
+        // Inject --check if not present for check mode
+        "black" if !user_args.iter().any(|a| a == "--check" || a == "--diff") => {
+            cmd.arg("--check");
         }
-        "ruff" => {
-            // Add "format" subcommand if not present
-            if user_args.is_empty() || !user_args[0].starts_with("format") {
-                cmd.arg("format");
-            }
+        // Add "format" subcommand if not present
+        "ruff" if user_args.is_empty() || !user_args[0].starts_with("format") => {
+            cmd.arg("format");
         }
         _ => {}
     }
