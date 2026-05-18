@@ -9,3 +9,4 @@
 - `curl_cmd.rs` truncates long responses, saves full output to file for recovery
 - `wget_cmd.rs` wraps wget with output filtering
 - `psql_cmd.rs` filters PostgreSQL query output
+- `ssh_cmd.rs` — SSH output filter with three modes: JSON passthrough (preserves parseability), log filtering (keeps WARN/ERROR + 1-line context, suppresses INFO/DEBUG), plain-text truncation at 50 lines. Interactive sessions (no remote command) pass through to TTY unchanged. Prometheus metric output is not mistaken for log output (≥10% threshold guard).

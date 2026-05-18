@@ -1,0 +1,56 @@
+---
+source: src/cmds/cloud/ssh_cmd.rs
+assertion_line: 397
+expression: output
+---
+# HELP oneshield_access_log_flusher_chunks_appended_total RowBinary chunks appended to WAL by flusher
+# TYPE oneshield_access_log_flusher_chunks_appended_total counter
+oneshield_access_log_flusher_chunks_appended_total 0
+# HELP oneshield_access_log_flusher_rows_per_chunk Row count per flusher RowBinary chunk
+# TYPE oneshield_access_log_flusher_rows_per_chunk histogram
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="100"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="1000"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="4000"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="8000"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="16000"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="+Inf"} 0
+oneshield_access_log_flusher_rows_per_chunk_sum 0
+oneshield_access_log_flusher_rows_per_chunk_count 0
+# HELP oneshield_access_log_lag_seconds Seconds since oldest unshipped segment first_ts; 0 when fully caught up
+# TYPE oneshield_access_log_lag_seconds gauge
+oneshield_access_log_lag_seconds 646
+# HELP oneshield_access_log_position_segment_seq Current shipper position: segment sequence number
+# TYPE oneshield_access_log_position_segment_seq gauge
+oneshield_access_log_position_segment_seq 0
+# HELP oneshield_access_log_recovery_events_total WAL recovery events at startup (clean, tail_repaired, position_corrupt)
+# TYPE oneshield_access_log_recovery_events_total counter
+oneshield_access_log_recovery_events_total{kind="clean"} 1
+# HELP oneshield_access_log_ring_depth Rows currently buffered in lock-free ring (all shards combined)
+# TYPE oneshield_access_log_ring_depth gauge
+oneshield_access_log_ring_depth 0
+# HELP oneshield_access_log_ship_retries_total Number of CH insert retries by shipper (transient errors)
+# TYPE oneshield_access_log_ship_retries_total counter
+oneshield_access_log_ship_retries_total 0
+# HELP oneshield_access_log_shipped_bytes_total Raw RowBinary bytes shipped to ClickHouse
+# TYPE oneshield_access_log_shipped_bytes_total counter
+oneshield_access_log_shipped_bytes_total 0
+# HELP oneshield_access_log_shipped_rows_total Rows successfully inserted into ClickHouse by shipper
+# TYPE oneshield_access_log_shipped_rows_total counter
+oneshield_access_log_shipped_rows_total 0
+# HELP oneshield_access_log_wal_bytes_total Total bytes across all WAL segment files on disk
+# TYPE oneshield_access_log_wal_bytes_total gauge
+oneshield_access_log_wal_bytes_total 0
+# HELP oneshield_access_log_wal_corrupt_segments_total WAL segments quarantined due to unrecoverable CH insert error (truncated body or binary format mismatch)
+# TYPE oneshield_access_log_wal_corrupt_segments_total counter
+oneshield_access_log_wal_corrupt_segments_total 0
+# HELP oneshield_access_log_wal_fsync_errors_total Number of fsync errors on the active WAL segment
+# TYPE oneshield_access_log_wal_fsync_errors_total counter
+oneshield_access_log_wal_fsync_errors_total 0
+# HELP oneshield_access_log_wal_rotations_total Number of WAL segment rotations since startup
+# TYPE oneshield_access_log_wal_rotations_total counter
+oneshield_access_log_wal_rotations_total 0
+# HELP oneshield_access_log_wal_segments_count Number of sealed WAL segment files awaiting ship
+# TYPE oneshield_access_log_wal_segments_count gauge
+oneshield_access_log_wal_segments_count 646
+# HELP oneshield_active_connections Number of currently active connections
+... (50 more lines)

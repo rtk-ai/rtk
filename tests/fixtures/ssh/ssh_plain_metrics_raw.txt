@@ -1,0 +1,100 @@
+# HELP oneshield_access_log_flusher_chunks_appended_total RowBinary chunks appended to WAL by flusher
+# TYPE oneshield_access_log_flusher_chunks_appended_total counter
+oneshield_access_log_flusher_chunks_appended_total 0
+# HELP oneshield_access_log_flusher_rows_per_chunk Row count per flusher RowBinary chunk
+# TYPE oneshield_access_log_flusher_rows_per_chunk histogram
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="100"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="1000"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="4000"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="8000"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="16000"} 0
+oneshield_access_log_flusher_rows_per_chunk_bucket{le="+Inf"} 0
+oneshield_access_log_flusher_rows_per_chunk_sum 0
+oneshield_access_log_flusher_rows_per_chunk_count 0
+# HELP oneshield_access_log_lag_seconds Seconds since oldest unshipped segment first_ts; 0 when fully caught up
+# TYPE oneshield_access_log_lag_seconds gauge
+oneshield_access_log_lag_seconds 646
+# HELP oneshield_access_log_position_segment_seq Current shipper position: segment sequence number
+# TYPE oneshield_access_log_position_segment_seq gauge
+oneshield_access_log_position_segment_seq 0
+# HELP oneshield_access_log_recovery_events_total WAL recovery events at startup (clean, tail_repaired, position_corrupt)
+# TYPE oneshield_access_log_recovery_events_total counter
+oneshield_access_log_recovery_events_total{kind="clean"} 1
+# HELP oneshield_access_log_ring_depth Rows currently buffered in lock-free ring (all shards combined)
+# TYPE oneshield_access_log_ring_depth gauge
+oneshield_access_log_ring_depth 0
+# HELP oneshield_access_log_ship_retries_total Number of CH insert retries by shipper (transient errors)
+# TYPE oneshield_access_log_ship_retries_total counter
+oneshield_access_log_ship_retries_total 0
+# HELP oneshield_access_log_shipped_bytes_total Raw RowBinary bytes shipped to ClickHouse
+# TYPE oneshield_access_log_shipped_bytes_total counter
+oneshield_access_log_shipped_bytes_total 0
+# HELP oneshield_access_log_shipped_rows_total Rows successfully inserted into ClickHouse by shipper
+# TYPE oneshield_access_log_shipped_rows_total counter
+oneshield_access_log_shipped_rows_total 0
+# HELP oneshield_access_log_wal_bytes_total Total bytes across all WAL segment files on disk
+# TYPE oneshield_access_log_wal_bytes_total gauge
+oneshield_access_log_wal_bytes_total 0
+# HELP oneshield_access_log_wal_corrupt_segments_total WAL segments quarantined due to unrecoverable CH insert error (truncated body or binary format mismatch)
+# TYPE oneshield_access_log_wal_corrupt_segments_total counter
+oneshield_access_log_wal_corrupt_segments_total 0
+# HELP oneshield_access_log_wal_fsync_errors_total Number of fsync errors on the active WAL segment
+# TYPE oneshield_access_log_wal_fsync_errors_total counter
+oneshield_access_log_wal_fsync_errors_total 0
+# HELP oneshield_access_log_wal_rotations_total Number of WAL segment rotations since startup
+# TYPE oneshield_access_log_wal_rotations_total counter
+oneshield_access_log_wal_rotations_total 0
+# HELP oneshield_access_log_wal_segments_count Number of sealed WAL segment files awaiting ship
+# TYPE oneshield_access_log_wal_segments_count gauge
+oneshield_access_log_wal_segments_count 646
+# HELP oneshield_active_connections Number of currently active connections
+# TYPE oneshield_active_connections gauge
+oneshield_active_connections 0
+# HELP oneshield_autotune_disabled 1 when [autotune] enabled = false in server.toml; 0 when autotune is running
+# TYPE oneshield_autotune_disabled gauge
+oneshield_autotune_disabled 0
+# HELP oneshield_autotune_inflight_ratio Fleet-max sliding-window peak / current_max_inflight cap, scaled 0-100
+# TYPE oneshield_autotune_inflight_ratio gauge
+oneshield_autotune_inflight_ratio 0
+# HELP oneshield_autotune_recompute_lag_seconds Duration of the last autotune recompute cycle in seconds (integer)
+# TYPE oneshield_autotune_recompute_lag_seconds gauge
+oneshield_autotune_recompute_lag_seconds 0
+# HELP oneshield_build_info Static build information gauge (always 1)
+# TYPE oneshield_build_info gauge
+oneshield_build_info{commit="1150345",version="0.1.0"} 1
+# HELP oneshield_cache_bot_shield_coalesce_fanout Number of followers per leader broadcast (aggregated, no zone label)
+# TYPE oneshield_cache_bot_shield_coalesce_fanout histogram
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="1"} 0
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="2"} 0
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="5"} 0
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="10"} 0
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="25"} 0
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="50"} 0
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="100"} 0
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="250"} 0
+oneshield_cache_bot_shield_coalesce_fanout_bucket{le="+Inf"} 0
+oneshield_cache_bot_shield_coalesce_fanout_sum 0
+oneshield_cache_bot_shield_coalesce_fanout_count 0
+# HELP oneshield_cache_bot_shield_coalesce_leader_total Total shield coalesce leader elections (aggregated, no zone label)
+# TYPE oneshield_cache_bot_shield_coalesce_leader_total counter
+oneshield_cache_bot_shield_coalesce_leader_total 0
+# HELP oneshield_cache_bot_shield_key_normalized_total Total requests where bot shield rewrote the cache key (aggregated, no zone label)
+# TYPE oneshield_cache_bot_shield_key_normalized_total counter
+oneshield_cache_bot_shield_key_normalized_total 0
+# HELP oneshield_cache_bot_shield_shadow_would_hit_total Shadow mode: normalised key would have produced a HIT (aggregated, no zone label)
+# TYPE oneshield_cache_bot_shield_shadow_would_hit_total counter
+oneshield_cache_bot_shield_shadow_would_hit_total 0
+# HELP oneshield_challenge_success_rate Rolling challenge success rate (pass / total, aggregated, no zone label)
+# TYPE oneshield_challenge_success_rate gauge
+oneshield_challenge_success_rate 0
+# HELP oneshield_circuit_breaker_state Fleet-aggregate circuit-breaker count per state (closed|half_open|open)
+# TYPE oneshield_circuit_breaker_state gauge
+oneshield_circuit_breaker_state{state="closed"} 4
+# HELP oneshield_clickhouse_rum_batches_failed_total RUM batch inserts that failed and were dropped
+# TYPE oneshield_clickhouse_rum_batches_failed_total counter
+oneshield_clickhouse_rum_batches_failed_total 0
+# HELP oneshield_clickhouse_rum_rows_dropped_total RUM rows dropped due to channel full or closed
+# TYPE oneshield_clickhouse_rum_rows_dropped_total counter
+oneshield_clickhouse_rum_rows_dropped_total 0
+# HELP oneshield_compression_bytes_saved Total bytes saved by compression (aggregated, no zone label)
+# TYPE oneshield_compression_bytes_saved counter

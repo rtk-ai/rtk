@@ -41,6 +41,7 @@ libc = "0.2"
 toml = "0.8"
 
 [dev-dependencies]
+insta = "1"
 
 [profile.release]
 opt-level = 3

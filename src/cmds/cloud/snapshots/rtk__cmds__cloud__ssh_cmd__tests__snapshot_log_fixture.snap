@@ -1,0 +1,11 @@
+---
+source: src/cmds/cloud/ssh_cmd.rs
+assertion_line: 390
+expression: output
+---
+2026-05-18T01:00:03Z WARN  oneshield_security::rate_limit ip=9.10.11.12 req_count=480 threshold=500
+2026-05-18T01:00:06Z ERROR oneshield_lb::health backend=10.0.0.2:80 status=connection_refused
+2026-05-18T01:00:10Z WARN  oneshield_lb::health backend=10.0.0.2:80 retry=1 latency_ms=5000
+2026-05-18T01:00:14Z ERROR oneshield_metrics::clickhouse send_batch failed: connection timeout after 5000ms
+2026-05-18T01:00:18Z WARN  oneshield_waf::engine rule_id=942100 match=true action=log zone=hoaban.food
+... (46 INFO/DEBUG lines suppressed)

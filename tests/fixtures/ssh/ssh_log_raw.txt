@@ -1,0 +1,51 @@
+2026-05-18T01:00:00Z INFO  oneshield_proxy::proxy starting request pipeline
+2026-05-18T01:00:00Z INFO  oneshield_core::zone loaded 42 zones
+2026-05-18T01:00:01Z INFO  oneshield_proxy::proxy request_filter zone=who.io.vn
+2026-05-18T01:00:01Z INFO  oneshield_security::ip ip=1.2.3.4 action=allow
+2026-05-18T01:00:01Z INFO  oneshield_cache::cache cache_hit=true ttl=300
+2026-05-18T01:00:02Z INFO  oneshield_proxy::proxy request_filter zone=hoaban.food
+2026-05-18T01:00:02Z INFO  oneshield_security::ip ip=5.6.7.8 action=allow
+2026-05-18T01:00:02Z INFO  oneshield_cache::cache cache_hit=false
+2026-05-18T01:00:03Z WARN  oneshield_security::rate_limit ip=9.10.11.12 req_count=480 threshold=500
+2026-05-18T01:00:03Z INFO  oneshield_proxy::proxy upstream_connect backend=10.0.0.1:80
+2026-05-18T01:00:04Z INFO  oneshield_proxy::proxy request_filter zone=findnear.vn
+2026-05-18T01:00:04Z INFO  oneshield_security::ip ip=13.14.15.16 action=allow
+2026-05-18T01:00:04Z INFO  oneshield_cache::cache cache_hit=true ttl=60
+2026-05-18T01:00:05Z INFO  oneshield_proxy::proxy request_filter zone=who.io.vn
+2026-05-18T01:00:05Z INFO  oneshield_security::waf rule_eval=ok phase=1
+2026-05-18T01:00:06Z ERROR oneshield_lb::health backend=10.0.0.2:80 status=connection_refused
+2026-05-18T01:00:06Z INFO  oneshield_lb::balancer failover to backend=10.0.0.3:80
+2026-05-18T01:00:07Z INFO  oneshield_proxy::proxy request_filter zone=hoaban.food
+2026-05-18T01:00:07Z INFO  oneshield_security::geo country=VN action=allow
+2026-05-18T01:00:08Z INFO  oneshield_cache::cache cache_hit=true ttl=300
+2026-05-18T01:00:09Z INFO  oneshield_proxy::proxy request_filter zone=findnear.vn
+2026-05-18T01:00:09Z INFO  oneshield_security::ip ip=17.18.19.20 action=allow
+2026-05-18T01:00:10Z WARN  oneshield_lb::health backend=10.0.0.2:80 retry=1 latency_ms=5000
+2026-05-18T01:00:10Z INFO  oneshield_proxy::proxy upstream_connect backend=10.0.0.3:80
+2026-05-18T01:00:11Z INFO  oneshield_proxy::proxy request_filter zone=who.io.vn
+2026-05-18T01:00:11Z INFO  oneshield_security::rate_limit ip=21.22.23.24 req_count=10
+2026-05-18T01:00:12Z INFO  oneshield_cache::cache cache_hit=false
+2026-05-18T01:00:12Z INFO  oneshield_proxy::proxy upstream_connect backend=10.0.0.1:80
+2026-05-18T01:00:13Z INFO  oneshield_proxy::proxy request_filter zone=hoaban.food
+2026-05-18T01:00:13Z INFO  oneshield_security::waf rule_eval=ok phase=2
+2026-05-18T01:00:14Z ERROR oneshield_metrics::clickhouse send_batch failed: connection timeout after 5000ms
+2026-05-18T01:00:14Z INFO  oneshield_metrics::clickhouse retry scheduled in 10s
+2026-05-18T01:00:15Z INFO  oneshield_proxy::proxy request_filter zone=findnear.vn
+2026-05-18T01:00:15Z INFO  oneshield_security::ip ip=25.26.27.28 action=allow
+2026-05-18T01:00:16Z INFO  oneshield_cache::cache cache_hit=true ttl=120
+2026-05-18T01:00:17Z INFO  oneshield_proxy::proxy request_filter zone=who.io.vn
+2026-05-18T01:00:17Z INFO  oneshield_security::geo country=US action=allow
+2026-05-18T01:00:18Z WARN  oneshield_waf::engine rule_id=942100 match=true action=log zone=hoaban.food
+2026-05-18T01:00:18Z INFO  oneshield_proxy::proxy upstream_response status=200
+2026-05-18T01:00:19Z INFO  oneshield_proxy::proxy request_filter zone=findnear.vn
+2026-05-18T01:00:19Z INFO  oneshield_security::ip ip=29.30.31.32 action=allow
+2026-05-18T01:00:20Z INFO  oneshield_cache::cache cache_hit=true ttl=300
+2026-05-18T01:00:21Z INFO  oneshield_proxy::proxy request_filter zone=who.io.vn
+2026-05-18T01:00:21Z INFO  oneshield_security::rate_limit ip=33.34.35.36 req_count=5
+2026-05-18T01:00:22Z INFO  oneshield_proxy::proxy upstream_connect backend=10.0.0.1:80
+2026-05-18T01:00:23Z INFO  oneshield_proxy::proxy request_filter zone=hoaban.food
+2026-05-18T01:00:24Z INFO  oneshield_security::waf rule_eval=ok phase=1
+2026-05-18T01:00:25Z INFO  oneshield_proxy::proxy request_filter zone=findnear.vn
+2026-05-18T01:00:25Z INFO  oneshield_security::ip ip=37.38.39.40 action=allow
+2026-05-18T01:00:26Z INFO  oneshield_cache::cache cache_hit=false
+2026-05-18T01:00:27Z INFO  oneshield_proxy::proxy upstream_connect backend=10.0.0.3:80
