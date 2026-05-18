@@ -9,8 +9,21 @@ type BashToolCallEvent = {
   input: { command: string };
 };
 
+type ExtensionContext = {
+  ui: {
+    notify(message: string, type?: "info" | "warning" | "error"): void;
+  };
+};
+
 type ExtensionAPI = {
   setLabel(label: string): void;
+  on(
+    event: "session_start",
+    handler: (
+      event: unknown,
+      ctx: ExtensionContext,
+    ) => Promise<void> | void,
+  ): void;
   on(
     event: "tool_call",
     handler: (
@@ -43,16 +56,10 @@ async function rewriteWithRtk(command: string): Promise<RewriteDecision> {
   switch (exitCode) {
     case 0:
     case 3:
-      if (!stdout) {
+      if (!stdout || stdout === command) {
         return { kind: "skip" };
       }
-      return stdout !== command
-        ? { kind: "rewrite", rewritten: stdout }
-        : { kind: "skip" };
-    case 1:
-      return { kind: "skip" };
-    case 2:
-      return { kind: "skip" };
+      return { kind: "rewrite", rewritten: stdout };
     default:
       return { kind: "skip" };
   }
@@ -63,12 +70,15 @@ export default function rtkOmpExtension(pi: ExtensionAPI) {
 
   const hasRtk = Boolean(Bun.which("rtk"));
 
+  if (!hasRtk) {
+    pi.on("session_start", (_event, ctx) => {
+      ctx.ui.notify("RTK extension disabled: rtk binary not found in PATH.", "warning");
+    });
+    return;
+  }
+
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "bash") {
-      return;
-    }
-
-    if (!hasRtk) {
       return;
     }
 

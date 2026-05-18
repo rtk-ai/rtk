@@ -1759,81 +1759,38 @@ fn omp_extension_matches_stock(existing: &str) -> bool {
     existing.trim() == OMP_EXTENSION.trim()
 }
 
-fn omp_extension_path(base_dir: &Path, global: bool) -> PathBuf {
-    if global {
-        base_dir.join(OMP_GLOBAL_EXTENSION_PATH)
-    } else {
-        base_dir.join(OMP_PROJECT_EXTENSION_PATH)
-    }
-}
-
-fn install_omp_extension_file(extension_path: &Path, ctx: InitContext) -> Result<bool> {
-    let InitContext { verbose, dry_run } = ctx;
-    let existing = if extension_path.exists() {
-        fs::read_to_string(extension_path).with_context(|| {
-            format!("Failed to read OMP extension: {}", extension_path.display())
-        })?
-    } else {
-        String::new()
-    };
-
-    if omp_extension_matches_stock(&existing) {
-        return Ok(false);
-    }
-    if omp_extension_contains_rtk(&existing) {
-        anyhow::bail!(
-            "OMP extension at {} contains RTK content that does not match the stock extension. Update or remove the file manually, then re-run the command.",
-            extension_path.display()
-        );
-    }
-    if !existing.trim().is_empty() {
-        anyhow::bail!(
-            "OMP extension file at {} already exists. Move, merge, or delete it manually, then re-run the command.",
-            extension_path.display()
-        );
-    }
-
-    if dry_run {
-        println!(
-            "[dry-run] would create OMP extension: {}",
-            extension_path.display()
-        );
-        return Ok(true);
-    }
-
-    if let Some(parent) = extension_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
-
-    atomic_write(extension_path, OMP_EXTENSION).with_context(|| {
-        format!(
-            "Failed to write OMP extension: {}",
-            extension_path.display()
-        )
-    })?;
-    if verbose > 0 {
-        eprintln!("Wrote {}", extension_path.display());
-    }
-
-    Ok(true)
-}
-
-pub fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
+fn resolve_omp_extension_path(global: bool) -> Result<PathBuf> {
     let base_dir = if global {
         dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?
     } else {
         std::env::current_dir()?
     };
-    run_omp_mode_at(&base_dir, global, ctx)
+
+    Ok(if global {
+        base_dir.join(OMP_GLOBAL_EXTENSION_PATH)
+    } else {
+        base_dir.join(OMP_PROJECT_EXTENSION_PATH)
+    })
 }
 
-fn run_omp_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+fn install_omp_extension_file(extension_path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { dry_run, .. } = ctx;
-    let extension_path = omp_extension_path(base_dir, global);
+    if !dry_run {
+        if let Some(parent) = extension_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+    }
+
+    write_if_changed(extension_path, OMP_EXTENSION, "OMP extension", ctx)
+}
+
+pub fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let extension_path = resolve_omp_extension_path(global)?;
     let installed = install_omp_extension_file(&extension_path, ctx)?;
 
     if dry_run {
@@ -1860,12 +1817,7 @@ fn run_omp_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()
 
 pub fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
-    let base_dir = if global {
-        dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?
-    } else {
-        std::env::current_dir()?
-    };
-    let extension_path = omp_extension_path(&base_dir, global);
+    let extension_path = resolve_omp_extension_path(global)?;
 
     if !extension_path.exists() {
         println!("RTK was not installed for Oh My Pi (nothing to remove)");
@@ -1935,10 +1887,8 @@ fn print_omp_extension_status(label: &str, extension_path: &Path) -> Result<()> 
 }
 
 fn show_omp_config() -> Result<()> {
-    let home = dirs::home_dir().context("Cannot determine home directory. Is $HOME set?")?;
-    let cwd = std::env::current_dir()?;
-    let global_extension = omp_extension_path(&home, true);
-    let project_extension = omp_extension_path(&cwd, false);
+    let global_extension = resolve_omp_extension_path(true)?;
+    let project_extension = resolve_omp_extension_path(false)?;
 
     println!("rtk Configuration (Oh My Pi):\n");
     print_omp_extension_status("Global extension", &global_extension)?;
