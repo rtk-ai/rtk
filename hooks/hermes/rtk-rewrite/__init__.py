@@ -915,8 +915,12 @@ def transform_tool_result(payload: dict) -> dict:
     return payload
 
 
-def register():
-    """Register plugin hooks."""
+def register(ctx=None):
+    """Register plugin hooks.
+    
+    ``ctx`` is passed by Hermes >= v0.14.0 (plugin API change).
+    Kept optional for backward compatibility with older versions.
+    """
     return {
         "pre_tool_call": pre_tool_call,
         "transform_tool_result": transform_tool_result,
