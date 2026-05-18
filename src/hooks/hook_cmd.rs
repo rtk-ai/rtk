@@ -259,7 +259,10 @@ enum GrokAction {
 
 fn process_grok_payload(v: &Value) -> GrokAction {
     let tool_name = v.get("toolName").and_then(|t| t.as_str()).unwrap_or("");
-    if !matches!(tool_name, "Bash" | "run_terminal_cmd") {
+
+    // Accept common variants Grok may use for the terminal tool
+    let lower = tool_name.to_lowercase();
+    if !lower.contains("bash") && !lower.contains("terminal") {
         return GrokAction::PassThrough;
     }
 
@@ -303,6 +306,9 @@ fn process_grok_payload(v: &Value) -> GrokAction {
 /// - Stdin: camelCase payload `{ toolName, toolInput: { command }, ... }`.
 /// - Stdout (deny): `{"decision":"deny","reason":"..."}`.
 /// - Empty stdout or any non-2 exit code is fail-open allow.
+///
+/// Grok's documented protocol has no `updatedInput` field — transparent rewrite
+/// is delivered via `GROK.md` agent instructions, not via the hook wire.
 pub fn run_grok() -> Result<()> {
     let input = read_stdin_limited()?;
     let input = input.trim();
@@ -363,7 +369,9 @@ fn process_grok_payload_with_rules(
     allow_rules: &[String],
 ) -> GrokAction {
     let tool_name = v.get("toolName").and_then(|t| t.as_str()).unwrap_or("");
-    if !matches!(tool_name, "Bash" | "run_terminal_cmd") {
+    // Accept common variants Grok may use for the terminal tool
+    let lower = tool_name.to_lowercase();
+    if !lower.contains("bash") && !lower.contains("terminal") {
         return GrokAction::PassThrough;
     }
 
@@ -444,6 +452,15 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
 }
 
 // ── Claude Code native hook ────────────────────────────────────
+
+/// Grok loads `~/.claude/settings.json` for Claude Code compatibility but
+/// always sends its own camelCase payload (`toolName`, `toolInput`). When a
+/// user has only `rtk hook claude` registered (and no dedicated Grok hook),
+/// we must recognise Grok's wire format here or the call silently
+/// pass-throughs and the user sees no rewrite suggestion.
+fn is_grok_style_payload(v: &Value) -> bool {
+    v.get("toolName").is_some() && v.get("tool_name").is_none()
+}
 
 enum PayloadAction {
     Rewrite {
@@ -531,6 +548,10 @@ pub fn run_claude() -> Result<()> {
         }
     };
 
+    if is_grok_style_payload(&v) {
+        return run_claude_as_grok(&v);
+    }
+
     match process_claude_payload(&v) {
         PayloadAction::Rewrite {
             cmd,
@@ -549,9 +570,44 @@ pub fn run_claude() -> Result<()> {
     Ok(())
 }
 
+/// Emit Grok-protocol output for a Grok-style payload that arrived via the
+/// Claude Code compatibility path (`~/.claude/settings.json`).
+fn run_claude_as_grok(v: &Value) -> Result<()> {
+    let cmd_for_audit = v
+        .pointer("/toolInput/command")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match process_grok_payload(v) {
+        GrokAction::PassThrough => {}
+        GrokAction::Deny { output } => {
+            audit_log("deny", &cmd_for_audit, "");
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        GrokAction::Rewrite {
+            original,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &original, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
+    if is_grok_style_payload(&v) {
+        return match process_grok_payload(&v) {
+            GrokAction::PassThrough => None,
+            GrokAction::Deny { output } | GrokAction::Rewrite { output, .. } => {
+                Some(output.to_string())
+            }
+        };
+    }
     match process_claude_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
@@ -951,6 +1007,56 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Grok-via-Claude-settings compatibility ---
+    //
+    // Grok loads `~/.claude/settings.json` for Claude Code compatibility but
+    // always sends its own camelCase payload (`toolName`, `toolInput`). Without
+    // polyglot detection in run_claude these calls silently pass through and
+    // the user sees no rewrite suggestion.
+
+    #[test]
+    fn test_claude_dispatches_grok_camelcase_to_grok_protocol() {
+        let input = grok_input("Bash", "git status").to_string();
+        let out = run_claude_inner(&input).expect("camelCase payload must yield output");
+        assert!(
+            out.contains(r#""decision":"deny""#),
+            "expected Grok deny+suggest envelope, got: {out}"
+        );
+        assert!(
+            out.contains("rtk git status"),
+            "expected suggested rewrite, got: {out}"
+        );
+        assert!(
+            !out.contains("hookSpecificOutput"),
+            "must not leak Claude wire format to Grok, got: {out}"
+        );
+    }
+
+    #[test]
+    fn test_claude_dispatches_grok_run_terminal_cmd_alias() {
+        let input = grok_input("run_terminal_cmd", "cargo test").to_string();
+        let out = run_claude_inner(&input).expect("run_terminal_cmd alias must work");
+        assert!(out.contains("rtk cargo test"), "got: {out}");
+    }
+
+    #[test]
+    fn test_claude_grok_camelcase_non_bash_passthrough() {
+        let input = grok_input("read_file", "git status").to_string();
+        assert!(
+            run_claude_inner(&input).is_none(),
+            "non-Bash Grok tool must pass through"
+        );
+    }
+
+    #[test]
+    fn test_claude_grok_camelcase_already_rtk_passthrough() {
+        let input = grok_input("Bash", "rtk git status").to_string();
+        assert!(
+            run_claude_inner(&input).is_none(),
+            "already-rewritten commands must pass through"
+        );
     }
 
     // --- Cursor handler ---
