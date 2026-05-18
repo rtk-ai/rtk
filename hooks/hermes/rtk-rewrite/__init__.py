@@ -918,15 +918,21 @@ def transform_tool_result(payload: dict) -> dict:
 
 
 def register(ctx=None):
-    """Register plugin hooks.
-    
+    """Register plugin hooks via PluginContext.
+
     ``ctx`` is passed by Hermes >= v0.14.0 (plugin API change).
+    Must call ctx.register_hook() — returning a dict is NOT consumed by PluginManager.
     Kept optional for backward compatibility with older versions.
     """
-    return {
-        "pre_tool_call": pre_tool_call,
-        "transform_tool_result": transform_tool_result,
-    }
+    if ctx is not None:
+        ctx.register_hook("pre_tool_call", pre_tool_call)
+        ctx.register_hook("transform_tool_result", transform_tool_result)
+    else:
+        # Legacy fallback: return dict (not consumed by PluginManager in v0.14.0+)
+        return {
+            "pre_tool_call": pre_tool_call,
+            "transform_tool_result": transform_tool_result,
+        }
 
 
 def _warn(message: str):
