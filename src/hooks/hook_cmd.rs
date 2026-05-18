@@ -244,36 +244,57 @@ fn print_rewrite(cmd: &str) {
 
 // ── Grok hook ────────────────────────────────────────────────
 
-/// Pure decision function. Returns `Some(json_value)` when a deny+suggest
-/// response should be written to stdout, `None` when the hook should pass
-/// through silently (Grok treats empty stdout as fail-open allow).
-fn process_grok_payload(v: &Value) -> Option<Value> {
+enum GrokAction {
+    /// Pass through silently — Grok treats empty stdout as fail-open allow.
+    PassThrough,
+    /// Block by an RTK permission deny rule.
+    Deny { output: Value },
+    /// Rewrite — Grok will display the suggestion in scrollback.
+    Rewrite {
+        original: String,
+        rewritten: String,
+        output: Value,
+    },
+}
+
+fn process_grok_payload(v: &Value) -> GrokAction {
     let tool_name = v.get("toolName").and_then(|t| t.as_str()).unwrap_or("");
     if !matches!(tool_name, "Bash" | "run_terminal_cmd") {
-        return None;
+        return GrokAction::PassThrough;
     }
 
-    let cmd = v
+    let cmd = match v
         .pointer("/toolInput/command")
         .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())?;
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return GrokAction::PassThrough,
+    };
 
     if permissions::check_command(cmd) == PermissionVerdict::Deny {
-        return Some(json!({
-            "decision": "deny",
-            "reason": "Blocked by RTK permission rule",
-        }));
+        return GrokAction::Deny {
+            output: json!({
+                "decision": "deny",
+                "reason": "Blocked by RTK permission rule",
+            }),
+        };
     }
 
-    let rewritten = get_rewritten(cmd)?;
-
-    Some(json!({
-        "decision": "deny",
-        "reason": format!(
-            "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
-            rewritten
-        ),
-    }))
+    match get_rewritten(cmd) {
+        Some(rewritten) => GrokAction::Rewrite {
+            original: cmd.to_string(),
+            rewritten: rewritten.clone(),
+            output: json!({
+                "decision": "deny",
+                "reason": format!(
+                    "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
+                    rewritten
+                ),
+            }),
+        },
+        None => GrokAction::PassThrough,
+    }
 }
 
 /// Run the Grok Build TUI PreToolUse hook.
@@ -304,47 +325,82 @@ pub fn run_grok() -> Result<()> {
         .to_string();
 
     match process_grok_payload(&v) {
-        Some(output) => {
-            // Distinguish deny-by-rule from deny-by-rewrite for the audit log.
-            let action = output
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .map(|r| {
-                    if r.starts_with("Token savings") {
-                        "rewrite"
-                    } else {
-                        "deny"
-                    }
-                })
-                .unwrap_or("deny");
-            let rewritten = output
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .and_then(extract_suggestion_from_reason)
-                .unwrap_or_default();
-            audit_log(action, &cmd_for_audit, &rewritten);
+        GrokAction::PassThrough => {
+            // Empty stdout = Grok fail-open allow.
+        }
+        GrokAction::Deny { output } => {
+            audit_log("deny", &cmd_for_audit, "");
             let _ = writeln!(io::stdout(), "{output}");
         }
-        None => {
-            // Pass-through: empty stdout = Grok fail-open allow.
+        GrokAction::Rewrite {
+            original,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &original, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
         }
     }
     Ok(())
 }
 
-/// Pull the suggested rewrite out of a `Token savings: use \`X\` instead ...` reason.
-/// Used only for audit logging; failure-tolerant.
-fn extract_suggestion_from_reason(reason: &str) -> Option<String> {
-    let start = reason.find('`')? + 1;
-    let rest = &reason[start..];
-    let end = rest.find('`')?;
-    Some(rest[..end].to_string())
-}
-
 #[cfg(test)]
 fn run_grok_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    process_grok_payload(&v).map(|out| out.to_string())
+    match process_grok_payload(&v) {
+        GrokAction::PassThrough => None,
+        GrokAction::Deny { output } | GrokAction::Rewrite { output, .. } => {
+            Some(output.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+fn process_grok_payload_with_rules(
+    v: &Value,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> GrokAction {
+    let tool_name = v.get("toolName").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(tool_name, "Bash" | "run_terminal_cmd") {
+        return GrokAction::PassThrough;
+    }
+
+    let cmd = match v
+        .pointer("/toolInput/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return GrokAction::PassThrough,
+    };
+
+    if permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules)
+        == PermissionVerdict::Deny
+    {
+        return GrokAction::Deny {
+            output: json!({
+                "decision": "deny",
+                "reason": "Blocked by RTK permission rule",
+            }),
+        };
+    }
+
+    match get_rewritten(cmd) {
+        Some(rewritten) => GrokAction::Rewrite {
+            original: cmd.to_string(),
+            rewritten: rewritten.clone(),
+            output: json!({
+                "decision": "deny",
+                "reason": format!(
+                    "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
+                    rewritten
+                ),
+            }),
+        },
+        None => GrokAction::PassThrough,
+    }
 }
 
 // ── Audit logging ─────────────────────────────────────────────
@@ -1168,5 +1224,21 @@ mod tests {
     #[test]
     fn test_grok_malformed_payload_returns_none() {
         assert!(run_grok_inner("not json").is_none());
+    }
+
+    #[test]
+    fn test_grok_deny_rule_blocks() {
+        let input = grok_input("Bash", "git push --force");
+        let deny = vec!["git push --force".to_string()];
+        let action = process_grok_payload_with_rules(&input, &deny, &[], &[]);
+        match action {
+            GrokAction::Deny { output } => {
+                let s = output.to_string();
+                assert!(s.contains(r#""decision":"deny""#), "got: {}", s);
+                assert!(s.contains("Blocked by RTK permission rule"), "got: {}", s);
+            }
+            GrokAction::PassThrough => panic!("expected Deny variant, got PassThrough"),
+            GrokAction::Rewrite { .. } => panic!("expected Deny variant, got Rewrite"),
+        }
     }
 }
