@@ -12,6 +12,7 @@ type BashToolCallEvent = {
 type ExtensionContext = {
   ui: {
     notify(message: string, type?: "info" | "warning" | "error"): void;
+    setStatus(key: string, text: string | undefined): void;
   };
 };
 
@@ -72,7 +73,9 @@ export default function rtkOmpExtension(pi: ExtensionAPI) {
 
   if (!hasRtk) {
     pi.on("session_start", (_event, ctx) => {
-      ctx.ui.notify("RTK extension disabled: rtk binary not found in PATH.", "warning");
+      const message = "RTK extension disabled: rtk binary not found in PATH.";
+      ctx.ui.notify(message, "warning");
+      ctx.ui.setStatus("rtk", message);
     });
     return;
   }
