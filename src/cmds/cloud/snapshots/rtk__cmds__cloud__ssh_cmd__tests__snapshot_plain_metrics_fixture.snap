@@ -1,0 +1,56 @@
+---
+source: src/cmds/cloud/ssh_cmd.rs
+assertion_line: 397
+expression: output
+---
+# HELP myapp_http_requests_total Total HTTP requests
+# TYPE myapp_http_requests_total counter
+myapp_http_requests_total{method="GET",status="200"} 4821
+myapp_http_requests_total{method="POST",status="200"} 312
+myapp_http_requests_total{method="GET",status="404"} 17
+myapp_http_requests_total{method="GET",status="500"} 3
+# HELP myapp_http_request_duration_seconds HTTP request latency
+# TYPE myapp_http_request_duration_seconds histogram
+myapp_http_request_duration_seconds_bucket{le="0.005"} 1234
+myapp_http_request_duration_seconds_bucket{le="0.01"} 2100
+myapp_http_request_duration_seconds_bucket{le="0.025"} 3500
+myapp_http_request_duration_seconds_bucket{le="0.05"} 4200
+myapp_http_request_duration_seconds_bucket{le="0.1"} 4750
+myapp_http_request_duration_seconds_bucket{le="0.25"} 4810
+myapp_http_request_duration_seconds_bucket{le="0.5"} 4820
+myapp_http_request_duration_seconds_bucket{le="1"} 4821
+myapp_http_request_duration_seconds_bucket{le="+Inf"} 4821
+myapp_http_request_duration_seconds_sum 48.3
+myapp_http_request_duration_seconds_count 4821
+# HELP myapp_active_connections Current open connections
+# TYPE myapp_active_connections gauge
+myapp_active_connections 42
+# HELP myapp_cache_hits_total Cache hit counter
+# TYPE myapp_cache_hits_total counter
+myapp_cache_hits_total 3902
+# HELP myapp_cache_misses_total Cache miss counter
+# TYPE myapp_cache_misses_total counter
+myapp_cache_misses_total 919
+# HELP myapp_cache_hit_ratio Current cache hit ratio
+# TYPE myapp_cache_hit_ratio gauge
+myapp_cache_hit_ratio 0.809
+# HELP myapp_upstream_pool_size Upstream connection pool size
+# TYPE myapp_upstream_pool_size gauge
+myapp_upstream_pool_size{backend="api-1"} 10
+myapp_upstream_pool_size{backend="api-2"} 10
+myapp_upstream_pool_size{backend="api-3"} 8
+# HELP myapp_upstream_errors_total Upstream connection errors
+# TYPE myapp_upstream_errors_total counter
+myapp_upstream_errors_total{backend="api-1"} 0
+myapp_upstream_errors_total{backend="api-2"} 2
+myapp_upstream_errors_total{backend="api-3"} 0
+# HELP myapp_build_info Build metadata (always 1)
+# TYPE myapp_build_info gauge
+myapp_build_info{version="1.4.2",commit="abc1234"} 1
+# HELP myapp_queue_depth Current task queue depth
+# TYPE myapp_queue_depth gauge
+myapp_queue_depth{worker="default"} 5
+myapp_queue_depth{worker="priority"} 1
+# HELP myapp_queue_processed_total Tasks processed
+# TYPE myapp_queue_processed_total counter
+... (49 more lines)

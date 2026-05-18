@@ -1,0 +1,11 @@
+---
+source: src/cmds/cloud/ssh_cmd.rs
+assertion_line: 390
+expression: output
+---
+2026-05-18T01:00:03Z WARN  myapp::ratelimit ip=9.10.11.12 req_count=480 threshold=500
+2026-05-18T01:00:06Z ERROR myapp::lb health backend=192.0.2.2:80 status=connection_refused
+2026-05-18T01:00:10Z WARN  myapp::lb health backend=192.0.2.2:80 retry=1 latency_ms=5000
+2026-05-18T01:00:14Z ERROR myapp::metrics db send_batch failed: connection timeout after 5000ms
+2026-05-18T01:00:18Z WARN  myapp::waf rule_id=942100 match=true action=log zone=demo.net
+... (46 INFO/DEBUG lines suppressed)
