@@ -3842,22 +3842,25 @@ fn remove_auggie_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Entry point for `rtk init --agent auggie`
-pub fn run_auggie_mode(verbose: u8) -> Result<()> {
-    run_auggie_mode_at(None, verbose)
+pub fn run_auggie_mode(ctx: InitContext) -> Result<()> {
+    run_auggie_mode_at(None, ctx)
 }
 
-fn run_auggie_mode_at(augment_dir_override: Option<&Path>, verbose: u8) -> Result<()> {
+fn run_auggie_mode_at(augment_dir_override: Option<&Path>, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
     let augment_dir = match augment_dir_override {
         Some(d) => d.to_path_buf(),
         None => resolve_augment_dir()?,
     };
 
-    fs::create_dir_all(&augment_dir).with_context(|| {
-        format!(
-            "Failed to create Augment directory: {}",
-            augment_dir.display()
-        )
-    })?;
+    if !dry_run {
+        fs::create_dir_all(&augment_dir).with_context(|| {
+            format!(
+                "Failed to create Augment directory: {}",
+                augment_dir.display()
+            )
+        })?;
+    }
 
     let settings_path = augment_dir.join(SETTINGS_JSON);
 
@@ -3883,6 +3886,12 @@ fn run_auggie_mode_at(augment_dir_override: Option<&Path>, verbose: u8) -> Resul
     }
 
     insert_auggie_hook_entry(&mut root)?;
+
+    if dry_run {
+        println!("[dry-run] would patch {}", settings_path.display());
+        print_dry_run_footer();
+        return Ok(());
+    }
 
     // Backup original if it exists
     if settings_path.exists() {
@@ -3947,11 +3956,39 @@ pub fn show_auggie_config() -> Result<()> {
 }
 
 /// Uninstall Auggie RTK hook
-pub fn uninstall_auggie(verbose: u8) -> Result<Vec<String>> {
-    uninstall_auggie_at(None, verbose)
+pub fn uninstall_auggie(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let removed = uninstall_auggie_at(None, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK Auggie support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Augment Code (Auggie):"
+        } else {
+            "RTK uninstalled (Auggie):"
+        };
+        println!("{}", header);
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        if !dry_run {
+            println!("\nRestart Augment Code to apply changes.");
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
 }
 
-fn uninstall_auggie_at(augment_dir_override: Option<&Path>, verbose: u8) -> Result<Vec<String>> {
+fn uninstall_auggie_at(
+    augment_dir_override: Option<&Path>,
+    ctx: InitContext,
+) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
     let augment_dir = match augment_dir_override {
         Some(d) => d.to_path_buf(),
         None => resolve_augment_dir()?,
@@ -3968,12 +4005,19 @@ fn uninstall_auggie_at(augment_dir_override: Option<&Path>, verbose: u8) -> Resu
                 .with_context(|| format!("Failed to parse {}", settings_path.display()))?;
 
             if remove_auggie_hook_from_json(&mut root) {
-                let backup_path = settings_path.with_extension("json.bak");
-                fs::copy(&settings_path, &backup_path).ok();
+                if dry_run {
+                    println!(
+                        "[dry-run] would remove RTK hook from {}",
+                        settings_path.display()
+                    );
+                } else {
+                    let backup_path = settings_path.with_extension("json.bak");
+                    fs::copy(&settings_path, &backup_path).ok();
 
-                let serialized = serde_json::to_string_pretty(&root)
-                    .context("Failed to serialize settings.json")?;
-                atomic_write(&settings_path, &serialized)?;
+                    let serialized = serde_json::to_string_pretty(&root)
+                        .context("Failed to serialize settings.json")?;
+                    atomic_write(&settings_path, &serialized)?;
+                }
 
                 removed.push("Augment settings.json: removed RTK hook entry".to_string());
 
@@ -5883,7 +5927,8 @@ mod tests {
         let augment_dir = tmp.path().join(AUGMENT_DIR);
         fs::create_dir_all(&augment_dir).unwrap();
 
-        run_auggie_mode_at(Some(&augment_dir), 0).unwrap();
+        let ctx = InitContext::default();
+        run_auggie_mode_at(Some(&augment_dir), ctx).unwrap();
 
         let settings_path = augment_dir.join(SETTINGS_JSON);
         assert!(settings_path.exists(), "settings.json must be created");
@@ -5904,8 +5949,9 @@ mod tests {
         let augment_dir = tmp.path().join(AUGMENT_DIR);
         fs::create_dir_all(&augment_dir).unwrap();
 
-        run_auggie_mode_at(Some(&augment_dir), 0).unwrap();
-        run_auggie_mode_at(Some(&augment_dir), 0).unwrap();
+        let ctx = InitContext::default();
+        run_auggie_mode_at(Some(&augment_dir), ctx).unwrap();
+        run_auggie_mode_at(Some(&augment_dir), ctx).unwrap();
 
         let settings_path = augment_dir.join(SETTINGS_JSON);
         let content = fs::read_to_string(&settings_path).unwrap();
@@ -5919,7 +5965,8 @@ mod tests {
         let augment_dir = tmp.path().join(AUGMENT_DIR);
         fs::create_dir_all(&augment_dir).unwrap();
 
-        run_auggie_mode_at(Some(&augment_dir), 0).unwrap();
+        let ctx = InitContext::default();
+        run_auggie_mode_at(Some(&augment_dir), ctx).unwrap();
 
         let settings_path = augment_dir.join(SETTINGS_JSON);
         assert!(
@@ -5929,7 +5976,7 @@ mod tests {
             "pre-condition: hook must be installed"
         );
 
-        let removed = uninstall_auggie_at(Some(&augment_dir), 0).unwrap();
+        let removed = uninstall_auggie_at(Some(&augment_dir), ctx).unwrap();
         assert!(!removed.is_empty(), "uninstall must report removal");
 
         let content = fs::read_to_string(&settings_path).unwrap();
@@ -5945,7 +5992,8 @@ mod tests {
         let augment_dir = tmp.path().join(AUGMENT_DIR);
         fs::create_dir_all(&augment_dir).unwrap();
 
-        let removed = uninstall_auggie_at(Some(&augment_dir), 0).unwrap();
+        let ctx = InitContext::default();
+        let removed = uninstall_auggie_at(Some(&augment_dir), ctx).unwrap();
         assert!(removed.is_empty(), "uninstall with no hook should be noop");
     }
 

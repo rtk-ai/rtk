@@ -4,8 +4,7 @@
 
 ## Specifics
 
-- Rust binary hook (`rtk hook auggie`) — preferred, no external dependencies
-- Shell-based fallback (`rtk-rewrite.sh`) requires `jq` for JSON parsing
+- Rust binary hook (`rtk hook auggie`) — native handler, no external dependencies
 - PreToolUse hook with `launch-process` matcher (NOT `Bash`)
 - Returns `updatedInput` JSON for transparent command rewrite (agent doesn't know RTK is involved)
 - Payload format matches Claude Code: `tool_input.command` in, `hookSpecificOutput.updatedInput.command` out

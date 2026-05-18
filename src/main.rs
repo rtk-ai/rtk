@@ -1363,21 +1363,26 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+#[allow(clippy::too_many_arguments)]
+fn uninstall_init_dispatch<UninstallHermes, UninstallAuggie, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
+    uninstall_auggie: UninstallAuggie,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallAuggie: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Auggie) {
+        uninstall_auggie(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         uninstall_standard(global, gemini, codex, cursor, ctx)
@@ -1817,30 +1822,18 @@ fn run_cli() -> Result<i32> {
                     hooks::init::show_config(codex)?;
                 }
             } else if uninstall {
-                if agent == Some(AgentTarget::Auggie) {
-                    let removed = hooks::init::uninstall_auggie(cli.verbose)?;
-                    if removed.is_empty() {
-                        println!("RTK Auggie support was not installed (nothing to remove)");
-                    } else {
-                        println!("RTK uninstalled (Auggie):");
-                        for item in &removed {
-                            println!("  - {}", item);
-                        }
-                        println!("\nRestart Augment Code to apply changes.");
-                    }
-                } else {
-                    uninstall_init_dispatch(
-                        agent,
-                        global,
-                        gemini,
-                        codex,
-                        ctx,
-                        hooks::init::uninstall_hermes,
-                        hooks::init::uninstall,
-                    )?;
-                }
+                uninstall_init_dispatch(
+                    agent,
+                    global,
+                    gemini,
+                    codex,
+                    ctx,
+                    hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_auggie,
+                    hooks::init::uninstall,
+                )?;
             } else if agent == Some(AgentTarget::Auggie) {
-                hooks::init::run_auggie_mode(cli.verbose)?;
+                hooks::init::run_auggie_mode(ctx)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2721,6 +2714,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
+            |_| Ok(()),
             |_, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
