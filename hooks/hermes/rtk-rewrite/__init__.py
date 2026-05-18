@@ -11,7 +11,7 @@ COUCHE RTK (lignes ~1-400): Port du pipeline 8 étapes depuis toml_filter.rs.
       de config Rust, pas de logique pipeline.
     - run_filter_tests: Suite de tests interne Rust.
 
-COUCHE HERMES (lignes ~400+): Hooks, DB, tag injection.
+COUCHE HERMES (lignes ~400+): Hooks, DB, savings tracking.
   Ces fonctions n'ont PAS de correspondant Rust.
   Elles sont clairement séparées.
 """
