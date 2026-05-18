@@ -938,6 +938,59 @@ mod tests {
         );
     }
 
+    /// Regression: the `npm` rewriter rule should cover ALL npm subcommands,
+    /// not just `exec|run|run-script|rum|urn|x`. The handler in
+    /// `cmds/js/npm_cmd.rs` already dispatches every subcommand internally
+    /// via its NPM_SUBCOMMANDS list — the regex previously prevented the
+    /// hook from triggering for the most common ones (`npm test`, `npm
+    /// install`, `npm ci`).
+    #[test]
+    fn test_classify_npm_subcommands() {
+        let supported_npm_invocations = [
+            "npm test",
+            "npm t",
+            "npm start",
+            "npm install",
+            "npm i",
+            "npm i react@18",
+            "npm ci",
+            "npm audit",
+            "npm audit fix",
+            "npm run build",
+            "npm run-script build",
+            "npm exec eslint",
+            "npm publish",
+            "npm pack",
+            "npm outdated",
+            "npm ls --depth=0",
+            "npm view react",
+            "npm --version",
+        ];
+        for cmd in &supported_npm_invocations {
+            match classify_command(cmd) {
+                Classification::Supported {
+                    rtk_equivalent: "rtk npm",
+                    ..
+                } => {}
+                other => panic!(
+                    "'{}' should classify as Supported(rtk npm), got {:?}",
+                    cmd, other
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_classify_bare_npm_is_supported() {
+        match classify_command("npm") {
+            Classification::Supported {
+                rtk_equivalent: "rtk npm",
+                ..
+            } => {}
+            other => panic!("bare 'npm' should classify as Supported, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_classify_cat_file() {
         assert_eq!(

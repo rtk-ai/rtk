@@ -62,7 +62,12 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
+        // Match any `npm <subcommand>`. The `npm_cmd::run` handler dispatches
+        // internally based on its NPM_SUBCOMMANDS list, so the regex doesn't
+        // need to enumerate them. Previously this rule only matched `exec|
+        // run|run-script|rum|urn|x`, leaving `npm test`, `npm install`,
+        // `npm ci`, `npm i`, `npm audit`, etc. as unrouted by the hook.
+        pattern: r"^npm(\s+|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
