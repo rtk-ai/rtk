@@ -698,9 +698,11 @@ def _compress_tool_result(tool_name: str, result_str: str) -> str:
 # --- H5: transform_tool_result (hook) ---
 
 def _transform_tool_result(tool_name: str, result) -> str:
-    """H5: Compress tool result + append RTK savings tag.
+    """H5: Compress tool result + record savings to DB.
 
     Hermes-specific — no Rust equivalent.
+    The savings tag is NOT injected into the result (it pollutes LLM context).
+    The CLI status bar reads savings directly from the DB via its own methods.
     """
     result_str = str(result) if not isinstance(result, str) else result
     original_len = len(result_str)
@@ -712,42 +714,11 @@ def _transform_tool_result(tool_name: str, result) -> str:
         comp_saved = original_len - len(compressed)
         result_str = compressed
 
-    # Step 2: Append savings tag
-    saved, count, avg_pct = _read_rtk_savings()
-    comp_count, comp_avg = 0, 0.0
+    # Step 2: Record savings to DB (do NOT inject tag into result)
     if comp_saved > 0:
         _record_compression(tool_name, comp_saved, original_len)
-        comp_count_result, comp_avg = _read_compression_savings_count()
 
-    if saved <= 0 and comp_saved <= 0:
-        return result_str
-
-    parts = []
-    if saved > 0 and count > 0:
-        parts.append(f"tokens saved: {_format_tokens(saved)} across {count} commands (avg {avg_pct}%)")
-    if comp_saved > 0 and comp_count_result > 0:
-        parts.append(f"chars saved: ~{_format_chars(comp_saved)} across {comp_count_result} results (avg {comp_avg}%)")
-
-    if not parts:
-        return result_str
-
-    tag = "\n⟡ " + " | ".join(parts)
-
-    # Inject tag safely
-    try:
-        data = json.loads(result_str)
-        if isinstance(data, dict):
-            if "output" in data and isinstance(data["output"], str):
-                data["output"] += tag
-            else:
-                data["_rtk_savings"] = tag.strip()
-            return json.dumps(data, separators=(',', ':'))
-        elif isinstance(data, list):
-            return result_str + tag
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    return result_str + tag
+    return result_str
 
 # --- H6/H7: Compression tracking DB ---
 
@@ -784,43 +755,26 @@ def _read_compression_savings():
         return 0, 0, 0.0
 
 
-def _read_compression_savings_count():
-    """H7b: Read compression count and average."""
-    try:
-        if not _COMPRESSION_DB_PATH.exists():
-            return 0, 0.0
-        with sqlite3.connect(str(_COMPRESSION_DB_PATH), timeout=1) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                "SELECT COUNT(*) AS cnt, COALESCE(ROUND(AVG(saved_pct),1),0.0) AS avg_pct"
-                " FROM compression_stats"
-            )
-            row = cur.fetchone()
-            return row["cnt"], row["avg_pct"]
-    except Exception:
-        return 0, 0.0
-
-
 def _ensure_compression_db():
-    """Create compression DB if it doesn't exist."""
+    """Create compression DB if it doesn't exist (with WAL for concurrent r/w)."""
     try:
         _COMPRESSION_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         _warn(f"compression db mkdir error: {e}")
         return
-    if not _COMPRESSION_DB_PATH.exists():
-        with sqlite3.connect(str(_COMPRESSION_DB_PATH)) as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS compression_stats ("
-                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                " tool_name TEXT NOT NULL,"
-                " original_chars INTEGER NOT NULL,"
-                " compressed_chars INTEGER NOT NULL,"
-                " saved_chars INTEGER NOT NULL,"
-                " saved_pct REAL NOT NULL,"
-                " timestamp TEXT DEFAULT CURRENT_TIMESTAMP)"
-            )
-            conn.commit()
+    with sqlite3.connect(str(_COMPRESSION_DB_PATH)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS compression_stats ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " tool_name TEXT NOT NULL,"
+            " original_chars INTEGER NOT NULL,"
+            " compressed_chars INTEGER NOT NULL,"
+            " saved_chars INTEGER NOT NULL,"
+            " saved_pct REAL NOT NULL,"
+            " timestamp TEXT DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.commit()
 
 
 # --- H8: Read RTK savings ---
@@ -875,18 +829,25 @@ def _check_rtk():
     return _rtk_available
 
 
-def pre_tool_call(payload: dict) -> dict:
-    """H10: Rewrite terminal commands through rtk."""
-    tool_name = payload.get("tool_name", "")
-    if tool_name not in _TERMINAL_TOOLS:
-        return payload
-    if not _check_rtk():
-        return payload
+def pre_tool_call(*, tool_name: str, args: dict, **_kwargs) -> dict:
+    """H10: Rewrite terminal commands through rtk.
 
-    args = payload.get("tool_args", {})
+    Called via invoke_hook('pre_tool_call', tool_name=..., args=..., ...).
+    Rewrites args['command'] in-place (the caller passes the live dict by
+    reference, so the mutation is visible downstream).  Returns None to
+    allow execution; returning {'action': 'block', 'message': '...'} would
+    block the tool call (not used by RTK).
+    """
+    if tool_name not in _TERMINAL_TOOLS:
+        return None
+    if not _check_rtk():
+        return None
+
+    if not isinstance(args, dict):
+        return None
     command = args.get("command", "")
     if not command:
-        return payload
+        return None
 
     try:
         result = subprocess.run(
@@ -895,35 +856,34 @@ def pre_tool_call(payload: dict) -> dict:
         )
         if result.returncode == 0 and result.stdout.strip():
             args["command"] = result.stdout.strip()
-            payload["tool_args"] = args
     except Exception:
         pass
 
-    return payload
+    return None
 
 
-def transform_tool_result(payload: dict) -> dict:
-    """H11: Compress non-terminal tool results + append savings tag."""
-    tool_name = payload.get("tool_name", "")
+def transform_tool_result(*, tool_name: str, result: str, **_kwargs) -> str:
+    """H11: Compress non-terminal tool results.
+
+    Called via invoke_hook('transform_tool_result', tool_name=..., result=..., ...)
+    Must return a string to replace the result, or None to leave it unchanged.
+    Savings are recorded to the DB but no longer injected into the result.
+    """
     if tool_name in _TERMINAL_TOOLS:
-        return payload
+        return None
 
-    result = payload.get("result", "")
     if not result:
-        return payload
+        return None
 
     transformed = _transform_tool_result(tool_name, result)
-    payload["result"] = transformed
-    return payload
+    # Only return the transformed string if it actually changed
+    if transformed != result:
+        return transformed
+    return None
 
 
 def register(ctx=None):
-    """Register plugin hooks via PluginContext.
-
-    ``ctx`` is passed by Hermes >= v0.14.0 (plugin API change).
-    Must call ctx.register_hook() — returning a dict is NOT consumed by PluginManager.
-    Kept optional for backward compatibility with older versions.
-    """
+    """Register plugin hooks via PluginContext."""
     if ctx is not None:
         ctx.register_hook("pre_tool_call", pre_tool_call)
         ctx.register_hook("transform_tool_result", transform_tool_result)
