@@ -26,6 +26,20 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
 
+/// Marker-wrapped Grok awareness block injected into `~/.grok/AGENTS.md`.
+///
+/// Grok's project-rules loader (`~/.grok/docs/user-guide/11-project-rules.md`)
+/// only scans for the filenames `Agents.md`, `Claude.md`, `AGENT.md`, `AGENTS.md`
+/// in `~/.grok/` — a freestanding `GROK.md` is silently ignored. We therefore
+/// embed `hooks/grok/rtk-awareness.md` inside the standard rtk-instructions
+/// marker block of `AGENTS.md` so `upsert_rtk_block` / `remove_rtk_block` can
+/// keep it idempotent and removable.
+const RTK_INSTRUCTIONS_GROK: &str = concat!(
+    "<!-- rtk-instructions v2 -->\n",
+    include_str!("../../hooks/grok/rtk-awareness.md"),
+    "<!-- /rtk-instructions -->",
+);
+
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
 # Filters here override user-global and built-in filters.
@@ -3339,14 +3353,34 @@ fn show_claude_config() -> Result<()> {
     // Check Grok hooks
     if let Ok(grok_dir) = resolve_grok_dir() {
         let grok_hook_json = grok_dir.join(HOOKS_SUBDIR).join(GROK_HOOK_FILENAME);
-        let grok_md = grok_dir.join(GROK_MD);
-        match (grok_hook_json.exists(), grok_md.exists()) {
-            (true, true) => println!("[ok] Grok: hook + GROK.md ({})", grok_dir.display()),
-            (true, false) => println!("[ok] Grok: hook only ({})", grok_dir.display()),
+        let agents_md = grok_dir.join(AGENTS_MD);
+        let legacy_grok_md = grok_dir.join(GROK_MD);
+        let has_block = agents_md
+            .exists()
+            .then(|| fs::read_to_string(&agents_md).ok())
+            .flatten()
+            .map(|c| c.contains(RTK_BLOCK_START) && c.contains(RTK_BLOCK_END))
+            .unwrap_or(false);
+
+        match (grok_hook_json.exists(), has_block) {
+            (true, true) => println!(
+                "[ok] Grok: hook + AGENTS.md rtk block ({})",
+                grok_dir.display()
+            ),
+            (true, false) => println!(
+                "[ok] Grok: hook only — awareness missing ({})",
+                grok_dir.display()
+            ),
             (false, true) => {
-                println!("[warn] Grok: GROK.md present but hook missing (run: rtk init -g --grok)")
+                println!("[warn] Grok: AGENTS.md rtk block present but hook missing (run: rtk init -g --grok)")
             }
             (false, false) => println!("[--] Grok: not installed"),
+        }
+        if legacy_grok_md.exists() {
+            println!(
+                "[warn] Grok: legacy GROK.md present (Grok ignores it) — run `rtk init -g --grok` to clean up: {}",
+                legacy_grok_md.display()
+            );
         }
     } else {
         println!("[--] Grok: home dir not found");
@@ -3739,7 +3773,7 @@ pub fn run_grok(global: bool, hook_only: bool, ctx: InitContext) -> Result<()> {
     run_grok_at(&grok_dir, hook_only, ctx)
 }
 
-/// Testable core: install Grok hook + GROK.md into the given directory.
+/// Testable core: install Grok hook + AGENTS.md awareness into the given directory.
 fn run_grok_at(grok_dir: &Path, hook_only: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
 
@@ -3758,10 +3792,74 @@ fn run_grok_at(grok_dir: &Path, hook_only: bool, ctx: InitContext) -> Result<()>
     let payload = serde_json::to_string_pretty(&grok_hook_payload())?;
     write_if_changed(&hook_json_path, &payload, "Grok hook", ctx)?;
 
-    // 2) Install GROK.md (RTK awareness) unless --hook-only
+    // 2) Migration: a previous RTK release wrote `~/.grok/GROK.md`, which Grok
+    // does not load (its project-rules scanner only recognises Agents.md /
+    // Claude.md / AGENT.md / AGENTS.md). Drop the stale file so users do not
+    // wonder why the awareness has no effect.
+    let legacy_grok_md = grok_dir.join(GROK_MD);
+    let mut removed_legacy_grok_md = false;
+    if legacy_grok_md.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove legacy GROK.md (Grok does not read it): {}",
+                legacy_grok_md.display()
+            );
+        } else {
+            fs::remove_file(&legacy_grok_md).with_context(|| {
+                format!(
+                    "Failed to remove legacy GROK.md: {}",
+                    legacy_grok_md.display()
+                )
+            })?;
+            removed_legacy_grok_md = true;
+        }
+    }
+
+    // 3) Upsert the rtk-instructions marker block into `~/.grok/AGENTS.md`
+    // unless --hook-only. Grok loads AGENTS.md into its system prompt, so this
+    // is the only place where awareness instructions actually reach the agent.
+    let agents_md_path = grok_dir.join(AGENTS_MD);
+    let mut agents_action: Option<RtkBlockUpsert> = None;
     if !hook_only {
-        let grok_md_path = grok_dir.join(GROK_MD);
-        write_if_changed(&grok_md_path, RTK_SLIM, GROK_MD, ctx)?;
+        let existing = if agents_md_path.exists() {
+            fs::read_to_string(&agents_md_path).with_context(|| {
+                format!("Failed to read AGENTS.md: {}", agents_md_path.display())
+            })?
+        } else {
+            String::new()
+        };
+        let (new_content, action) = upsert_rtk_block(&existing, RTK_INSTRUCTIONS_GROK);
+        agents_action = Some(action);
+
+        match action {
+            RtkBlockUpsert::Added | RtkBlockUpsert::Updated => {
+                if dry_run {
+                    println!(
+                        "[dry-run] would {} rtk-instructions block in {}",
+                        if action == RtkBlockUpsert::Added {
+                            "add"
+                        } else {
+                            "update"
+                        },
+                        agents_md_path.display()
+                    );
+                } else {
+                    atomic_write(&agents_md_path, &new_content).with_context(|| {
+                        format!("Failed to write AGENTS.md: {}", agents_md_path.display())
+                    })?;
+                }
+            }
+            RtkBlockUpsert::Unchanged => {}
+            RtkBlockUpsert::Malformed => {
+                eprintln!(
+                    "[warn] Found '{}' without closing marker in {}",
+                    RTK_BLOCK_START,
+                    agents_md_path.display()
+                );
+                eprintln!("    Action: Manually remove the incomplete block, then re-run:");
+                eprintln!("            rtk init -g --grok");
+            }
+        }
     }
 
     if dry_run {
@@ -3769,11 +3867,13 @@ fn run_grok_at(grok_dir: &Path, hook_only: bool, ctx: InitContext) -> Result<()>
     } else {
         println!("\nGrok hook installed (global).\n");
         println!("  Hook: {}", hook_json_path.display());
-        if !hook_only {
-            println!("  GROK.md: {}", grok_dir.join(GROK_MD).display());
+        if !hook_only && !matches!(agents_action, Some(RtkBlockUpsert::Malformed) | None) {
+            println!("  AGENTS.md: {}", agents_md_path.display());
         }
-        println!("  Restart Grok. Press Ctrl+L in TUI to confirm hook loaded.");
-        println!("  Test with: git status\n");
+        if removed_legacy_grok_md {
+            println!("  Cleanup: removed legacy GROK.md (Grok ignored it)");
+        }
+        println!("  Restart Grok. Test with: git status\n");
     }
 
     Ok(())
@@ -3811,15 +3911,54 @@ fn uninstall_grok_at(grok_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
         removed.push(format!("Grok hook: {}", hook_json_path.display()));
     }
 
+    // Strip the rtk-instructions block from AGENTS.md if we previously injected it.
+    let agents_md_path = grok_dir.join(AGENTS_MD);
+    if agents_md_path.exists() {
+        let content = fs::read_to_string(&agents_md_path)
+            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
+        if content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&content);
+            if did_remove {
+                if dry_run {
+                    println!(
+                        "[dry-run] would remove rtk-instructions block from {}",
+                        agents_md_path.display()
+                    );
+                } else if cleaned.trim().is_empty() {
+                    // Block was the only content — delete the now-empty file.
+                    fs::remove_file(&agents_md_path).with_context(|| {
+                        format!(
+                            "Failed to remove empty AGENTS.md: {}",
+                            agents_md_path.display()
+                        )
+                    })?;
+                } else {
+                    atomic_write(&agents_md_path, &cleaned).with_context(|| {
+                        format!("Failed to write AGENTS.md: {}", agents_md_path.display())
+                    })?;
+                }
+                removed.push(format!(
+                    "AGENTS.md: rtk-instructions block ({})",
+                    agents_md_path.display()
+                ));
+            }
+        }
+    }
+
+    // Legacy: earlier RTK releases wrote a freestanding GROK.md. Grok ignored it,
+    // but clean it up if still present.
     let grok_md_path = grok_dir.join(GROK_MD);
     if grok_md_path.exists() {
         if dry_run {
-            println!("[dry-run] would remove GROK.md: {}", grok_md_path.display());
+            println!(
+                "[dry-run] would remove legacy GROK.md: {}",
+                grok_md_path.display()
+            );
         } else {
             fs::remove_file(&grok_md_path)
                 .with_context(|| format!("Failed to remove {}", grok_md_path.display()))?;
         }
-        removed.push(format!("GROK.md: {}", grok_md_path.display()));
+        removed.push(format!("GROK.md (legacy): {}", grok_md_path.display()));
     }
 
     if verbose > 0 && !removed.is_empty() {
@@ -5801,7 +5940,7 @@ mod tests {
     // ── Grok integration tests ─────────────────────────────────
 
     #[test]
-    fn test_run_grok_at_writes_hook_json_and_grok_md() {
+    fn test_run_grok_at_writes_hook_json_and_agents_md() {
         let temp = TempDir::new().unwrap();
         run_grok_at(temp.path(), false, InitContext::default()).unwrap();
 
@@ -5822,16 +5961,71 @@ mod tests {
             Some("rtk hook grok")
         );
 
-        let grok_md = temp.path().join("GROK.md");
-        assert!(grok_md.exists(), "GROK.md not written");
+        // Grok only loads project rules from AGENTS.md / Claude.md / etc., so we
+        // must inject awareness into AGENTS.md, not GROK.md.
+        assert!(
+            !temp.path().join("GROK.md").exists(),
+            "GROK.md must not be written — Grok does not load it"
+        );
+        let agents_md = temp.path().join("AGENTS.md");
+        assert!(agents_md.exists(), "AGENTS.md not written");
+        let md = fs::read_to_string(&agents_md).unwrap();
+        assert!(
+            md.contains(RTK_BLOCK_START) && md.contains(RTK_BLOCK_END),
+            "AGENTS.md must contain rtk-instructions marker block"
+        );
+        assert!(
+            md.contains("Always prefix shell commands with `rtk`"),
+            "Grok awareness must instruct the agent to self-prefix"
+        );
     }
 
     #[test]
-    fn test_run_grok_at_hook_only_skips_grok_md() {
+    fn test_run_grok_at_preserves_existing_agents_md_content() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        let user_content = "# My Project\n\nUse Rust 2021.\n";
+        fs::write(&agents_md, user_content).unwrap();
+
+        run_grok_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let md = fs::read_to_string(&agents_md).unwrap();
+        assert!(
+            md.contains("Use Rust 2021."),
+            "user content must be preserved when block is appended"
+        );
+        assert!(
+            md.contains(RTK_BLOCK_START),
+            "rtk block must be added alongside user content"
+        );
+    }
+
+    #[test]
+    fn test_run_grok_at_migrates_legacy_grok_md() {
+        let temp = TempDir::new().unwrap();
+        // Simulate a prior install that wrote the dead-letter GROK.md.
+        let legacy = temp.path().join("GROK.md");
+        fs::write(&legacy, "stale content").unwrap();
+
+        run_grok_at(temp.path(), false, InitContext::default()).unwrap();
+
+        assert!(
+            !legacy.exists(),
+            "legacy GROK.md must be removed because Grok ignores it"
+        );
+        assert!(
+            temp.path().join("AGENTS.md").exists(),
+            "AGENTS.md must be written as the replacement"
+        );
+    }
+
+    #[test]
+    fn test_run_grok_at_hook_only_skips_agents_md() {
         let temp = TempDir::new().unwrap();
         run_grok_at(temp.path(), true, InitContext::default()).unwrap();
 
         assert!(temp.path().join("hooks").join("rtk.json").exists());
+        assert!(!temp.path().join("AGENTS.md").exists());
         assert!(!temp.path().join("GROK.md").exists());
     }
 
@@ -5839,11 +6033,16 @@ mod tests {
     fn test_run_grok_at_is_idempotent() {
         let temp = TempDir::new().unwrap();
         run_grok_at(temp.path(), false, InitContext::default()).unwrap();
-        run_grok_at(temp.path(), false, InitContext::default()).unwrap();
+        let after_first = fs::read_to_string(temp.path().join("AGENTS.md")).unwrap();
 
+        run_grok_at(temp.path(), false, InitContext::default()).unwrap();
+        let after_second = fs::read_to_string(temp.path().join("AGENTS.md")).unwrap();
+
+        assert_eq!(after_first, after_second, "second run must be a no-op");
         let hook_json = temp.path().join("hooks").join("rtk.json");
-        let content = fs::read_to_string(&hook_json).unwrap();
-        assert!(content.contains("rtk hook grok"));
+        assert!(fs::read_to_string(&hook_json)
+            .unwrap()
+            .contains("rtk hook grok"));
     }
 
     #[test]
@@ -5860,6 +6059,7 @@ mod tests {
         .unwrap();
 
         assert!(!temp.path().join("hooks").join("rtk.json").exists());
+        assert!(!temp.path().join("AGENTS.md").exists());
         assert!(!temp.path().join("GROK.md").exists());
     }
 
@@ -5873,16 +6073,47 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_grok_at_removes_files() {
+    fn test_uninstall_grok_at_removes_artifacts() {
         let temp = TempDir::new().unwrap();
         run_grok_at(temp.path(), false, InitContext::default()).unwrap();
 
         let removed = uninstall_grok_at(temp.path(), InitContext::default()).unwrap();
+        // Two artifacts expected when install was clean: hook + AGENTS.md block.
         assert_eq!(removed.len(), 2);
         assert!(!temp.path().join("hooks").join("rtk.json").exists());
-        assert!(!temp.path().join("GROK.md").exists());
+        // AGENTS.md was created solely by RTK in this test → file is deleted.
+        assert!(!temp.path().join("AGENTS.md").exists());
         // The hooks/ directory itself must NOT be removed (user may have other hooks).
         assert!(temp.path().join("hooks").exists());
+    }
+
+    #[test]
+    fn test_uninstall_grok_at_preserves_user_agents_md_content() {
+        let temp = TempDir::new().unwrap();
+        let agents_md = temp.path().join("AGENTS.md");
+        fs::write(&agents_md, "# Project rules\n\nUse Rust 2021.\n").unwrap();
+
+        run_grok_at(temp.path(), false, InitContext::default()).unwrap();
+        uninstall_grok_at(temp.path(), InitContext::default()).unwrap();
+
+        let md = fs::read_to_string(&agents_md).unwrap();
+        assert!(
+            md.contains("Use Rust 2021."),
+            "uninstall must leave user content intact"
+        );
+        assert!(!md.contains(RTK_BLOCK_START), "rtk block must be stripped");
+    }
+
+    #[test]
+    fn test_uninstall_grok_at_cleans_legacy_grok_md() {
+        let temp = TempDir::new().unwrap();
+        // Pre-existing legacy file (no install).
+        fs::write(temp.path().join("GROK.md"), "stale").unwrap();
+
+        let removed = uninstall_grok_at(temp.path(), InitContext::default()).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].contains("GROK.md"));
+        assert!(!temp.path().join("GROK.md").exists());
     }
 
     #[test]
@@ -5910,6 +6141,6 @@ mod tests {
         assert_eq!(removed.len(), 2);
         // But the files are still on disk.
         assert!(temp.path().join("hooks").join("rtk.json").exists());
-        assert!(temp.path().join("GROK.md").exists());
+        assert!(temp.path().join("AGENTS.md").exists());
     }
 }
