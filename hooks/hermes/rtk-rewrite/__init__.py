@@ -716,7 +716,7 @@ def _transform_tool_result(tool_name: str, result) -> str:
     saved, count, avg_pct = _read_rtk_savings()
     comp_count, comp_avg = 0, 0.0
     if comp_saved > 0:
-        _record_compression(comp_saved, original_len)
+        _record_compression(tool_name, comp_saved, original_len)
         comp_count_result, comp_avg = _read_compression_savings_count()
 
     if saved <= 0 and comp_saved <= 0:
@@ -751,14 +751,14 @@ def _transform_tool_result(tool_name: str, result) -> str:
 
 # --- H6/H7: Compression tracking DB ---
 
-def _record_compression(saved: int, original_len: int):
+def _record_compression(tool_name: str, saved: int, original_len: int):
     """H6: Record compression savings to DB."""
     try:
         _ensure_compression_db()
         with sqlite3.connect(str(_COMPRESSION_DB_PATH), timeout=1) as conn:
             conn.execute(
-                "INSERT INTO compressions (saved_chars, original_len, savings_pct) VALUES (?, ?, ?)",
-                (saved, original_len, round(saved / original_len * 100, 1) if original_len > 0 else 0),
+                "INSERT INTO compression_stats (tool_name, original_chars, compressed_chars, saved_chars, saved_pct) VALUES (?, ?, ?, ?, ?)",
+                (tool_name, original_len, original_len - saved, saved, round(saved / original_len * 100, 1) if original_len > 0 else 0),
             )
             conn.commit()
     except Exception as e:
@@ -775,8 +775,8 @@ def _read_compression_savings():
             cur = conn.execute(
                 "SELECT COALESCE(SUM(saved_chars),0) AS saved,"
                 " COUNT(*) AS cnt,"
-                " COALESCE(ROUND(AVG(savings_pct),1),0.0) AS avg_pct"
-                " FROM compressions"
+                " COALESCE(ROUND(AVG(saved_pct),1),0.0) AS avg_pct"
+                " FROM compression_stats"
             )
             row = cur.fetchone()
             return row["saved"], row["cnt"], row["avg_pct"]
@@ -792,8 +792,8 @@ def _read_compression_savings_count():
         with sqlite3.connect(str(_COMPRESSION_DB_PATH), timeout=1) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                "SELECT COUNT(*) AS cnt, COALESCE(ROUND(AVG(savings_pct),1),0.0) AS avg_pct"
-                " FROM compressions"
+                "SELECT COUNT(*) AS cnt, COALESCE(ROUND(AVG(saved_pct),1),0.0) AS avg_pct"
+                " FROM compression_stats"
             )
             row = cur.fetchone()
             return row["cnt"], row["avg_pct"]
@@ -811,12 +811,14 @@ def _ensure_compression_db():
     if not _COMPRESSION_DB_PATH.exists():
         with sqlite3.connect(str(_COMPRESSION_DB_PATH)) as conn:
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS compressions ("
+                "CREATE TABLE IF NOT EXISTS compression_stats ("
                 " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " tool_name TEXT NOT NULL,"
+                " original_chars INTEGER NOT NULL,"
+                " compressed_chars INTEGER NOT NULL,"
                 " saved_chars INTEGER NOT NULL,"
-                " original_len INTEGER NOT NULL,"
-                " savings_pct REAL NOT NULL,"
-                " ts DATETIME DEFAULT CURRENT_TIMESTAMP)"
+                " saved_pct REAL NOT NULL,"
+                " timestamp TEXT DEFAULT CURRENT_TIMESTAMP)"
             )
             conn.commit()
 
