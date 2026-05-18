@@ -3336,6 +3336,22 @@ fn show_claude_config() -> Result<()> {
         println!("[--] Cursor: home dir not found");
     }
 
+    // Check Grok hooks
+    if let Ok(grok_dir) = resolve_grok_dir() {
+        let grok_hook_json = grok_dir.join(HOOKS_SUBDIR).join(GROK_HOOK_FILENAME);
+        let grok_md = grok_dir.join(GROK_MD);
+        match (grok_hook_json.exists(), grok_md.exists()) {
+            (true, true) => println!("[ok] Grok: hook + GROK.md ({})", grok_dir.display()),
+            (true, false) => println!("[ok] Grok: hook only ({})", grok_dir.display()),
+            (false, true) => {
+                println!("[warn] Grok: GROK.md present but hook missing (run: rtk init -g --grok)")
+            }
+            (false, false) => println!("[--] Grok: not installed"),
+        }
+    } else {
+        println!("[--] Grok: home dir not found");
+    }
+
     println!("\nUsage:");
     println!("  rtk init              # Full injection into local CLAUDE.md");
     println!("  rtk init -g           # Hook + RTK.md + @RTK.md + settings.json (recommended)");
@@ -3348,6 +3364,7 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
+    println!("  rtk init -g --grok          # Install Grok Build TUI hook");
 
     Ok(())
 }
