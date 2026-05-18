@@ -375,7 +375,7 @@ enum Commands {
         #[arg(long)]
         copilot: bool,
 
-        /// Install Grok Build TUI integration (writes ~/.grok/hooks/rtk.json + GROK.md)
+        /// Target Grok Build TUI (writes ~/.grok/hooks/rtk.json + GROK.md)
         #[arg(long)]
         grok: bool,
 

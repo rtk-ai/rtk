@@ -619,9 +619,6 @@ pub fn uninstall(
     }
 
     if grok {
-        if !global {
-            anyhow::bail!("Grok uninstall only works with --global flag");
-        }
         let removed = uninstall_grok(global, ctx)?;
         let header = if dry_run {
             "[dry-run] would uninstall RTK (Grok):"
@@ -5876,5 +5873,26 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let removed = uninstall_grok_at(temp.path(), InitContext::default()).unwrap();
         assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn test_uninstall_grok_at_dry_run_keeps_files() {
+        let temp = TempDir::new().unwrap();
+        run_grok_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let removed = uninstall_grok_at(
+            temp.path(),
+            InitContext {
+                verbose: 0,
+                dry_run: true,
+            },
+        )
+        .unwrap();
+
+        // Dry-run still reports what WOULD be removed.
+        assert_eq!(removed.len(), 2);
+        // But the files are still on disk.
+        assert!(temp.path().join("hooks").join("rtk.json").exists());
+        assert!(temp.path().join("GROK.md").exists());
     }
 }
