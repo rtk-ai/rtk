@@ -242,6 +242,111 @@ fn print_rewrite(cmd: &str) {
     let _ = writeln!(io::stdout(), "{}", output);
 }
 
+// ── Grok hook ────────────────────────────────────────────────
+
+/// Pure decision function. Returns `Some(json_value)` when a deny+suggest
+/// response should be written to stdout, `None` when the hook should pass
+/// through silently (Grok treats empty stdout as fail-open allow).
+fn process_grok_payload(v: &Value) -> Option<Value> {
+    let tool_name = v.get("toolName").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(tool_name, "Bash" | "run_terminal_cmd") {
+        return None;
+    }
+
+    let cmd = v
+        .pointer("/toolInput/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())?;
+
+    if permissions::check_command(cmd) == PermissionVerdict::Deny {
+        return Some(json!({
+            "decision": "deny",
+            "reason": "Blocked by RTK permission rule",
+        }));
+    }
+
+    let rewritten = get_rewritten(cmd)?;
+
+    Some(json!({
+        "decision": "deny",
+        "reason": format!(
+            "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
+            rewritten
+        ),
+    }))
+}
+
+/// Run the Grok Build TUI PreToolUse hook.
+///
+/// Wire protocol (Grok docs `~/.grok/docs/user-guide/10-hooks.md`):
+/// - Stdin: camelCase payload `{ toolName, toolInput: { command }, ... }`.
+/// - Stdout (deny): `{"decision":"deny","reason":"..."}`.
+/// - Empty stdout or any non-2 exit code is fail-open allow.
+pub fn run_grok() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    let cmd_for_audit = v
+        .pointer("/toolInput/command")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match process_grok_payload(&v) {
+        Some(output) => {
+            // Distinguish deny-by-rule from deny-by-rewrite for the audit log.
+            let action = output
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .map(|r| {
+                    if r.starts_with("Token savings") {
+                        "rewrite"
+                    } else {
+                        "deny"
+                    }
+                })
+                .unwrap_or("deny");
+            let rewritten = output
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .and_then(extract_suggestion_from_reason)
+                .unwrap_or_default();
+            audit_log(action, &cmd_for_audit, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        None => {
+            // Pass-through: empty stdout = Grok fail-open allow.
+        }
+    }
+    Ok(())
+}
+
+/// Pull the suggested rewrite out of a `Token savings: use \`X\` instead ...` reason.
+/// Used only for audit logging; failure-tolerant.
+fn extract_suggestion_from_reason(reason: &str) -> Option<String> {
+    let start = reason.find('`')? + 1;
+    let rest = &reason[start..];
+    let end = rest.find('`')?;
+    Some(rest[..end].to_string())
+}
+
+#[cfg(test)]
+fn run_grok_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    process_grok_payload(&v).map(|out| out.to_string())
+}
+
 // ── Audit logging ─────────────────────────────────────────────
 
 /// Best-effort audit log when RTK_HOOK_AUDIT=1.
@@ -543,6 +648,18 @@ mod tests {
     fn copilot_cli_input(cmd: &str) -> Value {
         let args = serde_json::to_string(&json!({ "command": cmd })).unwrap();
         json!({ "toolName": "bash", "toolArgs": args })
+    }
+
+    fn grok_input(tool: &str, cmd: &str) -> Value {
+        json!({
+            "hookEventName": "pre_tool_use",
+            "sessionId": "test-session",
+            "cwd": "/tmp/proj",
+            "workspaceRoot": "/tmp/proj",
+            "toolName": tool,
+            "toolInput": { "command": cmd },
+            "timestamp": "2026-05-17T00:00:00Z"
+        })
     }
 
     #[test]
@@ -987,5 +1104,69 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // --- Grok handler ---
+
+    #[test]
+    fn test_grok_rewrites_bash_alias() {
+        let input = grok_input("Bash", "git status");
+        let out = run_grok_inner(&input.to_string()).expect("rewrite expected");
+        assert!(out.contains(r#""decision":"deny""#), "got: {}", out);
+        assert!(out.contains("rtk git status"), "got: {}", out);
+    }
+
+    #[test]
+    fn test_grok_rewrites_run_terminal_cmd() {
+        let input = grok_input("run_terminal_cmd", "git status");
+        let out = run_grok_inner(&input.to_string()).expect("rewrite expected");
+        assert!(out.contains("rtk git status"), "got: {}", out);
+    }
+
+    #[test]
+    fn test_grok_passes_non_bash_tool() {
+        let input = grok_input("read_file", "git status");
+        assert!(
+            run_grok_inner(&input.to_string()).is_none(),
+            "non-Bash tool must pass through"
+        );
+    }
+
+    #[test]
+    fn test_grok_passes_already_rtk() {
+        let input = grok_input("Bash", "rtk git status");
+        assert!(
+            run_grok_inner(&input.to_string()).is_none(),
+            "already-rewritten commands must pass through"
+        );
+    }
+
+    #[test]
+    fn test_grok_passes_heredoc() {
+        let input = grok_input("Bash", "cat <<EOF\nhello\nEOF");
+        assert!(
+            run_grok_inner(&input.to_string()).is_none(),
+            "heredoc commands must pass through"
+        );
+    }
+
+    #[test]
+    fn test_grok_passes_empty_command() {
+        let input = grok_input("Bash", "");
+        assert!(run_grok_inner(&input.to_string()).is_none());
+    }
+
+    #[test]
+    fn test_grok_passes_missing_tool_input() {
+        let input = json!({
+            "hookEventName": "pre_tool_use",
+            "toolName": "Bash"
+        });
+        assert!(run_grok_inner(&input.to_string()).is_none());
+    }
+
+    #[test]
+    fn test_grok_malformed_payload_returns_none() {
+        assert!(run_grok_inner("not json").is_none());
     }
 }

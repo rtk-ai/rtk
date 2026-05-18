@@ -774,6 +774,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Grok Build TUI PreToolUse hook (reads JSON from stdin)
+    Grok,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -2174,6 +2176,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Grok => {
+                hooks::hook_cmd::run_grok()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
