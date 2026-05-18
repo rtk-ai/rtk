@@ -375,6 +375,10 @@ enum Commands {
         #[arg(long)]
         copilot: bool,
 
+        /// Install Grok Build TUI integration (writes ~/.grok/hooks/rtk.json + GROK.md)
+        #[arg(long)]
+        grok: bool,
+
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
         dry_run: bool,
@@ -1361,24 +1365,26 @@ fn main() {
     std::process::exit(code);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
+    grok: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
-        uninstall_standard(global, gemini, codex, cursor, ctx)
+        uninstall_standard(global, gemini, codex, cursor, grok, ctx)
     }
 }
 
@@ -1802,6 +1808,7 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            grok,
             dry_run,
         } => {
             let ctx = hooks::init::InitContext {
@@ -1816,10 +1823,19 @@ fn run_cli() -> Result<i32> {
                     global,
                     gemini,
                     codex,
+                    grok,
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall,
                 )?;
+            } else if grok {
+                if codex || copilot || gemini || opencode || claude_md || agent.is_some() {
+                    anyhow::bail!(
+                        "--grok cannot be combined with another agent flag \
+                         (--codex/--copilot/--gemini/--opencode/--claude-md/--agent)"
+                    );
+                }
+                hooks::init::run_grok(global, hook_only, ctx)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2693,6 +2709,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             ctx,
             |ctx| {
                 hermes_called.set(true);
@@ -2700,7 +2717,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _| {
+            |_, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
