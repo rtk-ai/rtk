@@ -26,3 +26,10 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+#[allow(dead_code)]
+pub const GROK_DIR: &str = ".grok";
+#[allow(dead_code)]
+pub const GROK_HOOK_FILENAME: &str = "rtk.json";
+#[allow(dead_code)]
+pub const GROK_MD: &str = "GROK.md";
