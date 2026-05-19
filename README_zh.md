@@ -70,18 +70,29 @@ cargo install --git https://github.com/rtk-ai/rtk
 ### 验证
 
 ```bash
-rtk --version   # 应显示 "rtk 0.27.x"
+rtk --version   # 应显示 "rtk 0.28.2"
 rtk gain        # 应显示 token 节省统计
 ```
 
 ## 快速开始
 
 ```bash
-# 1. 为 Claude Code 安装 hook（推荐）
-rtk init --global
+# 1. 为你的 AI 工具安装（推荐）
+rtk init -g                     # Claude Code / Copilot（默认）
+rtk init -g --gemini            # Gemini CLI
+rtk init -g --grok              # Grok Build TUI (xAI)
+rtk init -g --codex             # Codex
+rtk init --agent cursor         # Cursor
+rtk init --agent windsurf       # Windsurf
+rtk init --agent cline          # Cline / Roo Code
+rtk init --agent hermes         # Hermes
+rtk init --agent kilocode       # Kilo Code
 
-# 2. 重启 Claude Code，然后测试
+# 2. 重启你的 AI 工具，然后测试
 git status  # 自动重写为 rtk git status
+```
+
+> 完整支持的 AI 工具列表（14+）见 [English README](README.md) 的 Supported AI Tools 章节。
 ```
 
 ## 工作原理
@@ -101,6 +112,25 @@ git status  # 自动重写为 rtk git status
 2. **分组** - 聚合相似项（按目录分文件，按类型分错误）
 3. **截断** - 保留相关上下文，删除冗余
 4. **去重** - 合并重复日志行并计数
+
+## 支持的 AI 工具
+
+RTK 支持 14 种主流 AI 编程助手。每种集成都会将 shell 命令重写为 `rtk` 等效命令，实现 60-90% token 节省。
+
+| 工具                  | 安装命令                          | 说明 |
+|-----------------------|-----------------------------------|------|
+| **Claude Code**      | `rtk init -g`                    | 透明重写 hook |
+| **GitHub Copilot**   | `rtk init -g --copilot`          | VS Code / CLI 支持 |
+| **Cursor**           | `rtk init --agent cursor`        | hooks.json |
+| **Gemini CLI**       | `rtk init -g --gemini`           | BeforeTool hook |
+| **Codex**            | `rtk init -g --codex`            | AGENTS.md 指导 |
+| **Grok Build TUI**   | `rtk init -g --grok`             | AGENTS.md + deny 建议（TUI 协议限制） |
+| **Windsurf / Cline** | `rtk init --agent windsurf`      | 项目规则文件 |
+| **Kilo Code 等**     | `rtk init --agent kilocode`      | 更多代理支持 |
+
+完整细节与降级策略见 [English README - Supported AI Tools](README.md#supported-ai-tools)。
+
+Grok 用户注意：Grok 使用全局 `~/.grok/AGENTS.md` 注入 RTK 使用规则（自动由 `rtk init -g --grok` 完成），并通过 `rtk hook grok` 提供命令建议。**务必始终在 shell 命令前加 `rtk` 前缀**。
 
 ## 命令
 
