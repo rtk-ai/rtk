@@ -33,7 +33,7 @@ pub fn run(
     // Without this, rg returns 0 matches for files in .gitignore, causing
     // false negatives that make AI agents draw wrong conclusions.
     // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
-    rg_cmd.args(["-n", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
+    rg_cmd.args(["-n", "--no-heading", "--with-filename", "--no-ignore-vcs", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -108,16 +108,9 @@ pub fn run(
 
     let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for line in result.stdout.lines() {
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-
-        let (file, line_num, content) = if parts.len() == 3 {
-            let ln = parts[1].parse().unwrap_or(0);
-            (parts[0].to_string(), ln, parts[2])
-        } else if parts.len() == 2 {
-            let ln = parts[0].parse().unwrap_or(0);
-            (path.to_string(), ln, parts[1])
-        } else {
-            continue;
+        let (file, line_num, content) = match parse_rg_line(line, path) {
+            Some(parsed) => parsed,
+            None => continue,
         };
 
         let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
@@ -164,6 +157,30 @@ pub fn run(
     );
 
     Ok(exit_code)
+}
+
+/// Parse a grep/rg output line into (file, line_number, content).
+///
+/// With `--with-filename`, rg always emits `file:line:content`.
+/// The grep fallback may still emit `line:content` for single files
+/// (detected when the first segment is purely numeric).
+fn parse_rg_line<'a>(line: &'a str, default_file: &str) -> Option<(String, usize, &'a str)> {
+    let first_colon = line.find(':')?;
+    let first_segment = &line[..first_colon];
+    let rest = &line[first_colon + 1..];
+
+    // `line:content` fallback: first segment is a bare line number.
+    if !first_segment.is_empty() && first_segment.bytes().all(|b| b.is_ascii_digit()) {
+        let line_num = first_segment.parse().unwrap_or(0);
+        return Some((default_file.to_string(), line_num, rest));
+    }
+
+    // `file:line:content` (rg --with-filename): first segment is a filename.
+    let second_colon = rest.find(':')?;
+    let line_num_str = &rest[..second_colon];
+    let content = &rest[second_colon + 1..];
+    let line_num = line_num_str.parse().unwrap_or(0);
+    Some((first_segment.to_string(), line_num, content))
 }
 
 fn has_format_flag(extra_args: &[String]) -> bool {
@@ -380,12 +397,12 @@ mod tests {
         // grep_cmd::run() always passes "-n" to rg (line 24).
         // This test documents that -n is built-in, so the clap flag is safe to ignore.
         let mut cmd = resolved_command("rg");
-        cmd.args(["-n", "--no-heading", "NONEXISTENT_PATTERN_12345", "."]);
+        cmd.args(["-n", "--no-heading", "--with-filename", "NONEXISTENT_PATTERN_12345", "."]);
         // If rg is available, it should accept -n without error (exit 1 = no match, not error)
         if let Ok(output) = cmd.output() {
             assert!(
                 output.status.code() == Some(1) || output.status.success(),
-                "rg -n should be accepted"
+                "rg -n --with-filename should be accepted"
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
@@ -398,6 +415,7 @@ mod tests {
         cmd.args([
             "-n",
             "--no-heading",
+            "--with-filename",
             "--no-ignore-vcs",
             "NONEXISTENT_PATTERN_12345",
             ".",
@@ -405,9 +423,96 @@ mod tests {
         if let Ok(output) = cmd.output() {
             assert!(
                 output.status.code() == Some(1) || output.status.success(),
-                "rg --no-ignore-vcs should be accepted"
+                "rg --no-ignore-vcs --with-filename should be accepted"
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    // --- parse_rg_line regression tests (issue #1613) ---
+
+    #[test]
+    fn test_parse_rg_line_with_filename_and_colons_in_content() {
+        let line = "fixtures/config.txt:7:config: value: still content";
+        let (file, line_num, content) = parse_rg_line(line, ".").unwrap();
+        assert_eq!(file, "fixtures/config.txt");
+        assert_eq!(line_num, 7);
+        assert_eq!(content, "config: value: still content");
+    }
+
+    #[test]
+    fn test_parse_rg_line_standard_format() {
+        let line = "src/main.rs:42:fn main() {";
+        let (file, line_num, content) = parse_rg_line(line, ".").unwrap();
+        assert_eq!(file, "src/main.rs");
+        assert_eq!(line_num, 42);
+        assert_eq!(content, "fn main() {");
+    }
+
+    #[test]
+    fn test_parse_rg_line_no_filename_fallback() {
+        // grep -rn single-file: file:line:content even without --with-filename
+        // But if somehow line:content appears (numeric first segment), use default_file.
+        let line = "10:some matched content";
+        let (file, line_num, content) = parse_rg_line(line, "default.txt").unwrap();
+        assert_eq!(file, "default.txt");
+        assert_eq!(line_num, 10);
+        assert_eq!(content, "some matched content");
+    }
+
+    #[test]
+    fn test_parse_rg_line_path_with_dots() {
+        // Filename with dots should NOT be treated as a numeric line number.
+        let line = "v2.1.txt:3:version: 2.1.0";
+        let (file, line_num, content) = parse_rg_line(line, ".").unwrap();
+        assert_eq!(file, "v2.1.txt");
+        assert_eq!(line_num, 3);
+        assert_eq!(content, "version: 2.1.0");
+    }
+
+    #[test]
+    fn test_parse_rg_line_no_colons_returns_none() {
+        assert!(parse_rg_line("no colons here", ".").is_none());
+    }
+
+    #[test]
+    fn test_parse_rg_line_empty() {
+        assert!(parse_rg_line("", ".").is_none());
+    }
+
+    #[test]
+    fn test_parse_rg_line_colon_only() {
+        // Just one colon — second find returns None
+        assert!(parse_rg_line(":", ".").is_none());
+    }
+
+    #[test]
+    fn test_parse_rg_line_single_file_with_colon_in_content() {
+        // Simulates rg --with-filename on a single file where content has a colon
+        let line = "config.yaml:5:url: https://example.com";
+        let (file, line_num, content) = parse_rg_line(line, ".").unwrap();
+        assert_eq!(file, "config.yaml");
+        assert_eq!(line_num, 5);
+        assert_eq!(content, "url: https://example.com");
+    }
+
+    #[test]
+    fn test_rg_with_filename_flag_accepted() {
+        // Verify rg accepts --with-filename (fix for #1613)
+        let mut cmd = resolved_command("rg");
+        cmd.args([
+            "-n",
+            "--no-heading",
+            "--with-filename",
+            "--no-ignore-vcs",
+            "NONEXISTENT_PATTERN_12345",
+            ".",
+        ]);
+        if let Ok(output) = cmd.output() {
+            assert!(
+                output.status.code() == Some(1) || output.status.success(),
+                "rg --with-filename should be accepted"
+            );
+        }
     }
 }
