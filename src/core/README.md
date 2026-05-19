@@ -121,5 +121,7 @@ Consumers that parse structured output (JSON, NDJSON, state machines) should cal
 
 For truncation recovery on **success** (e.g., list truncated at 20 items), use `tee::force_tee_hint()` which bypasses the tee mode check and writes regardless of exit code. This ensures LLMs always have a `[full output: ...]` recovery path instead of burning tokens working around missing data.
 
+When the truncated output is a **flat list** and the hidden items start at a predictable line, prefer `tee::force_tee_tail_hint(content, slug, offset)`. It writes the same tee file but emits a directly runnable hint — `[see remaining: tail -n +{offset} ~/path]` — so the agent jumps to exactly the first hidden item without scanning the whole file. The offset is `header_lines + MAX_CAP + 1`. Use `force_tee_hint` instead when the output has multiple sections (e.g. running + stopped containers) and no single offset cleanly covers the gap.
+
 ## Adding New Functionality
 Place new infrastructure code here if it meets **all** of these criteria: (1) it has no dependencies on command modules or hooks, (2) it is used by two or more other modules, and (3) it provides a general-purpose utility rather than command-specific logic. Follow the existing pattern of lazy-initialized resources (`lazy_static!` for regex, on-demand config loading) to preserve the <10ms startup target. Add `#[cfg(test)] mod tests` with unit tests in the same file.

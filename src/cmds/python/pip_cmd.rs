@@ -17,12 +17,16 @@ struct Package {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // Auto-detect uv vs pip
-    let use_uv = tool_exists("uv");
+    // The user ran `pip` — run `pip` so RTK stays transparent and reports the
+    // *same* environment the bare command would. Only fall back to `uv pip` when
+    // `pip` genuinely isn't on PATH (uv-only environments). Auto-substituting
+    // `uv pip` unconditionally made `pip list` show uv's discovered env instead
+    // of the active one — often just the 2-package base interpreter.
+    let use_uv = !tool_exists("pip") && tool_exists("uv");
     let base_cmd = if use_uv { "uv" } else { "pip" };
 
     if verbose > 0 && use_uv {
-        eprintln!("Using uv (pip-compatible)");
+        eprintln!("pip not found — falling back to `uv pip`");
     }
 
     // Detect subcommand
@@ -162,16 +166,21 @@ fn filter_pip_list(output: &str) -> String {
     let mut letters: Vec<_> = by_letter.keys().collect();
     letters.sort();
 
+    // `pip list` is an inventory query — dependency audits need every package
+    // visible. The compression here is structural (drop the alignment padding,
+    // group by initial); the per-group cap is just a safety bound for
+    // pathological environments, not a normal-case truncation.
+    const MAX_PER_LETTER: usize = 50;
     for letter in letters {
         let pkgs = by_letter.get(letter).unwrap();
         result.push_str(&format!("\n[{}]\n", letter.to_uppercase()));
 
-        for pkg in pkgs.iter().take(10) {
+        for pkg in pkgs.iter().take(MAX_PER_LETTER) {
             result.push_str(&format!("  {} ({})\n", pkg.name, pkg.version));
         }
 
-        if pkgs.len() > 10 {
-            result.push_str(&format!("  ... +{} more\n", pkgs.len() - 10));
+        if pkgs.len() > MAX_PER_LETTER {
+            result.push_str(&format!("  ... +{} more\n", pkgs.len() - MAX_PER_LETTER));
         }
     }
 

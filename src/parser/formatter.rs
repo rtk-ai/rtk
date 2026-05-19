@@ -45,7 +45,13 @@ pub trait TokenFormatter {
 
 impl TokenFormatter for TestResult {
     fn format_compact(&self) -> String {
-        let mut lines = vec![format!("PASS ({}) FAIL ({})", self.passed, self.failed)];
+        // Always surface skipped/pending tests — hiding them lets coverage gaps
+        // (test.skip / it.skip / xfail) accumulate invisibly.
+        let mut summary = format!("PASS ({}) FAIL ({})", self.passed, self.failed);
+        if self.skipped > 0 {
+            summary.push_str(&format!(" skipped ({})", self.skipped));
+        }
+        let mut lines = vec![summary];
 
         if !self.failures.is_empty() {
             lines.push(String::new());
@@ -112,6 +118,26 @@ impl TokenFormatter for TestResult {
 
 impl TokenFormatter for DependencyState {
     fn format_compact(&self) -> String {
+        // A plain package listing (`pnpm list` / `npm ls`) carries no upgrade
+        // info — every dep has `latest_version == None`. Reporting "All packages
+        // up-to-date" there is a false positive that hides the entire list, so
+        // we render the actual packages instead.
+        let is_listing = self.outdated_count == 0
+            && !self.dependencies.is_empty()
+            && self.dependencies.iter().all(|d| d.latest_version.is_none());
+        if is_listing {
+            let total = self.total_packages.max(self.dependencies.len());
+            let mut lines = vec![format!("{} packages", total)];
+            for dep in self.dependencies.iter().take(50) {
+                let dev = if dep.dev_dependency { " (dev)" } else { "" };
+                lines.push(format!("  {} {}{}", dep.name, dep.current_version, dev));
+            }
+            if self.dependencies.len() > 50 {
+                lines.push(format!("  ... +{} more", self.dependencies.len() - 50));
+            }
+            return lines.join("\n");
+        }
+
         if self.outdated_count == 0 {
             return "All packages up-to-date".to_string();
         }
@@ -196,6 +222,35 @@ mod tests {
             duration_ms: Some(1500),
             failures,
         }
+    }
+
+    fn make_dep(name: &str, version: &str, latest: Option<&str>) -> Dependency {
+        Dependency {
+            name: name.to_string(),
+            current_version: version.to_string(),
+            latest_version: latest.map(str::to_string),
+            wanted_version: None,
+            dev_dependency: false,
+        }
+    }
+
+    #[test]
+    fn test_dependency_state_plain_listing_shows_packages() {
+        let state = DependencyState {
+            total_packages: 2,
+            outdated_count: 0,
+            dependencies: vec![
+                make_dep("react", "18.0.0", None),
+                make_dep("typescript", "5.0.0", None),
+            ],
+        };
+        let out = state.format_compact();
+        assert!(out.contains("react"), "package name missing");
+        assert!(out.contains("typescript"), "package name missing");
+        assert!(
+            !out.contains("up-to-date"),
+            "false positive: plain listing should not say up-to-date"
+        );
     }
 
     // RED: format_compact must show the full error message, not just 2 lines.

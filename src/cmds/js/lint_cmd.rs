@@ -281,23 +281,20 @@ fn filter_eslint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    // Show top files with most issues
+    // Show top files with most issues, plus the top rules in each
     result.push_str("Top files:\n");
     for (file_result, count) in by_file.iter().take(10) {
         let short_path = compact_path(&file_result.file_path);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
-        // Show top 3 rules in this file
         let mut file_rules: HashMap<String, usize> = HashMap::new();
         for msg in &file_result.messages {
             if let Some(rule) = &msg.rule_id {
                 *file_rules.entry(rule.clone()).or_insert(0) += 1;
             }
         }
-
         let mut file_rule_counts: Vec<_> = file_rules.iter().collect();
         file_rule_counts.sort_by(|a, b| b.1.cmp(a.1));
-
         for (rule, count) in file_rule_counts.iter().take(3) {
             result.push_str(&format!("    {} ({})\n", rule, count));
         }

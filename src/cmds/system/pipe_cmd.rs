@@ -15,7 +15,8 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "find" | "fd" => Some(find_wrapper),
         "git-log" => Some(git_log_wrapper),
         "git-diff" => Some(git_diff_wrapper),
-        "git-status" => Some(crate::cmds::git::git::format_status_output),
+        "git-status" => Some(git_status_wrapper),
+        "log" => Some(crate::cmds::system::log_cmd::run_stdin_str),
         "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output),
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
@@ -26,6 +27,10 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
 
 fn go_test_wrapper(input: &str) -> String {
     crate::cmds::go::go_cmd::filter_go_test_json(input)
+}
+
+fn git_status_wrapper(input: &str) -> String {
+    crate::cmds::git::git::format_status_output(input)
 }
 
 fn git_log_wrapper(input: &str) -> String {
@@ -220,7 +225,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
                  tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 mypy, ruff-check, ruff-format, prettier",
+                 log, mypy, ruff-check, ruff-format, prettier",
                 name
             )
         })?,
@@ -298,6 +303,11 @@ mod tests {
     #[test]
     fn test_resolve_filter_git_status() {
         assert!(resolve_filter("git-status").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_log() {
+        assert!(resolve_filter("log").is_some());
     }
 
     #[test]

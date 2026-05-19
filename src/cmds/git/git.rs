@@ -678,8 +678,15 @@ fn truncate_line(line: &str, width: usize) -> String {
     }
 }
 
-/// Preserve RTK's branch/clean framing while keeping porcelain file lines intact.
 pub(crate) fn format_status_output(porcelain: &str) -> String {
+    format_status_inner(porcelain, None)
+}
+
+pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
+    format_status_inner(porcelain, Some(detached_ref))
+}
+
+fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
     let lines: Vec<&str> = porcelain
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -694,7 +701,8 @@ pub(crate) fn format_status_output(porcelain: &str) -> String {
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
-            output.push(format!("* {}", branch));
+            let display = detached.unwrap_or(branch);
+            output.push(format!("* {}", display));
         } else {
             output.push((*branch_line).to_string());
         }
@@ -809,6 +817,20 @@ fn extract_state_header(raw: &str) -> Option<String> {
     None
 }
 
+/// Extract the explicit "HEAD detached at/from <ref>" line from plain
+/// `git status` output.
+///
+/// Porcelain `-b` collapses a detached HEAD to the opaque `## HEAD (no branch)`,
+/// which an agent (or a distracted human) can misread as a branch literally
+/// named `HEAD`. The plain-status output keeps the explicit SHA/ref, so we
+/// surface that instead. Returns `None` when HEAD is on a branch.
+fn extract_detached_head(raw: &str) -> Option<String> {
+    raw.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("HEAD detached "))
+        .map(str::to_string)
+}
+
 /// Minimal filtering for git status with user-provided args
 fn filter_status_with_args(output: &str) -> String {
     let mut result = Vec::new();
@@ -913,7 +935,10 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
-    let formatted = format_status_output(&result.stdout);
+    let formatted = match extract_detached_head(&raw_output) {
+        Some(detached_ref) => format_status_output_detached(&result.stdout, &detached_ref),
+        None => format_status_output(&result.stdout),
+    };
 
     // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
     // plain-status output we already captured for tracking. Porcelain omits it
@@ -970,8 +995,11 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
         stat_cmd.args(["diff", "--cached", "--stat", "--shortstat"]);
         let stat_result = exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
 
+        // Mirror git's own behaviour: a no-op `git add` is silent. Emitting a
+        // generic "ok" here is misleading — an agent can't tell "staged N files"
+        // from "staged nothing" when both print "ok".
         let compact = if stat_result.stdout.trim().is_empty() {
-            "ok (nothing to add)".to_string()
+            String::new()
         } else {
             // Parse "1 file changed, 5 insertions(+)" format
             let short = stat_result.stdout.lines().last().unwrap_or("").trim();
@@ -982,7 +1010,9 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
             }
         };
 
-        println!("{}", compact);
+        if !compact.is_empty() {
+            println!("{}", compact);
+        }
 
         timer.track(
             &format!("git add {}", args.join(" ")),
@@ -1503,9 +1533,12 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
 fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
     match subcommand {
         None | Some("push") | Some("save") => {
-            // Create operations check for "no local changes"
-            if result.stdout.contains("No local changes") {
-                "ok (nothing to stash)".to_string()
+            // A successful stash collapses to "ok stashed" (the WIP ref/sha git
+            // prints isn't needed to `git stash pop`). But a no-op must NOT look
+            // like success — pass git's "No local changes to save" through so the
+            // agent can tell nothing was stashed.
+            if result.combined().contains("No local changes") {
+                "No local changes to save".to_string()
             } else {
                 "ok stashed".to_string()
             }
@@ -2759,6 +2792,35 @@ no changes added to commit (use "git add" and/or "git commit -a")
             result.contains("50 lines truncated"),
             "Expected '50 lines truncated' (150 - 100 = 50), got:\n{}",
             result
+        );
+    }
+
+    #[test]
+    fn test_extract_detached_head_returns_line() {
+        let raw = "HEAD detached at abc1234\nnothing to commit, working tree clean\n";
+        assert_eq!(
+            extract_detached_head(raw),
+            Some("HEAD detached at abc1234".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_detached_head_on_branch_is_none() {
+        let raw = "On branch main\nnothing to commit, working tree clean\n";
+        assert!(extract_detached_head(raw).is_none());
+    }
+
+    #[test]
+    fn test_format_status_output_detached_head() {
+        let porcelain = "## HEAD (no branch)\n M src/main.rs\n";
+        let result = format_status_output_detached(porcelain, "HEAD detached at abc1234");
+        assert!(
+            result.contains("HEAD detached at abc1234"),
+            "should use explicit detached ref, got: {result}"
+        );
+        assert!(
+            !result.contains("HEAD (no branch)"),
+            "should not show opaque porcelain string, got: {result}"
         );
     }
 

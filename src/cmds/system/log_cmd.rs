@@ -81,17 +81,24 @@ fn analyze_logs(content: &str) -> String {
         let normalized =
             normalize_log_line(line, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
 
-        // Categorize
+        // Categorize. The error bucket also covers severity labels above ERROR
+        // (CRITICAL, FATAL, ALERT, EMERGENCY, SEVERE, PANIC) — these are the most
+        // important lines in a log and were previously dropped as noise when they
+        // didn't literally contain "error".
         if line_lower.contains("error")
             || line_lower.contains("fatal")
             || line_lower.contains("panic")
+            || line_lower.contains("critical")
+            || line_lower.contains("alert")
+            || line_lower.contains("emerg")
+            || line_lower.contains("severe")
         {
             let count = error_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
                 unique_errors.push(line.to_string());
             }
             *count += 1;
-        } else if line_lower.contains("warn") {
+        } else if line_lower.contains("warn") || line_lower.contains("notice") {
             let count = warn_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
                 unique_warnings.push(line.to_string());
@@ -237,6 +244,18 @@ mod tests {
         let result = analyze_logs(logs);
         assert!(result.contains("×3"));
         assert!(result.contains("ERRORS"));
+    }
+
+    #[test]
+    fn test_analyze_logs_extended_severity_keywords() {
+        let logs = "2024-01-01 10:00:00 CRITICAL: disk full\n\
+                    2024-01-01 10:00:01 ALERT: memory pressure\n\
+                    2024-01-01 10:00:02 emerg: system shutdown imminent\n\
+                    2024-01-01 10:00:03 SEVERE: data corruption detected\n\
+                    2024-01-01 10:00:04 notice: config reloaded\n";
+        let result = analyze_logs(logs);
+        assert!(result.contains("ERRORS"), "critical/alert/emerg/severe should count as errors");
+        assert!(result.contains("WARNINGS"), "notice should count as warning");
     }
 
     #[test]
