@@ -26,3 +26,7 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+pub const QODER_DIR: &str = ".qoder";
+pub const QODER_HOOK_COMMAND: &str = "rtk hook qoder";
+pub const QODER_SETTINGS_JSON: &str = "settings.json";

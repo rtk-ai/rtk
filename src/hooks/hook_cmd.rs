@@ -397,6 +397,44 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── Qoder native hook ──────────────────────────────────────────
+
+/// Run the Qoder IDE PreToolUse hook natively.
+/// Protocol is identical to Claude Code; reuses process_claude_payload().
+pub fn run_qoder() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_claude_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Cursor on Windows ships hook payloads with one or more leading
@@ -778,6 +816,49 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Qoder handler ---
+
+    #[cfg(test)]
+    fn run_qoder_inner(input: &str) -> Option<String> {
+        let v: Value = serde_json::from_str(input).ok()?;
+        match process_claude_payload(&v) {
+            PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+            _ => None,
+        }
+    }
+
+    fn qoder_input(cmd: &str) -> String {
+        serde_json::json!({
+            "session_id": "test-session",
+            "cwd": "/tmp/project",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_qoder_rewrite_git_status() {
+        let input = qoder_input("git status");
+        let output = run_qoder_inner(&input).unwrap();
+        assert!(output.contains("\"updatedInput\":{\"command\":\"rtk git status\"}"));
+    }
+
+    #[test]
+    fn test_qoder_passthrough_no_output() {
+        let input = qoder_input("htop");
+        let output = run_qoder_inner(&input);
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn test_qoder_already_rtk_passthrough() {
+        let input = qoder_input("rtk git status");
+        let output = run_qoder_inner(&input);
+        assert!(output.is_none());
     }
 
     // --- Cursor handler ---
