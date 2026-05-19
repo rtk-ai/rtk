@@ -15,7 +15,7 @@ use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SETTINGS_JSON,
+    QODER_DIR, QODER_HOOK_COMMAND, QODER_SETTINGS_JSON, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -25,6 +25,7 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const RTK_SLIM_QODER: &str = include_str!("../../hooks/qoder/rtk-awareness.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -600,12 +601,13 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, or Cursor artifacts.
+/// Full uninstall for Claude, Gemini, Codex, Cursor, or Qoder artifacts.
 pub fn uninstall(
     global: bool,
     gemini: bool,
     codex: bool,
     cursor: bool,
+    qoder: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
@@ -637,6 +639,33 @@ pub fn uninstall(
             }
         } else {
             println!("RTK Cursor support was not installed (nothing to remove)");
+        }
+        if dry_run {
+            print_dry_run_footer();
+        }
+        return Ok(());
+    }
+
+    if qoder {
+        if !global {
+            anyhow::bail!("Qoder uninstall only works with --global flag");
+        }
+        let qoder_removed = remove_qoder_hooks(ctx).context("Failed to remove Qoder hooks")?;
+        if !qoder_removed.is_empty() {
+            let header = if dry_run {
+                "[dry-run] would uninstall RTK (Qoder):"
+            } else {
+                "RTK uninstalled (Qoder):"
+            };
+            println!("{}", header);
+            for item in &qoder_removed {
+                println!("  - {}", item);
+            }
+            if !dry_run {
+                println!("\nRestart Qoder to apply changes.");
+            }
+        } else {
+            println!("RTK Qoder support was not installed (nothing to remove)");
         }
         if dry_run {
             print_dry_run_footer();
@@ -2781,6 +2810,211 @@ fn resolve_cursor_dir() -> Result<PathBuf> {
     resolve_home_subdir(CURSOR_DIR)
 }
 
+fn resolve_qoder_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    Ok(home.join(QODER_DIR))
+}
+
+/// Check whether the Qoder settings.json already contains the RTK hook entry.
+fn qoder_hook_already_present(root: &serde_json::Value) -> bool {
+    let hooks = match root
+        .get("hooks")
+        .and_then(|h| h.get("PreToolUse"))
+        .and_then(|p| p.as_array())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    hooks.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|h| {
+                h.iter().any(|inner| {
+                    inner.get("command").and_then(|c| c.as_str()) == Some(QODER_HOOK_COMMAND)
+                })
+            })
+    })
+}
+
+/// Insert the RTK PreToolUse entry into a Qoder settings.json document.
+fn insert_qoder_hook_entry(root: &mut serde_json::Value) -> Result<()> {
+    let root_obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *root = serde_json::json!({});
+            root.as_object_mut().expect("just-created json object")
+        }
+    };
+
+    let hooks = root_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("hooks value is not an object")?;
+
+    let pre_tool_use = hooks
+        .entry("PreToolUse")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("PreToolUse value is not an array")?;
+
+    pre_tool_use.push(serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [
+            {
+                "type": "command",
+                "command": QODER_HOOK_COMMAND
+            }
+        ]
+    }));
+    Ok(())
+}
+
+/// Install Qoder IDE hooks: write settings.json PreToolUse entry + RTK.md awareness doc.
+pub fn install_qoder_hooks(ctx: InitContext) -> Result<()> {
+    let verbose = ctx.verbose;
+    let dry_run = ctx.dry_run;
+    let qoder_dir = resolve_qoder_dir()?;
+
+    if !dry_run && !qoder_dir.exists() {
+        fs::create_dir_all(&qoder_dir).context("Failed to create .qoder directory")?;
+    }
+
+    let settings_json_path = qoder_dir.join(QODER_SETTINGS_JSON);
+
+    let mut root = if settings_json_path.exists() {
+        let content = fs::read_to_string(&settings_json_path)
+            .with_context(|| format!("Failed to read {}", settings_json_path.display()))?;
+        if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse {}", settings_json_path.display()))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    let patched = if qoder_hook_already_present(&root) {
+        if verbose > 0 {
+            eprintln!("Qoder settings.json: RTK hook already present");
+        }
+        false
+    } else {
+        insert_qoder_hook_entry(&mut root)?;
+        let serialized =
+            serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+
+        if dry_run {
+            println!(
+                "[dry-run] would patch Qoder settings.json: {}",
+                settings_json_path.display()
+            );
+        } else {
+            if settings_json_path.exists() {
+                let backup_path = settings_json_path.with_extension("json.bak");
+                fs::copy(&settings_json_path, &backup_path).ok();
+            }
+            atomic_write(&settings_json_path, &serialized)?;
+        }
+        true
+    };
+
+    let rtk_md_path = qoder_dir.join("RTK.md");
+    let md_written = write_if_changed(&rtk_md_path, RTK_SLIM_QODER, "Qoder awareness doc", ctx)?;
+
+    if !dry_run {
+        println!("\nQoder hook registered (global).\n");
+        println!("  Command:       {}", QODER_HOOK_COMMAND);
+        println!("  settings.json: {}", settings_json_path.display());
+        if patched {
+            println!("  settings.json: RTK PreToolUse entry added");
+        } else {
+            println!("  settings.json: RTK PreToolUse entry already present");
+        }
+        if md_written {
+            println!("  RTK.md:        Written to {}", rtk_md_path.display());
+        }
+        println!("  Test with: git status in Qoder IDE\n");
+    }
+
+    Ok(())
+}
+
+/// Remove the RTK hook entry from a Qoder settings.json, if present.
+/// Returns `true` if an entry was removed.
+fn remove_qoder_hook_from_json(root: &mut serde_json::Value) -> bool {
+    let pre_tool_use = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut("PreToolUse"))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let original_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| {
+        !entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|h| {
+                h.iter().any(|inner| {
+                    inner.get("command").and_then(|c| c.as_str()) == Some(QODER_HOOK_COMMAND)
+                })
+            })
+    });
+
+    pre_tool_use.len() < original_len
+}
+
+/// Uninstall Qoder IDE hooks: remove settings.json entry and RTK.md awareness doc.
+pub fn remove_qoder_hooks(ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext {
+        verbose: _,
+        dry_run,
+    } = ctx;
+    let qoder_dir = resolve_qoder_dir()?;
+    let mut removed = Vec::new();
+
+    let settings_json_path = qoder_dir.join(QODER_SETTINGS_JSON);
+    if settings_json_path.exists() {
+        let content = fs::read_to_string(&settings_json_path)?;
+        if !content.trim().is_empty() {
+            if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) {
+                if remove_qoder_hook_from_json(&mut root) {
+                    if dry_run {
+                        println!("[dry-run] would remove RTK entry from Qoder settings.json");
+                    } else {
+                        let backup_path = settings_json_path.with_extension("json.bak");
+                        fs::copy(&settings_json_path, &backup_path).ok();
+                        let serialized = serde_json::to_string_pretty(&root)?;
+                        atomic_write(&settings_json_path, &serialized)?;
+                    }
+                    removed.push(format!("Qoder entry in {}", settings_json_path.display()));
+                }
+            }
+        }
+    }
+
+    let rtk_md_path = qoder_dir.join("RTK.md");
+    if rtk_md_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Qoder RTK.md: {}",
+                rtk_md_path.display()
+            );
+        } else {
+            fs::remove_file(&rtk_md_path).ok();
+        }
+        removed.push(format!("Qoder awareness doc: {}", rtk_md_path.display()));
+    }
+
+    Ok(removed)
+}
+
 /// Install Cursor hooks: register binary command in hooks.json
 fn install_cursor_hooks(ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
@@ -3309,6 +3543,21 @@ fn show_claude_config() -> Result<()> {
         }
     } else {
         println!("[--] Cursor: home dir not found");
+    }
+
+    // Check Qoder hooks
+    let qoder_dir = dirs::home_dir().map(|h| h.join(QODER_DIR));
+    if let Some(dir) = qoder_dir {
+        let settings = dir.join(QODER_SETTINGS_JSON);
+        if settings.exists() {
+            if let Ok(content) = fs::read_to_string(&settings) {
+                if let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if qoder_hook_already_present(&root) {
+                        println!("[ok] Qoder Hook:   {}", settings.display());
+                    }
+                }
+            }
+        }
     }
 
     println!("\nUsage:");
@@ -5394,7 +5643,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, InitContext::default()).unwrap();
+            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -5521,7 +5770,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
