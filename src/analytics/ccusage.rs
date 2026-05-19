@@ -77,7 +77,8 @@ struct MonthlyResponse {
 
 #[derive(Debug, Deserialize)]
 struct MonthlyEntry {
-    month: String,
+    #[serde(rename = "period", alias = "month")]
+    period: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
 }
@@ -198,7 +199,7 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
                 .monthly
                 .into_iter()
                 .map(|e| CcusagePeriod {
-                    key: e.month,
+                    key: e.period,
                     metrics: e.metrics,
                 })
                 .collect())
@@ -212,6 +213,36 @@ mod tests {
 
     #[test]
     fn test_parse_monthly_valid() {
+        // ccusage ≥19.0 emits `period` instead of `month`
+        let json = r#"{
+            "monthly": [
+                {
+                    "period": "2026-01",
+                    "agent": "all",
+                    "modelsUsed": ["claude-haiku-4-5-20251001"],
+                    "inputTokens": 1000,
+                    "outputTokens": 500,
+                    "cacheCreationTokens": 100,
+                    "cacheReadTokens": 200,
+                    "totalTokens": 1800,
+                    "totalCost": 12.34,
+                    "metadata": {"agents": ["claude"]}
+                }
+            ]
+        }"#;
+
+        let result = parse_json(json, Granularity::Monthly);
+        assert!(result.is_ok());
+        let periods = result.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-01");
+        assert_eq!(periods[0].metrics.input_tokens, 1000);
+        assert_eq!(periods[0].metrics.total_cost, 12.34);
+    }
+
+    #[test]
+    fn test_parse_monthly_legacy_month_field() {
+        // backward compat: ccusage <19.0 used `month` — alias keeps it working
         let json = r#"{
             "monthly": [
                 {
@@ -231,8 +262,6 @@ mod tests {
         let periods = result.unwrap();
         assert_eq!(periods.len(), 1);
         assert_eq!(periods[0].key, "2026-01");
-        assert_eq!(periods[0].metrics.input_tokens, 1000);
-        assert_eq!(periods[0].metrics.total_cost, 12.34);
     }
 
     #[test]
