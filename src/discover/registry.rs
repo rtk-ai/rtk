@@ -3946,7 +3946,7 @@ mod tests {
     #[test]
     fn test_rewrite_phpunit() {
         assert_eq!(
-            rewrite_command("phpunit tests/", &[]),
+            rewrite_command("phpunit tests/", &[], &[]),
             Some("rtk phpunit tests/".into())
         );
     }
@@ -3954,7 +3954,7 @@ mod tests {
     #[test]
     fn test_rewrite_vendor_bin_phpunit() {
         assert_eq!(
-            rewrite_command("vendor/bin/phpunit --filter EmailTest", &[]),
+            rewrite_command("vendor/bin/phpunit --filter EmailTest", &[], &[]),
             Some("rtk phpunit --filter EmailTest".into())
         );
     }
@@ -3962,7 +3962,7 @@ mod tests {
     #[test]
     fn test_rewrite_php_vendor_bin_phpunit() {
         assert_eq!(
-            rewrite_command("php vendor/bin/phpunit tests/", &[]),
+            rewrite_command("php vendor/bin/phpunit tests/", &[], &[]),
             Some("rtk phpunit tests/".into())
         );
     }
@@ -3971,7 +3971,7 @@ mod tests {
     fn test_rewrite_bin_phpunit() {
         // bin/phpunit used by Symfony apps
         assert_eq!(
-            rewrite_command("bin/phpunit tests/", &[]),
+            rewrite_command("bin/phpunit tests/", &[], &[]),
             Some("rtk phpunit tests/".into())
         );
     }
@@ -3979,7 +3979,7 @@ mod tests {
     #[test]
     fn test_rewrite_php_bin_phpunit() {
         assert_eq!(
-            rewrite_command("php bin/phpunit --filter EmailTest", &[]),
+            rewrite_command("php bin/phpunit --filter EmailTest", &[], &[]),
             Some("rtk phpunit --filter EmailTest".into())
         );
     }
