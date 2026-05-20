@@ -12,7 +12,13 @@ pub struct RtkRule {
 
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+        // Issue #1897: include universal-passthrough subcommands so they are
+        // classified as Supported (with Passthrough status) rather than
+        // landing in "missed savings". RTK routes them transparently — they
+        // don't shrink tokens, but `rtk git checkout main` works exactly the
+        // same as `git checkout main`, so the dashboard shouldn't flag them
+        // as opportunities.
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree|checkout|clone|remote|merge|rebase|reset|restore|switch|tag|init|clean|cherry-pick|revert|bisect|grep|blame|describe|reflog|config|rm|mv|notes|submodule|apply|format-patch|am|range-diff|shortlog|whatchanged|cat-file|ls-files|ls-tree|rev-parse|rev-list|update-ref)",
         rtk_cmd: "rtk git",
         rewrite_prefixes: &["git", "yadm"],
         category: "Git",
@@ -23,7 +29,45 @@ pub const RULES: &[RtkRule] = &[
             ("add", 59.0),
             ("commit", 59.0),
         ],
-        subcmd_status: &[],
+        subcmd_status: &[
+            // Universal-passthrough subcommands: no per-subcommand filter,
+            // but the RTK proxy still wraps them transparently.
+            ("checkout", RtkStatus::Passthrough),
+            ("clone", RtkStatus::Passthrough),
+            ("remote", RtkStatus::Passthrough),
+            ("merge", RtkStatus::Passthrough),
+            ("rebase", RtkStatus::Passthrough),
+            ("reset", RtkStatus::Passthrough),
+            ("restore", RtkStatus::Passthrough),
+            ("switch", RtkStatus::Passthrough),
+            ("tag", RtkStatus::Passthrough),
+            ("init", RtkStatus::Passthrough),
+            ("clean", RtkStatus::Passthrough),
+            ("cherry-pick", RtkStatus::Passthrough),
+            ("revert", RtkStatus::Passthrough),
+            ("bisect", RtkStatus::Passthrough),
+            ("grep", RtkStatus::Passthrough),
+            ("blame", RtkStatus::Passthrough),
+            ("describe", RtkStatus::Passthrough),
+            ("reflog", RtkStatus::Passthrough),
+            ("config", RtkStatus::Passthrough),
+            ("rm", RtkStatus::Passthrough),
+            ("mv", RtkStatus::Passthrough),
+            ("notes", RtkStatus::Passthrough),
+            ("submodule", RtkStatus::Passthrough),
+            ("apply", RtkStatus::Passthrough),
+            ("format-patch", RtkStatus::Passthrough),
+            ("am", RtkStatus::Passthrough),
+            ("range-diff", RtkStatus::Passthrough),
+            ("shortlog", RtkStatus::Passthrough),
+            ("whatchanged", RtkStatus::Passthrough),
+            ("cat-file", RtkStatus::Passthrough),
+            ("ls-files", RtkStatus::Passthrough),
+            ("ls-tree", RtkStatus::Passthrough),
+            ("rev-parse", RtkStatus::Passthrough),
+            ("rev-list", RtkStatus::Passthrough),
+            ("update-ref", RtkStatus::Passthrough),
+        ],
     },
     RtkRule {
         pattern: r"^gh\s+(pr|issue|run|repo|api|release)",

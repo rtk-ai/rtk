@@ -866,6 +866,62 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_git_checkout_is_supported_passthrough() {
+        // Issue #1897: git checkout/clone/remote/... are universal-passthrough,
+        // not missed savings. They must not appear in `rtk discover`'s
+        // "missed opportunities" list.
+        assert_eq!(
+            classify_command("git checkout main"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_clone_is_supported_passthrough() {
+        assert_eq!(
+            classify_command("git clone https://example.com/repo.git"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_remote_is_supported_passthrough() {
+        assert_eq!(
+            classify_command("git remote -v"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_git_reset_is_supported_passthrough() {
+        // Coverage for another previously-Unsupported subcommand.
+        assert_eq!(
+            classify_command("git reset --hard HEAD~1"),
+            Classification::Supported {
+                rtk_equivalent: "rtk git",
+                category: "Git",
+                estimated_savings_pct: 70.0,
+                status: RtkStatus::Passthrough,
+            }
+        );
+    }
+
+    #[test]
     fn test_classify_yadm_status() {
         assert_eq!(
             classify_command("yadm status"),

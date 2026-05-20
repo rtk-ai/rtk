@@ -557,7 +557,16 @@ enum Commands {
         args: Vec<String>,
     },
 
-    /// Discover missed RTK savings from Claude Code history
+    /// Discover missed RTK savings from Claude Code history.
+    ///
+    /// Note: this report inspects Claude Code's session transcripts, which
+    /// record the **pre-hook** form of each command (i.e. what the assistant
+    /// originally proposed). When the RTK PreToolUse hook is installed and
+    /// active, those commands are rewritten on the fly into `rtk …` and the
+    /// rewritten form is what actually executes. The "missed savings" list
+    /// below therefore overstates true misses when a hook is present; cross-
+    /// reference with `rtk gain --history` (which records executed commands)
+    /// to see what RTK actually handled.
     Discover {
         /// Filter by project path (substring match)
         #[arg(short, long)]
