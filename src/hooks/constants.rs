@@ -26,3 +26,6 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+pub const OMP_GLOBAL_HOOK_PATH: &str = ".omp/agent/hooks/pre/rtk.ts";
+pub const OMP_PROJECT_HOOK_PATH: &str = ".omp/hooks/pre/rtk.ts";

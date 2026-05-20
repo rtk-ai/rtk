@@ -28,6 +28,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Claude-MD (legacy) | `rtk init --claude-md` | 134-line RTK block | CLAUDE.md |
 | Windsurf | `rtk init -g --agent windsurf` | `.windsurfrules` | -- |
 | Cline | `rtk init --agent cline` | `.clinerules` | -- |
+| Oh My Pi | `rtk init --agent omp` / `rtk init -g --agent omp` | `.omp/hooks/pre/rtk.ts` or `~/.omp/agent/hooks/pre/rtk.ts` | -- |
 | Codex | `rtk init --codex` | RTK.md in `$CODEX_HOME` or `~/.codex` | AGENTS.md |
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |

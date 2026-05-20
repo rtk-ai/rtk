@@ -14,13 +14,15 @@ use crate::hooks::constants::{
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
-    REWRITE_HOOK_FILE, SETTINGS_JSON,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
+    OMP_GLOBAL_HOOK_PATH, OMP_PROJECT_HOOK_PATH, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
 };
 use super::integrity;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
+const OMP_HOOK: &str = include_str!("../../hooks/omp/rtk.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
@@ -606,6 +608,7 @@ pub fn uninstall(
     gemini: bool,
     codex: bool,
     cursor: bool,
+    omp: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
@@ -615,6 +618,10 @@ pub fn uninstall(
             print_dry_run_footer();
         }
         return Ok(());
+    }
+
+    if omp {
+        return uninstall_omp(global, ctx);
     }
 
     if cursor {
@@ -822,6 +829,74 @@ pub fn uninstall(
     }
 
     Ok(())
+}
+
+fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let base_dir = if global {
+        resolve_omp_agent_dir()?
+    } else {
+        std::env::current_dir()?
+    };
+    let removed = uninstall_omp_at(&base_dir, global, ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK was not installed for Oh My Pi (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Oh My Pi:"
+        } else {
+            "RTK uninstalled for Oh My Pi:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+fn uninstall_omp_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let hook_path = omp_hook_path(base_dir, global);
+    let mut removed = Vec::new();
+
+    let content = match fs::read_to_string(&hook_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(removed),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to read OMP hook: {}", hook_path.display()));
+        }
+    };
+
+    if omp_hook_matches_stock(&content) {
+        if dry_run {
+            println!("[dry-run] would remove OMP hook: {}", hook_path.display());
+        } else {
+            fs::remove_file(&hook_path)
+                .with_context(|| format!("Failed to remove OMP hook: {}", hook_path.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed OMP hook: {}", hook_path.display());
+            }
+        }
+        removed.push(format!("Hook: {}", hook_path.display()));
+        return Ok(removed);
+    }
+
+    if omp_hook_contains_rtk(&content) {
+        anyhow::bail!(
+            "OMP hook at {} contains RTK content that does not match the stock hook. Remove the file manually.",
+            hook_path.display()
+        );
+    }
+
+    Ok(removed)
 }
 
 fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
@@ -2284,6 +2359,103 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+// ─── Oh My Pi (OMP) support ────────────────────────────────
+
+const OMP_HOOK_MARKER: &str = "// RTK - Rust Token Killer";
+
+fn omp_hook_contains_rtk(existing: &str) -> bool {
+    existing.contains(OMP_HOOK_MARKER)
+}
+
+fn omp_hook_matches_stock(existing: &str) -> bool {
+    existing.trim() == OMP_HOOK.trim()
+}
+
+fn omp_hook_path(base_dir: &Path, global: bool) -> PathBuf {
+    if global {
+        base_dir.join(OMP_GLOBAL_HOOK_PATH)
+    } else {
+        base_dir.join(OMP_PROJECT_HOOK_PATH)
+    }
+}
+
+fn install_omp_hook_file(hook_path: &Path, ctx: InitContext) -> Result<bool> {
+    let existing = match fs::read_to_string(hook_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to read OMP hook: {}", hook_path.display()));
+        }
+    };
+
+    if omp_hook_matches_stock(&existing) {
+        return Ok(false);
+    }
+    if omp_hook_contains_rtk(&existing) {
+        anyhow::bail!(
+            "OMP hook at {} contains RTK content that does not match the stock hook. Update or remove the file manually, then re-run the command.",
+            hook_path.display()
+        );
+    }
+    if !existing.trim().is_empty() {
+        anyhow::bail!(
+            "OMP hook file at {} already exists. Move, merge, or delete it manually, then re-run the command.",
+            hook_path.display()
+        );
+    }
+
+    if let Some(parent) = hook_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        if ctx.dry_run {
+            println!("[dry-run] Would create directory: {}", parent.display());
+        } else {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+    }
+
+    write_if_changed(hook_path, OMP_HOOK, "OMP hook", ctx)
+}
+
+fn run_omp_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+    let hook_path = omp_hook_path(base_dir, global);
+    let changed = install_omp_hook_file(&hook_path, ctx)?;
+
+    let (scope, scope_target) = if global {
+        ("(global)", "every project")
+    } else {
+        ("in this project", "this project")
+    };
+
+    if changed && ctx.dry_run {
+        println!("\n[dry-run] Would configure RTK for Oh My Pi {scope}.\n");
+        println!("  Hook: {} (would be created)", hook_path.display());
+    } else {
+        let (header, note) = if changed {
+            ("configured", "installed")
+        } else {
+            ("already configured", "already present")
+        };
+        println!("\nRTK {header} for Oh My Pi {scope}.\n");
+        println!("  Hook: {} ({note})", hook_path.display());
+        println!("  OMP will now rewrite supported bash tool calls through RTK in {scope_target}.");
+    }
+    println!("  Restart OMP. Test with: git status\n");
+
+    Ok(())
+}
+pub fn run_omp_mode(global: bool, ctx: InitContext) -> Result<()> {
+    if global {
+        let agent_dir = resolve_omp_agent_dir()?;
+        run_omp_mode_at(&agent_dir, global, ctx)
+    } else {
+        run_omp_mode_at(&std::env::current_dir()?, global, ctx)
+    }
+}
+
 fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
     let (agents_md_path, rtk_md_path) = if global {
         let codex_dir = resolve_codex_dir()?;
@@ -2713,6 +2885,31 @@ fn resolve_hermes_home_from_env(
         .map(|home| home.join(HERMES_DIR))
         .context("Cannot determine Hermes home directory. Set $HERMES_HOME or $HOME.")
 }
+fn resolve_omp_agent_dir() -> Result<PathBuf> {
+    resolve_omp_agent_dir_from_env(
+        dirs::home_dir(),
+        std::env::var_os("PI_CODING_AGENT_DIR"),
+        std::env::var_os("PI_CONFIG_DIR"),
+    )
+}
+
+fn resolve_omp_agent_dir_from_env(
+    home_dir: Option<PathBuf>,
+    omp_agent_dir: Option<OsString>,
+    config_dir: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(path) = omp_agent_dir.filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    let config_dir = config_dir.filter(|v| !v.is_empty());
+    let config_subdir: &Path = config_dir
+        .as_deref()
+        .map(Path::new)
+        .unwrap_or_else(|| Path::new(".omp"));
+    home_dir
+        .map(|home| home.join(config_subdir).join("agent"))
+        .context("Cannot determine OMP agent directory. Set $PI_CODING_AGENT_DIR or $HOME.")
+}
 
 fn codex_rtk_md_ref(codex_dir: &Path) -> String {
     format!("@{}", codex_dir.join(RTK_MD).display())
@@ -3088,12 +3285,58 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool) -> Result<()> {
+pub fn show_config(codex: bool, omp: bool) -> Result<()> {
     if codex {
         return show_codex_config();
     }
-
+    if omp {
+        return show_omp_config();
+    }
     show_claude_config()
+}
+
+fn print_omp_hook_status(label: &str, hook_path: &Path) -> Result<()> {
+    if hook_path.exists() {
+        let content = fs::read_to_string(hook_path)?;
+        if omp_hook_matches_stock(&content) {
+            println!("[ok] {}: {}", label, hook_path.display());
+        } else if omp_hook_contains_rtk(&content) {
+            println!(
+                "[warn] {}: {} contains RTK content but differs from the stock OMP hook",
+                label,
+                hook_path.display()
+            );
+        } else {
+            println!(
+                "[--] {}: {} exists but rtk is not configured",
+                label,
+                hook_path.display()
+            );
+        }
+    } else {
+        println!("[--] {}: {} (not found)", label, hook_path.display());
+    }
+
+    Ok(())
+}
+
+fn show_omp_config() -> Result<()> {
+    let agent_dir = resolve_omp_agent_dir()?;
+    let cwd = std::env::current_dir()?;
+    let global_hook = omp_hook_path(&agent_dir, true);
+    let project_hook = omp_hook_path(&cwd, false);
+
+    println!("rtk Configuration (Oh My Pi):\n");
+    print_omp_hook_status("Global hook", &global_hook)?;
+    print_omp_hook_status("Project hook", &project_hook)?;
+
+    println!("\nUsage:");
+    println!("  rtk init --agent omp                 # Configure ./.omp/hooks/pre/rtk.ts");
+    println!("  rtk init -g --agent omp              # Configure ~/.omp/agent/hooks/pre/rtk.ts");
+    println!("  rtk init --agent omp --uninstall     # Remove project OMP RTK hook");
+    println!("  rtk init -g --agent omp --uninstall  # Remove global OMP RTK hook");
+
+    Ok(())
 }
 
 fn show_claude_config() -> Result<()> {
@@ -5394,7 +5637,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, InitContext::default()).unwrap();
+            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -5521,7 +5764,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -5633,5 +5876,170 @@ mod tests {
             !cleaned.contains(RTK_BLOCK_END),
             "RTK end marker must be removed"
         );
+    }
+
+    // ─── OMP hook tests ────────────────────────────────────────
+
+    #[test]
+    fn test_omp_hook_install_and_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = omp_hook_path(temp.path(), false);
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: false,
+        };
+
+        let changed = install_omp_hook_file(&hook_path, ctx).unwrap();
+        assert!(changed);
+        let content = fs::read_to_string(&hook_path).unwrap();
+        assert_eq!(content, OMP_HOOK);
+
+        let changed_again = install_omp_hook_file(&hook_path, ctx).unwrap();
+        assert!(!changed_again);
+        let content_again = fs::read_to_string(&hook_path).unwrap();
+        assert_eq!(content_again, OMP_HOOK);
+    }
+
+    #[test]
+    fn test_omp_hook_rejects_stale_rtk_content() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = omp_hook_path(temp.path(), false);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, "// RTK - Rust Token Killer\n// stale").unwrap();
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: false,
+        };
+
+        let err = install_omp_hook_file(&hook_path, ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match the stock hook"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_omp_hook_rejects_unmanaged_file() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = omp_hook_path(temp.path(), false);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, "export default function userHook() {}\n").unwrap();
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: false,
+        };
+
+        let err = install_omp_hook_file(&hook_path, ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_omp_mode_creates_global_hook() {
+        let temp = TempDir::new().unwrap();
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: false,
+        };
+        run_omp_mode_at(temp.path(), true, ctx).unwrap();
+
+        let hook_path = temp.path().join(".omp/agent/hooks/pre/rtk.ts");
+        assert!(hook_path.exists(), "OMP hook should be created");
+        let content = fs::read_to_string(&hook_path).unwrap();
+        assert_eq!(content, OMP_HOOK);
+    }
+
+    #[test]
+    fn test_omp_mode_creates_project_hook() {
+        let temp = TempDir::new().unwrap();
+        let ctx = InitContext {
+            verbose: 0,
+            dry_run: false,
+        };
+        run_omp_mode_at(temp.path(), false, ctx).unwrap();
+
+        let hook_path = temp.path().join(".omp/hooks/pre/rtk.ts");
+        assert!(hook_path.exists(), "OMP hook should be created");
+        let content = fs::read_to_string(&hook_path).unwrap();
+        assert_eq!(content, OMP_HOOK);
+    }
+
+    #[test]
+    fn test_omp_marker_is_first_line_of_embedded() {
+        assert!(
+            OMP_HOOK.starts_with(OMP_HOOK_MARKER),
+            "OMP_HOOK_MARKER must match the first line of hooks/omp/rtk.ts; update one so they agree"
+        );
+    }
+
+    #[test]
+    fn test_omp_uninstall_removes_stock_hook() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = omp_hook_path(temp.path(), false);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, OMP_HOOK).unwrap();
+
+        uninstall_omp_at(temp.path(), false, InitContext::default()).unwrap();
+        assert!(!hook_path.exists(), "Stock OMP hook must be removed");
+    }
+
+    #[test]
+    fn test_omp_uninstall_dry_run_keeps_stock_hook() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = omp_hook_path(temp.path(), false);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, OMP_HOOK).unwrap();
+
+        let dry = InitContext {
+            dry_run: true,
+            ..Default::default()
+        };
+        uninstall_omp_at(temp.path(), false, dry).unwrap();
+        assert!(
+            hook_path.exists(),
+            "Dry-run uninstall must not remove the file"
+        );
+    }
+
+    #[test]
+    fn test_omp_uninstall_preserves_unmanaged_file() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = omp_hook_path(temp.path(), false);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        let foreign = "export default function userHook() {}\n";
+        fs::write(&hook_path, foreign).unwrap();
+
+        uninstall_omp_at(temp.path(), false, InitContext::default()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&hook_path).unwrap(),
+            foreign,
+            "Unmanaged file must be left untouched"
+        );
+    }
+
+    #[test]
+    fn test_omp_uninstall_rejects_stale_rtk_content() {
+        let temp = TempDir::new().unwrap();
+        let hook_path = omp_hook_path(temp.path(), false);
+        fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        fs::write(&hook_path, format!("{OMP_HOOK_MARKER}\n// stale")).unwrap();
+
+        let err = uninstall_omp_at(temp.path(), false, InitContext::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match the stock hook"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            hook_path.exists(),
+            "Stale RTK file must be preserved for manual review"
+        );
+    }
+
+    #[test]
+    fn test_omp_uninstall_when_not_installed_is_noop() {
+        let temp = TempDir::new().unwrap();
+        uninstall_omp_at(temp.path(), false, InitContext::default()).unwrap();
     }
 }

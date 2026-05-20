@@ -2,7 +2,7 @@
 
 use crate::hooks::constants::{
     CURSOR_DIR, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
-    HOOKS_SUBDIR, REWRITE_HOOK_FILE,
+    HOOKS_SUBDIR, OMP_GLOBAL_HOOK_PATH, REWRITE_HOOK_FILE,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -52,6 +52,7 @@ pub struct UnsupportedEntry {
 pub struct AgentIntegrationStatus {
     pub cursor_hook_installed: bool,
     pub hermes_plugin_installed: bool,
+    pub omp_hook_installed: bool,
 }
 
 impl AgentIntegrationStatus {
@@ -74,6 +75,7 @@ impl AgentIntegrationStatus {
                 .join(HERMES_PLUGIN_NAME)
                 .join(HERMES_PLUGIN_MANIFEST_FILE)
                 .is_file(),
+            omp_hook_installed: home.join(OMP_GLOBAL_HOOK_PATH).exists(),
         }
     }
 }
@@ -221,6 +223,10 @@ fn append_agent_notes(out: &mut String, status: AgentIntegrationStatus) {
     if status.hermes_plugin_installed {
         out.push_str("\nNote: Hermes plugin is installed; Hermes sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
     }
+
+    if status.omp_hook_installed {
+        out.push_str("\nNote: Oh My Pi (OMP) hook is installed; OMP sessions are tracked via `rtk gain` (discover scans Claude Code only)\n");
+    }
 }
 
 /// Format report as JSON.
@@ -357,11 +363,44 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_status_detects_omp_hook_file() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let hook = temp_home.path().join(OMP_GLOBAL_HOOK_PATH);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "// RTK - Rust Token Killer\n").unwrap();
+
+        let status = AgentIntegrationStatus::detect_from_home(temp_home.path());
+
+        assert!(status.omp_hook_installed);
+        assert!(!status.cursor_hook_installed);
+    }
+
+    #[test]
+    fn test_format_text_reports_omp_hook_installed() {
+        let mut report = make_report(1, 0);
+        report.agent_status.omp_hook_installed = true;
+        report.unsupported.push(UnsupportedEntry {
+            base_command: "foo".to_string(),
+            count: 1,
+            example: "foo bar".to_string(),
+        });
+
+        let output = format_text(&report, 10, false);
+
+        assert!(
+            output.contains("Oh My Pi (OMP) hook is installed"),
+            "Expected OMP installed note in output but got:\n{}",
+            output
+        );
+    }
+
+    #[test]
     fn test_format_json_includes_agent_status() {
         let mut report = make_report(0, 0);
         report.agent_status = AgentIntegrationStatus {
             cursor_hook_installed: true,
             hermes_plugin_installed: true,
+            ..AgentIntegrationStatus::default()
         };
 
         let output = format_json(&report);

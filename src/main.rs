@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Hermes CLI
     Hermes,
+    /// Oh My Pi (OMP)
+    Omp,
 }
 
 #[derive(Parser)]
@@ -1370,19 +1372,20 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     global: bool,
     gemini: bool,
     codex: bool,
+    omp: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
-        uninstall_standard(global, gemini, codex, cursor, ctx)
+        uninstall_standard(global, gemini, codex, cursor, omp, ctx)
     }
 }
 
@@ -1818,13 +1821,16 @@ fn run_cli() -> Result<i32> {
                 dry_run,
             };
             if show {
-                hooks::init::show_config(codex)?;
+                let omp = agent == Some(AgentTarget::Omp);
+                hooks::init::show_config(codex, omp)?;
             } else if uninstall {
+                let omp = agent == Some(AgentTarget::Omp);
                 uninstall_init_dispatch(
                     agent,
                     global,
                     gemini,
                     codex,
+                    omp,
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall,
@@ -1854,6 +1860,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Omp) {
+                hooks::init::run_omp_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2698,6 +2706,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             ctx,
             |ctx| {
                 hermes_called.set(true);
@@ -2705,7 +2714,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _| {
+            |_, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
