@@ -494,7 +494,7 @@ fn filter_s3_ls(output: &str) -> FilterResult {
 
     if total > limit {
         let text = format!(
-            "{}\n... +{} more items",
+            "{}\n… +{} more items",
             lines[..limit].join("\n"),
             total - limit
         );
@@ -553,7 +553,7 @@ fn filter_ec2_instances(json_str: &str) -> Option<FilterResult> {
     }
 
     if truncated {
-        result.push_str(&format!("  ... +{} more\n", total - MAX_ITEMS));
+        result.push_str(&format!("  … +{} more\n", total - MAX_ITEMS));
     }
 
     let text = result.trim_end().to_string();
@@ -759,7 +759,7 @@ fn filter_logs_events(json_str: &str) -> Option<FilterResult> {
     }
 
     if truncated {
-        lines.push(format!("... +{} more events", total - MAX_LOG_EVENTS));
+        lines.push(format!("… +{} more events", total - MAX_LOG_EVENTS));
     }
 
     let text = lines.join("\n");
@@ -1132,7 +1132,7 @@ fn filter_dynamodb_items(json_str: &str) -> Option<FilterResult> {
     }
 
     if truncated {
-        lines.push(format!("... +{} more items", total - MAX_ITEMS));
+        lines.push(format!("… +{} more items", total - MAX_ITEMS));
     }
 
     let text = lines.join("\n");
@@ -1426,7 +1426,7 @@ fn filter_logs_query_results(json_str: &str) -> Option<FilterResult> {
         }
 
         if truncated {
-            lines.push(format!("... +{} more rows", total - MAX_ITEMS));
+            lines.push(format!("… +{} more rows", total - MAX_ITEMS));
         }
 
         let text = lines.join("\n");
@@ -1616,7 +1616,7 @@ mod tests {
         }
         let input = lines.join("\n");
         let result = filter_s3_ls(&input);
-        assert!(result.text.contains("... +20 more items"));
+        assert!(result.text.contains("… +20 more items"));
         assert!(result.truncated);
     }
 
@@ -1852,7 +1852,7 @@ mod tests {
         }
         let json = format!(r#"{{"DBInstances": [{}]}}"#, dbs.join(","));
         let result = filter_rds_instances(&json).unwrap();
-        assert!(result.text.contains("... +5 more instances"));
+        assert!(result.text.contains("… +5 more instances"));
         assert!(result.truncated);
     }
 
@@ -1893,7 +1893,7 @@ mod tests {
         }
         let json = format!(r#"{{"events": [{}]}}"#, events.join(","));
         let result = filter_logs_events(&json).unwrap();
-        assert!(result.text.contains("... +10 more events"));
+        assert!(result.text.contains("… +10 more events"));
         assert!(result.truncated);
     }
 

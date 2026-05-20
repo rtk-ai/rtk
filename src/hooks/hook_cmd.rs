@@ -886,10 +886,7 @@ mod tests {
         assert_eq!(strip_leading_bom("hello"), "hello");
         assert_eq!(strip_leading_bom("\u{feff}hello"), "hello");
         assert_eq!(strip_leading_bom("\u{feff}\u{feff}hello"), "hello");
-        assert_eq!(
-            strip_leading_bom("\u{feff}\u{feff}\u{feff}hello"),
-            "hello"
-        );
+        assert_eq!(strip_leading_bom("\u{feff}\u{feff}\u{feff}hello"), "hello");
         // BOM in the middle is preserved (not "leading").
         assert_eq!(strip_leading_bom("a\u{feff}b"), "a\u{feff}b");
     }

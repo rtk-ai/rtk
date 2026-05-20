@@ -304,27 +304,27 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
         "Merge Requests\n"
     });
 
-    for mr in mrs.iter().take(20) {
-        let iid = mr["iid"].as_i64().unwrap_or(0);
-        let title = mr["title"].as_str().unwrap_or("???");
-        let state = mr["state"].as_str().unwrap_or("???");
-        let author = mr["author"]["username"].as_str().unwrap_or("???");
-
-        let icon = state_icon(state, ultra_compact);
-        filtered.push_str(&format!(
-            "  {} !{} {} ({})\n",
-            icon,
-            iid,
-            truncate(title, 60),
-            author
-        ));
+    let all_lines: Vec<String> = mrs
+        .iter()
+        .map(|mr| {
+            let iid = mr["iid"].as_i64().unwrap_or(0);
+            let title = mr["title"].as_str().unwrap_or("???");
+            let state = mr["state"].as_str().unwrap_or("???");
+            let author = mr["author"]["username"].as_str().unwrap_or("???");
+            let icon = state_icon(state, ultra_compact);
+            format!("  {} !{} {} ({})", icon, iid, truncate(title, 60), author)
+        })
+        .collect();
+    const MAX_LIST: usize = 20;
+    for line in all_lines.iter().take(MAX_LIST) {
+        filtered.push_str(&format!("{}\n", line));
     }
-
-    if mrs.len() > 20 {
-        filtered.push_str(&format!(
-            "  ... {} more (use glab mr list for all)\n",
-            mrs.len() - 20
-        ));
+    if all_lines.len() > MAX_LIST {
+        filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "glab-mrs", MAX_LIST + 1) {
+            filtered.push_str(&format!("  {}\n", hint));
+        }
     }
 
     filtered
@@ -524,27 +524,32 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     let mut filtered = String::new();
     filtered.push_str("Issues\n");
 
-    for issue in issues.iter().take(20) {
-        let iid = issue["iid"].as_i64().unwrap_or(0);
-        let title = issue["title"].as_str().unwrap_or("???");
-        let state = issue["state"].as_str().unwrap_or("???");
-
-        let icon = if ultra_compact {
-            if state == "opened" {
-                "O"
+    let all_lines: Vec<String> = issues
+        .iter()
+        .map(|issue| {
+            let iid = issue["iid"].as_i64().unwrap_or(0);
+            let title = issue["title"].as_str().unwrap_or("???");
+            let state = issue["state"].as_str().unwrap_or("???");
+            let icon = if ultra_compact {
+                if state == "opened" { "O" } else { "C" }
+            } else if state == "opened" {
+                "[open]"
             } else {
-                "C"
-            }
-        } else if state == "opened" {
-            "[open]"
-        } else {
-            "[closed]"
-        };
-        filtered.push_str(&format!("  {} #{} {}\n", icon, iid, truncate(title, 60)));
+                "[closed]"
+            };
+            format!("  {} #{} {}", icon, iid, truncate(title, 60))
+        })
+        .collect();
+    const MAX_LIST: usize = 20;
+    for line in all_lines.iter().take(MAX_LIST) {
+        filtered.push_str(&format!("{}\n", line));
     }
-
-    if issues.len() > 20 {
-        filtered.push_str(&format!("  ... {} more\n", issues.len() - 20));
+    if all_lines.len() > MAX_LIST {
+        filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "glab-issues", MAX_LIST + 1) {
+            filtered.push_str(&format!("  {}\n", hint));
+        }
     }
 
     filtered
@@ -646,13 +651,28 @@ fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
 
     let mut filtered = String::new();
     filtered.push_str("Pipelines\n");
-    for pipeline in pipelines.iter().take(10) {
-        let id = pipeline["id"].as_i64().unwrap_or(0);
-        let status = pipeline["status"].as_str().unwrap_or("???");
-        let ref_name = pipeline["ref"].as_str().unwrap_or("???");
-
-        let icon = pipeline_icon(status, ultra_compact);
-        filtered.push_str(&format!("  {} #{} {} ({})\n", icon, id, status, ref_name));
+    let all_lines: Vec<String> = pipelines
+        .iter()
+        .map(|pipeline| {
+            let id = pipeline["id"].as_i64().unwrap_or(0);
+            let status = pipeline["status"].as_str().unwrap_or("???");
+            let ref_name = pipeline["ref"].as_str().unwrap_or("???");
+            let icon = pipeline_icon(status, ultra_compact);
+            format!("  {} #{} {} ({})", icon, id, status, ref_name)
+        })
+        .collect();
+    const MAX_CI_LIST: usize = 10;
+    for line in all_lines.iter().take(MAX_CI_LIST) {
+        filtered.push_str(&format!("{}\n", line));
+    }
+    if all_lines.len() > MAX_CI_LIST {
+        filtered.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_CI_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "glab-pipelines", MAX_CI_LIST + 1)
+        {
+            filtered.push_str(&format!("  {}\n", hint));
+        }
     }
     filtered
 }

@@ -147,7 +147,7 @@ pub fn format_cpt(cpt: f64) -> String {
 pub fn join_with_overflow(items: &[String], total: usize, max: usize, label: &str) -> String {
     let mut out = items.join("\n");
     if total > max {
-        out.push_str(&format!("\n... +{} more {}", total - max, label));
+        out.push_str(&format!("\n… +{} more {}", total - max, label));
     }
     out
 }

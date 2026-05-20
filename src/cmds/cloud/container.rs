@@ -12,6 +12,7 @@ use std::process::Command;
 #[derive(Debug, Clone, Copy)]
 pub enum ContainerCmd {
     DockerPs,
+    DockerPsAll,
     DockerImages,
     DockerLogs,
     KubectlPods,
@@ -22,6 +23,7 @@ pub enum ContainerCmd {
 pub fn run(cmd: ContainerCmd, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         ContainerCmd::DockerPs => docker_ps(verbose),
+        ContainerCmd::DockerPsAll => docker_ps_all(verbose),
         ContainerCmd::DockerImages => docker_images(verbose),
         ContainerCmd::DockerLogs => docker_logs(args, verbose),
         ContainerCmd::KubectlPods => kubectl_pods(args, verbose),
@@ -81,38 +83,134 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
         return Ok(0);
     }
 
-    let count = stdout.lines().count();
-    rtk.push_str(&format!("[docker] {} containers:\n", count));
+    const MAX_CONTAINERS: usize = 20;
+    let lines: Vec<String> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| format_container_line(line, true))
+        .collect();
 
-    for line in stdout.lines().take(15) {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 4 {
-            let id = &parts[0][..12.min(parts[0].len())];
-            let name = parts[1];
-            let short_image = parts
-                .get(3)
-                .unwrap_or(&"")
-                .split('/')
-                .next_back()
-                .unwrap_or("");
-            let ports = compact_ports(parts.get(4).unwrap_or(&""));
-            if ports == "-" {
-                rtk.push_str(&format!("  {} {} ({})\n", id, name, short_image));
-            } else {
-                rtk.push_str(&format!(
-                    "  {} {} ({}) [{}]\n",
-                    id, name, short_image, ports
-                ));
-            }
-        }
+    rtk.push_str(&format!("[docker] {} containers:\n", lines.len()));
+    for entry in lines.iter().take(MAX_CONTAINERS) {
+        rtk.push_str(entry);
     }
-    if count > 15 {
-        rtk.push_str(&format!("  ... +{} more", count - 15));
+    if lines.len() > MAX_CONTAINERS {
+        rtk.push_str(&format!("  … +{} more\n", lines.len() - MAX_CONTAINERS));
+        let full: String = lines.concat();
+        if let Some(hint) = crate::core::tee::force_tee_hint(&full, "docker-ps") {
+            rtk.push_str(&format!("{}\n", hint));
+        }
     }
 
     print!("{}", rtk);
     timer.track("docker ps", "rtk docker ps", &raw, &rtk);
     Ok(0)
+}
+
+fn docker_ps_all(_verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let raw = exec_capture(resolved_command("docker").args(["ps", "-a"]))
+        .map(|r| r.stdout)
+        .unwrap_or_default();
+
+    let result = exec_capture(resolved_command("docker").args([
+        "ps",
+        "-a",
+        "--format",
+        "{{.State}}\t{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}",
+    ]))
+    .context("Failed to run docker ps -a")?;
+
+    if !result.success() {
+        eprint!("{}", result.stderr);
+        timer.track("docker ps -a", "rtk docker ps -a", &raw, &raw);
+        return Ok(result.exit_code);
+    }
+
+    let mut running_lines: Vec<String> = Vec::new();
+    let mut stopped_lines: Vec<String> = Vec::new();
+    for line in result.stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let parts: Vec<&str> = line.split('\t').collect();
+        let state = parts.first().copied().unwrap_or("");
+        let is_running = matches!(state, "running" | "restarting");
+        if let Some(entry) = format_container_line_from_parts(&parts[1..], is_running) {
+            if is_running {
+                running_lines.push(entry);
+            } else {
+                stopped_lines.push(entry);
+            }
+        }
+    }
+
+    const MAX_CONTAINERS: usize = 20;
+    let truncated = running_lines.len() > MAX_CONTAINERS || stopped_lines.len() > MAX_CONTAINERS;
+
+    let mut rtk = String::new();
+    rtk.push_str(&format!("[docker] {} running:\n", running_lines.len()));
+    for l in running_lines.iter().take(MAX_CONTAINERS) {
+        rtk.push_str(l);
+    }
+    if running_lines.len() > MAX_CONTAINERS {
+        rtk.push_str(&format!(
+            "  … +{} more\n",
+            running_lines.len() - MAX_CONTAINERS
+        ));
+    }
+    if !stopped_lines.is_empty() {
+        rtk.push_str(&format!(
+            "[docker] {} stopped/exited:\n",
+            stopped_lines.len()
+        ));
+        for l in stopped_lines.iter().take(MAX_CONTAINERS) {
+            rtk.push_str(l);
+        }
+        if stopped_lines.len() > MAX_CONTAINERS {
+            rtk.push_str(&format!(
+                "  … +{} more\n",
+                stopped_lines.len() - MAX_CONTAINERS
+            ));
+        }
+    }
+    if truncated {
+        let full: String = running_lines.iter().chain(stopped_lines.iter()).cloned().collect();
+        if let Some(hint) = crate::core::tee::force_tee_hint(&full, "docker-ps-a") {
+            rtk.push_str(&format!("{}\n", hint));
+        }
+    }
+
+    print!("{}", rtk);
+    timer.track("docker ps -a", "rtk docker ps -a", &raw, &rtk);
+    Ok(0)
+}
+
+fn format_container_line(line: &str, with_ports: bool) -> Option<String> {
+    let parts: Vec<&str> = line.split('\t').collect();
+    format_container_line_from_parts(&parts, with_ports)
+}
+
+fn format_container_line_from_parts(parts: &[&str], with_ports: bool) -> Option<String> {
+    if parts.len() < 4 {
+        return None;
+    }
+    let id = &parts[0][..12.min(parts[0].len())];
+    let name = parts[1];
+    let status = parts[2].trim();
+    let short_image = parts[3].split('/').next_back().unwrap_or("");
+    let port_suffix = if with_ports {
+        let ports = compact_ports(parts.get(4).unwrap_or(&""));
+        if ports == "-" {
+            String::new()
+        } else {
+            format!(" [{}]", ports)
+        }
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "  {} {} ({}) {}{}\n",
+        id, name, short_image, status, port_suffix
+    ))
 }
 
 fn docker_images(_verbose: u8) -> Result<i32> {
@@ -173,21 +271,35 @@ fn docker_images(_verbose: u8) -> Result<i32> {
         total_display
     ));
 
-    for line in lines.iter().take(15) {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if !parts.is_empty() {
-            let image = parts[0];
-            let size = parts.get(1).unwrap_or(&"");
-            let short = if image.len() > 40 {
-                format!("...{}", &image[image.len() - 37..])
-            } else {
-                image.to_string()
-            };
-            rtk.push_str(&format!("  {} [{}]\n", short, size));
-        }
+    // Show images with their full `repository:tag` name — truncating the
+    // registry/user prefix to "..." breaks exact-match lookups against
+    // deployment manifests and CI configs. The list is generously capped (a
+    // higher bound than before, and only the count, never the names, is
+    // abbreviated) so token savings still hold on machines with many images.
+    const MAX_IMAGES: usize = 60;
+    let image_lines: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            let image = parts.first().copied().unwrap_or("");
+            let size = parts.get(1).copied().unwrap_or("");
+            format!("  {} [{}]\n", image, size)
+        })
+        .collect();
+
+    let mut full_rtk = rtk.clone();
+    for l in &image_lines {
+        full_rtk.push_str(l);
     }
-    if lines.len() > 15 {
-        rtk.push_str(&format!("  ... +{} more", lines.len() - 15));
+
+    for l in image_lines.iter().take(MAX_IMAGES) {
+        rtk.push_str(l);
+    }
+    if image_lines.len() > MAX_IMAGES {
+        rtk.push_str(&format!("  … +{} more\n", image_lines.len() - MAX_IMAGES));
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&full_rtk, "docker-images", MAX_IMAGES + 2) {
+            rtk.push_str(&format!("{}\n", hint));
+        }
     }
 
     print!("{}", rtk);
@@ -289,12 +401,19 @@ fn format_kubectl_pods(json: &Value) -> String {
 
     let mut out = format!("{} pods: {}\n", pods.len(), parts.join(", "));
     if !issues.is_empty() {
+        const MAX_PODS_ISSUES: usize = 10;
         out.push_str("[warn] Issues:\n");
-        for issue in issues.iter().take(10) {
+        for issue in issues.iter().take(MAX_PODS_ISSUES) {
             out.push_str(&format!("  {}\n", issue));
         }
-        if issues.len() > 10 {
-            out.push_str(&format!("  ... +{} more", issues.len() - 10));
+        if issues.len() > MAX_PODS_ISSUES {
+            out.push_str(&format!("  … +{} more", issues.len() - MAX_PODS_ISSUES));
+            let all_issues = issues.join("\n");
+            if let Some(hint) =
+                crate::core::tee::force_tee_tail_hint(&all_issues, "kubectl-pods", MAX_PODS_ISSUES + 1)
+            {
+                out.push_str(&format!(" {}", hint));
+            }
         }
     }
     out
@@ -315,39 +434,48 @@ fn format_kubectl_services(json: &Value) -> String {
     };
     let mut out = format!("{} services:\n", services.len());
 
-    for svc in services.iter().take(15) {
-        let ns = svc["metadata"]["namespace"].as_str().unwrap_or("-");
-        let name = svc["metadata"]["name"].as_str().unwrap_or("-");
-        let svc_type = svc["spec"]["type"].as_str().unwrap_or("-");
-        let ports: Vec<String> = svc["spec"]["ports"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|p| {
-                        let port = p["port"].as_i64().unwrap_or(0);
-                        let target = p["targetPort"]
-                            .as_i64()
-                            .or_else(|| p["targetPort"].as_str().and_then(|s| s.parse().ok()))
-                            .unwrap_or(port);
-                        if port == target {
-                            format!("{}", port)
-                        } else {
-                            format!("{}→{}", port, target)
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "  {}/{} {} [{}]\n",
-            ns,
-            name,
-            svc_type,
-            ports.join(",")
-        ));
+    let all_lines: Vec<String> = services
+        .iter()
+        .map(|svc| {
+            let ns = svc["metadata"]["namespace"].as_str().unwrap_or("-");
+            let name = svc["metadata"]["name"].as_str().unwrap_or("-");
+            let svc_type = svc["spec"]["type"].as_str().unwrap_or("-");
+            let ports: Vec<String> = svc["spec"]["ports"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|p| {
+                            let port = p["port"].as_i64().unwrap_or(0);
+                            let target = p["targetPort"]
+                                .as_i64()
+                                .or_else(|| p["targetPort"].as_str().and_then(|s| s.parse().ok()))
+                                .unwrap_or(port);
+                            if port == target {
+                                format!("{}", port)
+                            } else {
+                                format!("{}→{}", port, target)
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            format!("  {}/{} {} [{}]", ns, name, svc_type, ports.join(","))
+        })
+        .collect();
+
+    const MAX_KUBECTL_SERVICES: usize = 15;
+    for line in all_lines.iter().take(MAX_KUBECTL_SERVICES) {
+        out.push_str(&format!("{}\n", line));
     }
-    if services.len() > 15 {
-        out.push_str(&format!("  ... +{} more", services.len() - 15));
+    if all_lines.len() > MAX_KUBECTL_SERVICES {
+        out.push_str(&format!("  … +{} more", all_lines.len() - MAX_KUBECTL_SERVICES));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_text, "kubectl-services", MAX_KUBECTL_SERVICES + 1)
+        {
+            out.push_str(&format!(" {}", hint));
+        }
+        out.push('\n');
     }
     out
 }
@@ -385,6 +513,7 @@ fn kubectl_logs(args: &[String], _verbose: u8) -> Result<i32> {
 /// Expects tab-separated lines: Name\tImage\tStatus\tPorts
 /// (no header row — `--format` output is headerless)
 pub fn format_compose_ps(raw: &str) -> String {
+    const MAX_COMPOSE_SERVICES: usize = 20;
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
 
     if lines.is_empty() {
@@ -393,16 +522,19 @@ pub fn format_compose_ps(raw: &str) -> String {
 
     let mut result = format!("[compose] {} services:\n", lines.len());
 
-    for line in lines.iter().take(20) {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 4 {
+    // Pre-build all formatted lines so the tee file matches what the agent sees.
+    let all_formatted: Vec<String> = lines
+        .iter()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() < 4 {
+                return None;
+            }
             let name = parts[0];
             let image = parts[1];
             let status = parts[2];
             let ports = parts[3];
-
             let short_image = image.split('/').next_back().unwrap_or(image);
-
             let port_str = if ports.trim().is_empty() {
                 String::new()
             } else {
@@ -413,15 +545,20 @@ pub fn format_compose_ps(raw: &str) -> String {
                     format!(" [{}]", compact)
                 }
             };
+            Some(format!("  {} ({}) {}{}", name, short_image, status, port_str))
+        })
+        .collect();
 
-            result.push_str(&format!(
-                "  {} ({}) {}{}\n",
-                name, short_image, status, port_str
-            ));
-        }
+    for line in all_formatted.iter().take(MAX_COMPOSE_SERVICES) {
+        result.push_str(line);
+        result.push('\n');
     }
-    if lines.len() > 20 {
-        result.push_str(&format!("  ... +{} more\n", lines.len() - 20));
+    if all_formatted.len() > MAX_COMPOSE_SERVICES {
+        result.push_str(&format!("  … +{} more\n", all_formatted.len() - MAX_COMPOSE_SERVICES));
+        let all_text = all_formatted.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "compose-ps", MAX_COMPOSE_SERVICES + 1) {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim_end().to_string()
@@ -511,7 +648,7 @@ fn compact_ports(ports: &str) -> String {
         port_nums.join(", ")
     } else {
         format!(
-            "{}, ... +{}",
+            "{}, … +{}",
             port_nums[..2].join(", "),
             port_nums.len() - 2
         )
@@ -522,12 +659,15 @@ pub fn run_docker_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("docker", args, verbose)
 }
 
-/// Run `docker compose ps` with compact output
-pub fn run_compose_ps(verbose: u8) -> Result<i32> {
+/// Run `docker compose ps` (or `docker compose ps -a`) with compact output
+pub fn run_compose_ps(all: bool, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // Raw output for token tracking
-    let raw_result = exec_capture(resolved_command("docker").args(["compose", "ps"]))
+    let mut raw_args: Vec<&str> = vec!["compose", "ps"];
+    if all {
+        raw_args.push("-a");
+    }
+    let raw_result = exec_capture(resolved_command("docker").args(&raw_args))
         .context("Failed to run docker compose ps")?;
 
     if !raw_result.success() {
@@ -536,14 +676,13 @@ pub fn run_compose_ps(verbose: u8) -> Result<i32> {
     }
     let raw = raw_result.stdout;
 
-    // Structured output for parsing (same pattern as docker_ps)
-    let result = exec_capture(resolved_command("docker").args([
-        "compose",
-        "ps",
-        "--format",
-        "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}",
-    ]))
-    .context("Failed to run docker compose ps --format")?;
+    let mut format_args: Vec<&str> = vec!["compose", "ps"];
+    if all {
+        format_args.push("-a");
+    }
+    format_args.extend(["--format", "{{.Name}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]);
+    let result = exec_capture(resolved_command("docker").args(&format_args))
+        .context("Failed to run docker compose ps --format")?;
 
     if !result.success() {
         eprintln!("{}", result.stderr);
@@ -557,13 +696,16 @@ pub fn run_compose_ps(verbose: u8) -> Result<i32> {
 
     let rtk = format_compose_ps(&structured);
     println!("{}", rtk);
-    timer.track("docker compose ps", "rtk docker compose ps", &raw, &rtk);
+    let label = if all { "docker compose ps -a" } else { "docker compose ps" };
+    let rtk_label = if all { "rtk docker compose ps -a" } else { "rtk docker compose ps" };
+    timer.track(label, rtk_label, &raw, &rtk);
     Ok(0)
 }
 
-pub fn run_compose_logs(service: Option<&str>, verbose: u8) -> Result<i32> {
+pub fn run_compose_logs(service: Option<&str>, tail: u32, verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("docker");
-    cmd.args(["compose", "logs", "--tail", "100"]);
+    let tail_str = tail.to_string();
+    cmd.args(["compose", "logs", "--tail", &tail_str]);
     if let Some(svc) = service {
         cmd.arg(svc);
     }
@@ -609,6 +751,45 @@ pub fn run_compose_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     let mut combined = vec![OsString::from("compose")];
     combined.extend_from_slice(args);
     crate::core::runner::run_passthrough("docker", &combined, verbose)
+}
+
+pub fn run_kubectl_get(args: &[String], verbose: u8) -> Result<i32> {
+    match kubectl_get_target(args) {
+        Some(("pods", rest)) => run(ContainerCmd::KubectlPods, rest, verbose),
+        Some(("services", rest)) => run(ContainerCmd::KubectlServices, rest, verbose),
+        _ => run_kubectl_get_passthrough(args, verbose),
+    }
+}
+
+fn kubectl_get_target(args: &[String]) -> Option<(&'static str, &[String])> {
+    let resource = args.first()?.as_str();
+    let rest = &args[1..];
+    if kubectl_get_requests_raw_output(rest) {
+        return None;
+    }
+
+    match resource {
+        "po" | "pod" | "pods" => Some(("pods", rest)),
+        "svc" | "service" | "services" => Some(("services", rest)),
+        _ => None,
+    }
+}
+
+fn kubectl_get_requests_raw_output(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-o" | "--output" | "-w" | "--watch" | "--show-labels" | "--show-kind"
+        ) || arg.starts_with("-o")
+            || arg.starts_with("--output=")
+    })
+}
+
+fn run_kubectl_get_passthrough(args: &[String], verbose: u8) -> Result<i32> {
+    let passthrough_args: Vec<OsString> = std::iter::once(OsString::from("get"))
+        .chain(args.iter().map(|arg| OsString::from(arg.as_str())))
+        .collect();
+    run_kubectl_passthrough(&passthrough_args, verbose)
 }
 
 pub fn run_kubectl_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
@@ -749,6 +930,56 @@ api-1  | Connected to database";
     #[test]
     fn test_compact_ports_many() {
         let result = compact_ports("0.0.0.0:80->80/tcp, 0.0.0.0:443->443/tcp, 0.0.0.0:8080->8080/tcp, 0.0.0.0:9090->9090/tcp");
-        assert!(result.contains("..."), "should truncate for >3 ports");
+        assert!(result.contains("…"), "should truncate for >3 ports");
+    }
+
+    #[test]
+    fn test_kubectl_get_target_pods_aliases() {
+        for resource in ["po", "pod", "pods"] {
+            let args = vec![resource.to_string(), "-n".to_string(), "default".to_string()];
+
+            assert_eq!(
+                kubectl_get_target(&args),
+                Some(("pods", &args[1..])),
+                "failed for {resource}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kubectl_get_target_services_aliases() {
+        for resource in ["svc", "service", "services"] {
+            let args = vec![resource.to_string(), "-A".to_string()];
+
+            assert_eq!(
+                kubectl_get_target(&args),
+                Some(("services", &args[1..])),
+                "failed for {resource}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kubectl_get_target_unsupported_resource() {
+        let args = vec!["deployments".to_string()];
+
+        assert_eq!(kubectl_get_target(&args), None);
+    }
+
+    #[test]
+    fn test_kubectl_get_target_respects_output_flags() {
+        for output_flag in ["-o", "-owide", "--output", "--output=json"] {
+            let args = vec![
+                "pods".to_string(),
+                output_flag.to_string(),
+                "wide".to_string(),
+            ];
+
+            assert_eq!(
+                kubectl_get_target(&args),
+                None,
+                "should pass through {output_flag}"
+            );
+        }
     }
 }
