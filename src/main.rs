@@ -610,6 +610,22 @@ enum Commands {
         min_occurrences: usize,
     },
 
+    /// Update rtk to the latest GitHub release
+    Update {
+        /// Only check whether an update is available
+        #[arg(long)]
+        check: bool,
+        /// Install a specific release tag (e.g. v0.39.0)
+        #[arg(long)]
+        tag: Option<String>,
+        /// Reinstall even when current version matches target
+        #[arg(long)]
+        force: bool,
+        /// Skip confirmation prompt for direct binary replacement
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Execute a shell command via sh -c (raw, no filtering or tracking)
     Run {
         /// Command string to execute (use -c for shell-like invocation)
@@ -1141,6 +1157,7 @@ const RTK_META_COMMANDS: &[&str] = &[
     "untrust",
     "session",
     "rewrite",
+    "update",
 ];
 
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
@@ -2073,6 +2090,18 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Update {
+            check,
+            tag,
+            force,
+            yes,
+        } => core::update::run(core::update::UpdateOptions {
+            check,
+            tag,
+            force,
+            yes,
+        })?,
+
         Commands::Npx { args } => {
             if args.is_empty() {
                 anyhow::bail!("npx requires a command argument");
@@ -2810,6 +2839,28 @@ mod tests {
                 assert!(args.is_empty());
             }
             _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_update_command_parses() {
+        let cli = Cli::try_parse_from([
+            "rtk", "update", "--check", "--tag", "v0.39.0", "--force", "--yes",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Update {
+                check,
+                tag,
+                force,
+                yes,
+            } => {
+                assert!(check);
+                assert_eq!(tag, Some("v0.39.0".to_string()));
+                assert!(force);
+                assert!(yes);
+            }
+            _ => panic!("Expected Update command"),
         }
     }
 

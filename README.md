@@ -98,6 +98,15 @@ rtk gain        # Should show token savings stats
 
 > **Name collision warning**: Another project named "rtk" (Rust Type Kit) exists on crates.io. If `rtk gain` fails, you have the wrong package. Use `cargo install --git` above instead.
 
+### Update RTK
+
+```bash
+rtk update          # Update direct release installs
+rtk update --check  # Check whether a newer release is available
+```
+
+`rtk update` verifies release checksums before replacing the current binary. Homebrew, Cargo, and source-build installs stay managed by their installer; RTK prints the matching upgrade command instead of overwriting those installations.
+
 ## Quick Start
 
 ```bash
@@ -168,6 +177,13 @@ rtk gh pr list                  # Compact PR listing
 rtk gh pr view 42               # PR details + checks
 rtk gh issue list               # Compact issue listing
 rtk gh run list                 # Workflow run status
+```
+
+### RTK
+```bash
+rtk update                      # Verified self-update for direct installs
+rtk update --check              # Check for a newer release
+rtk update --tag v0.39.0        # Install a specific release tag
 ```
 
 ### Test Runners

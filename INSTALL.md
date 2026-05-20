@@ -67,6 +67,41 @@ rtk gain  # MUST show token savings, not "command not found"
 
 ⚠️ **WARNING**: `cargo install rtk` from crates.io might install the wrong package. Always verify with `rtk gain`.
 
+## Updating RTK
+
+Check for a newer release:
+
+```bash
+rtk update --check
+```
+
+Update a direct release install:
+
+```bash
+rtk update
+```
+
+Install a specific release tag:
+
+```bash
+rtk update --tag v0.39.0
+```
+
+`rtk update` downloads the matching GitHub release archive, verifies it against `checksums.txt`, rejects unsafe archive paths, and replaces the current binary atomically.
+
+Package-manager installs remain owned by their package manager. If RTK detects one of these installs, it prints the correct command instead of replacing the binary:
+
+```bash
+brew upgrade rtk
+cargo install --git https://github.com/rtk-ai/rtk --force
+```
+
+For binaries built from this repository, update with:
+
+```bash
+cargo install --path . --force
+```
+
 ## Project Initialization
 
 ### Which mode to choose?
