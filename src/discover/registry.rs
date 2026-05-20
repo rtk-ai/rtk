@@ -1233,6 +1233,35 @@ mod tests {
         );
     }
 
+    // --- pre-commit, including the `uv run pre-commit` alias ---
+
+    #[test]
+    fn test_rewrite_pre_commit_plain() {
+        assert_eq!(
+            rewrite_command_no_prefixes("pre-commit run --all-files", &[]),
+            Some("rtk pre-commit run --all-files".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pre_commit_via_uv_run() {
+        // In uv-managed projects, the canonical invocation is `uv run
+        // pre-commit run ...` — make sure the rewrite recognises it and
+        // strips the `uv run` prefix.
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run pre-commit run --files backend/foo.py", &[]),
+            Some("rtk pre-commit run --files backend/foo.py".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pre_commit_via_uv_run_no_args() {
+        assert_eq!(
+            rewrite_command_no_prefixes("uv run pre-commit", &[]),
+            Some("rtk pre-commit".into())
+        );
+    }
+
     // --- git -C <path> support (#555) ---
 
     #[test]

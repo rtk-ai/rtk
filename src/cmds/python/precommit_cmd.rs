@@ -37,10 +37,12 @@
 //! covers `install`, `autoupdate`, `clean`, `--help`, `--version`, etc.
 
 use crate::core::runner;
-use crate::core::utils::resolved_command;
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::path::Path;
+use std::process::Command;
 
 lazy_static! {
     /// One hook-result line: `<hook name>\.{3,}[(parens)]<status>`.
@@ -52,14 +54,58 @@ lazy_static! {
             .expect("hook-line regex literal is valid at build time");
 }
 
+/// Build the underlying command that will run pre-commit.
+///
+/// Resolution order:
+///
+/// 1. If `pre-commit` is on PATH, use it directly. This is the historical
+///    behaviour and the simplest path.
+/// 2. Otherwise, if `uv` is on PATH AND a `pyproject.toml` exists in `cwd`
+///    or an ancestor, fall back to `uv run pre-commit`. This is what users
+///    in a uv-managed project want — pre-commit lives inside `.venv/bin/`
+///    and isn't on PATH unless they enter `uv run` themselves.
+/// 3. Otherwise, fall through to `pre-commit` on PATH (which will fail
+///    cleanly with "command not found" — better than swallowing the call).
+///
+/// Returns the `Command` plus a human-readable string for `--verbose`.
+fn build_precommit_command(cwd: Option<&Path>) -> (Command, String) {
+    if tool_exists("pre-commit") {
+        return (resolved_command("pre-commit"), "pre-commit".to_string());
+    }
+
+    if tool_exists("uv") && cwd.map(has_pyproject_in_ancestors).unwrap_or(false) {
+        let mut c = resolved_command("uv");
+        c.arg("run").arg("pre-commit");
+        return (c, "uv run pre-commit".to_string());
+    }
+
+    // Last resort — let the OS report `command not found` rather than hiding
+    // the failure.
+    (resolved_command("pre-commit"), "pre-commit".to_string())
+}
+
+/// Walk up from `start` looking for a `pyproject.toml`. Used to decide
+/// whether `uv run pre-commit` is a reasonable fallback.
+fn has_pyproject_in_ancestors(start: &Path) -> bool {
+    let mut dir: Option<&Path> = Some(start);
+    while let Some(d) = dir {
+        if d.join("pyproject.toml").is_file() {
+            return true;
+        }
+        dir = d.parent();
+    }
+    false
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("pre-commit");
+    let cwd = std::env::current_dir().ok();
+    let (mut cmd, display_prefix) = build_precommit_command(cwd.as_deref());
     for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: pre-commit {}", args.join(" "));
+        eprintln!("Running: {} {}", display_prefix, args.join(" "));
     }
 
     // Only the `run` subcommand emits the hook-result format we filter.
@@ -378,6 +424,27 @@ black....................................................................Passed
             "summary line should mention 'failed':\n{}",
             filtered
         );
+    }
+
+    #[test]
+    fn has_pyproject_finds_marker_at_root() {
+        let tmp = std::env::temp_dir().join(format!("rtk-precommit-test-{}", std::process::id()));
+        let nested = tmp.join("a").join("b");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(tmp.join("pyproject.toml"), "[project]\n").expect("write pyproject");
+        assert!(has_pyproject_in_ancestors(&nested));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn has_pyproject_returns_false_when_absent() {
+        let tmp = std::env::temp_dir().join(format!(
+            "rtk-precommit-test-noproj-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        assert!(!has_pyproject_in_ancestors(&tmp));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
