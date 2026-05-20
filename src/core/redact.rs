@@ -10,10 +10,10 @@
 //! All regex are `lazy_static!`-cached and the public functions perform a
 //! single pass per call — they run on the `Tracker::record` hot path.
 //!
-//! This module is shared with the upcoming tee content redactor (see the
-//! security & privacy design doc) — `redact_project_path` and the regex
-//! helpers are deliberately `pub(crate)` so PR 3 can consume them without
-//! duplicating the patterns.
+//! `redact_content` reuses the same regex bundle for free-form command output
+//! that may contain credential-shaped substrings (used by the tee write path,
+//! see the security & privacy design doc). It returns both the redacted text
+//! and a count of substitutions so callers can prepend an audit header.
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -137,6 +137,53 @@ pub(crate) fn redact_command(s: &str) -> String {
     let s = CREDENTIAL_PREFIX_RE.replace_all(&s, "****");
 
     s.into_owned()
+}
+
+/// Scrub credential-shaped substrings from free-form command output.
+///
+/// Like [`redact_command`] but returns the substitution count alongside the
+/// redacted string. The count is used by the tee write path to decide whether
+/// to prepend the `--- rtk: N credential-like patterns redacted ---` audit
+/// header.
+///
+/// Counted matches are *substituted* occurrences (one per regex hit) — note
+/// that a single line can hit multiple patterns (e.g. `Authorization: Bearer
+/// ghp_…` matches both the bearer rule and the credential-prefix rule), each
+/// adds to the count. This is the desired behaviour: the header just signals
+/// "something looked like a credential and was masked", not "exactly N unique
+/// secrets were found".
+///
+/// Reuses the same `lazy_static!`-cached regex bundle as `redact_command`,
+/// so the cost is identical to a single command-line redact pass.
+pub(crate) fn redact_content(s: &str) -> (String, usize) {
+    if s.is_empty() {
+        return (String::new(), 0);
+    }
+
+    let mut count = 0usize;
+
+    // 1. URL userinfo
+    count += URL_USERINFO_RE.find_iter(s).count();
+    let s = URL_USERINFO_RE.replace_all(s, "$scheme****:****@");
+
+    // 2. Bearer / Basic / Token header values
+    count += BEARER_RE.find_iter(&s).count();
+    let s = BEARER_RE.replace_all(&s, "$lead ****");
+
+    // 3. Flag/value pairs
+    count += FLAG_VALUE_RE.find_iter(&s).count();
+    let s = FLAG_VALUE_RE.replace_all(&s, "$flag$sep****");
+
+    // 4. Inline env assignments
+    count += INLINE_ENV_RE.find_iter(&s).count();
+    let s = INLINE_ENV_RE.replace_all(&s, "$name=****");
+
+    // 5. Credential prefix heuristic — last so the structured rules above
+    //    get first crack at structured values.
+    count += CREDENTIAL_PREFIX_RE.find_iter(&s).count();
+    let s = CREDENTIAL_PREFIX_RE.replace_all(&s, "****");
+
+    (s.into_owned(), count)
 }
 
 /// Reduce a project path to `<basename>#<8-hex-sha256>`.
@@ -266,6 +313,34 @@ mod tests {
                 .any(|p| input.contains(p) && got.contains(p));
             assert!(!prefix_leaked, "prefix leaked: {got}");
         }
+    }
+
+    #[test]
+    fn test_redact_content_counts_substitutions() {
+        let input = "log: GET https://alice:s3cret@host/api Authorization: Bearer abc123XYZdef456";
+        let (out, n) = redact_content(input);
+        assert!(out.contains("https://****:****@host/api"), "got: {out}");
+        assert!(out.contains("Bearer ****"), "got: {out}");
+        assert!(!out.contains("alice"));
+        assert!(!out.contains("s3cret"));
+        assert!(!out.contains("abc123XYZdef456"));
+        // URL userinfo + bearer = 2 substitutions at minimum.
+        assert!(n >= 2, "expected >=2 matches, got {n}");
+    }
+
+    #[test]
+    fn test_redact_content_passes_clean_text_unchanged() {
+        let input = "running 12 tests\ntest core::tee::tests::test_sanitize_slug ... ok\n";
+        let (out, n) = redact_content(input);
+        assert_eq!(out, input, "clean text must round-trip");
+        assert_eq!(n, 0, "clean text must report zero matches");
+    }
+
+    #[test]
+    fn test_redact_content_empty_input() {
+        let (out, n) = redact_content("");
+        assert!(out.is_empty());
+        assert_eq!(n, 0);
     }
 
     #[test]

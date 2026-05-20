@@ -41,6 +41,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         filter_psql_output,
         RunOptions::stdout_only()
             .tee("psql")
+            // psql results can carry connection strings / `PGPASSWORD=` echoes
+            // in NOTICE / ECHO output, so route through the credential
+            // scrubber unconditionally.
+            .tee_sensitive()
             .early_exit_on_failure(),
     )
 }
