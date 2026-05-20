@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Hermes CLI
     Hermes,
+    /// Augment Code (Auggie)
+    Auggie,
 }
 
 #[derive(Parser)]
@@ -774,6 +776,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Augment Code (Auggie) PreToolUse hook (reads JSON from stdin)
+    Auggie,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1365,21 +1369,26 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+#[allow(clippy::too_many_arguments)]
+fn uninstall_init_dispatch<UninstallHermes, UninstallAuggie, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
+    uninstall_auggie: UninstallAuggie,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallAuggie: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Auggie) {
+        uninstall_auggie(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         uninstall_standard(global, gemini, codex, cursor, ctx)
@@ -1818,7 +1827,11 @@ fn run_cli() -> Result<i32> {
                 dry_run,
             };
             if show {
-                hooks::init::show_config(codex)?;
+                if agent == Some(AgentTarget::Auggie) {
+                    hooks::init::show_auggie_config()?;
+                } else {
+                    hooks::init::show_config(codex)?;
+                }
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
@@ -1827,8 +1840,11 @@ fn run_cli() -> Result<i32> {
                     codex,
                     ctx,
                     hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_auggie,
                     hooks::init::uninstall,
                 )?;
+            } else if agent == Some(AgentTarget::Auggie) {
+                hooks::init::run_auggie_mode(ctx)?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -2185,6 +2201,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Auggie => {
+                hooks::hook_cmd::run_auggie()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2705,6 +2725,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
+            |_| Ok(()),
             |_, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
