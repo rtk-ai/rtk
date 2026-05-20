@@ -1,0 +1,77 @@
+Detect hardcoded secrets.................................................Passed
+bandit...................................................................Passed
+pip-audit (uv-locked deps)...............................................Passed
+detect private key.......................................................Passed
+check for added large files..............................................Passed
+don't commit to branch...................................................Passed
+check python ast.........................................................Passed
+check yaml...............................................................Failed
+- hook id: check-yaml
+- exit code: 1
+
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/role.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/role.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/rolebinding.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/hpa.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/auth.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/configmap.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/serviceaccount.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/configmap.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/secrets.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/service.yaml", line 6, column 7
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/service.yaml", line 6, column 7
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/deployment.yaml", line 6, column 7
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/deployment.yaml", line 6, column 7
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/restartcron.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/serviceaccount.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/restartcron.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/rolebinding.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/secrets.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "chart/templates/ingress.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/ingress.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/auth.yaml", line 1, column 3
+while parsing a flow node
+expected the node content, but found '-'
+  in "charts/templates/hpa.yaml", line 1, column 3
