@@ -29,6 +29,7 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
+use super::redact::{redact_command, redact_project_path};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -36,6 +37,45 @@ use serde::Serialize;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
+
+/// SQLite `PRAGMA user_version` value that signals the credential-redaction
+/// migration has been applied. Bumped from the previous baseline of 0/1 to 2.
+const USER_VERSION_REDACTED: i32 = 2;
+
+/// Re-canonicalise a project path against the config-driven hashing toggle.
+/// Centralised here so `Tracker::record` and the one-shot migration share a
+/// single decision point.
+fn canonical_project_path(raw: &str, hash_enabled: bool) -> String {
+    if hash_enabled {
+        redact_project_path(raw)
+    } else {
+        raw.to_string()
+    }
+}
+
+/// Decide whether `Tracker::record` / `Tracker::record_parse_failure` should
+/// touch the DB this invocation.
+///
+/// Honours the long-documented-but-previously-unenforced `tracking.enabled`
+/// flag and adds a one-shot `RTK_TRACK=0` escape hatch mirroring the existing
+/// `RTK_TEE=0` pattern. Fails open: a missing/corrupt config never disables
+/// tracking on its own.
+fn tracking_enabled() -> bool {
+    if std::env::var("RTK_TRACK").ok().as_deref() == Some("0") {
+        return false;
+    }
+    crate::core::config::Config::load()
+        .map(|c| c.tracking.enabled)
+        .unwrap_or(true)
+}
+
+/// Whether `redact_project_path` should be applied. Defaults to true so new
+/// rows are private by default.
+fn hash_project_paths_enabled() -> bool {
+    crate::core::config::Config::load()
+        .map(|c| c.tracking.hash_project_paths)
+        .unwrap_or(true)
+}
 
 // ── Project path helpers ── // added: project-scoped tracking support
 
@@ -323,7 +363,105 @@ impl Tracker {
             [],
         )?;
 
-        Ok(Self { conn })
+        let tracker = Self { conn };
+        // One-shot redaction migration. Logs (and swallows) errors so a
+        // half-broken DB never blocks `rtk gain` from opening.
+        if let Err(e) = tracker.maybe_run_redaction_migration() {
+            eprintln!("rtk: tracking redaction migration skipped: {}", e);
+        }
+        Ok(tracker)
+    }
+
+    /// Redact `original_cmd` and `project_path` for rows newer than 90 days.
+    ///
+    /// Gated by `PRAGMA user_version` so it runs at most once per binary
+    /// version. The migration is a pure-Rust read-modify-write loop; we do
+    /// not register a SQLite UDF.
+    fn maybe_run_redaction_migration(&self) -> Result<()> {
+        let current: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+        if current >= USER_VERSION_REDACTED {
+            return Ok(());
+        }
+
+        let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
+        let hash_paths = hash_project_paths_enabled();
+
+        // Collect candidate rows first so we don't hold a statement open
+        // while issuing UPDATEs on the same connection.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, original_cmd, project_path
+                 FROM commands
+                 WHERE timestamp >= ?1",
+            )
+            .context("Failed to prepare migration SELECT")?;
+        let rows: Vec<(i64, String, String)> = stmt
+            .query_map(params![cutoff.to_rfc3339()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .context("Failed to query commands for migration")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to collect migration rows")?;
+        drop(stmt);
+
+        for (id, cmd, project_path) in rows {
+            let cmd_redacted = redact_command(&cmd);
+            let path_redacted = canonical_project_path(&project_path, hash_paths);
+            if cmd_redacted == cmd && path_redacted == project_path {
+                continue;
+            }
+            self.conn
+                .execute(
+                    "UPDATE commands
+                     SET original_cmd = ?1, project_path = ?2
+                     WHERE id = ?3",
+                    params![cmd_redacted, path_redacted, id],
+                )
+                .context("Failed to update redacted row")?;
+        }
+
+        // Parse failures table — same treatment for `raw_command`.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, raw_command FROM parse_failures
+                 WHERE timestamp >= ?1",
+            )
+            .context("Failed to prepare migration SELECT (parse_failures)")?;
+        let pf_rows: Vec<(i64, String)> = stmt
+            .query_map(params![cutoff.to_rfc3339()], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .context("Failed to query parse_failures for migration")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to collect parse_failures rows")?;
+        drop(stmt);
+        for (id, raw_cmd) in pf_rows {
+            let redacted = redact_command(&raw_cmd);
+            if redacted == raw_cmd {
+                continue;
+            }
+            self.conn
+                .execute(
+                    "UPDATE parse_failures SET raw_command = ?1 WHERE id = ?2",
+                    params![redacted, id],
+                )
+                .context("Failed to update redacted parse_failure row")?;
+        }
+
+        // PRAGMA user_version takes a literal int, not a bound param.
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {}", USER_VERSION_REDACTED))
+            .context("Failed to bump user_version after migration")?;
+        Ok(())
     }
 
     /// Create an isolated in-memory tracker for tests.
@@ -333,6 +471,14 @@ impl Tracker {
         let tracker = Self { conn };
         tracker.init_schema()?;
         Ok(tracker)
+    }
+
+    /// Run the credential-redaction migration on an in-memory tracker.
+    /// Exposed for the dedicated migration test; production callers go
+    /// through `Tracker::new()`.
+    #[cfg(test)]
+    pub fn run_redaction_migration_for_tests(&self) -> Result<()> {
+        self.maybe_run_redaction_migration()
     }
 
     #[cfg(test)]
@@ -407,6 +553,10 @@ impl Tracker {
         output_tokens: usize,
         exec_time_ms: u64,
     ) -> Result<()> {
+        if !tracking_enabled() {
+            return Ok(()); // silent no-op when [tracking] enabled = false / RTK_TRACK=0
+        }
+
         let saved = input_tokens.saturating_sub(output_tokens);
         let pct = if input_tokens > 0 {
             (saved as f64 / input_tokens as f64) * 100.0
@@ -414,14 +564,21 @@ impl Tracker {
             0.0
         };
 
-        let project_path = current_project_path_string(); // added: record cwd
+        // Scrub credential-shaped substrings before binding to SQL. The
+        // ecosystem aggregation paths (top_commands, categorize_command,
+        // top_passthrough) only look at the first whitespace-delimited
+        // token, which the redactor never touches.
+        let original_cmd_redacted = redact_command(original_cmd);
+
+        let raw_project_path = current_project_path_string(); // added: record cwd
+        let project_path = canonical_project_path(&raw_project_path, hash_project_paths_enabled());
 
         self.conn.execute(
             "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
             params![
                 Utc::now().to_rfc3339(),
-                original_cmd,
+                original_cmd_redacted,
                 rtk_cmd,
                 project_path, // added
                 input_tokens as i64,
@@ -469,12 +626,16 @@ impl Tracker {
         error_message: &str,
         fallback_succeeded: bool,
     ) -> Result<()> {
+        if !tracking_enabled() {
+            return Ok(()); // gated by the same flag as Tracker::record
+        }
+        let raw_command_redacted = redact_command(raw_command);
         self.conn.execute(
             "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
              VALUES (?1, ?2, ?3, ?4)",
             params![
                 Utc::now().to_rfc3339(),
-                raw_command,
+                raw_command_redacted,
                 error_message,
                 fallback_succeeded as i32,
             ],
@@ -1684,6 +1845,366 @@ mod tests {
         assert_eq!(
             failures.total, 0,
             "parse_failures table should be empty after reset"
+        );
+    }
+
+    // ── Finding 2 + 3 redaction & gating tests ──
+    //
+    // All tests below set `HOME` / `XDG_CONFIG_HOME` to a per-test temp dir so
+    // `Config::load()` falls back to defaults (tracking.enabled = true,
+    // hash_project_paths = true). They serialise via `tracking_env_lock` to
+    // avoid env-var races, mirroring `test_db_path_env_and_default`.
+
+    use std::sync::Mutex;
+    static TRACKING_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ScopedEnv {
+        keys: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl ScopedEnv {
+        fn new(overrides: &[(&'static str, Option<&str>)]) -> Self {
+            let mut saved = Vec::with_capacity(overrides.len());
+            for (key, val) in overrides {
+                saved.push((*key, std::env::var_os(key)));
+                match val {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { keys: saved }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            for (key, prev) in &self.keys {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// Write a config file at `<tmp>/config.toml` and return the path.
+    fn write_config(tmp: &std::path::Path, toml: &str) -> std::path::PathBuf {
+        let p = tmp.join("config.toml");
+        std::fs::write(&p, toml).expect("write config.toml");
+        p
+    }
+
+    /// Build an env-override list that points `Config::load()` at a per-test
+    /// config file via `RTK_CONFIG_PATH`. Avoids mutating `HOME` so we don't
+    /// race against other tests that call `Tracker::new()`.
+    fn make_isolated_config_env(
+        cfg_path: &std::path::Path,
+    ) -> Vec<(&'static str, Option<&'static str>)> {
+        let p: &'static str = Box::leak(
+            cfg_path
+                .to_str()
+                .expect("temp path utf8")
+                .to_string()
+                .into_boxed_str(),
+        );
+        vec![
+            ("RTK_CONFIG_PATH", Some(p)),
+            // Make sure no stray RTK_TRACK from the host leaks in.
+            ("RTK_TRACK", None),
+        ]
+    }
+
+    // ── Finding 2: redact_command tests ──
+
+    #[test]
+    fn test_redact_command_url_userinfo() {
+        let input = "git push https://x:y@host/repo";
+        let got = redact_command(input);
+        assert!(got.contains("https://****:****@host/repo"), "got: {got}");
+        assert!(!got.contains("x:y@"));
+    }
+
+    #[test]
+    fn test_redact_command_bearer() {
+        let input = r#"curl -H "Authorization: Bearer abc123" https://api"#;
+        let got = redact_command(input);
+        assert!(got.contains("Bearer ****"), "got: {got}");
+        assert!(!got.contains("abc123"));
+    }
+
+    #[test]
+    fn test_redact_command_flags() {
+        let cases = [
+            ("tool --token=abc", "--token=****"),
+            ("tool --password xyz", "--password ****"),
+            ("tool --api-key=k", "--api-key=****"),
+        ];
+        for (input, needle) in cases {
+            let got = redact_command(input);
+            assert!(got.contains(needle), "input={input} got={got}");
+            assert!(!got.contains("abc") || !input.contains("abc=abc"));
+        }
+    }
+
+    #[test]
+    fn test_redact_command_inline_env() {
+        let input = "GH_TOKEN=ghp_abc git push";
+        let got = redact_command(input);
+        assert!(got.contains("GH_TOKEN=****"), "got: {got}");
+        assert!(!got.contains("ghp_abc"));
+    }
+
+    #[test]
+    fn test_redact_command_credential_heuristic() {
+        // Synthetic fixtures (all Z-suffixed) — not real credentials, but
+        // they trip the RTK prefix regex without flagging GitHub's
+        // secret-scanner.
+        let cases = [
+            ("echo ghp_ZZZZZZZZZZZZZZZZZZZZ", "ghp_"),
+            ("echo sk-ZZZZZZZZZZZZZZZZZZZZ", "sk-"),
+            ("echo AKIAZZZZZZZZZZZZZZZZ", "AKIA"),
+        ];
+        for (input, prefix) in cases {
+            let got = redact_command(input);
+            assert!(got.contains("****"), "input={input} got={got}");
+            let original_tail = input.split_whitespace().last().expect("token");
+            assert!(
+                !got.contains(original_tail),
+                "original token {original_tail} (prefix {prefix}) leaked: {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_redact_command_idempotent() {
+        let inputs = [
+            "git push https://alice:s3cret@github.com/acme/repo.git",
+            "curl --token=abc -H 'Authorization: Bearer xyz' https://api",
+            "GH_TOKEN=ghp_ZZZZZZZZZZZZZZZZZZZZ git push",
+        ];
+        for input in inputs {
+            let once = redact_command(input);
+            let twice = redact_command(&once);
+            assert_eq!(once, twice, "non-idempotent: {input}");
+        }
+    }
+
+    #[test]
+    fn test_redact_project_path_shape() {
+        let cases = [
+            "/Users/alice/Projects/rtk",
+            "/home/bob/work/secret-project",
+            "C:\\Users\\carol\\code\\rtk",
+            "/", // edge case
+        ];
+        let shape = regex::Regex::new(r"^[A-Za-z0-9_.-]+#[0-9a-f]{8}$").expect("shape regex");
+        for path in cases {
+            let got = redact_project_path(path);
+            assert!(shape.is_match(&got), "shape mismatch for {path}: got {got}");
+        }
+        // Empty path stays empty (so existing `project_path != ''` filter
+        // keeps treating it as "no project recorded").
+        assert_eq!(redact_project_path(""), "");
+    }
+
+    #[test]
+    fn test_migration_redacts_existing_rows() {
+        let tracker = Tracker::new_in_memory().expect("in-memory tracker");
+
+        // Insert a pre-migration row directly (bypassing record's redactor).
+        // Token below is a synthetic Z-suffixed fixture (not a real PAT).
+        let original =
+            "git push https://alice:s3cret@example.com/repo --token=ghp_ZZZZZZZZZZZZZZZZZZZZ";
+        tracker
+            .conn
+            .execute(
+                "INSERT INTO commands
+                 (timestamp, original_cmd, rtk_cmd, project_path,
+                  input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
+                 VALUES (?1, ?2, 'rtk git push', '/Users/test/proj', 100, 20, 80, 80.0, 5)",
+                params![Utc::now().to_rfc3339(), original],
+            )
+            .expect("seed pre-migration row");
+        // Pre-condition: token visible.
+        let row: String = tracker
+            .conn
+            .query_row("SELECT original_cmd FROM commands LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .expect("read seeded row");
+        assert!(row.contains("ghp_ZZZZZZZZZZZZZZZZZZZZ"), "seed: {row}");
+
+        // Reset user_version so the migration runs.
+        tracker
+            .conn
+            .execute_batch("PRAGMA user_version = 0")
+            .expect("reset user_version");
+        tracker
+            .run_redaction_migration_for_tests()
+            .expect("run migration");
+
+        let row: String = tracker
+            .conn
+            .query_row("SELECT original_cmd FROM commands LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .expect("read migrated row");
+        assert!(
+            !row.contains("ghp_ZZZZZZZZZZZZZZZZZZZZ"),
+            "token leaked post-migration: {row}"
+        );
+        assert!(!row.contains("alice"), "user leaked post-migration: {row}");
+        assert!(!row.contains("s3cret"), "pw leaked post-migration: {row}");
+
+        // user_version bumped → second run is a no-op (does not re-rewrite).
+        let path_before: String = tracker
+            .conn
+            .query_row("SELECT project_path FROM commands LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .expect("read project_path");
+        tracker
+            .run_redaction_migration_for_tests()
+            .expect("second migration");
+        let path_after: String = tracker
+            .conn
+            .query_row("SELECT project_path FROM commands LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .expect("read project_path again");
+        assert_eq!(path_before, path_after, "migration not idempotent");
+    }
+
+    // ── Finding 3: tracking_enabled gate tests ──
+
+    #[test]
+    fn test_tracking_disabled_via_config_skips_insert() {
+        let _guard = TRACKING_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = write_config(
+            tmp.path(),
+            "[tracking]\nenabled = false\nhistory_days = 90\n",
+        );
+        let overrides = make_isolated_config_env(&cfg);
+        let _env = ScopedEnv::new(&overrides);
+
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        let before: i64 = tracker
+            .conn
+            .query_row("SELECT COUNT(*) FROM commands", [], |r| r.get(0))
+            .expect("count");
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .expect("record");
+        let after: i64 = tracker
+            .conn
+            .query_row("SELECT COUNT(*) FROM commands", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            before, after,
+            "tracking.enabled = false must skip the INSERT"
+        );
+    }
+
+    #[test]
+    fn test_tracking_disabled_via_env_skips_insert() {
+        let _guard = TRACKING_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No config file written — rely on the env var override.
+        let cfg = tmp.path().join("nonexistent-config.toml");
+        let mut overrides = make_isolated_config_env(&cfg);
+        for slot in overrides.iter_mut() {
+            if slot.0 == "RTK_TRACK" {
+                slot.1 = Some("0");
+            }
+        }
+        let _env = ScopedEnv::new(&overrides);
+
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .expect("record");
+        let after: i64 = tracker
+            .conn
+            .query_row("SELECT COUNT(*) FROM commands", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(after, 0, "RTK_TRACK=0 must skip the INSERT");
+    }
+
+    #[test]
+    fn test_tracking_enabled_default_records() {
+        let _guard = TRACKING_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = tmp.path().join("missing-config.toml"); // file does not exist → defaults
+        let overrides = make_isolated_config_env(&cfg);
+        let _env = ScopedEnv::new(&overrides);
+
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .expect("record");
+        let after: i64 = tracker
+            .conn
+            .query_row("SELECT COUNT(*) FROM commands", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(after, 1, "default config must record");
+    }
+
+    #[test]
+    fn test_tracking_disabled_still_lets_reset_run() {
+        let _guard = TRACKING_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Step 1: seed a row while tracking is enabled (no config file yet).
+        let cfg_path = tmp.path().join("config.toml");
+        let overrides = make_isolated_config_env(&cfg_path);
+        let _env = ScopedEnv::new(&overrides);
+
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record("git status", "rtk git status", 100, 20, 5)
+            .expect("seed record");
+
+        // Step 2: write the disabling config in place.
+        std::fs::write(
+            &cfg_path,
+            "[tracking]\nenabled = false\nhistory_days = 90\n",
+        )
+        .expect("write config");
+
+        // Records are now no-ops, but reset_all must still drain the table.
+        tracker
+            .record("git diff", "rtk git diff", 50, 10, 5)
+            .expect("noop record");
+        tracker.reset_all().expect("reset");
+        let after: i64 = tracker
+            .conn
+            .query_row("SELECT COUNT(*) FROM commands", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(after, 0, "reset_all must work even when disabled");
+    }
+
+    #[test]
+    fn test_parse_failure_also_gated() {
+        let _guard = TRACKING_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = write_config(
+            tmp.path(),
+            "[tracking]\nenabled = false\nhistory_days = 90\n",
+        );
+        let overrides = make_isolated_config_env(&cfg);
+        let _env = ScopedEnv::new(&overrides);
+
+        let tracker = Tracker::new_in_memory().expect("tracker");
+        tracker
+            .record_parse_failure("bad cmd", "boom", false)
+            .expect("noop pf");
+        let after: i64 = tracker
+            .conn
+            .query_row("SELECT COUNT(*) FROM parse_failures", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            after, 0,
+            "record_parse_failure must respect tracking.enabled"
         );
     }
 }
