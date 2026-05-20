@@ -6,7 +6,15 @@ use std::fs;
 use std::path::Path;
 
 /// Ultra-condensed diff - only changed lines, no context.
-/// Returns the diff-convention exit code: 0 if identical, 1 if files differ.
+///
+/// Exit-code contract aligned with GNU `diff` (issue #1918):
+/// - `Ok(0)` when files are identical.
+/// - `Ok(1)` when files differ.
+/// - `Ok(2)` on I/O errors such as missing files.
+///
+/// The "files are identical" status message is written to stderr (not stdout)
+/// so scripts redirecting stdout into `patch`, `git apply`, or similar
+/// consumers don't see decorative text mixed into the patch stream.
 pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -14,13 +22,32 @@ pub fn run(file1: &Path, file2: &Path, verbose: u8) -> Result<i32> {
         eprintln!("Comparing: {} vs {}", file1.display(), file2.display());
     }
 
-    let content1 = fs::read_to_string(file1)?;
-    let content2 = fs::read_to_string(file2)?;
+    let content1 = match fs::read_to_string(file1) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rtk diff: {}: {}", file1.display(), e);
+            return Ok(2);
+        }
+    };
+    let content2 = match fs::read_to_string(file2) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("rtk diff: {}: {}", file2.display(), e);
+            return Ok(2);
+        }
+    };
     let raw = format!("{}\n---\n{}", content1, content2);
 
     let (rtk, exit_code) = render_file_diff(file1, file2, &content1, &content2);
 
-    print!("{}", rtk);
+    if exit_code == 0 {
+        // Match GNU diff: silent on identical files (advisory message to
+        // stderr only). Exit code 0.
+        eprintln!("[ok] Files are identical");
+    } else if !rtk.is_empty() {
+        print!("{}", rtk);
+    }
+
     timer.track(
         &format!("diff {} {}", file1.display(), file2.display()),
         "rtk diff",
@@ -38,7 +65,7 @@ fn render_file_diff(file1: &Path, file2: &Path, content1: &str, content2: &str) 
     let diff = compute_diff(&lines1, &lines2);
 
     if diff.changes.is_empty() {
-        return ("[ok] Files are identical\n".to_string(), 0);
+        return (String::new(), 0);
     }
 
     let mut rtk = String::new();
@@ -353,7 +380,10 @@ mod tests {
             "a: 1\nb: 2\n",
             "a: 1\nb: 2\n",
         );
-        assert!(out.contains("[ok] Files are identical"));
+        assert!(
+            out.is_empty(),
+            "identical files must not write decorative text to stdout"
+        );
         assert_eq!(code, 0);
     }
 
@@ -493,6 +523,44 @@ diff --git a/b.rs b/b.rs
 
         assert!(output.contains("old_line_0"), "should contain first change");
         assert!(output.contains("new_line_99"), "should contain last change");
+    }
+
+    #[test]
+    fn test_run_returns_0_on_identical_files() {
+        use std::io::Write;
+        let mut a = tempfile::NamedTempFile::new().unwrap();
+        let mut b = tempfile::NamedTempFile::new().unwrap();
+        a.write_all(b"hello\nworld\n").unwrap();
+        b.write_all(b"hello\nworld\n").unwrap();
+        a.flush().unwrap();
+        b.flush().unwrap();
+
+        let exit = run(a.path(), b.path(), 0).expect("run ok");
+        assert_eq!(exit, 0, "identical files must exit 0 (GNU diff convention)");
+    }
+
+    #[test]
+    fn test_run_returns_1_on_different_files() {
+        use std::io::Write;
+        let mut a = tempfile::NamedTempFile::new().unwrap();
+        let mut b = tempfile::NamedTempFile::new().unwrap();
+        a.write_all(b"hello\nworld\n").unwrap();
+        b.write_all(b"hello\nWORLD\n").unwrap();
+        a.flush().unwrap();
+        b.flush().unwrap();
+
+        let exit = run(a.path(), b.path(), 0).expect("run ok");
+        assert_eq!(exit, 1, "differing files must exit 1 (GNU diff convention)");
+    }
+
+    #[test]
+    fn test_run_returns_2_on_missing_file() {
+        use std::path::PathBuf;
+        let missing = PathBuf::from("/nonexistent-rtk-test-path-xyz123/a.txt");
+        let existing = tempfile::NamedTempFile::new().unwrap();
+
+        let exit = run(&missing, existing.path(), 0).expect("run does not error out on missing");
+        assert_eq!(exit, 2, "missing file must exit 2 (GNU diff convention)");
     }
 
     #[test]

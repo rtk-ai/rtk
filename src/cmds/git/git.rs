@@ -103,6 +103,31 @@ pub fn run(
     }
 }
 
+/// Flags that change `git diff` output into a non-unified format (name lists,
+/// stat tables, raw mode, machine-readable variants). When any of these is
+/// present, RTK must NOT inject its `--- Changes ---` decoration — doing so
+/// breaks `for f in $(git diff --name-only); do ...`, `git diff | git apply`,
+/// `git diff --check` predicates, etc. (issue #1918 / #1869 / #1081).
+fn has_machine_friendly_diff_flag(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "--name-only"
+            || a == "--name-status"
+            || a == "--stat"
+            || a == "--numstat"
+            || a == "--shortstat"
+            || a == "--dirstat"
+            || a == "--check"
+            || a == "--exit-code"
+            || a == "--raw"
+            || a == "-z"
+            || a == "--no-color"
+            || a == "--patch-with-raw"
+            || a == "--patch-with-stat"
+            || a.starts_with("--output=")
+            || a == "--output"
+    })
+}
+
 fn run_diff(
     args: &[String],
     max_lines: Option<usize>,
@@ -122,8 +147,22 @@ fn run_diff(
     // Check if user wants compact diff (default RTK behavior)
     let wants_compact = !args.iter().any(|arg| arg == "--no-compact");
 
-    if wants_stat || !wants_compact {
-        // User wants stat or explicitly no compacting - pass through directly
+    // Issue #1918 / #1869 / #1081: when a machine-friendly flag is present,
+    // emit raw `git diff` output verbatim so consumers like `git apply`,
+    // `patch`, and `for f in $(... --name-only)` round-trip correctly.
+    //
+    // We deliberately do NOT include `!stdout.is_terminal()` here. Agent
+    // runtimes (Claude Code, Codex, etc.) capture stdout through a pipe,
+    // so a TTY-based trigger would silently disable every RTK compaction
+    // on the agent path — the exact place RTK's token savings matter
+    // most. Programmatic consumers signal their intent with explicit
+    // flags (`--name-only`, `--exit-code`, `--check`, `--raw`, ...);
+    // that's the trigger we trust.
+    let force_passthrough = has_machine_friendly_diff_flag(args);
+
+    if wants_stat || !wants_compact || force_passthrough {
+        // User wants stat / explicitly no compacting / programmatic use —
+        // pass through directly without any decoration.
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
         for arg in args {
@@ -135,12 +174,23 @@ fn run_diff(
 
         let result = exec_capture(&mut cmd).context("Failed to run git diff")?;
 
-        if !result.success() {
-            eprintln!("{}", result.stderr);
-            return Ok(result.exit_code);
+        // Issue #1981: `git diff --exit-code` returns exit 1 *with* a
+        // populated stdout patch when files differ. Emit stdout
+        // unconditionally before propagating the exit code so programmatic
+        // consumers (`git diff --exit-code | patch -p1`, CI scripts that
+        // both check the diff and capture it) don't lose content. stderr
+        // is forwarded alongside stdout for the same reason — both
+        // streams are independent and either may carry payload.
+        //
+        // print! (not println!) preserves git's own trailing-newline/EOF
+        // conventions byte-for-byte — critical for `git apply` to accept
+        // the patch.
+        if !result.stdout.is_empty() {
+            print!("{}", result.stdout);
         }
-
-        println!("{}", result.stdout.trim());
+        if !result.stderr.is_empty() {
+            eprint!("{}", result.stderr);
+        }
 
         timer.track(
             &format!("git diff {}", args.join(" ")),
@@ -149,7 +199,7 @@ fn run_diff(
             &result.stdout,
         );
 
-        return Ok(0);
+        return Ok(result.exit_code);
     }
 
     // Default RTK behavior: stat first, then compacted diff
@@ -1780,6 +1830,53 @@ pub fn run_passthrough(args: &[OsString], global_args: &[String], verbose: u8) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_has_machine_friendly_diff_flag_detects_name_only() {
+        // Issue #1918: `--name-only` output must not get the
+        // "--- Changes ---" decoration appended.
+        let args = vec!["--name-only".to_string()];
+        assert!(has_machine_friendly_diff_flag(&args));
+    }
+
+    #[test]
+    fn test_has_machine_friendly_diff_flag_detects_machine_variants() {
+        for flag in [
+            "--name-status",
+            "--stat",
+            "--numstat",
+            "--shortstat",
+            "--dirstat",
+            "--check",
+            "--exit-code",
+            "--raw",
+            "-z",
+            "--no-color",
+            "--patch-with-raw",
+            "--patch-with-stat",
+        ] {
+            let args = vec![flag.to_string()];
+            assert!(
+                has_machine_friendly_diff_flag(&args),
+                "flag {flag} must trigger passthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn test_has_machine_friendly_diff_flag_ignores_normal_args() {
+        // Default `git diff HEAD~1` should still get RTK compaction in TTY.
+        let args: Vec<String> = vec!["HEAD~1".into(), "--".into(), "src/main.rs".into()];
+        assert!(!has_machine_friendly_diff_flag(&args));
+    }
+
+    #[test]
+    fn test_has_machine_friendly_diff_flag_detects_output_arg() {
+        let args = vec!["--output=patch.diff".to_string()];
+        assert!(has_machine_friendly_diff_flag(&args));
+        let args2 = vec!["--output".to_string(), "patch.diff".to_string()];
+        assert!(has_machine_friendly_diff_flag(&args2));
+    }
 
     #[test]
     fn test_git_cmd_no_global_args() {
