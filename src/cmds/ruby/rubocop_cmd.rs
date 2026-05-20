@@ -88,6 +88,32 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
 // ── JSON filtering ───────────────────────────────────────────────────────────
 
+/// Detect the minimal JSON shape emitted by `rubocop --version`.
+///
+/// Recognizes `{"version":"..."}` with no lint-report fields (`files`,
+/// `summary`, `metadata`) and returns a clean `rubocop <version>` line.
+/// Returns `None` for any other input so the caller can fall through to the
+/// standard report parser.
+fn try_version_only_json(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let obj = value.as_object()?;
+
+    let version = obj.get("version")?.as_str()?;
+
+    // Bail if any lint-report key is present — that means it's a real report
+    // that happens to include `version`, not a `--version` query.
+    if obj.contains_key("files") || obj.contains_key("summary") || obj.contains_key("metadata") {
+        return None;
+    }
+
+    Some(format!("rubocop {}", version))
+}
+
 /// Rank severity for ordering: lower = more severe.
 fn severity_rank(severity: &str) -> u8 {
     match severity {
@@ -101,6 +127,13 @@ fn severity_rank(severity: &str) -> u8 {
 fn filter_rubocop_json(output: &str) -> String {
     if output.trim().is_empty() {
         return "RuboCop: No output".to_string();
+    }
+
+    // `rubocop --version` emits minimal JSON like `{"version":"1.86.2"}` which
+    // does not match the lint-report struct. Detect and surface it cleanly
+    // instead of warning about a missing `files` field.
+    if let Some(line) = try_version_only_json(output) {
+        return line;
     }
 
     let parsed: Result<RubocopOutput, _> = serde_json::from_str(output);
@@ -610,6 +643,56 @@ mod tests {
         let input = "\x1b[33mWarning: something\x1b[0m\n{\"broken\": true}";
         let result = filter_rubocop_json(input);
         assert!(!result.is_empty(), "should not panic on ANSI-prefixed JSON");
+    }
+
+    // ── --version JSON handling (Issue 1946) ────────────────────────────────
+
+    #[test]
+    fn test_filter_rubocop_version_only_json_clean() {
+        // `rubocop --version` emits `{"version":"1.86.2"}` — must produce a
+        // clean line containing the version, with no JSON-parse warning text.
+        let input = r#"{"version":"1.86.2"}"#;
+        let result = filter_rubocop_json(input);
+        assert!(
+            result.contains("1.86.2"),
+            "should contain version string: {}",
+            result
+        );
+        assert!(
+            !result.contains("JSON parse"),
+            "should not mention JSON parse error: {}",
+            result
+        );
+        assert!(
+            !result.contains("not recognized"),
+            "should not emit fallback warning marker: {}",
+            result
+        );
+        assert_eq!(result, "rubocop 1.86.2");
+    }
+
+    #[test]
+    fn test_filter_rubocop_version_only_json_with_whitespace() {
+        // Trailing newline / surrounding whitespace still detected as version-only.
+        let input = "\n  {\"version\":\"2.0.0\"}\n";
+        let result = filter_rubocop_json(input);
+        assert_eq!(result, "rubocop 2.0.0");
+    }
+
+    #[test]
+    fn test_filter_rubocop_version_only_does_not_swallow_real_report() {
+        // A real report that happens to include `version` must still go through
+        // the full struct parser (regression guard).
+        let result = filter_rubocop_json(no_offenses_json());
+        assert_eq!(result, "ok ✓ rubocop (15 files)");
+    }
+
+    #[test]
+    fn test_try_version_only_json_rejects_non_object() {
+        assert!(try_version_only_json("\"1.86.2\"").is_none());
+        assert!(try_version_only_json("[]").is_none());
+        assert!(try_version_only_json("not json").is_none());
+        assert!(try_version_only_json("").is_none());
     }
 
     // ── 10-file cap test (Issue 12) ─────────────────────────────────────────
