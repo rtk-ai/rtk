@@ -28,6 +28,7 @@ use anyhow::{Context, Result};
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 /// Target agent for hook installation.
@@ -47,6 +48,17 @@ pub enum AgentTarget {
     Antigravity,
     /// Hermes CLI
     Hermes,
+}
+
+/// Decide whether to look up and apply a TOML filter for the current command.
+///
+/// Returns `false` when `RTK_NO_TOML=1` is set (existing escape hatch), or when
+/// stdout is not a terminal (piped / redirected to a file). In the piped case
+/// the consumer of our output is another program that expects the unfiltered
+/// raw command output — applying `max_lines` / `truncate_lines_at` would
+/// silently corrupt pipelines like `rtk ps aux | grep opencode` (issue #1060).
+fn should_apply_toml_filter(env_disabled: bool, stdout_is_tty: bool) -> bool {
+    !env_disabled && stdout_is_tty
 }
 
 #[derive(Parser)]
@@ -1175,10 +1187,12 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let toml_match = if std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1") {
-        None
-    } else {
+    let env_disabled = std::env::var("RTK_NO_TOML").ok().as_deref() == Some("1");
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let toml_match = if should_apply_toml_filter(env_disabled, stdout_is_tty) {
         core::toml_filter::find_matching_filter(&lookup_cmd)
+    } else {
+        None
     };
 
     if let Some(filter) = toml_match {
@@ -3171,5 +3185,60 @@ mod tests {
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
         }
+    }
+
+    // Regression tests for issue #1060: TOML filters must not fire when
+    // stdout is piped or redirected, otherwise pipelines like
+    // `rtk ps aux | grep opencode` silently lose data.
+    //
+    // These tests pin the full (env_disabled, stdout_is_tty) decision matrix.
+
+    #[test]
+    fn test_toml_filter_runs_in_tty_mode_when_not_disabled() {
+        // Default interactive usage: filter must apply.
+        assert!(should_apply_toml_filter(false, true));
+    }
+
+    #[test]
+    fn test_toml_filter_skipped_when_env_disabled_in_tty() {
+        // RTK_NO_TOML=1 escape hatch wins over TTY.
+        assert!(!should_apply_toml_filter(true, true));
+    }
+
+    #[test]
+    fn test_toml_filter_skipped_when_env_disabled_in_pipe() {
+        // RTK_NO_TOML=1 still wins when piped.
+        assert!(!should_apply_toml_filter(true, false));
+    }
+
+    /// Issue #1060: `rtk ps aux | grep opencode` loses processes because the
+    /// TOML filter truncates to 30 lines before the pipe sees them. When
+    /// stdout is not a terminal the filter must be bypassed so downstream
+    /// consumers receive the raw command output.
+    #[test]
+    fn test_toml_filter_skipped_when_stdout_piped() {
+        assert!(
+            !should_apply_toml_filter(false, false),
+            "TOML filter must be skipped when stdout is piped/redirected (issue #1060)"
+        );
+    }
+
+    /// Issue #1060 has the same shape on every TOML filter that truncates
+    /// output (ps, top, lsof, df, netstat, ...). Confirm the registry actually
+    /// matches several commands so the pipe-bypass fix protects more than
+    /// just `ps`.
+    #[test]
+    fn test_multiple_toml_filters_are_registered() {
+        let truncating_commands = ["ps aux", "top -b -n 1", "lsof -i", "df -h", "netstat -an"];
+        let matched: Vec<&str> = truncating_commands
+            .iter()
+            .copied()
+            .filter(|cmd| core::toml_filter::find_matching_filter(cmd).is_some())
+            .collect();
+        assert!(
+            matched.len() >= 2,
+            "expected at least two truncating TOML filters in the registry, got {:?}",
+            matched
+        );
     }
 }
