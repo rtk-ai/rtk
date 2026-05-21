@@ -89,7 +89,7 @@ mod tests {
     /// See: https://github.com/rtk-ai/rtk/issues/1155
     mod exit_code_protocol {
         use super::registry;
-        use crate::hooks::permissions::{check_command_with_rules, PermissionVerdict};
+        use crate::hooks::permissions::{check_command_with_rules, DefaultMode, PermissionVerdict};
 
         /// Exit code that `run()` returns for each verdict:
         ///   Allow  → 0 (exit Ok(()))
@@ -108,7 +108,8 @@ mod tests {
         #[test]
         fn test_default_verdict_maps_to_ask_exit_code() {
             // When no rules match, verdict is Default → exit code must be 3 (ask).
-            let verdict = check_command_with_rules("git status", &[], &[], &[]);
+            let verdict =
+                check_command_with_rules("git status", &[], &[], &[], DefaultMode::Default);
             assert_eq!(verdict, PermissionVerdict::Default);
             assert_eq!(
                 expected_exit_code(&verdict),
@@ -120,7 +121,8 @@ mod tests {
         #[test]
         fn test_allow_verdict_maps_to_allow_exit_code() {
             let allow = vec!["git *".to_string()];
-            let verdict = check_command_with_rules("git status", &[], &[], &allow);
+            let verdict =
+                check_command_with_rules("git status", &[], &[], &allow, DefaultMode::Default);
             assert_eq!(verdict, PermissionVerdict::Allow);
             assert_eq!(expected_exit_code(&verdict), 0);
         }
@@ -128,7 +130,13 @@ mod tests {
         #[test]
         fn test_ask_verdict_maps_to_ask_exit_code() {
             let ask = vec!["git push".to_string()];
-            let verdict = check_command_with_rules("git push origin main", &[], &ask, &[]);
+            let verdict = check_command_with_rules(
+                "git push origin main",
+                &[],
+                &ask,
+                &[],
+                DefaultMode::Default,
+            );
             assert_eq!(verdict, PermissionVerdict::Ask);
             assert_eq!(expected_exit_code(&verdict), 3);
         }
@@ -136,7 +144,8 @@ mod tests {
         #[test]
         fn test_deny_verdict_maps_to_deny_exit_code() {
             let deny = vec!["rm -rf".to_string()];
-            let verdict = check_command_with_rules("rm -rf /tmp/test", &deny, &[], &[]);
+            let verdict =
+                check_command_with_rules("rm -rf /tmp/test", &deny, &[], &[], DefaultMode::Default);
             assert_eq!(verdict, PermissionVerdict::Deny);
             assert_eq!(expected_exit_code(&verdict), 2);
         }
@@ -147,7 +156,8 @@ mod tests {
             // must NOT be auto-allowed. This is the core of issue #1155.
             // Even though `git status` can be rewritten to `rtk git status`,
             // the absence of an allow rule means Default → exit 3 → ask.
-            let verdict = check_command_with_rules("git status", &[], &[], &[]);
+            let verdict =
+                check_command_with_rules("git status", &[], &[], &[], DefaultMode::Default);
             assert_eq!(verdict, PermissionVerdict::Default);
 
             // Verify the rewrite exists (so the hook would output it),
