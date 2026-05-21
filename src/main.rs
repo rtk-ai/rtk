@@ -49,6 +49,18 @@ pub enum AgentTarget {
     Hermes,
 }
 
+/// Decide whether `rtk init` should install Claude Code artifacts (RTK.md,
+/// CLAUDE.md patch, settings.json hook). Claude is installed when the user did
+/// not opt into OpenCode and either did not specify `--agent` or asked for
+/// `--agent claude` explicitly. Regression guard for issue #213: `--agent
+/// cursor` previously still wrote ~/.claude/RTK.md, breaking Cursor-only users.
+fn should_install_claude(opencode: bool, agent: Option<AgentTarget>) -> bool {
+    if opencode {
+        return false;
+    }
+    matches!(agent, None | Some(AgentTarget::Claude))
+}
+
 #[derive(Parser)]
 #[command(
     name = "rtk",
@@ -1856,8 +1868,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_hermes_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
-                let install_claude = !opencode;
                 let install_cursor = agent == Some(AgentTarget::Cursor);
+                let install_claude = should_install_claude(opencode, agent);
                 let install_windsurf = agent == Some(AgentTarget::Windsurf);
                 let install_cline = agent == Some(AgentTarget::Cline);
 
@@ -3171,5 +3183,32 @@ mod tests {
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
         }
+    }
+
+    /// Regression test for issue #213: `rtk init -g --agent cursor` must not
+    /// drag in the Claude Code install path.
+    #[test]
+    fn test_should_install_claude_routing() {
+        // Default (no opencode, no agent) => install Claude
+        assert!(should_install_claude(false, None));
+
+        // OpenCode plugin only
+        assert!(!should_install_claude(true, None));
+
+        // Explicit non-Claude agent: never install Claude
+        assert!(!should_install_claude(false, Some(AgentTarget::Cursor)));
+        assert!(!should_install_claude(false, Some(AgentTarget::Windsurf)));
+        assert!(!should_install_claude(false, Some(AgentTarget::Cline)));
+        assert!(!should_install_claude(false, Some(AgentTarget::Kilocode)));
+        assert!(!should_install_claude(
+            false,
+            Some(AgentTarget::Antigravity)
+        ));
+
+        // Explicit Claude agent => install Claude
+        assert!(should_install_claude(false, Some(AgentTarget::Claude)));
+
+        // OpenCode combined with any agent => skip Claude
+        assert!(!should_install_claude(true, Some(AgentTarget::Cursor)));
     }
 }

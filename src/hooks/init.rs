@@ -313,7 +313,8 @@ pub fn run(
                 }
             }
 
-            // Cursor hooks (additive, installed alongside Claude Code)
+            // Cursor hooks: standalone when `--agent cursor` is the only target,
+            // additive when Claude Code is also being installed.
             if install_cursor {
                 install_cursor_hooks(ctx)?;
             }
@@ -2914,6 +2915,16 @@ fn patch_cursor_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
         }
     }
 
+    // Ensure parent directory exists (Cursor-only users may not have ~/.cursor yet)
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create Cursor config directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+
     // Atomic write
     atomic_write(path, &serialized)?;
 
@@ -5196,6 +5207,36 @@ mod tests {
 
         // afterFileEdit should be preserved
         assert!(json_content["hooks"]["afterFileEdit"].is_array());
+    }
+
+    /// Regression test for issue #213: `rtk init -g --agent cursor` must succeed
+    /// even when the parent directory does not exist yet (Cursor-only users
+    /// without a prior `~/.cursor/` directory).
+    #[test]
+    fn test_patch_cursor_hooks_json_creates_missing_parent_dir() {
+        let temp = TempDir::new().unwrap();
+        let hooks_path = temp.path().join(".cursor").join(HOOKS_JSON);
+        assert!(!hooks_path.parent().unwrap().exists());
+
+        let patched = patch_cursor_hooks_json(&hooks_path, InitContext::default()).unwrap();
+
+        assert!(patched, "hooks.json should have been created");
+        assert!(
+            hooks_path.exists(),
+            "hooks.json file must exist after patch"
+        );
+        assert!(
+            hooks_path.parent().unwrap().exists(),
+            "parent .cursor/ directory must be created"
+        );
+
+        let content = fs::read_to_string(&hooks_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed["hooks"]["preToolUse"][0]["command"],
+            CURSOR_HOOK_COMMAND
+        );
+        assert_eq!(parsed["hooks"]["preToolUse"][0]["matcher"], "Shell");
     }
 
     #[test]
