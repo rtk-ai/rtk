@@ -233,6 +233,10 @@ enum Commands {
         /// Show keys only (strip all values, show structure)
         #[arg(long)]
         keys_only: bool,
+        /// Emit TOON (Token-Oriented Object Notation) instead of compact JSON.
+        /// Saves 30-60% additional tokens on tabular data. Lossless one-way.
+        #[arg(long, conflicts_with = "keys_only")]
+        toon: bool,
     },
 
     /// Summarize project dependencies
@@ -1660,11 +1664,12 @@ fn run_cli() -> Result<i32> {
             file,
             depth,
             keys_only,
+            toon,
         } => {
             if file == Path::new("-") {
-                json_cmd::run_stdin(depth, keys_only, cli.verbose)?;
+                json_cmd::run_stdin(depth, keys_only, toon, cli.verbose)?;
             } else {
-                json_cmd::run(&file, depth, keys_only, cli.verbose)?;
+                json_cmd::run(&file, depth, keys_only, toon, cli.verbose)?;
             }
             0
         }

@@ -33,6 +33,17 @@ flate2 = "1.0"
 quick-xml = "0.37"
 which = "8"
 automod = "1"
+# Optional: external TOON encoder. Enable with `--features toon-crate` to swap
+# the built-in `core::toon` encoder for the upstream `toon` crate. Both expose
+# the same RTK-facing API (`core::toon::encode` / `try_from_json`).
+toon = { version = "0.1", optional = true }
+
+[features]
+default = []
+# Use the external `toon` crate (https://crates.io/crates/toon) instead of
+# RTK's built-in TOON encoder. Output is equivalent but key ordering may
+# differ (external crate sorts alphabetically; built-in preserves JSON order).
+toon-crate = ["dep:toon"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
