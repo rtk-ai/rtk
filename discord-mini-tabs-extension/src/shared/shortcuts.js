@@ -70,7 +70,7 @@ export function filterShortcuts(shortcuts, query) {
   }
 
   return shortcuts.filter((shortcut) => {
-    const haystack = `${shortcut.name} ${shortcut.type} ${shortcut.url}`.toLowerCase();
+    const haystack = `${shortcut.name} ${shortcut.url}`.toLowerCase();
     return haystack.includes(normalizedQuery);
   });
 }

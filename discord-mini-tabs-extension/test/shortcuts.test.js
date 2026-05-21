@@ -55,6 +55,7 @@ test("updates shortcut while preserving id and createdAt", () => {
   assert.equal(updated.id, "shortcut-1");
   assert.equal(updated.createdAt, "2026-05-21T00:00:00.000Z");
   assert.equal(updated.updatedAt, "2026-05-21T01:00:00.000Z");
+  assert.equal(updated.name, "team call");
   assert.equal(updated.type, "voice");
   assert.equal(updated.url, voiceUrl);
 });
@@ -74,6 +75,7 @@ test("filters shortcuts by name and url", () => {
   ];
   assert.deepEqual(filterShortcuts(shortcuts, "team").map((item) => item.id), ["b"]);
   assert.deepEqual(filterShortcuts(shortcuts, "123456").map((item) => item.id), ["a"]);
+  assert.deepEqual(filterShortcuts(shortcuts, "voice").map((item) => item.id), []);
 });
 
 test("splits shortcuts by type", () => {
