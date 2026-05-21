@@ -1899,10 +1899,11 @@ fn remove_antigravity_hook_from_json(root: &mut serde_json::Value) -> bool {
 
     let initial_len = pre_tool_use.len();
     pre_tool_use.retain(|entry| {
-        entry
-            .get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd != ANTIGRAVITY_HOOK_COMMAND)
+        if let Some(cmd) = entry.get("command").and_then(|c| c.as_str()) {
+            cmd != ANTIGRAVITY_HOOK_COMMAND
+        } else {
+            true
+        }
     });
 
     pre_tool_use.len() < initial_len
@@ -4339,6 +4340,45 @@ mod tests {
             content.contains("rtk hook antigravity"),
             "hooks.json should contain RTK hook"
         );
+    }
+
+    #[test]
+    fn test_remove_antigravity_hook_preserves_other_hooks() {
+        let mut root = serde_json::json!({
+            "version": 1,
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "command": "rtk hook antigravity",
+                        "matcher": "run_command"
+                    },
+                    {
+                        "command": "other_hook_command",
+                        "matcher": "run_command"
+                    },
+                    {
+                        "no_command_field": "but_important"
+                    },
+                    {
+                        "command": 12345 // non-string command field
+                    }
+                ]
+            }
+        });
+
+        let changed = remove_antigravity_hook_from_json(&mut root);
+        assert!(changed, "Should return true indicating changes were made");
+
+        let pre_tool_use = root
+            .pointer("/hooks/PreToolUse")
+            .unwrap()
+            .as_array()
+            .unwrap();
+
+        assert_eq!(pre_tool_use.len(), 3);
+        assert_eq!(pre_tool_use[0]["command"], "other_hook_command");
+        assert_eq!(pre_tool_use[1]["no_command_field"], "but_important");
+        assert_eq!(pre_tool_use[2]["command"], 12345);
     }
 
     #[test]

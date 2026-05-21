@@ -1,6 +1,7 @@
 //! Inspects JSON structure without showing values, saving tokens on large payloads.
 
 use crate::core::tracking;
+use crate::core::utils::floor_char_boundary;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::fs;
@@ -271,17 +272,6 @@ fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
             }
         }
     }
-}
-
-fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut idx = index;
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
 }
 
 #[cfg(test)]

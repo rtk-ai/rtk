@@ -398,6 +398,20 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Finds the largest character boundary less than or equal to `index`.
+///
+/// If `index` is greater than or equal to the string length, returns the string length.
+pub fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut idx = index;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +869,18 @@ mod tests {
     fn test_count_tokens_multiple_spaces() {
         assert_eq!(count_tokens("hello    world"), 2);
         assert_eq!(count_tokens("  hello   world  "), 2);
+    }
+
+    #[test]
+    fn test_floor_char_boundary() {
+        let s = "你好"; // each char is 3 bytes
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 1), 0);
+        assert_eq!(floor_char_boundary(s, 2), 0);
+        assert_eq!(floor_char_boundary(s, 3), 3);
+        assert_eq!(floor_char_boundary(s, 4), 3);
+        assert_eq!(floor_char_boundary(s, 5), 3);
+        assert_eq!(floor_char_boundary(s, 6), 6);
+        assert_eq!(floor_char_boundary(s, 10), 6);
     }
 }

@@ -44,6 +44,7 @@ pub enum AgentTarget {
     /// Kilo Code
     Kilocode,
     /// Google Antigravity
+    #[clap(alias = "agy")]
     Antigravity,
     /// Hermes CLI
     Hermes,
@@ -773,6 +774,7 @@ enum HookCommands {
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
     /// Process Google Antigravity hook (reads JSON from stdin)
+    #[command(alias = "agy")]
     Antigravity,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
@@ -2661,6 +2663,17 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_antigravity_alias() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "agy"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Antigravity));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -2877,6 +2890,17 @@ mod tests {
     #[test]
     fn test_hook_antigravity_parses() {
         let cli = Cli::try_parse_from(["rtk", "hook", "antigravity"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Antigravity
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_agy_alias_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "agy"]).unwrap();
         assert!(matches!(
             cli.command,
             Commands::Hook {

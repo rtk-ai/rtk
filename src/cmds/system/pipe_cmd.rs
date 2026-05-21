@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::io::Read;
 
 use crate::core::stream::RAW_CAP;
+use crate::core::utils::floor_char_boundary;
 use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
 const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
@@ -240,17 +241,6 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
     let output = apply_filter(filter_fn, &buf);
     print!("{}", output);
     Ok(())
-}
-
-fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut idx = index;
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
 }
 
 #[cfg(test)]

@@ -40,7 +40,7 @@ Agent runs "cargo test"
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
-| Google Antigravity | Rules file (prompt-level) | N/A |
+| Google Antigravity (agy) | Shell hook (`PreToolUse`) | Yes |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
@@ -131,13 +131,14 @@ rtk init --agent kilocode    # creates .kilocode/rules/rtk-rules.md in current p
 
 Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance telling Kilo Code to prefer `rtk <cmd>` over raw commands.
 
-### Google Antigravity
+### Google Antigravity (agy)
 
 ```bash
-rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md in current project
+rtk init --agent agy           # patches .agents/hooks.json and creates rules in current project
+rtk init --agent agy --global  # patches ~/.gemini/config/hooks.json globally
 ```
 
-Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
+Antigravity reads `.agents/rules/` as custom instructions and runs PreToolUse hooks via `hooks.json` (both project-scoped and global). RTK adds a hook to transparently rewrite commands before execution, and generates rules to prefer `rtk <cmd>`.
 
 ### Mistral Vibe (planned)
 
@@ -151,7 +152,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini, Antigravity) are guaranteed — the command is rewritten before the agent sees it.
 
 ## Windows support
 

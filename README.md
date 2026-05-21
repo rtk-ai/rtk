@@ -109,7 +109,7 @@ rtk init -g --agent cursor      # Cursor
 rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
-rtk init --agent antigravity    # Google Antigravity
+rtk init --agent antigravity    # Google Antigravity (alias: agy)
 rtk init --agent hermes         # Hermes
 
 # 2. Restart your AI tool, then test
@@ -368,7 +368,7 @@ RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rt
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
 | **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
-| **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |
+| **Google Antigravity (agy)** | `rtk init --agent agy` <br> `rtk init -g --agent agy` | PreToolUse hook (hooks.json) & rules (project/global) |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 
