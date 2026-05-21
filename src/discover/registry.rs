@@ -3521,8 +3521,8 @@ mod tests {
 
     #[test]
     fn test_classify_wc_supported() {
-        // BUG: "wc " was in IGNORED_PREFIXES despite wc_cmd.rs having a full filter.
-        // This test documents the bug: it must FAIL before the fix and PASS after.
+        // "wc " was removed from IGNORED_PREFIXES so wc_cmd.rs filter is now active.
+        // This test verifies the fix is working: wc commands are now classified as Supported.
         assert_eq!(
             classify_command("wc -l src/main.rs"),
             Classification::Supported {
