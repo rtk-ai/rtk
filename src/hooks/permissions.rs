@@ -594,6 +594,59 @@ mod tests {
     // grant Allow to the entire chain. Every non-empty segment must match
     // independently.
 
+    // --- Mixed deny/allow chain tests ---
+    // Deny short-circuits the entire chain regardless of allow rules on other segments.
+    // This tests that a single denied segment takes priority over a permitted one.
+
+    #[test]
+    fn test_chain_deny_short_circuits_allow() {
+        // Deny takes precedence: `git reset` is denied, `git status` is allowed.
+        // Even though `git status` matches allow, the denied `git reset` must
+        // short-circuit the entire chain to Deny (not Default/Allow/Ask).
+        let deny = vec!["git reset".to_string()];
+        let allow = vec!["git status".to_string(), "git *".to_string()];
+
+        // Deny segment present → entire chain is Deny
+        assert_eq!(
+            check_command_with_rules("git status && git reset --hard", &deny, &[], &allow),
+            PermissionVerdict::Deny,
+            "denied segment must short-circuit even with allowed segments present"
+        );
+    }
+
+    #[test]
+    fn test_chain_deny_wins_over_partial_allow() {
+        // Three-segment chain: first allowed, second denied, third allowed.
+        // Deny short-circuits; result is Deny (not Allow, not Default).
+        let deny = vec!["git push".to_string()];
+        let allow = vec!["git status".to_string(), "git log".to_string()];
+
+        assert_eq!(
+            check_command_with_rules(
+                "git status && git push origin main && git log --oneline -5",
+                &deny,
+                &[],
+                &allow
+            ),
+            PermissionVerdict::Deny,
+            "deny must win even when allow rules exist for other segments"
+        );
+    }
+
+    #[test]
+    fn test_chain_deny_wins_over_ask() {
+        // Deny also wins over Ask: `git commit` denied, `git status` would be Ask.
+        // Precedence is Deny > Ask > Allow > Default.
+        let deny = vec!["git commit".to_string()];
+        let ask = vec!["git status".to_string()];
+
+        assert_eq!(
+            check_command_with_rules("git status && git commit -m foo", &deny, &ask, &[]),
+            PermissionVerdict::Deny,
+            "deny must win over ask even in compound commands"
+        );
+    }
+
     #[test]
     fn test_compound_allow_requires_every_segment() {
         // Reproduces #1213: `git status` is allowed but `git add .` is not.
