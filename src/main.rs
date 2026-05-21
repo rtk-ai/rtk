@@ -1244,30 +1244,114 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
             }
         }
     } else {
-        // No TOML match: original passthrough behaviour (Stdio::inherit, streaming)
-        let status = core::utils::resolved_command(&args[0])
+        // No TOML match: capture output and apply source-level trimming
+        let result = core::utils::resolved_command(&args[0])
             .args(&args[1..])
             .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
-            .status();
+            .output();
 
-        match status {
-            Ok(s) => {
-                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+        match result {
+            Ok(output) => {
+                let exit_code = core::utils::exit_code_from_output(&output, &raw_command);
+                let stdout_raw = String::from_utf8_lossy(&output.stdout);
 
+                // Tee raw output on failure
+                let tee_hint = if !output.status.success() {
+                    core::tee::tee_and_hint(&stdout_raw, &raw_command, exit_code)
+                } else {
+                    None
+                };
+
+                let filtered = filter_fallback_output(&stdout_raw);
+                println!("{}", filtered);
+                if let Some(hint) = tee_hint {
+                    println!("{}", hint);
+                }
+
+                timer.track(
+                    &raw_command,
+                    &format!("rtk fallback: {}", raw_command),
+                    &stdout_raw,
+                    &filtered,
+                );
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
 
-                Ok(core::utils::exit_code_from_status(&s, &raw_command))
+                Ok(exit_code)
             }
             Err(e) => {
                 core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
-                // Command not found or other OS error — single message, no duplicate Clap error
                 eprintln!("[rtk: {}]", e);
                 Ok(127)
             }
         }
     }
+}
+
+/// Source-level trimming for unknown CLI commands.
+///
+/// Strips blank lines, banners, line counts, list headers, decorative separators,
+/// markdown headers, and bullet prefixes. Does NOT reformat content.
+fn filter_fallback_output(input: &str) -> String {
+    let stripped = core::utils::strip_ansi(input);
+
+    let separator_re = regex::Regex::new(r"^[═╔╗╚╝║─=\-#*~]{3,}\s*$").unwrap();
+    let banner_re = regex::Regex::new(r"^\[ok\]\s+Command:").unwrap();
+    let markdown_header_re = regex::Regex::new(r"^#{1,6}\s+").unwrap();
+    let bullet_re = regex::Regex::new(r"^[ \t]*[•·▪▸▹➤]\s*").unwrap();
+    let list_header_re =
+        regex::Regex::new(r"^\d+\s+(items?|entries?|rows?|results?|records?|lines?)\s*$").unwrap();
+
+    let mut result_lines: Vec<&str> = Vec::new();
+    let mut prev_blank = false;
+
+    for line in stripped.lines() {
+        let trimmed = line.trim();
+
+        // Skip blank lines (collapse consecutive blanks to zero)
+        if trimmed.is_empty() {
+            if !prev_blank && !result_lines.is_empty() {
+                prev_blank = true;
+            }
+            continue;
+        }
+
+        // Skip decorative separators
+        if separator_re.is_match(trimmed) {
+            continue;
+        }
+
+        // Skip banners like "[ok] Command: ..."
+        if banner_re.is_match(trimmed) {
+            continue;
+        }
+
+        // Skip list count lines like "3 items" or "15 entries"
+        if list_header_re.is_match(trimmed) {
+            continue;
+        }
+
+        prev_blank = false;
+
+        // Strip markdown header prefix (# ## ### etc.) — keep the text
+        if markdown_header_re.is_match(line) {
+            let cleaned = markdown_header_re.replace(line, "").to_string();
+            result_lines.push(Box::leak(cleaned.into_boxed_str()));
+            continue;
+        }
+
+        // Strip bullet prefix — keep the text
+        if bullet_re.is_match(line) {
+            let cleaned = bullet_re.replace(line, "").to_string();
+            result_lines.push(Box::leak(cleaned.into_boxed_str()));
+            continue;
+        }
+
+        result_lines.push(line);
+    }
+
+    result_lines.join("\n")
 }
 
 #[derive(Debug, Subcommand)]
@@ -3171,5 +3255,59 @@ mod tests {
             }
             _ => panic!("Expected Commands::Npx for unknown tool"),
         }
+    }
+
+    #[test]
+    fn test_filter_fallback_strips_blank_lines() {
+        let input = "line1\n\n\nline2\n\nline3";
+        let output = filter_fallback_output(input);
+        assert_eq!(output, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn test_filter_fallback_strips_separators() {
+        let input = "header\n════════════════\ncontent\n----------\nmore";
+        let output = filter_fallback_output(input);
+        assert_eq!(output, "header\ncontent\nmore");
+    }
+
+    #[test]
+    fn test_filter_fallback_strips_banner() {
+        let input = "[ok] Command: dima workitem get 123\nid: 123\nname: test";
+        let output = filter_fallback_output(input);
+        assert_eq!(output, "id: 123\nname: test");
+    }
+
+    #[test]
+    fn test_filter_fallback_strips_markdown_headers() {
+        let input = "## Details\nid: 123\n### Sub\nvalue: 456";
+        let output = filter_fallback_output(input);
+        assert_eq!(output, "Details\nid: 123\nSub\nvalue: 456");
+    }
+
+    #[test]
+    fn test_filter_fallback_strips_bullets() {
+        let input = "• item1\n· item2\n  ▸ item3\nplain text";
+        let output = filter_fallback_output(input);
+        assert_eq!(output, "item1\nitem2\nitem3\nplain text");
+    }
+
+    #[test]
+    fn test_filter_fallback_preserves_content() {
+        let input = "id: \"123\"\nname: test-value\nurl: https://example.com\nstatus: active";
+        let output = filter_fallback_output(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_filter_fallback_strips_list_count() {
+        let input = "3 items\nentry1\n15 entries\nentry2";
+        let output = filter_fallback_output(input);
+        assert_eq!(output, "entry1\nentry2");
+    }
+
+    #[test]
+    fn test_filter_fallback_empty_input() {
+        assert_eq!(filter_fallback_output(""), "");
     }
 }
