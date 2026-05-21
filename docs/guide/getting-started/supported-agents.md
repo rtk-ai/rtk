@@ -32,7 +32,7 @@ Agent runs "cargo test"
 | VS Code Copilot Chat | Shell hook (`PreToolUse`) | Yes |
 | GitHub Copilot CLI | Shell hook (deny-with-suggestion) | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Yes |
-| Gemini CLI | Rust binary (`BeforeTool`) | Yes |
+| Gemini CLI (Legacy) | Rust binary (`BeforeTool`) | Yes (Sunsetting) |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
@@ -40,7 +40,7 @@ Agent runs "cargo test"
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
-| Google Antigravity (agy) | Shell hook (`PreToolUse`) | Yes |
+| Google Antigravity CLI / IDE (agy) | Shell hook (`PreToolUse`) & rules | Yes |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
@@ -71,7 +71,10 @@ Restart Cursor. The hook uses `preToolUse` with Cursor's `updated_input` format.
 rtk init --global --copilot
 ```
 
-### Gemini CLI
+### Gemini CLI (Legacy/Sunsetting)
+
+> [!WARNING]
+> Gemini CLI integration (`--gemini`) is sunsetting and legacy. For the new generation Google Antigravity tools, use the `--agent agy` integration.
 
 ```bash
 rtk init --global --gemini
@@ -131,11 +134,16 @@ rtk init --agent kilocode    # creates .kilocode/rules/rtk-rules.md in current p
 
 Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance telling Kilo Code to prefer `rtk <cmd>` over raw commands.
 
-### Google Antigravity (agy)
+### Google Antigravity CLI & IDE (agy)
+
+RTK supports both the Google Antigravity IDE agent extension (via prompt-level rules files) and the `agy` CLI/command-line tool (via PreToolUse hooks).
+
+*   **Google Antigravity IDE (Agent)**: Configured project-scoped to add custom instruction rules.
+*   **Google Antigravity CLI (`agy`)**: Configured globally or locally to intercept run_command tool execution and rewrite commands.
 
 ```bash
-rtk init --agent agy           # patches .agents/hooks.json and creates rules in current project
-rtk init --agent agy --global  # patches ~/.gemini/config/hooks.json globally
+rtk init --agent agy           # patches .agents/hooks.json (for agy CLI) and creates rules (for Antigravity IDE) in the current project
+rtk init --agent agy --global  # patches ~/.gemini/config/hooks.json globally (for agy CLI)
 ```
 
 Antigravity reads `.agents/rules/` as custom instructions and runs PreToolUse hooks via `hooks.json` (both project-scoped and global). RTK adds a hook to transparently rewrite commands before execution, and generates rules to prefer `rtk <cmd>`.
