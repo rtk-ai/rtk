@@ -1,5 +1,5 @@
 import { SHORTCUT_TYPES } from "./constants.js";
-import { normalizeDiscordChannelUrl } from "./url.js";
+import { normalizeDiscordChannelUrl, validateDiscordChannelUrl } from "./url.js";
 
 const VALID_TYPES = new Set([SHORTCUT_TYPES.TEXT, SHORTCUT_TYPES.VOICE]);
 
@@ -37,11 +37,12 @@ function isShortcutLike(shortcut) {
     typeof shortcut.name === "string" &&
     typeof shortcut.type === "string" &&
     typeof shortcut.url === "string" &&
-    VALID_TYPES.has(shortcut.type)
+    VALID_TYPES.has(shortcut.type) &&
+    validateDiscordChannelUrl(shortcut.url).ok
   );
 }
 
-function normalizeShortcutList(shortcuts) {
+export function normalizeShortcutList(shortcuts) {
   if (!Array.isArray(shortcuts)) {
     return [];
   }

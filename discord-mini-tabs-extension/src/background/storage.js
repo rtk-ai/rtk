@@ -1,14 +1,11 @@
 import { STORAGE_KEYS } from "../shared/constants.js";
 import { createDefaultWindowState, normalizeWindowState } from "../shared/settings.js";
+import { normalizeShortcutList } from "../shared/shortcuts.js";
 
 const DEFAULT_STATE = {
   [STORAGE_KEYS.SHORTCUTS]: [],
   [STORAGE_KEYS.WINDOW_STATE]: createDefaultWindowState()
 };
-
-function normalizeShortcuts(value) {
-  return Array.isArray(value) ? value : [];
-}
 
 function getDefaultStorageArea() {
   return chrome.storage.local;
@@ -17,13 +14,13 @@ function getDefaultStorageArea() {
 export async function getExtensionState(storageArea = getDefaultStorageArea()) {
   const data = await storageArea.get(DEFAULT_STATE);
   return {
-    shortcuts: normalizeShortcuts(data[STORAGE_KEYS.SHORTCUTS]),
+    shortcuts: normalizeShortcutList(data[STORAGE_KEYS.SHORTCUTS]),
     windowState: normalizeWindowState(data[STORAGE_KEYS.WINDOW_STATE])
   };
 }
 
 export async function setShortcuts(shortcuts, storageArea = getDefaultStorageArea()) {
-  const normalized = normalizeShortcuts(shortcuts);
+  const normalized = normalizeShortcutList(shortcuts);
   await storageArea.set({ [STORAGE_KEYS.SHORTCUTS]: normalized });
   return normalized;
 }
