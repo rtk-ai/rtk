@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Hermes CLI
     Hermes,
+    /// Pi coding agent
+    Pi,
 }
 
 #[derive(Parser)]
@@ -1365,24 +1367,33 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+#[derive(Clone, Copy)]
+struct InitUninstallArgs {
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
+}
+
+fn uninstall_init_dispatch<UninstallHermes, UninstallPi, UninstallStandard>(
+    args: InitUninstallArgs,
     uninstall_hermes: UninstallHermes,
+    uninstall_pi: UninstallPi,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallPi: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
-    if agent == Some(AgentTarget::Hermes) {
-        uninstall_hermes(ctx)
+    if args.agent == Some(AgentTarget::Hermes) {
+        uninstall_hermes(args.ctx)
+    } else if args.agent == Some(AgentTarget::Pi) {
+        uninstall_pi(args.ctx)
     } else {
-        let cursor = agent == Some(AgentTarget::Cursor);
-        uninstall_standard(global, gemini, codex, cursor, ctx)
+        let cursor = args.agent == Some(AgentTarget::Cursor);
+        uninstall_standard(args.global, args.gemini, args.codex, cursor, args.ctx)
     }
 }
 
@@ -1821,12 +1832,15 @@ fn run_cli() -> Result<i32> {
                 hooks::init::show_config(codex)?;
             } else if uninstall {
                 uninstall_init_dispatch(
-                    agent,
-                    global,
-                    gemini,
-                    codex,
-                    ctx,
+                    InitUninstallArgs {
+                        agent,
+                        global,
+                        gemini,
+                        codex,
+                        ctx,
+                    },
                     hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_pi,
                     hooks::init::uninstall,
                 )?;
             } else if gemini {
@@ -1854,6 +1868,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Pi) {
+                hooks::init::run_pi_mode(ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2659,6 +2675,17 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_pi() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "pi"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Pi));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -2687,6 +2714,7 @@ mod tests {
     #[test]
     fn test_init_uninstall_dispatch_routes_hermes_to_hermes_cleanup() {
         let hermes_called = Cell::new(false);
+        let pi_called = Cell::new(false);
         let standard_called = Cell::new(false);
         let ctx = hooks::init::InitContext {
             verbose: 2,
@@ -2694,15 +2722,21 @@ mod tests {
         };
 
         let result = uninstall_init_dispatch(
-            Some(AgentTarget::Hermes),
-            true,
-            false,
-            false,
-            ctx,
+            InitUninstallArgs {
+                agent: Some(AgentTarget::Hermes),
+                global: true,
+                gemini: false,
+                codex: false,
+                ctx,
+            },
             |ctx| {
                 hermes_called.set(true);
                 assert_eq!(ctx.verbose, 2);
                 assert!(ctx.dry_run);
+                Ok(())
+            },
+            |_| {
+                pi_called.set(true);
                 Ok(())
             },
             |_, _, _, _, _| {
@@ -2713,6 +2747,42 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(hermes_called.get());
+        assert!(!pi_called.get());
+        assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_pi_to_pi_cleanup() {
+        let hermes_called = Cell::new(false);
+        let pi_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext::default();
+
+        let result = uninstall_init_dispatch(
+            InitUninstallArgs {
+                agent: Some(AgentTarget::Pi),
+                global: true,
+                gemini: false,
+                codex: false,
+                ctx,
+            },
+            |_| {
+                hermes_called.set(true);
+                Ok(())
+            },
+            |_| {
+                pi_called.set(true);
+                Ok(())
+            },
+            |_, _, _, _, _| {
+                standard_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!hermes_called.get());
+        assert!(pi_called.get());
         assert!(!standard_called.get());
     }
 

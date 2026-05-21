@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Pi, Kilo Code, and Antigravity
 sidebar:
   order: 3
 ---
@@ -36,6 +36,7 @@ Agent runs "cargo test"
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
+| Pi | TypeScript extension (`tool_call` command mutation) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
@@ -103,6 +104,16 @@ Creates `~/.hermes/plugins/rtk-rewrite/` and enables it through `plugins.enabled
 
 The plugin fails open. If `rtk` is missing at load time, the hook is not registered. If `rtk rewrite` errors, the tool is not `terminal`, the payload has no string `command`, or the plugin raises an exception, Hermes runs the original command unchanged. The same `rtk rewrite` limitations apply: already-prefixed `rtk` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
 
+### Pi
+
+```bash
+rtk init --agent pi
+```
+
+Creates `~/.pi/agent/extensions/rtk.ts` by default, or `$PI_CODING_AGENT_DIR/extensions/rtk.ts` when `PI_CODING_AGENT_DIR` is set. The extension listens for Pi `bash` tool calls, mutates the `command` in place, and delegates all rewrite decisions to `rtk rewrite`. Restart Pi or run `/reload` after installing.
+
+The extension fails open. If `rtk` is missing, `rtk rewrite` errors, the tool is not `bash`, the payload has no string `command`, or the extension raises an exception, Pi runs the original command unchanged. The same `rtk rewrite` limitations apply: already-prefixed `rtk` commands, compound shell commands, heredocs, and commands without filters are not rewritten.
+
 ### Cline / Roo Code
 
 ```bash
@@ -148,10 +159,10 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | Tier | Mechanism | How rewrites work |
 |------|-----------|------------------|
 | **Full hook** | Shell script or Rust binary, intercepts via agent API | Transparent — agent never sees the raw command |
-| **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
+| **Plugin / extension** | TypeScript, JavaScript, or Python in agent's plugin or extension system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) and plugin/extension integrations that support mutation (OpenCode, OpenClaw, Hermes, Pi) are transparent — the command is rewritten before the agent sees it.
 
 ## Windows support
 

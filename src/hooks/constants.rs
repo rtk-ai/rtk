@@ -26,3 +26,9 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+pub const PI_DIR: &str = ".pi";
+pub const PI_AGENT_SUBDIR: &str = "agent";
+pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
+pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
+pub const PI_EXTENSION_FILE: &str = "rtk.ts";

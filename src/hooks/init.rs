@@ -14,13 +14,17 @@ use crate::hooks::constants::{
 use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY,
+    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PI_AGENT_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_EXTENSION_FILE, PRE_TOOL_USE_KEY,
     REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
 // Embedded OpenCode plugin (auto-rewrite)
 const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
+
+// Embedded Pi extension (auto-rewrite)
+const PI_EXTENSION: &str = include_str!("../../hooks/pi/rtk.ts");
 
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
@@ -794,6 +798,12 @@ pub fn uninstall(
     // 6. Remove Cursor hooks
     let cursor_removed = remove_cursor_hooks(ctx)?;
     removed.extend(cursor_removed);
+
+    // 7. Remove Pi extension
+    let pi_removed = remove_pi_extension(ctx)?;
+    for path in pi_removed {
+        removed.push(format!("Pi extension: {}", path.display()));
+    }
 
     // Report results
     if removed.is_empty() {
@@ -2804,6 +2814,66 @@ fn remove_opencode_plugin(ctx: InitContext) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
+fn resolve_pi_agent_dir() -> Result<PathBuf> {
+    resolve_pi_agent_dir_from(std::env::var_os(PI_CODING_AGENT_DIR_ENV), dirs::home_dir())
+}
+
+fn resolve_pi_agent_dir_from(
+    pi_coding_agent_dir: Option<OsString>,
+    home_dir: Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(path) = pi_coding_agent_dir.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    home_dir
+        .map(|home| home.join(PI_DIR).join(PI_AGENT_SUBDIR))
+        .context("Cannot determine Pi agent directory. Set $PI_CODING_AGENT_DIR or $HOME.")
+}
+
+fn pi_extension_path(pi_agent_dir: &Path) -> PathBuf {
+    pi_agent_dir
+        .join(PI_EXTENSIONS_SUBDIR)
+        .join(PI_EXTENSION_FILE)
+}
+
+fn ensure_pi_extension_installed(path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { dry_run, .. } = ctx;
+    if !dry_run {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Pi extension directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+    write_if_changed(path, PI_EXTENSION, "Pi extension", ctx)
+}
+
+fn remove_pi_extension(ctx: InitContext) -> Result<Vec<PathBuf>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let pi_agent_dir = resolve_pi_agent_dir()?;
+    let path = pi_extension_path(&pi_agent_dir);
+    let mut removed = Vec::new();
+
+    if path.exists() {
+        if dry_run {
+            println!("[dry-run] would remove Pi extension: {}", path.display());
+        } else {
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove Pi extension: {}", path.display()))?;
+            if verbose > 0 {
+                eprintln!("Removed Pi extension: {}", path.display());
+            }
+        }
+        removed.push(path);
+    }
+
+    Ok(removed)
+}
+
 // ─── Cursor Agent support ─────────────────────────────────────────────
 
 fn resolve_cursor_dir() -> Result<PathBuf> {
@@ -3288,6 +3358,18 @@ fn show_claude_config() -> Result<()> {
         println!("[--] OpenCode: config dir not found");
     }
 
+    // Check Pi extension
+    if let Ok(pi_agent_dir) = resolve_pi_agent_dir() {
+        let extension = pi_extension_path(&pi_agent_dir);
+        if extension.exists() {
+            println!("[ok] Pi: extension installed ({})", extension.display());
+        } else {
+            println!("[--] Pi: extension not found");
+        }
+    } else {
+        println!("[--] Pi: agent config dir not found");
+    }
+
     // Check Cursor hooks
     if let Ok(cursor_dir) = resolve_cursor_dir() {
         let cursor_hook = cursor_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
@@ -3421,6 +3503,49 @@ fn run_opencode_only_mode(ctx: InitContext) -> Result<()> {
         println!("  OpenCode: {}", opencode_plugin_path.display());
         println!("  Restart OpenCode. Test with: git status\n");
     }
+    Ok(())
+}
+
+pub fn run_pi_mode(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let pi_agent_dir = resolve_pi_agent_dir()?;
+    let extension_path = pi_extension_path(&pi_agent_dir);
+    ensure_pi_extension_installed(&extension_path, ctx)?;
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nPi extension installed.\n");
+        println!("  Extension: {}", extension_path.display());
+        println!("  Restart Pi or run /reload. Test with: git status\n");
+    }
+    Ok(())
+}
+
+pub fn uninstall_pi(ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+    let removed = remove_pi_extension(ctx)?;
+
+    if removed.is_empty() {
+        println!("RTK Pi support was not installed (nothing to remove)");
+    } else {
+        let header = if dry_run {
+            "[dry-run] would uninstall RTK for Pi:"
+        } else {
+            "RTK uninstalled for Pi:"
+        };
+        println!("{}", header);
+        for path in &removed {
+            println!("  - Pi extension: {}", path.display());
+        }
+        if !dry_run {
+            println!("\nRestart Pi or run /reload to apply changes.");
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
     Ok(())
 }
 
@@ -3882,6 +4007,54 @@ mod tests {
         assert!(plugin_path.exists());
         fs::remove_file(&plugin_path).unwrap();
         assert!(!plugin_path.exists());
+    }
+
+    #[test]
+    fn test_pi_agent_dir_prefers_env_override() {
+        let temp = TempDir::new().unwrap();
+        let resolved =
+            resolve_pi_agent_dir_from(Some(temp.path().as_os_str().to_os_string()), None).unwrap();
+        assert_eq!(resolved, temp.path());
+    }
+
+    #[test]
+    fn test_pi_agent_dir_defaults_to_home_pi_agent() {
+        let temp = TempDir::new().unwrap();
+        let resolved = resolve_pi_agent_dir_from(None, Some(temp.path().to_path_buf())).unwrap();
+        assert_eq!(resolved, temp.path().join(".pi").join("agent"));
+    }
+
+    #[test]
+    fn test_pi_extension_install_and_update() {
+        let temp = TempDir::new().unwrap();
+        let extension_path = pi_extension_path(temp.path());
+
+        let changed =
+            ensure_pi_extension_installed(&extension_path, InitContext::default()).unwrap();
+        assert!(changed);
+        let content = fs::read_to_string(&extension_path).unwrap();
+        assert_eq!(content, PI_EXTENSION);
+
+        fs::write(&extension_path, "// old").unwrap();
+        let changed_again =
+            ensure_pi_extension_installed(&extension_path, InitContext::default()).unwrap();
+        assert!(changed_again);
+        let content_updated = fs::read_to_string(&extension_path).unwrap();
+        assert_eq!(content_updated, PI_EXTENSION);
+    }
+
+    #[test]
+    fn test_pi_extension_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let extension_path = pi_extension_path(temp.path());
+        let ctx = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+
+        let changed = ensure_pi_extension_installed(&extension_path, ctx).unwrap();
+        assert!(changed);
+        assert!(!extension_path.exists());
     }
 
     #[test]
