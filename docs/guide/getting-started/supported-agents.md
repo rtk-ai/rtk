@@ -40,7 +40,8 @@ Agent runs "cargo test"
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
-| Google Antigravity CLI / IDE (agy) | Shell hook (`PreToolUse`) & rules | Yes |
+| Google Antigravity CLI (agy) | Shell hook (`PreToolUse`) | Yes |
+| Google Antigravity IDE | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
@@ -74,7 +75,7 @@ rtk init --global --copilot
 ### Gemini CLI (Legacy/Sunsetting)
 
 > [!WARNING]
-> Gemini CLI integration (`--gemini`) is sunsetting and legacy. For the new generation Google Antigravity tools, use the `--agent agy` integration.
+> Gemini CLI integration (`--gemini`) is sunsetting and legacy. For the new generation Google Antigravity tools, use the `-g --antigravity` command for CLI hooks and `--agent antigravity` for IDE rules.
 
 ```bash
 rtk init --global --gemini
@@ -138,13 +139,21 @@ Kilo Code reads `.kilocode/rules/` as custom instructions. RTK adds guidance tel
 
 RTK supports both the Google Antigravity IDE agent extension (via prompt-level rules files) and the `agy` CLI/command-line tool (via PreToolUse hooks).
 
-*   **Google Antigravity IDE (Agent)**: Configured project-scoped to add custom instruction rules.
-*   **Google Antigravity CLI (`agy`)**: Configured globally or locally to intercept run_command tool execution and rewrite commands.
+These two components are completely independent, use different configuration files, and do not share or conflict with each other:
+*   **Google Antigravity IDE (Agent)**: Configured project-scoped to add custom instruction rules under `.agents/rules/antigravity-rtk-rules.md`.
+*   **Google Antigravity CLI (`agy`)**: Configured globally or locally to intercept run_command tool execution and rewrite commands via `hooks.json`.
 
+**To setup Google Antigravity CLI (agy) hooks:**
 ```bash
-rtk init --agent agy           # patches .agents/hooks.json (for agy CLI) and creates rules (for Antigravity IDE) in the current project
-rtk init --agent agy --global  # patches ~/.gemini/config/hooks.json globally (for agy CLI)
+rtk init -g --antigravity      # configures hooks.json globally (~/.gemini/config/hooks.json)
+rtk init --antigravity         # configures hooks.json locally (.agents/hooks.json)
 ```
+
+**To setup Google Antigravity IDE prompt rules:**
+```bash
+rtk init --agent antigravity   # creates .agents/rules/antigravity-rtk-rules.md in current project
+```
+Note: Antigravity IDE rules are strictly project-scoped and cannot be initialized globally.
 
 Antigravity reads `.agents/rules/` as custom instructions and runs PreToolUse hooks via `hooks.json` (both project-scoped and global). RTK adds a hook to transparently rewrite commands before execution, and generates rules to prefer `rtk <cmd>`.
 

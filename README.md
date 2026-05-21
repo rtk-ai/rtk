@@ -103,13 +103,14 @@ rtk gain        # Should show token savings stats
 ```bash
 # 1. Install for your AI tool
 rtk init -g                     # Claude Code / Copilot (default)
-rtk init -g --gemini            # Gemini CLI (Legacy/Sunsetting)
+rtk init -g --gemini            # Gemini CLI (Sunsetting)
+rtk init -g --antigravity       # Antigravity CLI (agy)
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
 rtk init --agent windsurf       # Windsurf
 rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
-rtk init --agent antigravity    # Google Antigravity CLI (agy) & IDE Agent (alias: agy)
+rtk init --agent antigravity    # Antigravity IDE Agent
 rtk init --agent hermes         # Hermes
 
 # 2. Restart your AI tool, then test
@@ -351,7 +352,7 @@ rtk git status
 
 ## Supported AI Tools
 
-RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
+RTK supports 14 AI coding tools. Each integration rewrites shell commands to `rtk` equivalents for 60-90% token savings where the agent supports command interception.
 
 | Tool | Install | Method |
 |------|---------|--------|
@@ -359,7 +360,8 @@ RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rt
 | **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
-| **Gemini CLI (Legacy)** | `rtk init -g --gemini` | BeforeTool hook (Sunsetting) |
+| **Gemini CLI (Sunsetting)** | `rtk init -g --gemini` | BeforeTool hook |
+| **Antigravity CLI** | `rtk init -g --antigravity`| PreToolUse hook (hooks.json) |
 | **Codex** | `rtk init -g --codex` | AGENTS.md + RTK.md instructions |
 | **Windsurf** | `rtk init --agent windsurf` | .windsurfrules (project-scoped) |
 | **Cline / Roo Code** | `rtk init --agent cline` | .clinerules (project-scoped) |
@@ -368,7 +370,7 @@ RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rt
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
 | **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
-| **Google Antigravity (agy)** | `rtk init --agent agy` <br> `rtk init -g --agent agy` | PreToolUse hook (hooks.json) & rules (for `agy` CLI & Antigravity IDE) |
+| **Google Antigravity IDE** | `rtk init --agent antigravity` | Prompt rules (`.agents/rules/antigravity-rtk-rules.md`) |
 
 For per-agent setup details, override controls, and graceful degradation, see the [Supported Agents guide](https://www.rtk-ai.app/guide/getting-started/supported-agents). The Hermes plugin source and tests live in `hooks/hermes/`; installed Hermes runtime files still live under `~/.hermes/plugins/rtk-rewrite/`.
 

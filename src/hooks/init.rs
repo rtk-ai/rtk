@@ -606,7 +606,8 @@ pub fn uninstall(
     gemini: bool,
     codex: bool,
     cursor: bool,
-    antigravity: bool,
+    antigravity_cli: bool,
+    antigravity_ide: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
@@ -645,17 +646,29 @@ pub fn uninstall(
         return Ok(());
     }
 
-    if antigravity {
-        let antigravity_removed =
-            uninstall_antigravity(global, ctx).context("Failed to remove Antigravity hooks")?;
-        if !antigravity_removed.is_empty() {
+    let mut total_removed = Vec::new();
+
+    if antigravity_cli {
+        let removed = uninstall_antigravity_cli(global, ctx)
+            .context("Failed to remove Antigravity CLI hooks")?;
+        total_removed.extend(removed);
+    }
+
+    if antigravity_ide {
+        let removed = uninstall_antigravity_ide(ctx)
+            .context("Failed to remove Antigravity IDE rules")?;
+        total_removed.extend(removed);
+    }
+
+    if antigravity_cli || antigravity_ide {
+        if !total_removed.is_empty() {
             let header = if dry_run {
                 "[dry-run] would uninstall RTK (Antigravity):"
             } else {
                 "RTK uninstalled (Antigravity):"
             };
             println!("{}", header);
-            for item in &antigravity_removed {
+            for item in &total_removed {
                 println!("  - {}", item);
             }
             if !dry_run {
@@ -1708,16 +1721,67 @@ fn run_kilocode_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 
 const ANTIGRAVITY_RULES: &str = include_str!("../../hooks/antigravity/rules.md");
 
-pub fn run_antigravity_mode(global: bool, ctx: InitContext) -> Result<()> {
+pub fn run_antigravity_ide_mode(ctx: InitContext) -> Result<()> {
+    run_antigravity_ide_mode_at(&std::env::current_dir()?, ctx)
+}
+
+fn run_antigravity_ide_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let rules_dir = base_dir.join(ANTIGRAVITY_DIR).join("rules");
+    let rules_path = rules_dir.join("antigravity-rtk-rules.md");
+
+    let existing = fs::read_to_string(&rules_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        if !dry_run {
+            println!("\nRTK already configured for Antigravity IDE in this project.\n");
+            println!("  Rules: .agents/rules/antigravity-rtk-rules.md (already present)");
+        }
+    } else {
+        let new_content = if existing.trim().is_empty() {
+            ANTIGRAVITY_RULES.to_string()
+        } else {
+            format!("{}\n\n{}", existing.trim(), ANTIGRAVITY_RULES)
+        };
+        if dry_run {
+            println!(
+                "[dry-run] would write {}: (and create parent dir if missing)",
+                rules_path.display()
+            );
+            if verbose > 0 {
+                println!("[dry-run] content:\n{}", new_content);
+            }
+        } else {
+            fs::create_dir_all(&rules_dir)
+                .context("Failed to create .agents/rules directory")?;
+            fs::write(&rules_path, &new_content)
+                .context("Failed to write .agents/rules/antigravity-rtk-rules.md")?;
+
+            if verbose > 0 {
+                eprintln!("Wrote .agents/rules/antigravity-rtk-rules.md");
+            }
+
+            println!("\nRTK configured for Google Antigravity IDE.\n");
+            println!("  Rules: .agents/rules/antigravity-rtk-rules.md (installed)");
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+pub fn run_antigravity_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
     if global {
         let gemini_config_dir = resolve_gemini_dir()?.join("config");
-        run_antigravity_mode_at(&gemini_config_dir, global, ctx)
+        run_antigravity_cli_mode_at(&gemini_config_dir, global, ctx)
     } else {
-        run_antigravity_mode_at(&std::env::current_dir()?, global, ctx)
+        run_antigravity_cli_mode_at(&std::env::current_dir()?, global, ctx)
     }
 }
 
-fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+fn run_antigravity_cli_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let (hooks_dir, hooks_json_path) = if global {
         (base_dir.to_path_buf(), base_dir.join(HOOKS_JSON))
@@ -1736,52 +1800,18 @@ fn run_antigravity_mode_at(base_dir: &Path, global: bool, ctx: InitContext) -> R
         println!("Patched hooks.json: {}", hooks_json_path.display());
     }
 
-    if !global {
-        let rules_dir = base_dir.join(ANTIGRAVITY_DIR).join("rules");
-        let rules_path = rules_dir.join("antigravity-rtk-rules.md");
-
-        let existing = fs::read_to_string(&rules_path).unwrap_or_default();
-        if existing.contains("RTK") || existing.contains("rtk") {
-            if !dry_run {
-                println!("\nRTK already configured for Antigravity in this project.\n");
-                println!("  Rules: .agents/rules/antigravity-rtk-rules.md (already present)");
-            }
+    if !dry_run {
+        if global {
+            println!("\nRTK configured for Google Antigravity CLI (global).\n");
         } else {
-            let new_content = if existing.trim().is_empty() {
-                ANTIGRAVITY_RULES.to_string()
-            } else {
-                format!("{}\n\n{}", existing.trim(), ANTIGRAVITY_RULES)
-            };
-            if dry_run {
-                println!(
-                    "[dry-run] would write {}: (and create parent dir if missing)",
-                    rules_path.display()
-                );
-                if verbose > 0 {
-                    println!("[dry-run] content:\n{}", new_content);
-                }
-            } else {
-                fs::create_dir_all(&rules_dir)
-                    .context("Failed to create .agents/rules directory")?;
-                fs::write(&rules_path, &new_content)
-                    .context("Failed to write .agents/rules/antigravity-rtk-rules.md")?;
-
-                if verbose > 0 {
-                    eprintln!("Wrote .agents/rules/antigravity-rtk-rules.md");
-                }
-
-                println!("\nRTK configured for Google Antigravity.\n");
-                println!("  Rules: .agents/rules/antigravity-rtk-rules.md (installed)");
-            }
+            println!("\nRTK configured for Google Antigravity CLI (local).\n");
         }
-    } else if !dry_run {
-        println!("\nRTK configured for Google Antigravity (global).\n");
     }
 
     if dry_run {
         print_dry_run_footer();
     } else {
-        println!("  Antigravity will now use rtk commands for token savings.");
+        println!("  Antigravity CLI (agy) will now use rtk commands for token savings.");
         println!("  Test with: git status\n");
     }
 
@@ -1909,7 +1939,7 @@ fn remove_antigravity_hook_from_json(root: &mut serde_json::Value) -> bool {
     pre_tool_use.len() < initial_len
 }
 
-fn uninstall_antigravity(global: bool, ctx: InitContext) -> Result<Vec<String>> {
+fn uninstall_antigravity_cli(global: bool, ctx: InitContext) -> Result<Vec<String>> {
     let InitContext { verbose, dry_run } = ctx;
     let mut removed = Vec::new();
 
@@ -1957,27 +1987,32 @@ fn uninstall_antigravity(global: bool, ctx: InitContext) -> Result<Vec<String>> 
         }
     }
 
-    if !global {
-        let rules_path = std::env::current_dir()?
-            .join(ANTIGRAVITY_DIR)
-            .join("rules")
-            .join("antigravity-rtk-rules.md");
-        if rules_path.exists() {
-            if dry_run {
-                println!(
-                    "[dry-run] would remove Antigravity rule file: {}",
+    Ok(removed)
+}
+
+fn uninstall_antigravity_ide(ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose: _, dry_run } = ctx;
+    let mut removed = Vec::new();
+
+    let rules_path = std::env::current_dir()?
+        .join(ANTIGRAVITY_DIR)
+        .join("rules")
+        .join("antigravity-rtk-rules.md");
+    if rules_path.exists() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Antigravity rule file: {}",
+                rules_path.display()
+            );
+        } else {
+            fs::remove_file(&rules_path).with_context(|| {
+                format!(
+                    "Failed to remove Antigravity rule file: {}",
                     rules_path.display()
-                );
-            } else {
-                fs::remove_file(&rules_path).with_context(|| {
-                    format!(
-                        "Failed to remove Antigravity rule file: {}",
-                        rules_path.display()
-                    )
-                })?;
-            }
-            removed.push(format!("Antigravity rules file: {}", rules_path.display()));
+                )
+            })?;
         }
+        removed.push(format!("Antigravity rules file: {}", rules_path.display()));
     }
 
     Ok(removed)
@@ -4304,9 +4339,9 @@ mod tests {
     }
 
     #[test]
-    fn test_antigravity_mode_creates_rules_file() {
+    fn test_antigravity_ide_mode_creates_rules_file() {
         let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        run_antigravity_ide_mode_at(temp.path(), InitContext::default()).unwrap();
 
         let rules_path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
         assert!(rules_path.exists(), "Rules file should be created");
@@ -4315,23 +4350,23 @@ mod tests {
     }
 
     #[test]
-    fn test_antigravity_mode_is_idempotent() {
+    fn test_antigravity_ide_mode_is_idempotent() {
         let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        run_antigravity_ide_mode_at(temp.path(), InitContext::default()).unwrap();
 
         let path = temp.path().join(".agents/rules/antigravity-rtk-rules.md");
         let first = fs::read_to_string(&path).unwrap();
 
         // Second run should not overwrite
-        run_antigravity_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        run_antigravity_ide_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
     }
 
     #[test]
-    fn test_antigravity_global_mode_creates_hooks_json() {
+    fn test_antigravity_cli_global_mode_creates_hooks_json() {
         let temp = TempDir::new().unwrap();
-        run_antigravity_mode_at(temp.path(), true, InitContext::default()).unwrap();
+        run_antigravity_cli_mode_at(temp.path(), true, InitContext::default()).unwrap();
 
         let hooks_path = temp.path().join("hooks.json");
         assert!(hooks_path.exists(), "hooks.json should be created globally");
@@ -5739,7 +5774,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(true, false, false, false, false, false, InitContext::default()).unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -5866,7 +5901,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(

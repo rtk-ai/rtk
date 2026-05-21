@@ -44,7 +44,6 @@ pub enum AgentTarget {
     /// Kilo Code
     Kilocode,
     /// Google Antigravity
-    #[clap(alias = "agy")]
     Antigravity,
     /// Hermes CLI
     Hermes,
@@ -375,6 +374,10 @@ enum Commands {
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
+
+        /// Target Google Antigravity CLI (agy)
+        #[arg(long)]
+        antigravity: bool,
 
         /// Preview changes without writing any files (combine with -v to show content)
         #[arg(long = "dry-run", conflicts_with = "show")]
@@ -1374,20 +1377,21 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     global: bool,
     gemini: bool,
     codex: bool,
+    antigravity_cli: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
-        let antigravity = agent == Some(AgentTarget::Antigravity);
-        uninstall_standard(global, gemini, codex, cursor, antigravity, ctx)
+        let antigravity_ide = agent == Some(AgentTarget::Antigravity);
+        uninstall_standard(global, gemini, codex, cursor, antigravity_cli, antigravity_ide, ctx)
     }
 }
 
@@ -1816,6 +1820,7 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            antigravity,
             dry_run,
         } => {
             let ctx = hooks::init::InitContext {
@@ -1830,6 +1835,7 @@ fn run_cli() -> Result<i32> {
                     global,
                     gemini,
                     codex,
+                    antigravity,
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall,
@@ -1845,13 +1851,20 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
                 hooks::init::run_copilot(ctx)?;
+            } else if antigravity {
+                hooks::init::run_antigravity_cli_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
-                hooks::init::run_antigravity_mode(global, ctx)?;
+                if global {
+                    anyhow::bail!(
+                        "Antigravity IDE (agent) is project-scoped. Use: rtk init --agent antigravity"
+                    );
+                }
+                hooks::init::run_antigravity_ide_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
             } else {
@@ -2663,14 +2676,9 @@ mod tests {
     }
 
     #[test]
-    fn test_try_parse_init_agent_antigravity_alias() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "agy"]).unwrap();
-        match cli.command {
-            Commands::Init { agent, .. } => {
-                assert_eq!(agent, Some(AgentTarget::Antigravity));
-            }
-            _ => panic!("Expected Init command"),
-        }
+    fn test_try_parse_init_agent_agy_alias_fails() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "agy"]);
+        assert!(cli.is_err());
     }
 
     #[test]
@@ -2713,6 +2721,7 @@ mod tests {
             true,
             false,
             false,
+            false, // antigravity_cli
             ctx,
             |ctx| {
                 hermes_called.set(true);
@@ -2720,7 +2729,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
@@ -2745,18 +2754,20 @@ mod tests {
             true,
             false,
             false,
+            false, // antigravity_cli
             ctx,
             |_ctx| {
                 hermes_called.set(true);
                 Ok(())
             },
-            |global, gemini, codex, cursor, antigravity, ctx| {
+            |global, gemini, codex, cursor, antigravity_cli, antigravity_ide, ctx| {
                 standard_called.set(true);
                 assert!(global);
                 assert!(!gemini);
                 assert!(!codex);
                 assert!(!cursor);
-                assert!(antigravity);
+                assert!(!antigravity_cli);
+                assert!(antigravity_ide);
                 assert_eq!(ctx.verbose, 2);
                 Ok(())
             },
@@ -2765,6 +2776,18 @@ mod tests {
         assert!(result.is_ok());
         assert!(!hermes_called.get());
         assert!(standard_called.get());
+    }
+
+    #[test]
+    fn test_try_parse_init_antigravity_flag() {
+        let cli = Cli::try_parse_from(["rtk", "init", "-g", "--antigravity"]).unwrap();
+        match cli.command {
+            Commands::Init { global, antigravity, .. } => {
+                assert!(global);
+                assert!(antigravity);
+            }
+            _ => panic!("Expected Init command"),
+        }
     }
 
     #[test]
