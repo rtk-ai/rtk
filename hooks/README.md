@@ -54,6 +54,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
+| Rovo Dev | AGENTS.md / memory file | Prompt-level guidance | N/A |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
 | Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 
@@ -157,6 +158,33 @@ if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
 }
 ```
+
+### Rovo Dev (AGENTS.md Memory File)
+
+Rovo Dev reads `AGENTS.md` at session start (project scope) and
+`~/.rovodev/AGENTS.md` (user/global scope). RTK inlines its instructions
+directly into `AGENTS.md` between `<!-- rtk-instructions -->` markers
+(Rovo Dev does not auto-expand `@file` references inside memory files).
+The block is idempotent — re-running `rtk init` updates it in place.
+
+**Install (project scope)**:
+```bash
+rtk init --agent rovodev
+```
+
+**Install (global scope — applies to all `acli rovodev` sessions)**:
+```bash
+rtk init -g --agent rovodev
+```
+
+**Uninstall**:
+```bash
+rtk init --agent rovodev --uninstall      # local
+rtk init -g --agent rovodev --uninstall   # global
+```
+
+No programmatic hook is used; prompt-level guidance is the most reliable
+and transparent integration available with Rovo Dev today.
 
 ### Hermes (Python Plugin)
 
