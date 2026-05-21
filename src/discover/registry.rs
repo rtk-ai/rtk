@@ -3059,6 +3059,57 @@ mod tests {
         );
     }
 
+    // --- Maven ---
+
+    #[test]
+    fn test_classify_mvn_test() {
+        assert!(matches!(
+            classify_command("mvn test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_verify() {
+        assert!(matches!(
+            classify_command("mvn verify"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_mvn_failsafe_integration_test() {
+        assert!(matches!(
+            classify_command("mvn failsafe:integration-test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_mvn_test() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn test", &[]),
+            Some("rtk mvn test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvn_verify() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn verify", &[]),
+            Some("rtk mvn verify".into())
+        );
+    }
+
     #[test]
     fn test_rewrite_gradlew_test_savings() {
         assert_eq!(

@@ -180,6 +180,8 @@ rtk go test                     # Go tests (NDJSON, -90%)
 rtk cargo test                  # Cargo tests (-90%)
 rtk rake test                   # Ruby minitest (-90%)
 rtk rspec                       # RSpec tests (JSON, -60%+)
+rtk mvn test                    # Maven Surefire (XML summary, -90%+)
+rtk mvn verify                  # Maven Failsafe (XML summary, -90%+)
 rtk err <cmd>                   # Filter errors only from any command
 rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
 ```
