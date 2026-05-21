@@ -29,6 +29,25 @@ function normalizeType(type) {
   return type;
 }
 
+function isShortcutLike(shortcut) {
+  return (
+    shortcut !== null &&
+    typeof shortcut === "object" &&
+    typeof shortcut.id === "string" &&
+    typeof shortcut.name === "string" &&
+    typeof shortcut.type === "string" &&
+    typeof shortcut.url === "string" &&
+    VALID_TYPES.has(shortcut.type)
+  );
+}
+
+function normalizeShortcutList(shortcuts) {
+  if (!Array.isArray(shortcuts)) {
+    return [];
+  }
+  return shortcuts.filter(isShortcutLike);
+}
+
 export function createShortcut(input, options = {}) {
   const idFactory = options.idFactory ?? defaultIdFactory;
   const now = options.now ?? defaultNow;
@@ -56,28 +75,30 @@ export function updateShortcut(existing, input) {
 }
 
 export function deleteShortcut(shortcuts, id) {
-  return shortcuts.filter((shortcut) => shortcut.id !== id);
+  return normalizeShortcutList(shortcuts).filter((shortcut) => shortcut.id !== id);
 }
 
 export function findShortcut(shortcuts, id) {
-  return shortcuts.find((shortcut) => shortcut.id === id) ?? null;
+  return normalizeShortcutList(shortcuts).find((shortcut) => shortcut.id === id) ?? null;
 }
 
 export function filterShortcuts(shortcuts, query) {
+  const normalizedShortcuts = normalizeShortcutList(shortcuts);
   const normalizedQuery = String(query ?? "").trim().toLowerCase();
   if (!normalizedQuery) {
-    return shortcuts;
+    return normalizedShortcuts;
   }
 
-  return shortcuts.filter((shortcut) => {
+  return normalizedShortcuts.filter((shortcut) => {
     const haystack = `${shortcut.name} ${shortcut.url}`.toLowerCase();
     return haystack.includes(normalizedQuery);
   });
 }
 
 export function splitShortcutsByType(shortcuts) {
+  const normalizedShortcuts = normalizeShortcutList(shortcuts);
   return {
-    text: shortcuts.filter((shortcut) => shortcut.type === SHORTCUT_TYPES.TEXT),
-    voice: shortcuts.filter((shortcut) => shortcut.type === SHORTCUT_TYPES.VOICE)
+    text: normalizedShortcuts.filter((shortcut) => shortcut.type === SHORTCUT_TYPES.TEXT),
+    voice: normalizedShortcuts.filter((shortcut) => shortcut.type === SHORTCUT_TYPES.VOICE)
   };
 }

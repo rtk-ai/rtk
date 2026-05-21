@@ -4,6 +4,7 @@ import {
   createShortcut,
   deleteShortcut,
   filterShortcuts,
+  findShortcut,
   splitShortcutsByType,
   updateShortcut
 } from "../src/shared/shortcuts.js";
@@ -68,6 +69,16 @@ test("deletes shortcut by id", () => {
   assert.deepEqual(deleteShortcut(shortcuts, "a").map((item) => item.id), ["b"]);
 });
 
+test("finds shortcuts by id and returns null when missing", () => {
+  const shortcuts = [
+    { id: "a", name: "Dev Chat", type: "text", url: textUrl },
+    { id: "b", name: "Team Call", type: "voice", url: voiceUrl }
+  ];
+
+  assert.equal(findShortcut(shortcuts, "b")?.name, "Team Call");
+  assert.equal(findShortcut(shortcuts, "missing"), null);
+});
+
 test("filters shortcuts by name and url", () => {
   const shortcuts = [
     { id: "a", name: "Dev Chat", type: "text", url: textUrl },
@@ -86,4 +97,25 @@ test("splits shortcuts by type", () => {
 
   assert.deepEqual(result.text.map((item) => item.id), ["a"]);
   assert.deepEqual(result.voice.map((item) => item.id), ["b"]);
+});
+
+test("list helpers tolerate malformed shortcut lists", () => {
+  assert.deepEqual(deleteShortcut(null, "a"), []);
+  assert.equal(findShortcut(null, "a"), null);
+  assert.deepEqual(filterShortcuts(null, "dev"), []);
+  assert.deepEqual(splitShortcutsByType(null), { text: [], voice: [] });
+});
+
+test("list helpers skip malformed shortcut items", () => {
+  const shortcuts = [
+    null,
+    { id: "a", name: "Dev Chat", type: "text", url: textUrl },
+    { id: "b", name: "Team Call", type: "voice", url: voiceUrl },
+    { id: "broken", name: null, type: "text", url: null }
+  ];
+
+  assert.deepEqual(deleteShortcut(shortcuts, "a").map((item) => item.id), ["b"]);
+  assert.equal(findShortcut(shortcuts, "b")?.name, "Team Call");
+  assert.deepEqual(filterShortcuts(shortcuts, "TEAM").map((item) => item.id), ["b"]);
+  assert.deepEqual(splitShortcutsByType(shortcuts).text.map((item) => item.id), ["a"]);
 });
