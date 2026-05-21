@@ -26,6 +26,33 @@ rtk git status
 
 最低可用能力是规则/提示注入，最佳能力是透明命令改写。
 
+### 当前 Jcode 源码对照结论
+
+基于当前 Jcode 源码分析，Jcode **已经具备 Level 1 提示/规则级集成条件**，但**尚不具备 Level 2 透明命令改写 hook 条件**。
+
+当前可直接利用的能力：
+
+- Jcode 有稳定的全局配置目录和配置文件：`~/.jcode/config.toml`，也可通过 `$JCODE_HOME/config.toml` 覆盖。
+- Jcode 会读取项目级 `AGENTS.md` 和全局 `~/.AGENTS.md`，可用于写入 RTK 使用提示。
+- Jcode 会读取项目级 `.jcode/prompt-overlay.md` 和全局 `~/.jcode/prompt-overlay.md`，同样可用于写入 RTK 使用提示。
+- Jcode 的 shell 工具内部名是 `bash`，兼容别名 `shell_exec`，命令字段是 `command`。
+- Windows 下 `bash` 工具实际通过 `cmd.exe /C <command>` 执行，非 Windows 下通过 `bash -c <command>` 执行。
+
+当前缺失的关键能力：
+
+- 工具执行前没有通用 `BeforeToolCall` / `PreToolUse` hook。
+- `~/.jcode/config.toml` 的配置 schema 里目前没有 hooks 字段。
+- 工具执行入口会直接调用 tool，当前没有外部程序修改 `tool_input` 的机制。
+- 没有 `updated_input.command` 替换原命令的流程。
+- 没有 hook timeout、fail open、stdout JSON 协议、stderr 调试日志等 hook 运行时能力。
+
+因此，RTK 侧当前可以先实现：
+
+1. `rtk init --agent jcode` 写入 `AGENTS.md` 或 `.jcode/prompt-overlay.md` 的提示级集成。
+2. 等 Jcode 增加 before-tool hook 后，再实现 `rtk hook jcode` 和透明改写集成。
+
+如果要在 Jcode 侧实现透明 hook，推荐优先改造 `src/tool/mod.rs` 的 `Registry::execute`，在调用具体 tool 前运行 hook，并对 `bash` / `shell_exec` 的 `command` 字段应用 `updated_input.command`。
+
 推荐优先级：
 
 1. **必须能力**：命令执行前 hook。
@@ -64,6 +91,41 @@ rtk git status
 #### 适合阶段
 
 适合作为第一阶段快速支持。
+
+### 当前 Jcode 可用的规则文件位置
+
+当前 Jcode 已经支持以下 prompt/rules 注入位置，RTK 可以优先使用这些位置实现 `rtk init --agent jcode`：
+
+| 位置 | 级别 | Jcode 源码依据 | 建议用途 |
+| --- | --- | --- | --- |
+| `AGENTS.md` | 项目级 | `src/prompt.rs::load_agents_md_files_from_dir` | 推荐作为项目级 RTK 提示安装位置 |
+| `~/.AGENTS.md` | 用户级 | `src/prompt.rs::load_agents_md_files_from_dir` | 可作为全局提示安装位置 |
+| `.jcode/prompt-overlay.md` | 项目级 | `src/prompt.rs::load_prompt_overlay_files_from_dir` | 推荐作为 Jcode 专属项目级提示安装位置 |
+| `~/.jcode/prompt-overlay.md` | 用户级 | `src/prompt.rs::load_prompt_overlay_files_from_dir` | 推荐作为 Jcode 专属全局提示安装位置 |
+| `~/.jcode/config.toml` | 用户级配置 | `src/config.rs`、`src/config/config_file.rs` | 当前可检测存在，但尚不能注册 hooks |
+
+建议 RTK 第一阶段优先写入 `.jcode/prompt-overlay.md`，原因是它是 Jcode 专属位置，不容易影响其他 agent；如果用户希望多 agent 共享规则，再写入 `AGENTS.md`。
+
+推荐写入内容示例：
+
+```markdown
+# RTK Integration
+
+执行 shell/bash 命令时，优先使用 RTK 包装命令，例如：
+
+- 使用 `rtk git status`，不要直接使用 `git status`。
+- 使用 `rtk cargo test`，不要直接使用 `cargo test`。
+- 使用 `rtk npm install`，不要直接使用 `npm install`。
+
+如果命令已经以 `rtk` 开头，不要重复添加 `rtk`。
+```
+
+RTK 的 `--show` 或检测逻辑可以检查：
+
+- `.jcode/prompt-overlay.md` 是否包含 RTK 标记段。
+- `~/.jcode/prompt-overlay.md` 是否包含 RTK 标记段。
+- `rtk` 是否在 `PATH` 中。
+- `rtk rewrite "git status"` 是否返回可用结果。
 
 ## Level 2：透明命令改写 hook
 
@@ -451,6 +513,51 @@ uninstall_jcode(ctx)
 ## 推荐 Jcode hook 协议
 
 为了让 RTK 接入最简单，建议 Jcode 原生支持如下协议。
+
+### Jcode 当前源码落点参考
+
+当前与 RTK 透明改写最相关的 Jcode 源码位置如下：
+
+| 目的 | 文件/符号 | 当前行为 | 集成建议 |
+| --- | --- | --- | --- |
+| 工具注册 | `src/tool/mod.rs::Registry::base_tools` | 注册内部工具名 `bash` | hook matcher 应匹配 `bash` |
+| 工具别名 | `src/tool/mod.rs::Registry::resolve_tool_name` | `shell_exec` 会映射到 `bash` | RTK payload 可保留原始名和 resolved 名 |
+| 工具执行入口 | `src/tool/mod.rs::Registry::execute` | 直接调用 `tool.execute(input.clone(), ctx.clone())` | 推荐在调用前插入 before hook |
+| shell 输入结构 | `src/tool/bash.rs::BashInput` | `command: String` 是实际命令字段 | RTK 只需要改写 `command` |
+| shell 执行方式 | `src/tool/bash.rs::build_shell_command` | Windows 用 `cmd.exe /C`，非 Windows 用 `bash -c` | hook 不应假设 Unix shell |
+| 上下文信息 | `crates/jcode-tool-core/src/lib.rs::ToolContext` | 包含 `session_id`、`tool_call_id`、`working_dir` | 可用于 hook payload 的 session/cwd 字段 |
+
+建议在 `Registry::execute` 中采用如下顺序：
+
+1. 解析工具名，得到 `requested_tool_name` 和 `resolved_tool_name`。
+2. 对 `resolved_tool_name == "bash"` 的调用运行 `BeforeToolCall` hook。
+3. 将原始 `input` 和 `ToolContext` 组装为 JSON payload。
+4. hook 成功返回 `updated_input` 时，合并/替换 `input`。
+5. 对最终 `input` 调用真实 `tool.execute`。
+6. hook 失败、超时或输出非法时记录 warning，并继续执行原始 `input`。
+
+建议 Jcode hook payload 同时包含原始工具名和解析后的工具名：
+
+```json
+{
+  "schema_version": 1,
+  "hook_event_name": "BeforeToolCall",
+  "tool_name": "shell_exec",
+  "resolved_tool_name": "bash",
+  "tool_input": {
+    "command": "git status"
+  },
+  "session_id": "abc123",
+  "tool_call_id": "toolu_456",
+  "cwd": "/repo"
+}
+```
+
+RTK 侧适配时应优先读取：
+
+1. `tool_input.command`
+2. 如需判断工具类型，接受 `tool_name == "bash"`、`tool_name == "shell_exec"` 或 `resolved_tool_name == "bash"`
+3. 如需项目级规则或日志，使用 `cwd`
 
 ### 配置示例
 

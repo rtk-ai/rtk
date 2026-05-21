@@ -25,6 +25,7 @@ const OPENCODE_PLUGIN: &str = include_str!("../../hooks/opencode/rtk.ts");
 // Embedded slim RTK awareness instructions
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
+const JCODE_RULES: &str = include_str!("../../hooks/jcode/rules.md");
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -62,6 +63,8 @@ const CLAUDE_MD: &str = "CLAUDE.md";
 const AGENTS_MD: &str = "AGENTS.md";
 const RTK_MD_REF: &str = "@RTK.md";
 const GEMINI_MD: &str = "GEMINI.md";
+const JCODE_DIR: &str = ".jcode";
+const JCODE_PROMPT_OVERLAY: &str = "prompt-overlay.md";
 
 const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
 const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
@@ -1785,6 +1788,195 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+// ─── Jcode support ───────────────────────────────────────────────
+
+pub fn run_jcode_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let path = if global {
+        resolve_jcode_home()?.join(JCODE_PROMPT_OVERLAY)
+    } else {
+        std::env::current_dir()?
+            .join(JCODE_DIR)
+            .join(JCODE_PROMPT_OVERLAY)
+    };
+
+    run_jcode_mode_at(&path, global, ctx)
+}
+
+fn run_jcode_mode_at(prompt_overlay_path: &Path, global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { dry_run, .. } = ctx;
+
+    if !dry_run {
+        if let Some(parent) = prompt_overlay_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create Jcode prompt overlay directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    let existing = fs::read_to_string(prompt_overlay_path).unwrap_or_default();
+    let (new_content, action) = upsert_rtk_block(&existing, JCODE_RULES);
+
+    match action {
+        RtkBlockUpsert::Added | RtkBlockUpsert::Updated => {
+            if dry_run {
+                println!(
+                    "[dry-run] would write Jcode prompt overlay: {}",
+                    prompt_overlay_path.display()
+                );
+                println!("[dry-run] content:\n{}", new_content);
+            } else {
+                atomic_write(prompt_overlay_path, &new_content).with_context(|| {
+                    format!(
+                        "Failed to write Jcode prompt overlay: {}",
+                        prompt_overlay_path.display()
+                    )
+                })?;
+            }
+        }
+        RtkBlockUpsert::Unchanged => {}
+        RtkBlockUpsert::Malformed => {
+            eprintln!(
+                "[warn] Found '{}' without closing marker in {}",
+                RTK_BLOCK_START,
+                prompt_overlay_path.display()
+            );
+            eprintln!(
+                "    Remove the incomplete RTK block manually, then re-run rtk init --agent jcode."
+            );
+            return Ok(());
+        }
+    }
+
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("\nRTK configured for Jcode.\n");
+        println!("  Prompt overlay: {}", prompt_overlay_path.display());
+        if global {
+            println!("  Scope: global Jcode instructions");
+        } else {
+            println!("  Scope: project Jcode instructions");
+        }
+        println!("  Jcode will prefer rtk commands when using bash/shell_exec.");
+        println!("  Restart Jcode or start a new session. Test with: git status\n");
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_jcode(global: bool, ctx: InitContext) -> Result<()> {
+    let path = if global {
+        resolve_jcode_home()?.join(JCODE_PROMPT_OVERLAY)
+    } else {
+        std::env::current_dir()?
+            .join(JCODE_DIR)
+            .join(JCODE_PROMPT_OVERLAY)
+    };
+
+    let removed = uninstall_jcode_at(&path, ctx)?;
+    if removed.is_empty() {
+        println!("RTK was not installed for Jcode (nothing to remove)");
+    } else {
+        let header = if ctx.dry_run {
+            "[dry-run] would uninstall RTK for Jcode:"
+        } else {
+            "RTK uninstalled for Jcode:"
+        };
+        println!("{}", header);
+        for item in removed {
+            println!("  - {}", item);
+        }
+        if !ctx.dry_run {
+            println!("\nRestart Jcode or start a new session to apply changes.");
+        }
+    }
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+fn uninstall_jcode_at(prompt_overlay_path: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut removed = Vec::new();
+
+    if !prompt_overlay_path.exists() {
+        return Ok(removed);
+    }
+
+    let existing = fs::read_to_string(prompt_overlay_path).with_context(|| {
+        format!(
+            "Failed to read Jcode prompt overlay: {}",
+            prompt_overlay_path.display()
+        )
+    })?;
+
+    if !existing.contains(RTK_BLOCK_START) {
+        return Ok(removed);
+    }
+
+    let (cleaned, did_remove) = remove_rtk_block(&existing);
+    if !did_remove {
+        eprintln!(
+            "[warn] Found '{}' without closing marker in {}",
+            RTK_BLOCK_START,
+            prompt_overlay_path.display()
+        );
+        eprintln!("    Remove the incomplete RTK block manually.");
+        return Ok(removed);
+    }
+
+    if cleaned.trim().is_empty() {
+        if dry_run {
+            println!(
+                "[dry-run] would remove Jcode prompt overlay: {}",
+                prompt_overlay_path.display()
+            );
+        } else {
+            fs::remove_file(prompt_overlay_path).with_context(|| {
+                format!(
+                    "Failed to remove Jcode prompt overlay: {}",
+                    prompt_overlay_path.display()
+                )
+            })?;
+            if verbose > 0 {
+                eprintln!(
+                    "Removed Jcode prompt overlay: {}",
+                    prompt_overlay_path.display()
+                );
+            }
+        }
+        removed.push(format!(
+            "Jcode prompt overlay: {}",
+            prompt_overlay_path.display()
+        ));
+    } else if dry_run {
+        println!(
+            "[dry-run] would update Jcode prompt overlay: {}",
+            prompt_overlay_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", cleaned);
+        }
+        removed.push("Jcode prompt overlay: removed RTK block".to_string());
+    } else {
+        atomic_write(prompt_overlay_path, &cleaned).with_context(|| {
+            format!(
+                "Failed to update Jcode prompt overlay: {}",
+                prompt_overlay_path.display()
+            )
+        })?;
+        removed.push("Jcode prompt overlay: removed RTK block".to_string());
+    }
+
+    Ok(removed)
+}
+
 // ─── Hermes support ────────────────────────────────────────────
 
 const HERMES_PLUGIN_INIT: &str = include_str!("../../hooks/hermes/rtk-rewrite/__init__.py");
@@ -2701,6 +2893,23 @@ fn resolve_hermes_home() -> Result<PathBuf> {
     resolve_hermes_home_from_env(dirs::home_dir(), std::env::var_os("HERMES_HOME"))
 }
 
+fn resolve_jcode_home() -> Result<PathBuf> {
+    resolve_jcode_home_from_env(dirs::home_dir(), std::env::var_os("JCODE_HOME"))
+}
+
+fn resolve_jcode_home_from_env(
+    home_dir: Option<PathBuf>,
+    jcode_home: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(path) = jcode_home.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    home_dir
+        .map(|home| home.join(JCODE_DIR))
+        .context("Cannot determine Jcode home directory. Set $JCODE_HOME or $HOME.")
+}
+
 fn resolve_hermes_home_from_env(
     home_dir: Option<PathBuf>,
     hermes_home: Option<OsString>,
@@ -3088,12 +3297,69 @@ fn remove_cursor_hook_from_json(root: &mut serde_json::Value) -> bool {
 }
 
 /// Show current rtk configuration
-pub fn show_config(codex: bool) -> Result<()> {
+pub fn show_config(codex: bool, jcode: bool) -> Result<()> {
     if codex {
         return show_codex_config();
     }
 
+    if jcode {
+        return show_jcode_config();
+    }
+
     show_claude_config()
+}
+
+fn show_jcode_config() -> Result<()> {
+    let global_overlay = resolve_jcode_home()?.join(JCODE_PROMPT_OVERLAY);
+    let local_overlay = PathBuf::from(JCODE_DIR).join(JCODE_PROMPT_OVERLAY);
+
+    println!("rtk Configuration (Jcode):\n");
+
+    if global_overlay.exists() {
+        let content = fs::read_to_string(&global_overlay)?;
+        if content.contains(RTK_BLOCK_START) && content.contains(RTK_BLOCK_END) {
+            println!(
+                "[ok] Global prompt overlay: RTK instructions ({})",
+                global_overlay.display()
+            );
+        } else {
+            println!(
+                "[--] Global prompt overlay: exists but rtk not configured ({})",
+                global_overlay.display()
+            );
+        }
+    } else {
+        println!(
+            "[--] Global prompt overlay: not found ({})",
+            global_overlay.display()
+        );
+    }
+
+    if local_overlay.exists() {
+        let content = fs::read_to_string(&local_overlay)?;
+        if content.contains(RTK_BLOCK_START) && content.contains(RTK_BLOCK_END) {
+            println!(
+                "[ok] Local prompt overlay: RTK instructions ({})",
+                local_overlay.display()
+            );
+        } else {
+            println!(
+                "[--] Local prompt overlay: exists but rtk not configured ({})",
+                local_overlay.display()
+            );
+        }
+    } else {
+        println!(
+            "[--] Local prompt overlay: not found ({})",
+            local_overlay.display()
+        );
+    }
+
+    println!("\nUsage:");
+    println!("  rtk init --agent jcode       # Configure local .jcode/prompt-overlay.md");
+    println!("  rtk init -g --agent jcode    # Configure global Jcode prompt overlay");
+
+    Ok(())
 }
 
 fn show_claude_config() -> Result<()> {
@@ -3323,6 +3589,8 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
+    println!("  rtk init --agent jcode      # Configure local .jcode/prompt-overlay.md");
+    println!("  rtk init -g --agent jcode   # Configure global Jcode prompt overlay");
 
     Ok(())
 }
@@ -4034,6 +4302,93 @@ mod tests {
         run_antigravity_mode_at(temp.path(), InitContext::default()).unwrap();
         let second = fs::read_to_string(&path).unwrap();
         assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_jcode_mode_creates_prompt_overlay() {
+        let temp = TempDir::new().unwrap();
+        let overlay_path = temp.path().join(".jcode/prompt-overlay.md");
+
+        run_jcode_mode_at(&overlay_path, false, InitContext::default()).unwrap();
+
+        assert!(
+            overlay_path.exists(),
+            "Jcode prompt overlay should be created"
+        );
+        let content = fs::read_to_string(&overlay_path).unwrap();
+        assert!(content.contains("RTK command usage for Jcode"));
+        assert!(content.contains("bash"));
+        assert!(content.contains("shell_exec"));
+    }
+
+    #[test]
+    fn test_jcode_mode_preserves_existing_overlay_and_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let overlay_path = temp.path().join("prompt-overlay.md");
+        fs::write(&overlay_path, "# Existing Jcode instructions\n").unwrap();
+
+        run_jcode_mode_at(&overlay_path, true, InitContext::default()).unwrap();
+        let first = fs::read_to_string(&overlay_path).unwrap();
+        run_jcode_mode_at(&overlay_path, true, InitContext::default()).unwrap();
+        let second = fs::read_to_string(&overlay_path).unwrap();
+
+        assert_eq!(first, second, "Jcode prompt overlay should be idempotent");
+        assert!(first.contains("# Existing Jcode instructions"));
+        assert_eq!(first.matches(RTK_BLOCK_START).count(), 1);
+        assert_eq!(first.matches(RTK_BLOCK_END).count(), 1);
+    }
+
+    #[test]
+    fn test_uninstall_jcode_removes_only_rtk_block() {
+        let temp = TempDir::new().unwrap();
+        let overlay_path = temp.path().join("prompt-overlay.md");
+        fs::write(&overlay_path, "# Existing Jcode instructions\n").unwrap();
+        run_jcode_mode_at(&overlay_path, true, InitContext::default()).unwrap();
+
+        let removed = uninstall_jcode_at(&overlay_path, InitContext::default()).unwrap();
+
+        assert_eq!(removed.len(), 1);
+        let content = fs::read_to_string(&overlay_path).unwrap();
+        assert!(content.contains("# Existing Jcode instructions"));
+        assert!(!content.contains(RTK_BLOCK_START));
+        assert!(!content.contains("RTK command usage for Jcode"));
+    }
+
+    #[test]
+    fn test_uninstall_jcode_removes_empty_overlay_file() {
+        let temp = TempDir::new().unwrap();
+        let overlay_path = temp.path().join("prompt-overlay.md");
+        run_jcode_mode_at(&overlay_path, true, InitContext::default()).unwrap();
+
+        let removed = uninstall_jcode_at(&overlay_path, InitContext::default()).unwrap();
+
+        assert_eq!(removed.len(), 1);
+        assert!(!overlay_path.exists());
+    }
+
+    #[test]
+    fn test_resolve_jcode_home_prefers_jcode_home() {
+        let temp = TempDir::new().unwrap();
+        let custom = temp.path().join("custom-jcode-home");
+        let fallback_home = temp.path().join("home");
+
+        let resolved = resolve_jcode_home_from_env(
+            Some(fallback_home.clone()),
+            Some(custom.clone().into_os_string()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, custom);
+    }
+
+    #[test]
+    fn test_resolve_jcode_home_falls_back_to_home_dot_jcode() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+
+        let resolved = resolve_jcode_home_from_env(Some(home.clone()), None).unwrap();
+
+        assert_eq!(resolved, home.join(JCODE_DIR));
     }
 
     #[test]
