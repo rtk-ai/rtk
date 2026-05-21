@@ -7,7 +7,7 @@ mod learn;
 mod parser;
 
 // Re-export command modules for routing
-use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, wget_cmd};
+use cmds::cloud::{aws_cmd, container, curl_cmd, psql_cmd, ssh_cmd, wget_cmd};
 use cmds::dotnet::{binlog, dotnet_cmd, dotnet_format_report, dotnet_trx};
 use cmds::git::{diff_cmd, gh_cmd, git, glab_cmd, gt_cmd};
 use cmds::go::{go_cmd, golangci_cmd};
@@ -553,6 +553,13 @@ enum Commands {
     /// Curl with auto-JSON detection and schema output
     Curl {
         /// Curl arguments (URL + options)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// SSH with JSON/log/plain-text output filtering; passthrough for interactive sessions
+    Ssh {
+        /// SSH arguments ([options] [user@]host [command])
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2030,6 +2037,7 @@ fn run_cli() -> Result<i32> {
         Commands::Npm { args } => npm_cmd::run(&args, cli.verbose, cli.skip_env)?,
 
         Commands::Curl { args } => curl_cmd::run(&args, cli.verbose)?,
+        Commands::Ssh { args } => ssh_cmd::run(&args, cli.verbose)?,
 
         Commands::Discover {
             project,
@@ -2496,6 +2504,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Npm { .. }
             | Commands::Npx { .. }
             | Commands::Curl { .. }
+            | Commands::Ssh { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
             | Commands::Rake { .. }

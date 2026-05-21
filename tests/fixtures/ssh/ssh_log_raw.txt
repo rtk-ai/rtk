@@ -1,0 +1,51 @@
+2026-05-18T01:00:00Z INFO  myapp::proxy starting request pipeline
+2026-05-18T01:00:00Z INFO  myapp::config loaded 42 zones
+2026-05-18T01:00:01Z INFO  myapp::proxy request_filter zone=example.com
+2026-05-18T01:00:01Z INFO  myapp::security ip=1.2.3.4 action=allow
+2026-05-18T01:00:01Z INFO  myapp::cache cache_hit=true ttl=300
+2026-05-18T01:00:02Z INFO  myapp::proxy request_filter zone=demo.net
+2026-05-18T01:00:02Z INFO  myapp::security ip=5.6.7.8 action=allow
+2026-05-18T01:00:02Z INFO  myapp::cache cache_hit=false
+2026-05-18T01:00:03Z WARN  myapp::ratelimit ip=9.10.11.12 req_count=480 threshold=500
+2026-05-18T01:00:03Z INFO  myapp::proxy upstream_connect backend=192.0.2.1:80
+2026-05-18T01:00:04Z INFO  myapp::proxy request_filter zone=test.org
+2026-05-18T01:00:04Z INFO  myapp::security ip=13.14.15.16 action=allow
+2026-05-18T01:00:04Z INFO  myapp::cache cache_hit=true ttl=60
+2026-05-18T01:00:05Z INFO  myapp::proxy request_filter zone=example.com
+2026-05-18T01:00:05Z INFO  myapp::security waf rule_eval=ok phase=1
+2026-05-18T01:00:06Z ERROR myapp::lb health backend=192.0.2.2:80 status=connection_refused
+2026-05-18T01:00:06Z INFO  myapp::lb balancer failover to backend=192.0.2.3:80
+2026-05-18T01:00:07Z INFO  myapp::proxy request_filter zone=demo.net
+2026-05-18T01:00:07Z INFO  myapp::security geo country=US action=allow
+2026-05-18T01:00:08Z INFO  myapp::cache cache_hit=true ttl=300
+2026-05-18T01:00:09Z INFO  myapp::proxy request_filter zone=test.org
+2026-05-18T01:00:09Z INFO  myapp::security ip=17.18.19.20 action=allow
+2026-05-18T01:00:10Z WARN  myapp::lb health backend=192.0.2.2:80 retry=1 latency_ms=5000
+2026-05-18T01:00:10Z INFO  myapp::proxy upstream_connect backend=192.0.2.3:80
+2026-05-18T01:00:11Z INFO  myapp::proxy request_filter zone=example.com
+2026-05-18T01:00:11Z INFO  myapp::security ratelimit ip=21.22.23.24 req_count=10
+2026-05-18T01:00:12Z INFO  myapp::cache cache_hit=false
+2026-05-18T01:00:12Z INFO  myapp::proxy upstream_connect backend=192.0.2.1:80
+2026-05-18T01:00:13Z INFO  myapp::proxy request_filter zone=demo.net
+2026-05-18T01:00:13Z INFO  myapp::security waf rule_eval=ok phase=2
+2026-05-18T01:00:14Z ERROR myapp::metrics db send_batch failed: connection timeout after 5000ms
+2026-05-18T01:00:14Z INFO  myapp::metrics db retry scheduled in 10s
+2026-05-18T01:00:15Z INFO  myapp::proxy request_filter zone=test.org
+2026-05-18T01:00:15Z INFO  myapp::security ip=25.26.27.28 action=allow
+2026-05-18T01:00:16Z INFO  myapp::cache cache_hit=true ttl=120
+2026-05-18T01:00:17Z INFO  myapp::proxy request_filter zone=example.com
+2026-05-18T01:00:17Z INFO  myapp::security geo country=DE action=allow
+2026-05-18T01:00:18Z WARN  myapp::waf rule_id=942100 match=true action=log zone=demo.net
+2026-05-18T01:00:18Z INFO  myapp::proxy upstream_response status=200
+2026-05-18T01:00:19Z INFO  myapp::proxy request_filter zone=test.org
+2026-05-18T01:00:19Z INFO  myapp::security ip=29.30.31.32 action=allow
+2026-05-18T01:00:20Z INFO  myapp::cache cache_hit=true ttl=300
+2026-05-18T01:00:21Z INFO  myapp::proxy request_filter zone=example.com
+2026-05-18T01:00:21Z INFO  myapp::security ratelimit ip=33.34.35.36 req_count=5
+2026-05-18T01:00:22Z INFO  myapp::proxy upstream_connect backend=192.0.2.1:80
+2026-05-18T01:00:23Z INFO  myapp::proxy request_filter zone=demo.net
+2026-05-18T01:00:24Z INFO  myapp::security waf rule_eval=ok phase=1
+2026-05-18T01:00:25Z INFO  myapp::proxy request_filter zone=test.org
+2026-05-18T01:00:25Z INFO  myapp::security ip=37.38.39.40 action=allow
+2026-05-18T01:00:26Z INFO  myapp::cache cache_hit=false
+2026-05-18T01:00:27Z INFO  myapp::proxy upstream_connect backend=192.0.2.3:80
