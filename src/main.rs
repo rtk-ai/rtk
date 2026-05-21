@@ -772,6 +772,8 @@ enum HookCommands {
     Cursor,
     /// Process Gemini CLI BeforeTool hook (reads JSON from stdin)
     Gemini,
+    /// Process Google Antigravity hook (reads JSON from stdin)
+    Antigravity,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
     /// Check how a command would be rewritten by the hook engine (dry-run)
@@ -1376,13 +1378,14 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
-        uninstall_standard(global, gemini, codex, cursor, ctx)
+        let antigravity = agent == Some(AgentTarget::Antigravity);
+        uninstall_standard(global, gemini, codex, cursor, antigravity, ctx)
     }
 }
 
@@ -1846,12 +1849,7 @@ fn run_cli() -> Result<i32> {
                 }
                 hooks::init::run_kilocode_mode(ctx)?;
             } else if agent == Some(AgentTarget::Antigravity) {
-                if global {
-                    anyhow::bail!(
-                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
-                    );
-                }
-                hooks::init::run_antigravity_mode(ctx)?;
+                hooks::init::run_antigravity_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
             } else {
@@ -2181,6 +2179,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Gemini => {
                 hooks::hook_cmd::run_gemini()?;
+                0
+            }
+            HookCommands::Antigravity => {
+                hooks::hook_cmd::run_antigravity()?;
                 0
             }
             HookCommands::Copilot => {
@@ -2705,7 +2707,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _| {
+            |_, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
@@ -2714,6 +2716,42 @@ mod tests {
         assert!(result.is_ok());
         assert!(hermes_called.get());
         assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_antigravity_to_standard_cleanup() {
+        let hermes_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 2,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Antigravity),
+            true,
+            false,
+            false,
+            ctx,
+            |_ctx| {
+                hermes_called.set(true);
+                Ok(())
+            },
+            |global, gemini, codex, cursor, antigravity, ctx| {
+                standard_called.set(true);
+                assert!(global);
+                assert!(!gemini);
+                assert!(!codex);
+                assert!(!cursor);
+                assert!(antigravity);
+                assert_eq!(ctx.verbose, 2);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!hermes_called.get());
+        assert!(standard_called.get());
     }
 
     #[test]
@@ -2832,6 +2870,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_antigravity_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "antigravity"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Antigravity
             }
         ));
     }

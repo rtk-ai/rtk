@@ -156,7 +156,7 @@ mod tests {
     use super::*;
     use crate::hooks::constants::{
         CODEX_DIR, CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, GEMINI_HOOK_FILE, HERMES_DIR,
-        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME,
+        HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
         OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
     };
 
@@ -177,6 +177,7 @@ mod tests {
                 .join(HERMES_PLUGINS_SUBDIR)
                 .join(HERMES_PLUGIN_NAME)
                 .join(HERMES_PLUGIN_MANIFEST_FILE),
+            home.join(GEMINI_DIR).join("config").join(HOOKS_JSON),
         ];
         paths.iter().any(|p| p.exists())
     }
@@ -281,6 +282,15 @@ mod tests {
             .join(HERMES_PLUGIN_MANIFEST_FILE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"plugin").unwrap();
+        assert!(other_integration_installed(tmp.path()));
+    }
+
+    #[test]
+    fn test_other_integration_antigravity() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join(GEMINI_DIR).join("config").join(HOOKS_JSON);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"hook").unwrap();
         assert!(other_integration_installed(tmp.path()));
     }
 

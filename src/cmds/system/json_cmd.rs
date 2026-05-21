@@ -106,7 +106,7 @@ fn compact_json(value: &Value, depth: usize, max_depth: usize) -> String {
         Value::Number(n) => format!("{}{}", indent, n),
         Value::String(s) => {
             if s.len() > 80 {
-                let end = s.floor_char_boundary(77);
+                let end = floor_char_boundary(s, 77);
                 format!("{}\"{}...\"", indent, &s[..end])
             } else {
                 format!("{}\"{}\"", indent, s)
@@ -271,6 +271,17 @@ fn extract_schema(value: &Value, depth: usize, max_depth: usize) -> String {
             }
         }
     }
+}
+
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut idx = index;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }
 
 #[cfg(test)]

@@ -397,6 +397,116 @@ fn run_claude_inner(input: &str) -> Option<String> {
     }
 }
 
+// ── Google Antigravity hook ────────────────────────────────────
+
+fn process_antigravity_payload(v: &Value) -> PayloadAction {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if tool_name != "run_command" {
+        return PayloadAction::Ignore;
+    }
+
+    let cmd = match v
+        .pointer("/tool_input/CommandLine")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return PayloadAction::Ignore,
+    };
+
+    let verdict = permissions::check_command(cmd);
+    if verdict == PermissionVerdict::Deny {
+        return PayloadAction::Skip {
+            reason: "skip:deny_rule",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_match",
+                cmd: cmd.to_string(),
+            }
+        }
+    };
+
+    let updated_input = {
+        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = ti.as_object_mut() {
+            obj.insert("CommandLine".into(), Value::String(rewritten.clone()));
+        }
+        ti
+    };
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "updatedInput": updated_input
+    });
+
+    if verdict == PermissionVerdict::Allow {
+        hook_output
+            .as_object_mut()
+            .unwrap()
+            .insert("permissionDecision".into(), json!("allow"));
+    }
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output: json!({ "hookSpecificOutput": hook_output }),
+    }
+}
+
+/// Run the Google Antigravity PreToolUse hook natively.
+pub fn run_antigravity() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_antigravity_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+            let _ = writeln!(io::stdout(), "{{}}");
+        }
+        PayloadAction::Ignore => {
+            let _ = writeln!(io::stdout(), "{{}}");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_antigravity_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_antigravity_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 // ── Cursor native hook ─────────────────────────────────────────
 
 /// Cursor on Windows ships hook payloads with one or more leading
@@ -987,5 +1097,57 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // --- Google Antigravity handler ---
+
+    fn antigravity_input(cmd: &str) -> String {
+        json!({
+            "tool_name": "run_command",
+            "tool_input": { "CommandLine": cmd }
+        })
+        .to_string()
+    }
+
+    fn antigravity_input_with_fields(cmd: &str, cwd: &str) -> String {
+        json!({
+            "tool_name": "run_command",
+            "tool_input": {
+                "CommandLine": cmd,
+                "Cwd": cwd
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_antigravity_rewrite_git_status() {
+        let result = run_antigravity_inner(&antigravity_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/CommandLine")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_antigravity_rewrite_preserves_tool_input_fields() {
+        let input = antigravity_input_with_fields("git status", "/some/path");
+        let result = run_antigravity_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["CommandLine"], "rtk git status");
+        assert_eq!(updated["Cwd"], "/some/path");
+    }
+
+    #[test]
+    fn test_antigravity_passthrough_no_output() {
+        assert!(run_antigravity_inner(&antigravity_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_antigravity_already_rtk_passthrough() {
+        assert!(run_antigravity_inner(&antigravity_input("rtk git status")).is_none());
     }
 }

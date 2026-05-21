@@ -360,6 +360,7 @@ fn detect_hook_type() -> String {
         (home.join(".gemini/hooks/rtk-hook.sh"), "gemini"),
         (home.join(".codex/AGENTS.md"), "codex"),
         (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
+        (home.join(".gemini/config/hooks.json"), "antigravity"),
     ];
 
     for (path, name) in &checks {
@@ -372,6 +373,9 @@ fn detect_hook_type() -> String {
     if let Ok(cwd) = std::env::current_dir() {
         if cwd.join(".claude/hooks/rtk-rewrite.sh").exists() {
             return "claude".to_string();
+        }
+        if cwd.join(".agents/hooks.json").exists() {
+            return "antigravity".to_string();
         }
     }
 
@@ -571,9 +575,17 @@ mod tests {
         assert!(stats.low_savings_commands.len() <= 5);
         assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
         assert!(
-            ["claude", "gemini", "codex", "cursor", "none", "unknown"]
-                .iter()
-                .any(|&h| stats.hook_type.starts_with(h)),
+            [
+                "claude",
+                "gemini",
+                "codex",
+                "cursor",
+                "antigravity",
+                "none",
+                "unknown"
+            ]
+            .iter()
+            .any(|&h| stats.hook_type.starts_with(h)),
             "Unexpected hook type: {}",
             stats.hook_type
         );
@@ -583,7 +595,16 @@ mod tests {
     fn test_detect_hook_type_returns_known() {
         let ht = detect_hook_type();
         assert!(
-            ["claude", "gemini", "codex", "cursor", "none", "unknown"].contains(&ht.as_str()),
+            [
+                "claude",
+                "gemini",
+                "codex",
+                "cursor",
+                "antigravity",
+                "none",
+                "unknown"
+            ]
+            .contains(&ht.as_str()),
             "Unexpected hook type: {}",
             ht
         );
