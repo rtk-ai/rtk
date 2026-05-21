@@ -2,8 +2,10 @@
 
 use crate::core::filter::{self, FilterLevel, Language};
 use crate::core::tracking;
+use crate::core::utils::strip_ansi;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::IsTerminal;
 use std::path::Path;
 
 pub fn run(
@@ -65,11 +67,15 @@ pub fn run(
 
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
-    let rtk_output = if line_numbers {
+    let mut rtk_output = if line_numbers {
         format_with_line_numbers(&filtered)
     } else {
         filtered.clone()
     };
+    // #1409: drop ANSI when stdout isn't a TTY so command substitution
+    // (e.g. `gh pr create --body "$(cat file.md)"`) doesn't carry escape
+    // codes into downstream payloads. Honours NO_COLOR / CLICOLOR=0 too.
+    rtk_output = sanitize_for_stdout(rtk_output, should_strip_color());
     print!("{}", rtk_output);
     timer.track(
         &format!("cat {}", file.display()),
@@ -129,11 +135,14 @@ pub fn run_stdin(
 
     filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
 
-    let rtk_output = if line_numbers {
+    let mut rtk_output = if line_numbers {
         format_with_line_numbers(&filtered)
     } else {
         filtered.clone()
     };
+    // #1409: same TTY-aware sanitiser as the file path; protects
+    // `some_cmd "$(rtk read -)"` style pipelines.
+    rtk_output = sanitize_for_stdout(rtk_output, should_strip_color());
     print!("{}", rtk_output);
 
     timer.track("cat - (stdin)", "rtk read -", &content, &rtk_output);
@@ -148,6 +157,41 @@ fn format_with_line_numbers(content: &str) -> String {
         out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
     }
     out
+}
+
+/// Returns the input verbatim or with ANSI escape codes stripped, depending on
+/// `strip`. Split from [`should_strip_color`] so the policy and the action are
+/// independently testable (env-var inspection is process-global and racy under
+/// `cargo test`'s default parallel execution).
+fn sanitize_for_stdout(output: String, strip: bool) -> String {
+    if strip {
+        strip_ansi(&output)
+    } else {
+        output
+    }
+}
+
+/// Decides whether `rtk read` should strip ANSI escape codes from its output.
+///
+/// Mirrors the convention shared by `ls`, `grep`, `git`, `rg`, …:
+///
+/// 1. `NO_COLOR` set to any non-empty value disables colour output
+///    (<https://no-color.org>).
+/// 2. `CLICOLOR=0` is an explicit opt-out.
+/// 3. Otherwise, output is sanitised iff stdout is not attached to a terminal
+///    (typical case: command substitution like `gh pr create --body "$(rtk
+///    read body.md)"`, where any embedded ANSI ends up verbatim in the
+///    downstream payload — #1409).
+fn should_strip_color() -> bool {
+    if let Some(v) = std::env::var_os("NO_COLOR") {
+        if !v.is_empty() {
+            return true;
+        }
+    }
+    if matches!(std::env::var("CLICOLOR").as_deref(), Ok("0")) {
+        return true;
+    }
+    !std::io::stdout().is_terminal()
 }
 
 fn apply_line_window(
@@ -225,6 +269,35 @@ fn main() {{
         let output = apply_line_window(input, Some(2), None, &Language::Unknown);
         assert!(output.starts_with("a\n"));
         assert!(output.contains("more lines"));
+    }
+
+    // --- #1409: ANSI sanitisation for non-TTY stdout ---
+
+    #[test]
+    fn test_sanitize_strips_when_asked() {
+        // 256-colour sequence as reported in the bug (`\e[38;5;231m...\e[0m`)
+        // plus a plain SGR reset — both must vanish so command substitution
+        // payloads stay clean.
+        let input = "\x1b[38;5;231mhello\x1b[0m world\n".to_string();
+        let got = sanitize_for_stdout(input, true);
+        assert_eq!(got, "hello world\n");
+    }
+
+    #[test]
+    fn test_sanitize_passes_through_when_not_asked() {
+        // When stdout IS a TTY (interactive shell), we must not silently
+        // strip colour the user might actually want to see.
+        let input = "\x1b[31mError\x1b[0m\n".to_string();
+        let got = sanitize_for_stdout(input.clone(), false);
+        assert_eq!(got, input);
+    }
+
+    #[test]
+    fn test_sanitize_no_ansi_is_identity() {
+        // No-ANSI input must round-trip byte-for-byte regardless of `strip`.
+        let input = "plain text with no escapes\n".to_string();
+        assert_eq!(sanitize_for_stdout(input.clone(), true), input);
+        assert_eq!(sanitize_for_stdout(input.clone(), false), input);
     }
 
     fn rtk_bin() -> std::path::PathBuf {
