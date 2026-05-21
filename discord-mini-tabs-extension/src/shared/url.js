@@ -12,6 +12,10 @@ function parseUrl(input) {
   }
 }
 
+function isSnowflake(value) {
+  return /^\d+$/.test(value);
+}
+
 function getChannelParts(url) {
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts.length !== 3 || parts[0] !== "channels") {
@@ -20,6 +24,10 @@ function getChannelParts(url) {
 
   const [, guildOrMe, channelId] = parts;
   if (!guildOrMe || !channelId) {
+    return null;
+  }
+
+  if (!isSnowflake(channelId) || (guildOrMe !== "@me" && !isSnowflake(guildOrMe))) {
     return null;
   }
 

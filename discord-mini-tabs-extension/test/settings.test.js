@@ -40,6 +40,15 @@ test("keeps null left and top when unset", () => {
   });
 });
 
+test("clampBounds handles null input", () => {
+  assert.deepEqual(clampBounds(null), {
+    left: null,
+    top: null,
+    width: 420,
+    height: 900
+  });
+});
+
 test("clamps zoom to supported range", () => {
   assert.equal(clampZoom(0.2), 0.67);
   assert.equal(clampZoom(2), 1.25);
@@ -66,4 +75,8 @@ test("normalizes partial window state", () => {
     zoom: 1.25,
     lastShortcutId: "abc"
   });
+});
+
+test("normalizeWindowState handles null input", () => {
+  assert.deepEqual(normalizeWindowState(null), createDefaultWindowState());
 });

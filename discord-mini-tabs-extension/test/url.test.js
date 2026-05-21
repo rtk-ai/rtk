@@ -39,6 +39,22 @@ test("rejects non-channel Discord URLs", () => {
   assert.match(result.error, /channels/);
 });
 
+test("rejects non-numeric server and channel ids", () => {
+  assert.equal(validateDiscordChannelUrl("https://discord.com/channels/foo/456").ok, false);
+  assert.equal(validateDiscordChannelUrl("https://discord.com/channels/123/bar").ok, false);
+  assert.equal(validateDiscordChannelUrl("https://discord.com/channels/@me/not-a-snowflake").ok, false);
+});
+
+test("rejects non-https discord URLs", () => {
+  const result = validateDiscordChannelUrl("http://discord.com/channels/123/456");
+  assert.equal(result.ok, false);
+});
+
+test("rejects discord host spoofing", () => {
+  const result = validateDiscordChannelUrl("https://discord.com.evil.test/channels/123/456");
+  assert.equal(result.ok, false);
+});
+
 test("returns compact display labels", () => {
   assert.equal(compactDiscordUrl("https://discord.com/channels/123/456"), "123 / 456");
   assert.equal(compactDiscordUrl("https://discord.com/channels/@me/456"), "DM / 456");

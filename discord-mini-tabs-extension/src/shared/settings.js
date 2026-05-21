@@ -23,18 +23,24 @@ function normalizeNullableCoordinate(value) {
   return Number.isFinite(number) ? Math.round(number) : null;
 }
 
+function normalizeObject(value) {
+  return value && typeof value === "object" ? value : {};
+}
+
 export function clampBounds(bounds = {}) {
+  const source = normalizeObject(bounds);
+
   return {
-    left: normalizeNullableCoordinate(bounds.left),
-    top: normalizeNullableCoordinate(bounds.top),
+    left: normalizeNullableCoordinate(source.left),
+    top: normalizeNullableCoordinate(source.top),
     width: clampNumber(
-      bounds.width,
+      source.width,
       BOUNDS_LIMITS.minWidth,
       BOUNDS_LIMITS.maxWidth,
       DEFAULT_BOUNDS.width
     ),
     height: clampNumber(
-      bounds.height,
+      source.height,
       BOUNDS_LIMITS.minHeight,
       BOUNDS_LIMITS.maxHeight,
       DEFAULT_BOUNDS.height
@@ -62,14 +68,17 @@ export function createDefaultWindowState() {
 
 export function normalizeWindowState(input = {}) {
   const defaults = createDefaultWindowState();
+  const source = normalizeObject(input);
+  const bounds = normalizeObject(source.bounds);
+
   return {
-    windowId: Number.isInteger(input.windowId) ? input.windowId : null,
-    tabId: Number.isInteger(input.tabId) ? input.tabId : null,
-    bounds: clampBounds({ ...defaults.bounds, ...input.bounds }),
-    zoom: clampZoom(input.zoom ?? defaults.zoom),
+    windowId: Number.isInteger(source.windowId) ? source.windowId : null,
+    tabId: Number.isInteger(source.tabId) ? source.tabId : null,
+    bounds: clampBounds({ ...defaults.bounds, ...bounds }),
+    zoom: clampZoom(source.zoom ?? defaults.zoom),
     lastShortcutId:
-      typeof input.lastShortcutId === "string" && input.lastShortcutId.length > 0
-        ? input.lastShortcutId
+      typeof source.lastShortcutId === "string" && source.lastShortcutId.length > 0
+        ? source.lastShortcutId
         : null
   };
 }
