@@ -401,9 +401,12 @@ enum Commands {
 
     /// Show token savings summary and history
     Gain {
-        /// Filter statistics to current project (current working directory) // added
+        /// Filter statistics to current project (current working directory)
         #[arg(short, long)]
         project: bool,
+        /// Filter statistics by agent name (claude, cursor, gemini, copilot, windsurf, etc.)
+        #[arg(long)]
+        agent: Option<String>,
         /// Show ASCII graph of daily savings
         #[arg(short, long)]
         graph: bool,
@@ -1903,7 +1906,8 @@ fn run_cli() -> Result<i32> {
         Commands::Wc { args } => wc_cmd::run(&args, cli.verbose)?,
 
         Commands::Gain {
-            project, // added
+            project,
+            agent,
             graph,
             history,
             quota,
@@ -1918,7 +1922,8 @@ fn run_cli() -> Result<i32> {
             yes,
         } => {
             analytics::gain::run(
-                project, // added: pass project flag
+                project,
+                agent,
                 graph,
                 history,
                 quota,

@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    project: bool, // added: per-project scope flag
+    project: bool,
+    agent: Option<String>,
     graph: bool,
     history: bool,
     quota: bool,
@@ -29,7 +30,8 @@ pub fn run(
     _verbose: u8,
 ) -> Result<()> {
     let tracker = Tracker::new().context("Failed to initialize tracking database")?;
-    let project_scope = resolve_project_scope(project)?; // added: resolve project path
+    let project_scope = resolve_project_scope(project)?;
+    let agent_filter = agent.as_deref();
 
     if reset {
         if !yes && !confirm_reset()? {
@@ -56,7 +58,8 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
-                project_scope.as_deref(), // added: pass project scope
+                project_scope.as_deref(),
+                agent_filter,
             );
         }
         "csv" => {
@@ -66,14 +69,15 @@ pub fn run(
                 weekly,
                 monthly,
                 all,
-                project_scope.as_deref(), // added: pass project scope
+                project_scope.as_deref(),
+                agent_filter,
             );
         }
         _ => {} // Continue with text format
     }
 
     let summary = tracker
-        .get_summary_filtered(project_scope.as_deref()) // changed: use filtered variant
+        .get_summary_filtered(project_scope.as_deref(), agent_filter)
         .context("Failed to load token savings summary from database")?;
 
     if summary.total_commands == 0 {
@@ -84,17 +88,19 @@ pub fn run(
 
     // Default view (summary)
     if !daily && !weekly && !monthly && !all {
-        // added: scope-aware styled header // changed: merged upstream styled + project scope
-        let title = if project_scope.is_some() {
-            "RTK Token Savings (Project Scope)"
-        } else {
-            "RTK Token Savings (Global Scope)"
+        let title = match (project_scope.is_some(), agent_filter) {
+            (true, Some(a)) => format!("RTK Token Savings (Project + Agent: {a})"),
+            (true, None) => "RTK Token Savings (Project Scope)".to_string(),
+            (false, Some(a)) => format!("RTK Token Savings (Agent: {a})"),
+            (false, None) => "RTK Token Savings (Global Scope)".to_string(),
         };
-        println!("{}", styled(title, true));
+        println!("{}", styled(&title, true));
         println!("{}", "═".repeat(60));
-        // added: show project path when scoped
         if let Some(ref scope) = project_scope {
             println!("Scope: {}", shorten_path(scope));
+        }
+        if let Some(a) = agent_filter {
+            println!("Agent: {a}");
         }
         println!();
 
@@ -240,7 +246,7 @@ pub fn run(
         }
 
         if history {
-            let recent = tracker.get_recent_filtered(10, project_scope.as_deref())?; // changed: filtered
+            let recent = tracker.get_recent_filtered(10, project_scope.as_deref(), agent_filter)?;
             if !recent.is_empty() {
                 println!("{}", styled("Recent Commands", true)); // added: styled header
                 println!("──────────────────────────────────────────────────────────");
@@ -303,15 +309,15 @@ pub fn run(
 
     // Time breakdown views
     if all || daily {
-        print_daily_full(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_daily_full(&tracker, project_scope.as_deref(), agent_filter)?;
     }
 
     if all || weekly {
-        print_weekly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_weekly(&tracker, project_scope.as_deref(), agent_filter)?;
     }
 
     if all || monthly {
-        print_monthly(&tracker, project_scope.as_deref())?; // changed: pass project scope
+        print_monthly(&tracker, project_scope.as_deref(), agent_filter)?;
     }
 
     Ok(())
@@ -474,23 +480,32 @@ fn print_ascii_graph(data: &[(String, usize)]) {
     }
 }
 
-fn print_daily_full(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
-    // changed: add project scope
-    let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered variant
+fn print_daily_full(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    agent_filter: Option<&str>,
+) -> Result<()> {
+    let days = tracker.get_all_days_filtered(project_scope, agent_filter)?;
     print_period_table(&days);
     Ok(())
 }
 
-fn print_weekly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
-    // changed: add project scope
-    let weeks = tracker.get_by_week_filtered(project_scope)?; // changed: use filtered variant
+fn print_weekly(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    agent_filter: Option<&str>,
+) -> Result<()> {
+    let weeks = tracker.get_by_week_filtered(project_scope, agent_filter)?;
     print_period_table(&weeks);
     Ok(())
 }
 
-fn print_monthly(tracker: &Tracker, project_scope: Option<&str>) -> Result<()> {
-    // changed: add project scope
-    let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered variant
+fn print_monthly(
+    tracker: &Tracker,
+    project_scope: Option<&str>,
+    agent_filter: Option<&str>,
+) -> Result<()> {
+    let months = tracker.get_by_month_filtered(project_scope, agent_filter)?;
     print_period_table(&months);
     Ok(())
 }
@@ -523,10 +538,11 @@ fn export_json(
     weekly: bool,
     monthly: bool,
     all: bool,
-    project_scope: Option<&str>, // added: project scope
+    project_scope: Option<&str>,
+    agent_filter: Option<&str>,
 ) -> Result<()> {
     let summary = tracker
-        .get_summary_filtered(project_scope) // changed: use filtered variant
+        .get_summary_filtered(project_scope, agent_filter)
         .context("Failed to load token savings summary from database")?;
 
     let export = ExportData {
@@ -540,17 +556,17 @@ fn export_json(
             avg_time_ms: summary.avg_time_ms,
         },
         daily: if all || daily {
-            Some(tracker.get_all_days_filtered(project_scope)?) // changed: use filtered
+            Some(tracker.get_all_days_filtered(project_scope, agent_filter)?)
         } else {
             None
         },
         weekly: if all || weekly {
-            Some(tracker.get_by_week_filtered(project_scope)?) // changed: use filtered
+            Some(tracker.get_by_week_filtered(project_scope, agent_filter)?)
         } else {
             None
         },
         monthly: if all || monthly {
-            Some(tracker.get_by_month_filtered(project_scope)?) // changed: use filtered
+            Some(tracker.get_by_month_filtered(project_scope, agent_filter)?)
         } else {
             None
         },
@@ -568,10 +584,11 @@ fn export_csv(
     weekly: bool,
     monthly: bool,
     all: bool,
-    project_scope: Option<&str>, // added: project scope
+    project_scope: Option<&str>,
+    agent_filter: Option<&str>,
 ) -> Result<()> {
     if all || daily {
-        let days = tracker.get_all_days_filtered(project_scope)?; // changed: use filtered
+        let days = tracker.get_all_days_filtered(project_scope, agent_filter)?;
         println!("# Daily Data");
         println!("date,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
         for day in days {
@@ -591,7 +608,7 @@ fn export_csv(
     }
 
     if all || weekly {
-        let weeks = tracker.get_by_week_filtered(project_scope)?; // changed: use filtered
+        let weeks = tracker.get_by_week_filtered(project_scope, agent_filter)?;
         println!("# Weekly Data");
         println!(
             "week_start,week_end,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms"
@@ -614,7 +631,7 @@ fn export_csv(
     }
 
     if all || monthly {
-        let months = tracker.get_by_month_filtered(project_scope)?; // changed: use filtered
+        let months = tracker.get_by_month_filtered(project_scope, agent_filter)?;
         println!("# Monthly Data");
         println!("month,commands,input_tokens,output_tokens,saved_tokens,savings_pct,total_time_ms,avg_time_ms");
         for month in months {
