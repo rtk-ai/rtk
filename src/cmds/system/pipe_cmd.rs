@@ -3,7 +3,9 @@ use std::io::Read;
 
 use crate::core::stream::RAW_CAP;
 
-pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
+pub type PipeFilter = fn(&str) -> String;
+
+pub fn resolve_filter(name: &str) -> Option<PipeFilter> {
     match name {
         "cargo-test" | "cargo" => Some(crate::cmds::rust::cargo_cmd::filter_cargo_test),
         "pytest" => Some(crate::cmds::python::pytest_cmd::filter_pytest_output),
@@ -134,10 +136,10 @@ fn find_wrapper(input: &str) -> String {
     out
 }
 
-pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
+pub fn auto_detect_filter(input: &str) -> PipeFilter {
     let end = input.len().min(1024);
     // Avoid panic: byte 1024 may fall inside a multi-byte UTF-8 char
-    let end = input.floor_char_boundary(end);
+    let end = crate::core::utils::floor_char_boundary(input, end);
     let first_1k = &input[..end];
 
     if first_1k.contains("test result:") && first_1k.contains("passed;") {
@@ -196,7 +198,7 @@ fn identity_filter(input: &str) -> String {
     input.to_string()
 }
 
-fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
+fn apply_filter(filter_fn: PipeFilter, input: &str) -> String {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filter_fn(input)))
         .unwrap_or_else(|_| {
             eprintln!("[rtk] warning: filter panicked — passing through raw output");
@@ -204,7 +206,11 @@ fn apply_filter(filter_fn: fn(&str) -> String, input: &str) -> String {
         })
 }
 
-pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
+pub fn run(
+    filter_name: Option<&str>,
+    command_filter: Option<PipeFilter>,
+    passthrough: bool,
+) -> Result<()> {
     if passthrough {
         std::io::copy(&mut std::io::stdin(), &mut std::io::stdout())
             .map_err(|e| anyhow::anyhow!("Failed to relay stdin: {}", e))?;
@@ -229,7 +235,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
                 name
             )
         })?,
-        None => auto_detect_filter(&buf),
+        None => command_filter.unwrap_or_else(|| auto_detect_filter(&buf)),
     };
 
     let output = apply_filter(filter_fn, &buf);
