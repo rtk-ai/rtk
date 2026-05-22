@@ -135,30 +135,23 @@ export function createServiceWorkerController({
     }
   }
 
-  async function handleBoundsChanged(changedWindow) {
-    try {
-      const state = await getExtensionState();
-      if (
-        changedWindow?.id !== state.windowState.windowId ||
-        changedWindow?.type !== "popup"
-      ) {
-        return;
-      }
-
-      clearTimeoutFn(boundsSaveTimer);
-      boundsSaveTimer = setTimeoutFn(async () => {
-        try {
-          const latestState = await getExtensionState();
-          await saveBoundsFromWindow(changedWindow, {
-            expectedWindowId: latestState.windowState.windowId
-          });
-        } catch {
-          // Background window events must not surface unhandled storage failures.
-        }
-      }, debounceMs);
-    } catch {
-      // Background window events must not surface unhandled storage failures.
+  function handleBoundsChanged(changedWindow) {
+    if (!changedWindow || changedWindow.type !== "popup") {
+      return Promise.resolve();
     }
+
+    clearTimeoutFn(boundsSaveTimer);
+    boundsSaveTimer = setTimeoutFn(async () => {
+      try {
+        const state = await getExtensionState();
+        await saveBoundsFromWindow(changedWindow, {
+          expectedWindowId: state.windowState.windowId
+        });
+      } catch {
+        // Background window events must not surface unhandled storage failures.
+      }
+    }, debounceMs);
+    return Promise.resolve();
   }
 
   return {

@@ -23,6 +23,14 @@ function createFakeStorage(initial = {}) {
   };
 }
 
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
+}
+
 function createController(storage, overrides = {}) {
   return createServiceWorkerController({
     chromeApi: {
@@ -125,4 +133,79 @@ test("ignores unrelated window bounds events without cancelling a pending mini s
     width: 640,
     height: 820
   });
+});
+
+test("preserves mini bounds event order when storage reads resolve out of order", async () => {
+  const storage = createFakeStorage({
+    windowState: {
+      windowId: 1,
+      tabId: 10,
+      bounds: { left: 1, top: 2, width: 420, height: 900 },
+      zoom: 0.9,
+      lastShortcutId: null
+    }
+  });
+  const scheduled = [];
+  const readDeferrals = [];
+  let nextTimerId = 1;
+  let deferReads = true;
+  const readState = () => ({
+    shortcuts: storage.data.shortcuts ?? [],
+    windowState: storage.data.windowState
+  });
+  const controller = createController(storage, {
+    getExtensionState() {
+      if (!deferReads) {
+        return Promise.resolve(readState());
+      }
+
+      const deferred = createDeferred();
+      readDeferrals.push(deferred);
+      return deferred.promise;
+    },
+    setTimeoutFn(callback) {
+      const timer = { id: nextTimerId++, callback, cancelled: false };
+      scheduled.push(timer);
+      return timer.id;
+    },
+    clearTimeoutFn(timerId) {
+      const timer = scheduled.find((item) => item.id === timerId);
+      if (timer) {
+        timer.cancelled = true;
+      }
+    },
+    debounceMs: 400
+  });
+
+  const firstEvent = controller.handleBoundsChanged({
+    id: 1,
+    type: "popup",
+    left: 10,
+    top: 60,
+    width: 640,
+    height: 820
+  });
+  const secondEvent = controller.handleBoundsChanged({
+    id: 1,
+    type: "popup",
+    left: 20,
+    top: 70,
+    width: 650,
+    height: 830
+  });
+  await Promise.resolve();
+  deferReads = false;
+
+  if (readDeferrals.length >= 2) {
+    readDeferrals[1].resolve(readState());
+    await secondEvent;
+    readDeferrals[0].resolve(readState());
+    await firstEvent;
+  } else {
+    await Promise.all([firstEvent, secondEvent]);
+  }
+
+  await Promise.all(scheduled.filter((timer) => !timer.cancelled).map((timer) => timer.callback()));
+
+  assert.equal(storage.data.windowState.bounds.left, 20);
 });
