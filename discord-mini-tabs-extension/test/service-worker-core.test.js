@@ -209,3 +209,53 @@ test("preserves mini bounds event order when storage reads resolve out of order"
 
   assert.equal(storage.data.windowState.bounds.left, 20);
 });
+
+test("unrelated popup bounds events do not cancel pending mini save", async () => {
+  const storage = createFakeStorage({
+    windowState: {
+      windowId: 1,
+      tabId: 10,
+      bounds: { left: 1, top: 2, width: 420, height: 900 },
+      zoom: 0.9,
+      lastShortcutId: "s1"
+    }
+  });
+  const scheduled = [];
+  let nextTimerId = 1;
+  const controller = createController(storage, {
+    setTimeoutFn(callback) {
+      const timer = { id: nextTimerId++, callback, cancelled: false };
+      scheduled.push(timer);
+      return timer.id;
+    },
+    clearTimeoutFn(timerId) {
+      const timer = scheduled.find((item) => item.id === timerId);
+      if (timer) {
+        timer.cancelled = true;
+      }
+    },
+    debounceMs: 400
+  });
+
+  await controller.handleBoundsChanged({
+    id: 1,
+    type: "popup",
+    left: 20,
+    top: 30,
+    width: 500,
+    height: 700
+  });
+  await controller.handleBoundsChanged({
+    id: 2,
+    type: "popup",
+    left: 99,
+    top: 99,
+    width: 600,
+    height: 800
+  });
+
+  await Promise.all(scheduled.filter((timer) => !timer.cancelled).map((timer) => timer.callback()));
+
+  assert.equal(storage.data.windowState.bounds.left, 20);
+  assert.equal(storage.data.windowState.bounds.top, 30);
+});
