@@ -14,7 +14,7 @@ BENCH_DIR="$(pwd)/scripts/benchmark"
 RTK_ROOT="$(pwd)"
 
 if [ -z "$CI" ]; then
-  rm -rf "$BENCH_DIR"
+  rm -rf "$BENCH_DIR/unix" "$BENCH_DIR/rtk" "$BENCH_DIR/diff"
   mkdir -p "$BENCH_DIR/unix" "$BENCH_DIR/rtk" "$BENCH_DIR/diff"
 fi
 
