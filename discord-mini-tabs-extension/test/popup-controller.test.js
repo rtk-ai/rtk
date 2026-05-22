@@ -302,6 +302,48 @@ test("edit action updates form title and cancel restores add title", async () =>
   assert.equal(document.getElementById("editingId").value, "");
 });
 
+test("save current resets edit mode title before populating active tab", async () => {
+  const activeUrl = "https://discord.com/channels/323456789012345678/787654321098765432";
+  const document = createPopupDocument();
+  const chromeApi = createChromeApi(async (message) => {
+    if (message.type === MESSAGE_TYPES.READ_ACTIVE_DISCORD_TAB) {
+      return {
+        ok: true,
+        data: {
+          suggestedName: "Active Channel",
+          url: activeUrl
+        }
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        shortcuts: [{ id: "text-1", name: "Dev Chat", type: SHORTCUT_TYPES.TEXT, url: textUrl }],
+        windowState: {
+          windowId: null,
+          bounds: { width: 420, height: 900 },
+          zoom: 0.9
+        }
+      }
+    };
+  });
+
+  const app = createPopupApp({ document, chromeApi });
+  await app.init();
+
+  const editButton = document.getElementById("shortcutList").findByText("E");
+  assert.ok(editButton);
+  await editButton.dispatchEvent("click");
+  assert.equal(document.getElementById("formTitle").textContent, "Edit shortcut");
+
+  await document.getElementById("saveCurrentButton").dispatchEvent("click");
+
+  assert.equal(document.getElementById("editingId").value, "");
+  assert.equal(document.getElementById("shortcutName").value, "Active Channel");
+  assert.equal(document.getElementById("shortcutUrl").value, activeUrl);
+  assert.equal(document.getElementById("formTitle").textContent, "Add shortcut");
+});
+
 test("search render does not overwrite unsaved settings values", async () => {
   const document = createPopupDocument();
   const chromeApi = createChromeApi(async () => ({

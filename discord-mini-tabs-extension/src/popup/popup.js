@@ -243,7 +243,7 @@ export function createPopupApp({ document, chromeApi }) {
 
     elements.saveCurrentButton.addEventListener("click", () => runAction(async () => {
       const data = await sendMessage(MESSAGE_TYPES.READ_ACTIVE_DISCORD_TAB);
-      elements.editingId.value = "";
+      clearShortcutForm();
       elements.shortcutName.value = data?.suggestedName ?? "";
       elements.shortcutUrl.value = data?.url ?? "";
       elements.shortcutType.value = state.activeType;
