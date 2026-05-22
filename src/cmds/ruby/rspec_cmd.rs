@@ -6,11 +6,15 @@
 //! fails to parse.
 
 use crate::core::runner;
+use crate::core::truncate::{reduced, CAP_WARNINGS};
 use crate::core::utils::{fallback_tail, ruby_exec, truncate};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
+
+// rspec failures carry full backtraces — show fewer than a generic warning list.
+const MAX_RSPEC_FAILURES: usize = reduced(CAP_WARNINGS, 5);
 
 // ── Noise-stripping regex patterns ──────────────────────────────────────────
 
@@ -224,7 +228,7 @@ fn build_rspec_summary(rspec: &RspecOutput) -> String {
 
     result.push_str("\nFailures:\n");
 
-    for (i, example) in failures.iter().take(5).enumerate() {
+    for (i, example) in failures.iter().take(MAX_RSPEC_FAILURES).enumerate() {
         result.push_str(&format!(
             "{}. ❌ {}\n   {}:{}\n",
             i + 1,
@@ -251,13 +255,16 @@ fn build_rspec_summary(rspec: &RspecOutput) -> String {
             }
         }
 
-        if i < failures.len().min(5) - 1 {
+        if i < failures.len().min(MAX_RSPEC_FAILURES) - 1 {
             result.push('\n');
         }
     }
 
-    if failures.len() > 5 {
-        result.push_str(&format!("\n... +{} more failures\n", failures.len() - 5));
+    if failures.len() > MAX_RSPEC_FAILURES {
+        result.push_str(&format!(
+            "\n... +{} more failures\n",
+            failures.len() - MAX_RSPEC_FAILURES
+        ));
     }
 
     result.trim().to_string()
@@ -347,14 +354,17 @@ fn filter_rspec_text(output: &str) -> String {
         }
         let mut result = format!("RSpec: {}\n", summary_line);
         result.push_str("═══════════════════════════════════════\n\n");
-        for (i, failure) in failures.iter().take(5).enumerate() {
+        for (i, failure) in failures.iter().take(MAX_RSPEC_FAILURES).enumerate() {
             result.push_str(&format!("{}. ❌ {}\n", i + 1, failure));
-            if i < failures.len().min(5) - 1 {
+            if i < failures.len().min(MAX_RSPEC_FAILURES) - 1 {
                 result.push('\n');
             }
         }
-        if failures.len() > 5 {
-            result.push_str(&format!("\n... +{} more failures\n", failures.len() - 5));
+        if failures.len() > MAX_RSPEC_FAILURES {
+            result.push_str(&format!(
+                "\n... +{} more failures\n",
+                failures.len() - MAX_RSPEC_FAILURES
+            ));
         }
         return result.trim().to_string();
     }

@@ -3,6 +3,7 @@
 use crate::core::config;
 use crate::core::runner;
 use crate::core::stream::exec_capture;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
@@ -324,8 +325,9 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     }
 
     // Show top files
+    const MAX_GOLANGCI_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file, count) in file_counts.iter().take(10) {
+    for (file, count) in file_counts.iter().take(MAX_GOLANGCI_FILES) {
         let short_path = compact_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
@@ -339,7 +341,7 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
         }
 
         let mut file_linter_counts: Vec<_> = file_linters.iter().collect();
-        file_linter_counts.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        file_linter_counts.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
         for (linter, linter_issues) in file_linter_counts.iter().take(3) {
             result.push_str(&format!("    {} ({})\n", linter, linter_issues.len()));
@@ -360,8 +362,11 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
         }
     }
 
-    if file_counts.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", file_counts.len() - 10));
+    if file_counts.len() > MAX_GOLANGCI_FILES {
+        result.push_str(&format!(
+            "\n... +{} more files\n",
+            file_counts.len() - MAX_GOLANGCI_FILES
+        ));
     }
 
     result.trim().to_string()

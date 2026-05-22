@@ -32,6 +32,22 @@ cd /your/project && rtk init
 
 This installs the hook that automatically rewrites commands. Restart your AI assistant after this step.
 
+### Preview without writing: `--dry-run`
+
+To see exactly what `init` would change before it touches anything, add `--dry-run`:
+
+```bash
+rtk init --global --dry-run
+```
+
+Every would-be file create/update/patch is printed with a `[dry-run] would ...` prefix, then a `[dry-run] Nothing written.` footer. Nothing on disk is modified, no settings.json is patched, and the telemetry consent prompt is skipped. Combine with `-v` to also print the full content RTK would write:
+
+```bash
+rtk init --global --dry-run -v
+```
+
+`--dry-run` works for every init flavour (`--agent cursor`, `--gemini`, `--codex`, `--copilot`, `--uninstall`, ...). It cannot be combined with `--show`.
+
 ## Step 2: Use your tools normally
 
 Once the hook is installed, nothing changes in how you work. Your AI assistant runs commands as usual — the hook intercepts them transparently and rewrites them before execution.

@@ -25,3 +25,8 @@ pub const CURSOR_DIR: &str = ".cursor";
 pub const CODEX_DIR: &str = ".codex";
 #[allow(dead_code)]
 pub const GEMINI_DIR: &str = ".gemini";
+pub const HERMES_DIR: &str = ".hermes";
+pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
+pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
+pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
+pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";

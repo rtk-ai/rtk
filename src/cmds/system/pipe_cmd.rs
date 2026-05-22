@@ -2,6 +2,11 @@ use anyhow::Result;
 use std::io::Read;
 
 use crate::core::stream::RAW_CAP;
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
+
+const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
+const MAX_PIPE_FILES: usize = CAP_WARNINGS;
+const MAX_PIPE_DIRS: usize = CAP_LIST;
 
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
@@ -15,7 +20,8 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
         "find" | "fd" => Some(find_wrapper),
         "git-log" => Some(git_log_wrapper),
         "git-diff" => Some(git_diff_wrapper),
-        "git-status" => Some(crate::cmds::git::git::format_status_output),
+        "git-status" => Some(git_status_wrapper),
+        "log" => Some(crate::cmds::system::log_cmd::run_stdin_str),
         "mypy" => Some(crate::cmds::python::mypy_cmd::filter_mypy_output),
         "ruff-check" => Some(crate::cmds::python::ruff_cmd::filter_ruff_check_json),
         "ruff-format" => Some(crate::cmds::python::ruff_cmd::filter_ruff_format),
@@ -26,6 +32,10 @@ pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
 
 fn go_test_wrapper(input: &str) -> String {
     crate::cmds::go::go_cmd::filter_go_test_json(input)
+}
+
+fn git_status_wrapper(input: &str) -> String {
+    crate::cmds::git::git::format_status_output(input)
 }
 
 fn git_log_wrapper(input: &str) -> String {
@@ -73,11 +83,11 @@ fn grep_wrapper(input: &str) -> String {
 
     for (file, matches) in files {
         out.push_str(&format!("[file] {} ({}):\n", file, matches.len()));
-        for (line_num, content) in matches.iter().take(10) {
+        for (line_num, content) in matches.iter().take(MAX_PIPE_MATCHES) {
             out.push_str(&format!("  {:>4}: {}\n", line_num, content.trim()));
         }
-        if matches.len() > 10 {
-            out.push_str(&format!("  +{}\n", matches.len() - 10));
+        if matches.len() > MAX_PIPE_MATCHES {
+            out.push_str(&format!("  +{}\n", matches.len() - MAX_PIPE_MATCHES));
         }
         out.push('\n');
     }
@@ -112,18 +122,18 @@ fn find_wrapper(input: &str) -> String {
     let mut dirs: Vec<_> = by_dir.iter().collect();
     dirs.sort_by_key(|(d, _)| *d);
 
-    for (dir, files) in dirs.iter().take(20) {
+    for (dir, files) in dirs.iter().take(MAX_PIPE_DIRS) {
         out.push_str(&format!("{}/  ({})\n", dir, files.len()));
-        for f in files.iter().take(10) {
+        for f in files.iter().take(MAX_PIPE_FILES) {
             out.push_str(&format!("  {}\n", f));
         }
-        if files.len() > 10 {
-            out.push_str(&format!("  +{}\n", files.len() - 10));
+        if files.len() > MAX_PIPE_FILES {
+            out.push_str(&format!("  +{}\n", files.len() - MAX_PIPE_FILES));
         }
     }
 
-    if dirs.len() > 20 {
-        out.push_str(&format!("\n+{} more dirs\n", dirs.len() - 20));
+    if dirs.len() > MAX_PIPE_DIRS {
+        out.push_str(&format!("\n+{} more dirs\n", dirs.len() - MAX_PIPE_DIRS));
     }
 
     out
@@ -220,7 +230,7 @@ pub fn run(filter_name: Option<&str>, passthrough: bool) -> Result<()> {
             anyhow::anyhow!(
                 "Unknown filter '{}'. Available: cargo-test, pytest, go-test, go-build, \
                  tsc, vitest, grep, rg, find, fd, git-log, git-diff, git-status, \
-                 mypy, ruff-check, ruff-format, prettier",
+                 log, mypy, ruff-check, ruff-format, prettier",
                 name
             )
         })?,
@@ -298,6 +308,11 @@ mod tests {
     #[test]
     fn test_resolve_filter_git_status() {
         assert!(resolve_filter("git-status").is_some());
+    }
+
+    #[test]
+    fn test_resolve_filter_log() {
+        assert!(resolve_filter("log").is_some());
     }
 
     #[test]
