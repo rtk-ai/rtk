@@ -1,0 +1,128 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createServiceWorkerController } from "../src/background/service-worker-core.js";
+import { getExtensionState, setShortcuts, setWindowState } from "../src/background/storage.js";
+import { saveBoundsFromWindow } from "../src/background/window-manager.js";
+import { MESSAGE_TYPES } from "../src/shared/constants.js";
+import { createShortcut, deleteShortcut, findShortcut, updateShortcut } from "../src/shared/shortcuts.js";
+import { validateDiscordChannelUrl } from "../src/shared/url.js";
+
+const firstUrl = "https://discord.com/channels/123456789012345678/987654321098765432";
+const secondUrl = "https://discord.com/channels/223456789012345678/887654321098765432";
+
+function createFakeStorage(initial = {}) {
+  const data = { ...initial };
+  return {
+    data,
+    async get(defaults) {
+      return { ...defaults, ...data };
+    },
+    async set(values) {
+      Object.assign(data, values);
+    }
+  };
+}
+
+function createController(storage, overrides = {}) {
+  return createServiceWorkerController({
+    chromeApi: {
+      tabs: {
+        async query() {
+          return [];
+        }
+      }
+    },
+    getExtensionState: () => getExtensionState(storage),
+    setShortcuts: (shortcuts) => setShortcuts(shortcuts, storage),
+    setWindowState: (windowState) => setWindowState(windowState, storage),
+    createShortcut,
+    deleteShortcut,
+    findShortcut,
+    updateShortcut,
+    validateDiscordChannelUrl,
+    openShortcutInMiniWindow: async ({ shortcut }) => ({ lastShortcutId: shortcut.id }),
+    focusMiniWindow: async () => 1,
+    closeMiniWindow: async () => ({}),
+    resetMiniWindowPosition: async () => ({}),
+    updateMiniWindowSettings: async ({ bounds, zoom }) => ({ bounds, zoom }),
+    saveBoundsFromWindow: (window, options) =>
+      saveBoundsFromWindow(window, { storageArea: storage, ...options }),
+    ...overrides
+  });
+}
+
+test("serializes concurrent shortcut creates and preserves both shortcuts", async () => {
+  const storage = createFakeStorage();
+  const controller = createController(storage);
+
+  await Promise.all([
+    controller.handleMessage({
+      type: MESSAGE_TYPES.CREATE_SHORTCUT,
+      payload: { name: "First", type: "text", url: firstUrl }
+    }),
+    controller.handleMessage({
+      type: MESSAGE_TYPES.CREATE_SHORTCUT,
+      payload: { name: "Second", type: "text", url: secondUrl }
+    })
+  ]);
+
+  assert.equal(storage.data.shortcuts.length, 2);
+  assert.deepEqual(
+    storage.data.shortcuts.map((shortcut) => shortcut.name).sort(),
+    ["First", "Second"]
+  );
+});
+
+test("ignores unrelated window bounds events without cancelling a pending mini save", async () => {
+  const storage = createFakeStorage({
+    windowState: {
+      windowId: 1,
+      tabId: 10,
+      bounds: { left: 1, top: 2, width: 420, height: 900 },
+      zoom: 0.9,
+      lastShortcutId: null
+    }
+  });
+  const scheduled = [];
+  let nextTimerId = 1;
+  const controller = createController(storage, {
+    setTimeoutFn(callback) {
+      const timer = { id: nextTimerId++, callback, cancelled: false };
+      scheduled.push(timer);
+      return timer.id;
+    },
+    clearTimeoutFn(timerId) {
+      const timer = scheduled.find((item) => item.id === timerId);
+      if (timer) {
+        timer.cancelled = true;
+      }
+    },
+    debounceMs: 400
+  });
+
+  await controller.handleBoundsChanged({
+    id: 1,
+    type: "popup",
+    left: 50,
+    top: 60,
+    width: 640,
+    height: 820
+  });
+  await controller.handleBoundsChanged({
+    id: 2,
+    type: "normal",
+    left: 500,
+    top: 600,
+    width: 700,
+    height: 800
+  });
+
+  await Promise.all(scheduled.filter((timer) => !timer.cancelled).map((timer) => timer.callback()));
+
+  assert.deepEqual(storage.data.windowState.bounds, {
+    left: 50,
+    top: 60,
+    width: 640,
+    height: 820
+  });
+});
