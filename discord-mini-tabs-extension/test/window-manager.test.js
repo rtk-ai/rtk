@@ -105,6 +105,28 @@ function callsNamed(chromeApi, name) {
   return chromeApi.calls.filter((call) => call[0] === name);
 }
 
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function deferWindowCreate(chromeApi) {
+  const started = createDeferred();
+  const release = createDeferred();
+  const createWindow = chromeApi.windows.create;
+  chromeApi.windows.create = async (createData) => {
+    started.resolve();
+    await release.promise;
+    return createWindow(createData);
+  };
+  return { started, release };
+}
+
 const shortcut = {
   id: "s1",
   name: "Dev Chat",
@@ -183,6 +205,48 @@ test("serializes concurrent open calls so only one popup is created", async () =
   assert.equal(storage.data.windowState.windowId, 100);
   assert.equal(storage.data.windowState.tabId, 200);
   assert.equal(storage.data.windowState.lastShortcutId, "s2");
+});
+
+test("serializes close after in-flight open so close wins", async () => {
+  const chromeApi = createFakeChrome();
+  const storage = createFakeStorage();
+  const deferredCreate = deferWindowCreate(chromeApi);
+
+  const openPromise = openShortcutInMiniWindow({ chromeApi, storageArea: storage, shortcut });
+  await deferredCreate.started.promise;
+  const closePromise = closeMiniWindow({ chromeApi, storageArea: storage });
+
+  deferredCreate.release.resolve();
+  await Promise.all([openPromise, closePromise]);
+
+  assert.equal(storage.data.windowState.windowId, null);
+  assert.equal(storage.data.windowState.tabId, null);
+  assert.equal(chromeApi.windowsById.has(100), false);
+});
+
+test("serializes settings after in-flight open so settings win", async () => {
+  const chromeApi = createFakeChrome();
+  const storage = createFakeStorage();
+  const deferredCreate = deferWindowCreate(chromeApi);
+
+  const openPromise = openShortcutInMiniWindow({ chromeApi, storageArea: storage, shortcut });
+  await deferredCreate.started.promise;
+  const settingsPromise = updateMiniWindowSettings({
+    chromeApi,
+    storageArea: storage,
+    bounds: { width: 640, height: 820 },
+    zoom: 1
+  });
+
+  deferredCreate.release.resolve();
+  await Promise.all([openPromise, settingsPromise]);
+
+  assert.equal(storage.data.windowState.windowId, 100);
+  assert.equal(storage.data.windowState.bounds.width, 640);
+  assert.equal(storage.data.windowState.bounds.height, 820);
+  assert.equal(storage.data.windowState.zoom, 1);
+  assert.equal(chromeApi.windowsById.get(100).width, 640);
+  assert.equal(chromeApi.windowsById.get(100).height, 820);
 });
 
 test("focuses existing window", async () => {

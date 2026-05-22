@@ -2,7 +2,7 @@ import { DEFAULT_BOUNDS } from "../shared/constants.js";
 import { clampBounds, normalizeWindowState } from "../shared/settings.js";
 import { getExtensionState, setWindowState, updateWindowState } from "./storage.js";
 
-let openQueue = Promise.resolve();
+let windowMutationQueue = Promise.resolve();
 
 function getDefaultChromeApi() {
   if (typeof chrome === "undefined") {
@@ -11,9 +11,9 @@ function getDefaultChromeApi() {
   return chrome;
 }
 
-function enqueueOpen(operation) {
-  const next = openQueue.catch(() => undefined).then(operation);
-  openQueue = next.catch(() => undefined);
+function enqueueWindowMutation(operation) {
+  const next = windowMutationQueue.catch(() => undefined).then(operation);
+  windowMutationQueue = next.catch(() => undefined);
   return next;
 }
 
@@ -71,7 +71,7 @@ export async function openShortcutInMiniWindow({
   storageArea,
   shortcut
 }) {
-  return enqueueOpen(() =>
+  return enqueueWindowMutation(() =>
     openShortcutInMiniWindowUnlocked({ chromeApi, storageArea, shortcut })
   );
 }
@@ -123,6 +123,10 @@ async function openShortcutInMiniWindowUnlocked({ chromeApi, storageArea, shortc
 }
 
 export async function focusMiniWindow({ chromeApi = getDefaultChromeApi(), storageArea }) {
+  return enqueueWindowMutation(() => focusMiniWindowUnlocked({ chromeApi, storageArea }));
+}
+
+async function focusMiniWindowUnlocked({ chromeApi, storageArea }) {
   const state = await getExtensionState(storageArea);
   const existing = await getWindowWithTab(chromeApi, state.windowState);
   if (!existing) {
@@ -135,6 +139,10 @@ export async function focusMiniWindow({ chromeApi = getDefaultChromeApi(), stora
 }
 
 export async function closeMiniWindow({ chromeApi = getDefaultChromeApi(), storageArea }) {
+  return enqueueWindowMutation(() => closeMiniWindowUnlocked({ chromeApi, storageArea }));
+}
+
+async function closeMiniWindowUnlocked({ chromeApi, storageArea }) {
   const state = await getExtensionState(storageArea);
   if (Number.isInteger(state.windowState.windowId)) {
     try {
@@ -151,6 +159,12 @@ export async function resetMiniWindowPosition({
   chromeApi = getDefaultChromeApi(),
   storageArea
 }) {
+  return enqueueWindowMutation(() =>
+    resetMiniWindowPositionUnlocked({ chromeApi, storageArea })
+  );
+}
+
+async function resetMiniWindowPositionUnlocked({ chromeApi, storageArea }) {
   const state = await updateWindowState(
     (windowState) => ({
       ...windowState,
@@ -179,6 +193,12 @@ export async function updateMiniWindowSettings({
   bounds,
   zoom
 }) {
+  return enqueueWindowMutation(() =>
+    updateMiniWindowSettingsUnlocked({ chromeApi, storageArea, bounds, zoom })
+  );
+}
+
+async function updateMiniWindowSettingsUnlocked({ chromeApi, storageArea, bounds, zoom }) {
   const state = await updateWindowState(
     (windowState) => ({
       ...windowState,
@@ -210,6 +230,15 @@ export async function updateMiniWindowSettings({
 }
 
 export async function saveBoundsFromWindow(
+  window,
+  { storageArea, expectedWindowId, shouldSave = () => true }
+) {
+  return enqueueWindowMutation(() =>
+    saveBoundsFromWindowUnlocked(window, { storageArea, expectedWindowId, shouldSave })
+  );
+}
+
+async function saveBoundsFromWindowUnlocked(
   window,
   { storageArea, expectedWindowId, shouldSave = () => true }
 ) {
