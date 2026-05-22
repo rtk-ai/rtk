@@ -81,6 +81,19 @@ class FakeElement {
     const handlers = this.listeners.get(type) ?? [];
     await Promise.all(handlers.map((handler) => handler(event)));
   }
+
+  findByText(text) {
+    if (this._textContent === text) {
+      return this;
+    }
+    for (const child of this.children) {
+      const match = child.findByText(text);
+      if (match) {
+        return match;
+      }
+    }
+    return null;
+  }
 }
 
 class FakeDocument {
@@ -115,6 +128,7 @@ function createPopupDocument() {
     "voiceCount",
     "shortcutList",
     "shortcutForm",
+    "formTitle",
     "editingId",
     "shortcutName",
     "shortcutUrl",
@@ -144,6 +158,7 @@ test("popup markup exposes resetButton id contract", async () => {
   const html = await readFile(new URL("../src/popup/popup.html", import.meta.url), "utf8");
 
   assert.match(html, /id="resetButton"/);
+  assert.match(html, /id="formTitle"/);
   assert.doesNotMatch(html, /resetPositionButton/);
 });
 
@@ -168,6 +183,7 @@ test("initializes from service worker state and renders popup controls", async (
   assert.equal(document.getElementById("windowMeta").textContent, "Open | 420 x 900 | 90%");
   assert.equal(document.getElementById("textCount").textContent, "1");
   assert.equal(document.getElementById("voiceCount").textContent, "0");
+  assert.equal(document.getElementById("formTitle").textContent, "Add shortcut");
   assert.equal(document.getElementById("widthInput").value, "420");
   assert.equal(document.getElementById("heightInput").value, "900");
   assert.equal(document.getElementById("zoomInput").value, "90");
@@ -254,6 +270,36 @@ test("switching tabs while editing does not change the edited shortcut type", as
       type: SHORTCUT_TYPES.VOICE
     }
   });
+});
+
+test("edit action updates form title and cancel restores add title", async () => {
+  const document = createPopupDocument();
+  const chromeApi = createChromeApi(async () => ({
+    ok: true,
+    data: {
+      shortcuts: [{ id: "text-1", name: "Dev Chat", type: SHORTCUT_TYPES.TEXT, url: textUrl }],
+      windowState: {
+        windowId: null,
+        bounds: { width: 420, height: 900 },
+        zoom: 0.9
+      }
+    }
+  }));
+
+  const app = createPopupApp({ document, chromeApi });
+  await app.init();
+
+  const editButton = document.getElementById("shortcutList").findByText("E");
+  assert.ok(editButton);
+  await editButton.dispatchEvent("click");
+
+  assert.equal(document.getElementById("formTitle").textContent, "Edit shortcut");
+  assert.equal(document.getElementById("editingId").value, "text-1");
+
+  await document.getElementById("cancelEditButton").dispatchEvent("click");
+
+  assert.equal(document.getElementById("formTitle").textContent, "Add shortcut");
+  assert.equal(document.getElementById("editingId").value, "");
 });
 
 test("search render does not overwrite unsaved settings values", async () => {

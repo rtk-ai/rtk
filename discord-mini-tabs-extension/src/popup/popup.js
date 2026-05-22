@@ -21,6 +21,7 @@ const CONTROL_IDS = {
   voiceCount: "voiceCount",
   shortcutList: "shortcutList",
   shortcutForm: "shortcutForm",
+  formTitle: "formTitle",
   editingId: "editingId",
   shortcutName: "shortcutName",
   shortcutUrl: "shortcutUrl",
@@ -107,6 +108,7 @@ export function createPopupApp({ document, chromeApi }) {
   }
 
   function clearShortcutForm() {
+    elements.formTitle.textContent = "Add shortcut";
     elements.editingId.value = "";
     elements.shortcutName.value = "";
     elements.shortcutUrl.value = "";
@@ -114,6 +116,7 @@ export function createPopupApp({ document, chromeApi }) {
   }
 
   function populateShortcutForm(shortcut) {
+    elements.formTitle.textContent = "Edit shortcut";
     elements.editingId.value = shortcut.id;
     elements.shortcutName.value = shortcut.name;
     elements.shortcutUrl.value = shortcut.url;
