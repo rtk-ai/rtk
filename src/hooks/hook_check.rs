@@ -94,15 +94,10 @@ pub fn maybe_warn() {
 
 /// Single source of truth: delegates to `status()` then rate-limits the warning.
 fn check_and_warn() -> Option<()> {
-    let warning = match status() {
-        HookStatus::Ok => return Some(()),
-        HookStatus::Missing => {
-            "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings"
-        }
-        HookStatus::Outdated => "[rtk] /!\\ Hook outdated — run `rtk init -g` to update",
-    };
-
-    // Rate limit: warn once per day
+    // C-08 fix: check the rate-limit marker BEFORE calling status().
+    // status() reads settings.json unconditionally — skipping it on the hot path
+    // (recent marker → already warned today) avoids that disk read on every
+    // hook invocation.
     let marker = warn_marker_path()?;
     if let Ok(meta) = std::fs::metadata(&marker) {
         if let Ok(modified) = meta.modified() {
@@ -111,6 +106,14 @@ fn check_and_warn() -> Option<()> {
             }
         }
     }
+
+    let warning = match status() {
+        HookStatus::Ok => return Some(()),
+        HookStatus::Missing => {
+            "[rtk] /!\\ No hook installed — run `rtk init -g` for automatic token savings"
+        }
+        HookStatus::Outdated => "[rtk] /!\\ Hook outdated — run `rtk init -g` to update",
+    };
 
     eprintln!("{}", warning);
 

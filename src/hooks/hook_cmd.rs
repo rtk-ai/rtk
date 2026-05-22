@@ -40,6 +40,7 @@ enum HookFormat {
 /// Run the Copilot preToolUse hook.
 /// Auto-detects VS Code Copilot Chat vs Copilot CLI format.
 pub fn run_copilot() -> Result<()> {
+    std::env::set_var("RTK_HOOK_MODE", "1");
     let input = read_stdin_limited()?;
 
     let input = input.trim();
@@ -107,9 +108,9 @@ fn get_rewritten(cmd: &str) -> Option<String> {
         return None;
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
+    let cfg = crate::core::config::Config::load_cached();
+    let excluded = cfg.hooks.exclude_commands.clone();
+    let transparent_prefixes = cfg.hooks.transparent_prefixes.clone();
 
     let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
 
@@ -181,6 +182,7 @@ fn handle_copilot_cli(cmd: &str) -> Result<()> {
 
 /// Run the Gemini CLI BeforeTool hook.
 pub fn run_gemini() -> Result<()> {
+    std::env::set_var("RTK_HOOK_MODE", "1");
     let input = read_stdin_limited()?;
 
     let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
@@ -211,9 +213,9 @@ pub fn run_gemini() -> Result<()> {
         return Ok(());
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
+    let cfg = crate::core::config::Config::load_cached();
+    let excluded = cfg.hooks.exclude_commands.clone();
+    let transparent_prefixes = cfg.hooks.transparent_prefixes.clone();
 
     match rewrite_command(cmd, &excluded, &transparent_prefixes) {
         Some(ref rewritten) => {
@@ -355,6 +357,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
 
 /// Run the Claude Code PreToolUse hook natively.
 pub fn run_claude() -> Result<()> {
+    std::env::set_var("RTK_HOOK_MODE", "1");
     let input = read_stdin_limited()?;
 
     let input = input.trim();
@@ -413,6 +416,7 @@ fn strip_leading_bom(input: &str) -> &str {
 
 /// Run the Cursor Agent hook natively.
 pub fn run_cursor() -> Result<()> {
+    std::env::set_var("RTK_HOOK_MODE", "1");
     let input = read_stdin_limited()?;
 
     let input = strip_leading_bom(&input).trim();

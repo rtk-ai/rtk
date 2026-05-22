@@ -4,6 +4,9 @@ use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static CONFIG_CACHE: OnceLock<Config> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -161,6 +164,15 @@ impl Config {
         } else {
             Ok(Config::default())
         }
+    }
+
+    /// Load config with process-lifetime caching.
+    ///
+    /// C-08 hot-path fix: hook invocations call this instead of `load()` so
+    /// `config.toml` is read at most once per `rtk hook` process. Falls back to
+    /// `Config::default()` on load failure so hook execution is never blocked.
+    pub fn load_cached() -> &'static Config {
+        CONFIG_CACHE.get_or_init(|| Config::load().unwrap_or_default())
     }
 
     pub fn save(&self) -> Result<()> {
