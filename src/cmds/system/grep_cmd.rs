@@ -125,11 +125,13 @@ pub fn run(
     }
 
     let mut rtk_output = String::new();
-    rtk_output.push_str(&format!(
-        "{} matches in {} files:\n\n",
-        total_matches,
-        by_file.len()
-    ));
+    if total_matches > 5 {
+        rtk_output.push_str(&format!(
+            "{} matches in {} files:\n\n",
+            total_matches,
+            by_file.len()
+        ));
+    }
 
     let mut shown = 0;
     let mut files: Vec<_> = by_file.iter().collect();

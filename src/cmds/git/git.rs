@@ -58,7 +58,7 @@ fn uses_compact_status_path(args: &[String]) -> bool {
         match arg.as_str() {
             "-b" | "--branch" => saw_branch = true,
             "-sb" | "-bs" => return true,
-            "-s" | "--short" => {}
+            "-s" | "--short" => saw_branch = true,
             _ => return false,
         }
     }
@@ -511,9 +511,9 @@ fn run_log(
         let n = parse_user_limit(args).unwrap_or(10);
         (n, true)
     } else if has_format_flag {
-        // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
-        (50, false)
+        // User specified --oneline/--pretty/--format without -N: compact output
+        cmd.arg("-20");
+        (20, false)
     } else {
         // No flags at all: default to 10
         cmd.arg("-10");
@@ -2000,10 +2000,17 @@ mod tests {
         assert!(uses_compact_status_path(&["-sb".to_string()]));
         assert!(uses_compact_status_path(&["-s".to_string(), "-b".to_string()]));
         assert!(uses_compact_status_path(&["--short".to_string(), "--branch".to_string()]));
-        assert!(!uses_compact_status_path(&["-s".to_string()]));
-        assert!(!uses_compact_status_path(&["--short".to_string()]));
+        assert!(uses_compact_status_path(&["-s".to_string()]));
+        assert!(uses_compact_status_path(&["--short".to_string()]));
         assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
         assert!(!uses_compact_status_path(&["-uno".to_string()]));
+    }
+
+    #[test]
+    fn test_build_status_command_with_short_alone_uses_porcelain() {
+        let cmd = build_status_command(&["--short".to_string()], &[]);
+        let cmd_args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]
