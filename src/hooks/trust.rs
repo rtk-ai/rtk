@@ -299,6 +299,9 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // Env-var tests that set/unset the same vars must run serially.
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Helper: create a temporary trust store in a temp dir.
     /// Overrides the store path via a scoped env var (not possible with
     /// the real function), so we test the logic by calling internal fns.
@@ -332,6 +335,37 @@ mod tests {
             Ok(TrustStatus::ContentChanged {
                 expected: entry.sha256.clone(),
                 actual: actual_hash,
+            })
+        }
+    }
+
+    /// Same as `check_trust_from_hash` but reads from a caller-supplied store
+    /// file instead of the default store path. For TOCTOU tests only.
+    fn check_trust_from_hash_with_store(
+        filter_path: &Path,
+        pre_computed_hash: &str,
+        store_file: &Path,
+    ) -> Result<TrustStatus> {
+        let key = canonical_key(filter_path)?;
+
+        let store: TrustStore = if store_file.exists() {
+            let content = std::fs::read_to_string(store_file)?;
+            serde_json::from_str(&content)?
+        } else {
+            TrustStore::default()
+        };
+
+        let entry = match store.trusted.get(&key) {
+            Some(e) => e,
+            None => return Ok(TrustStatus::Untrusted),
+        };
+
+        if pre_computed_hash == entry.sha256 {
+            Ok(TrustStatus::Trusted)
+        } else {
+            Ok(TrustStatus::ContentChanged {
+                expected: entry.sha256.clone(),
+                actual: pre_computed_hash.to_string(),
             })
         }
     }
@@ -449,20 +483,22 @@ mod tests {
 
     #[test]
     fn test_env_override_with_ci() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
         std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
 
-        // Both env vars must be set: trust override + CI indicator
+        // Platform-specific CI var (GITHUB_ACTIONS) + trust override → EnvOverride.
+        // Generic CI=true is intentionally rejected (see test_ci_bypass_requires_platform_ci_not_generic).
         #[allow(deprecated)]
         std::env::set_var("RTK_TRUST_PROJECT_FILTERS", "1");
         #[allow(deprecated)]
-        std::env::set_var("CI", "true");
+        std::env::set_var("GITHUB_ACTIONS", "true");
         let status = check_trust(&filter).unwrap();
         #[allow(deprecated)]
         std::env::remove_var("RTK_TRUST_PROJECT_FILTERS");
         #[allow(deprecated)]
-        std::env::remove_var("CI");
+        std::env::remove_var("GITHUB_ACTIONS");
 
         assert_eq!(status, TrustStatus::EnvOverride);
     }
@@ -559,11 +595,13 @@ mod tests {
         assert_ne!(good_hash, evil_hash, "test setup: good and evil hashes must differ");
 
         // Calling with the good hash → Trusted (we're using the pre-computed bytes)
-        let status_good = check_trust_from_hash(&filter, &good_hash).unwrap();
+        let status_good =
+            check_trust_from_hash_with_store(&filter, &good_hash, &store_file).unwrap();
         assert_eq!(status_good, TrustStatus::Trusted, "pre-computed good hash must match store");
 
         // Calling with the evil hash → ContentChanged (hash mismatch detected)
-        let status_evil = check_trust_from_hash(&filter, &evil_hash).unwrap();
+        let status_evil =
+            check_trust_from_hash_with_store(&filter, &evil_hash, &store_file).unwrap();
         assert!(
             matches!(status_evil, TrustStatus::ContentChanged { .. }),
             "evil hash must be rejected as ContentChanged"
@@ -572,6 +610,7 @@ mod tests {
 
     #[test]
     fn test_ci_bypass_requires_platform_ci_not_generic() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
         let temp = TempDir::new().unwrap();
         let filter = temp.path().join("filters.toml");
         std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
