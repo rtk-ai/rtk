@@ -22,7 +22,12 @@ function createFakeStorage(initial = {}) {
   };
 }
 
-function createFakeChrome({ failSetZoom = false } = {}) {
+function createFakeChrome({
+  failSetZoom = false,
+  failWindowUpdate = false,
+  tabsUpdateReturnsUndefined = false,
+  windowsCreateReturnsUndefined = false
+} = {}) {
   const calls = [];
   const windowsById = new Map();
   const tabsById = new Map();
@@ -36,6 +41,10 @@ function createFakeChrome({ failSetZoom = false } = {}) {
     windows: {
       async create(createData) {
         calls.push(["windows.create", createData]);
+        if (windowsCreateReturnsUndefined) {
+          return undefined;
+        }
+
         const windowId = nextWindowId++;
         const tabId = nextTabId++;
         const tab = { id: tabId, windowId, url: createData.url };
@@ -61,6 +70,7 @@ function createFakeChrome({ failSetZoom = false } = {}) {
       },
       async update(windowId, updateInfo) {
         calls.push(["windows.update", windowId, updateInfo]);
+        if (failWindowUpdate) throw new Error("Window update failed");
         const window = windowsById.get(windowId);
         if (!window) throw new Error("No window");
         Object.assign(window, updateInfo);
@@ -77,6 +87,10 @@ function createFakeChrome({ failSetZoom = false } = {}) {
         const tab = tabsById.get(tabId);
         if (!tab) throw new Error("No tab");
         Object.assign(tab, updateInfo);
+        if (tabsUpdateReturnsUndefined) {
+          return undefined;
+        }
+
         return tab;
       },
       async setZoom(tabId, zoom) {
@@ -154,6 +168,23 @@ test("reuses existing mini window and tab", async () => {
   assert.equal(storage.data.windowState.lastShortcutId, "s2");
 });
 
+test("serializes concurrent open calls so only one popup is created", async () => {
+  const chromeApi = createFakeChrome();
+  const storage = createFakeStorage();
+
+  const [first, second] = await Promise.all([
+    openShortcutInMiniWindow({ chromeApi, storageArea: storage, shortcut }),
+    openShortcutInMiniWindow({ chromeApi, storageArea: storage, shortcut: nextShortcut })
+  ]);
+
+  assert.equal(callsNamed(chromeApi, "windows.create").length, 1);
+  assert.equal(first.windowId, 100);
+  assert.equal(second.windowId, 100);
+  assert.equal(storage.data.windowState.windowId, 100);
+  assert.equal(storage.data.windowState.tabId, 200);
+  assert.equal(storage.data.windowState.lastShortcutId, "s2");
+});
+
 test("focuses existing window", async () => {
   const chromeApi = createFakeChrome();
   const storage = createFakeStorage();
@@ -204,6 +235,35 @@ test("resets position but keeps size", async () => {
   assert.deepEqual(lastWindowUpdate[2], { width: 640, height: 820 });
 });
 
+test("returns cleared state when reset position detects stale window", async () => {
+  const chromeApi = createFakeChrome({ failWindowUpdate: true });
+  const storage = createFakeStorage();
+  await openShortcutInMiniWindow({ chromeApi, storageArea: storage, shortcut });
+
+  const state = await resetMiniWindowPosition({ chromeApi, storageArea: storage });
+
+  assert.equal(state.windowId, null);
+  assert.equal(state.tabId, null);
+  assert.equal(storage.data.windowState.windowId, null);
+});
+
+test("returns cleared state when settings update detects stale window", async () => {
+  const chromeApi = createFakeChrome({ failWindowUpdate: true });
+  const storage = createFakeStorage();
+  await openShortcutInMiniWindow({ chromeApi, storageArea: storage, shortcut });
+
+  const state = await updateMiniWindowSettings({
+    chromeApi,
+    storageArea: storage,
+    bounds: { width: 640, height: 820 },
+    zoom: 1
+  });
+
+  assert.equal(state.windowId, null);
+  assert.equal(state.tabId, null);
+  assert.equal(storage.data.windowState.windowId, null);
+});
+
 test("saves bounds from popup windows only", async () => {
   const storage = createFakeStorage({
     windowState: {
@@ -235,4 +295,55 @@ test("saves bounds from popup windows only", async () => {
   assert.equal(saved.bounds.width, 500);
   assert.equal(saved.bounds.height, 700);
   assert.equal(storage.data.windowState.bounds.left, 10);
+});
+
+test("does not save bounds for a stale expected window id", async () => {
+  const storage = createFakeStorage({
+    windowState: {
+      windowId: 2,
+      tabId: 20,
+      bounds: { left: 1, top: 2, width: 420, height: 900 },
+      zoom: 0.9,
+      lastShortcutId: "s2"
+    }
+  });
+
+  const result = await saveBoundsFromWindow(
+    { id: 1, type: "popup", left: 10, top: 20, width: 500, height: 700 },
+    { storageArea: storage, expectedWindowId: 1 }
+  );
+
+  assert.equal(result, null);
+  assert.equal(storage.data.windowState.windowId, 2);
+  assert.deepEqual(storage.data.windowState.bounds, {
+    left: 1,
+    top: 2,
+    width: 420,
+    height: 900
+  });
+});
+
+test("falls back to existing tab id when tabs.update returns undefined", async () => {
+  const chromeApi = createFakeChrome({ tabsUpdateReturnsUndefined: true });
+  const storage = createFakeStorage();
+  await openShortcutInMiniWindow({ chromeApi, storageArea: storage, shortcut });
+
+  const result = await openShortcutInMiniWindow({
+    chromeApi,
+    storageArea: storage,
+    shortcut: nextShortcut
+  });
+
+  assert.equal(result.tabId, 200);
+  assert.equal(storage.data.windowState.tabId, 200);
+});
+
+test("throws custom error when chrome creates no usable window", async () => {
+  const chromeApi = createFakeChrome({ windowsCreateReturnsUndefined: true });
+  const storage = createFakeStorage();
+
+  await assert.rejects(
+    openShortcutInMiniWindow({ chromeApi, storageArea: storage, shortcut }),
+    /usable Discord mini window/
+  );
 });

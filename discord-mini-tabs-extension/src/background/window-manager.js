@@ -2,11 +2,19 @@ import { DEFAULT_BOUNDS } from "../shared/constants.js";
 import { clampBounds, normalizeWindowState } from "../shared/settings.js";
 import { getExtensionState, setWindowState, updateWindowState } from "./storage.js";
 
+let openQueue = Promise.resolve();
+
 function getDefaultChromeApi() {
   if (typeof chrome === "undefined") {
     throw new Error("Chrome API is unavailable.");
   }
   return chrome;
+}
+
+function enqueueOpen(operation) {
+  const next = openQueue.catch(() => undefined).then(operation);
+  openQueue = next.catch(() => undefined);
+  return next;
 }
 
 function boundsToCreateData(bounds, url) {
@@ -63,6 +71,12 @@ export async function openShortcutInMiniWindow({
   storageArea,
   shortcut
 }) {
+  return enqueueOpen(() =>
+    openShortcutInMiniWindowUnlocked({ chromeApi, storageArea, shortcut })
+  );
+}
+
+async function openShortcutInMiniWindowUnlocked({ chromeApi, storageArea, shortcut }) {
   const state = await getExtensionState(storageArea);
   const windowState = normalizeWindowState(state.windowState);
   const existing = await getWindowWithTab(chromeApi, windowState);
@@ -73,7 +87,7 @@ export async function openShortcutInMiniWindow({
       url: shortcut.url,
       active: true
     });
-    const tabId = Number.isInteger(tab.id) ? tab.id : existing.tab.id;
+    const tabId = Number.isInteger(tab?.id) ? tab.id : existing.tab.id;
     await applyZoom(chromeApi, tabId, windowState.zoom);
 
     return setWindowState(
@@ -89,8 +103,8 @@ export async function openShortcutInMiniWindow({
 
   const bounds = clampBounds(windowState.bounds ?? DEFAULT_BOUNDS);
   const createdWindow = await chromeApi.windows.create(boundsToCreateData(bounds, shortcut.url));
-  const createdTab = createdWindow.tabs?.[0] ?? null;
-  if (!Number.isInteger(createdWindow.id) || !Number.isInteger(createdTab?.id)) {
+  const createdTab = createdWindow?.tabs?.[0] ?? null;
+  if (!Number.isInteger(createdWindow?.id) || !Number.isInteger(createdTab?.id)) {
     throw new Error("Chrome did not return a usable Discord mini window.");
   }
 
@@ -152,7 +166,7 @@ export async function resetMiniWindowPosition({
         height: state.bounds.height
       });
     } catch {
-      await setWindowState({ ...state, windowId: null, tabId: null }, storageArea);
+      return setWindowState({ ...state, windowId: null, tabId: null }, storageArea);
     }
   }
 
@@ -188,7 +202,7 @@ export async function updateMiniWindowSettings({
         await applyZoom(chromeApi, state.tabId, state.zoom);
       }
     } catch {
-      await setWindowState({ ...state, windowId: null, tabId: null }, storageArea);
+      return setWindowState({ ...state, windowId: null, tabId: null }, storageArea);
     }
   }
 
@@ -200,8 +214,14 @@ export async function saveBoundsFromWindow(window, { storageArea, expectedWindow
     return null;
   }
 
-  return updateWindowState(
-    (windowState) => ({
+  const state = await getExtensionState(storageArea);
+  const windowState = normalizeWindowState(state.windowState);
+  if (windowState.windowId !== window.id) {
+    return null;
+  }
+
+  return setWindowState(
+    {
       ...windowState,
       bounds: clampBounds({
         left: window.left,
@@ -209,7 +229,7 @@ export async function saveBoundsFromWindow(window, { storageArea, expectedWindow
         width: window.width,
         height: window.height
       })
-    }),
+    },
     storageArea
   );
 }
