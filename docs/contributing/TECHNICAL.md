@@ -213,7 +213,7 @@ Key design decisions:
 
 Once the rewritten command reaches RTK:
 
-1. **Telemetry**: `telemetry::maybe_ping()` fires a non-blocking daily usage ping
+1. **Local usage DB**: `tracking` persists metrics for `rtk gain`; outbound telemetry is disabled in this tree
 2. **Clap parsing**: `Cli::try_parse()` matches against the `Commands` enum
 3. **Hook check**: `hook_check::maybe_warn()` warns if the installed hook is outdated (rate-limited to 1/day)
 4. **Integrity check**: `integrity::runtime_check()` verifies the hook's SHA-256 hash for operational commands

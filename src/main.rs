@@ -579,7 +579,7 @@ enum Commands {
     /// Show RTK adoption across Claude Code sessions
     Session {},
 
-    /// Manage telemetry consent and data (RGPD/GDPR)
+    /// Legacy telemetry subcommands (remote uploads disabled; local tracking via SQLite)
     Telemetry {
         #[command(subcommand)]
         command: core::telemetry_cmd::TelemetrySubcommand,
@@ -1387,9 +1387,6 @@ where
 }
 
 fn run_cli() -> Result<i32> {
-    // Fire-and-forget telemetry ping (1/day, non-blocking)
-    core::telemetry::maybe_ping();
-
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

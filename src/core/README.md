@@ -6,7 +6,7 @@
 
 Domain-agnostic building blocks with **no knowledge of any specific command, hook, or agent**. If a module references "git", "cargo", "claude", or any external tool by name, it does not belong here. Core is a leaf in the dependency graph — it is consumed by all other components but imports from none of them.
 
-Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, telemetry, and shared utilities.
+Owns: configuration loading, token tracking persistence, TOML filter engine, tee output recovery, display formatting, telemetry CLI helpers (no network), and shared utilities.
 
 Does **not** own: command-specific filtering logic (that's `cmds/`), hook lifecycle management (that's `src/hooks/`), or analytics dashboards (that's `analytics/`).
 
@@ -78,7 +78,7 @@ max_files = 20
 max_file_size = 1048576
 directory = "/custom/tee/dir"
 
-[telemetry]
+[telemetry]  # legacy keys; outbound pings are disabled — see docs/TELEMETRY.md
 enabled = true
 
 [hooks]

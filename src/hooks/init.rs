@@ -320,10 +320,6 @@ pub fn run(
         }
     }
 
-    if !dry_run {
-        prompt_telemetry_consent()?;
-    }
-
     if dry_run {
         print_dry_run_footer();
     } else {
@@ -441,56 +437,6 @@ pub fn save_telemetry_consent(accepted: bool) -> Result<()> {
     config
         .save()
         .context("Failed to save telemetry consent to config.toml")
-}
-
-fn prompt_telemetry_consent() -> Result<()> {
-    use std::io::{self, BufRead, IsTerminal};
-
-    let config = crate::core::config::Config::load().unwrap_or_default();
-    match config.telemetry.consent_given {
-        Some(true) => return Ok(()),
-        Some(false) => return Ok(()),
-        None => {}
-    }
-
-    if !io::stdin().is_terminal() {
-        return Ok(());
-    }
-
-    eprintln!();
-    eprintln!("--- Telemetry ---");
-    eprintln!("RTK collects anonymous usage metrics once per day to improve filters.");
-    eprintln!();
-    eprintln!("  What:    command names (not arguments), token savings, OS, version");
-    eprintln!("  Why:     prioritize filter development for the most-used commands");
-    eprintln!("  Who:     RTK AI Labs, contact@rtk-ai.app");
-    eprintln!("  Rights:  disable anytime with `rtk telemetry disable`,");
-    eprintln!("           request erasure with `rtk telemetry forget`");
-    eprintln!("  Details: https://github.com/rtk-ai/rtk/blob/master/docs/TELEMETRY.md");
-    eprintln!();
-    eprint!("Enable anonymous telemetry? [y/N] ");
-
-    let stdin = io::stdin();
-    let mut line = String::new();
-    stdin
-        .lock()
-        .read_line(&mut line)
-        .context("Failed to read user input")?;
-
-    let accepted = {
-        let response = line.trim().to_lowercase();
-        response == "y" || response == "yes"
-    };
-
-    save_telemetry_consent(accepted)?;
-
-    if accepted {
-        eprintln!("  Telemetry enabled. Disable anytime: rtk telemetry disable");
-    } else {
-        eprintln!("  Telemetry disabled.");
-    }
-
-    Ok(())
 }
 
 fn print_manual_instructions(hook_command: &str, include_opencode: bool) {

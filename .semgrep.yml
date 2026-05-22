@@ -33,15 +33,15 @@ rules:
       - pattern: TcpListener::$METHOD(...)
     message: >
       Raw socket usage detected. RTK is a CLI proxy — it should not
-      open network connections directly. Use ureq in telemetry only.
+      open network connections directly.
     languages: [rust]
     severity: ERROR
 
   - id: reqwest-forbidden
     pattern: reqwest::$METHOD(...)
     message: >
-      reqwest is forbidden in RTK. The project uses ureq for HTTP
-      (telemetry only). Adding reqwest increases binary size and attack surface.
+      reqwest is forbidden in RTK. Prefer std::process patterns and local-only
+      usage tracking rather than outbound HTTP clients.
     languages: [rust]
     severity: ERROR
 
@@ -60,17 +60,6 @@ rules:
       Direct interpreter/downloader execution detected.
       RTK proxies user commands — it should never spawn interpreters
       or download tools on its own.
-    languages: [rust]
-    severity: ERROR
-
-  - id: ureq-outside-telemetry
-    pattern: ureq::$METHOD(...)
-    paths:
-      exclude:
-        - /src/core/telemetry.rs
-    message: >
-      ureq usage outside of src/core/telemetry.rs.
-      HTTP calls are restricted to the telemetry module to prevent data exfiltration.
     languages: [rust]
     severity: ERROR
 
