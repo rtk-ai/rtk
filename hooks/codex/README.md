@@ -4,6 +4,8 @@
 
 ## Specifics
 
-- Prompt-level guidance via awareness document -- no programmatic hook
+- Native `PreToolUse` hook via `hooks.json`
+- Returns `hookSpecificOutput.updatedInput` for transparent command rewrite
 - `rtk-awareness.md` is injected into `AGENTS.md` with an `@RTK.md` reference
-- Installed to `$CODEX_HOME` when set, otherwise `~/.codex/`, by `rtk init --codex`
+- Installed to project `.codex/hooks.json` by `rtk init --codex`
+- Installed to `$CODEX_HOME/hooks.json` when set, otherwise `~/.codex/hooks.json`, by `rtk init -g --codex`
