@@ -28,6 +28,7 @@ export function createServiceWorkerController({
   debounceMs = 400
 }) {
   const boundsSaveTimers = new Map();
+  const boundsSaveTokens = new Map();
   let shortcutMutationQueue = Promise.resolve();
 
   function enqueueShortcutMutation(operation) {
@@ -141,18 +142,32 @@ export function createServiceWorkerController({
     }
 
     const windowId = changedWindow.id;
+    const token = Symbol("bounds-save");
+    boundsSaveTokens.set(windowId, token);
     clearTimeoutFn(boundsSaveTimers.get(windowId));
     const timerId = setTimeoutFn(async () => {
       if (boundsSaveTimers.get(windowId) === timerId) {
         boundsSaveTimers.delete(windowId);
       }
+      if (boundsSaveTokens.get(windowId) !== token) {
+        return;
+      }
+
       try {
         const state = await getExtensionState();
+        if (boundsSaveTokens.get(windowId) !== token) {
+          return;
+        }
+
         await saveBoundsFromWindow(changedWindow, {
           expectedWindowId: state.windowState.windowId
         });
       } catch {
         // Background window events must not surface unhandled storage failures.
+      } finally {
+        if (boundsSaveTokens.get(windowId) === token) {
+          boundsSaveTokens.delete(windowId);
+        }
       }
     }, debounceMs);
     boundsSaveTimers.set(windowId, timerId);

@@ -259,3 +259,71 @@ test("unrelated popup bounds events do not cancel pending mini save", async () =
   assert.equal(storage.data.windowState.bounds.left, 20);
   assert.equal(storage.data.windowState.bounds.top, 30);
 });
+
+test("ignores stale in-flight bounds callbacks for the same window", async () => {
+  const storage = createFakeStorage({
+    windowState: {
+      windowId: 1,
+      tabId: 10,
+      bounds: { left: 1, top: 2, width: 420, height: 900 },
+      zoom: 0.9,
+      lastShortcutId: "s1"
+    }
+  });
+  const scheduled = [];
+  const readDeferrals = [];
+  let nextTimerId = 1;
+  const readState = () => ({
+    shortcuts: storage.data.shortcuts ?? [],
+    windowState: storage.data.windowState
+  });
+  const controller = createController(storage, {
+    getExtensionState() {
+      const deferred = createDeferred();
+      readDeferrals.push(deferred);
+      return deferred.promise;
+    },
+    setTimeoutFn(callback) {
+      const timer = { id: nextTimerId++, callback, cancelled: false };
+      scheduled.push(timer);
+      return timer.id;
+    },
+    clearTimeoutFn(timerId) {
+      const timer = scheduled.find((item) => item.id === timerId);
+      if (timer) {
+        timer.cancelled = true;
+      }
+    },
+    debounceMs: 400
+  });
+
+  await controller.handleBoundsChanged({
+    id: 1,
+    type: "popup",
+    left: 10,
+    top: 30,
+    width: 500,
+    height: 700
+  });
+  const firstCallback = scheduled.at(-1).callback();
+  await Promise.resolve();
+
+  await controller.handleBoundsChanged({
+    id: 1,
+    type: "popup",
+    left: 20,
+    top: 40,
+    width: 510,
+    height: 710
+  });
+  const secondCallback = scheduled.at(-1).callback();
+  await Promise.resolve();
+
+  readDeferrals[1].resolve(readState());
+  await secondCallback;
+  readDeferrals[0].resolve(readState());
+  await firstCallback;
+
+  assert.equal(storage.data.windowState.bounds.left, 20);
+  assert.equal(storage.data.windowState.bounds.top, 40);
+});
