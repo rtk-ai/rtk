@@ -31,6 +31,12 @@ function createDeferred() {
   return { promise, resolve };
 }
 
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 function createController(storage, overrides = {}) {
   return createServiceWorkerController({
     chromeApi: {
@@ -306,7 +312,7 @@ test("ignores stale in-flight bounds callbacks for the same window", async () =>
     height: 700
   });
   const firstCallback = scheduled.at(-1).callback();
-  await Promise.resolve();
+  await flushMicrotasks();
 
   await controller.handleBoundsChanged({
     id: 1,
@@ -317,11 +323,77 @@ test("ignores stale in-flight bounds callbacks for the same window", async () =>
     height: 710
   });
   const secondCallback = scheduled.at(-1).callback();
-  await Promise.resolve();
+  await flushMicrotasks();
 
   readDeferrals[1].resolve(readState());
   await secondCallback;
   readDeferrals[0].resolve(readState());
+  await firstCallback;
+
+  assert.equal(storage.data.windowState.bounds.left, 20);
+  assert.equal(storage.data.windowState.bounds.top, 40);
+});
+
+test("ignores stale bounds callbacks that are already inside save", async () => {
+  const storage = createFakeStorage({
+    windowState: {
+      windowId: 1,
+      tabId: 10,
+      bounds: { left: 1, top: 2, width: 420, height: 900 },
+      zoom: 0.9,
+      lastShortcutId: "s1"
+    }
+  });
+  const scheduled = [];
+  const saveDeferrals = [];
+  let nextTimerId = 1;
+  const controller = createController(storage, {
+    saveBoundsFromWindow(window, options) {
+      const deferred = createDeferred();
+      saveDeferrals.push({ deferred, window, options });
+      return deferred.promise.then(() =>
+        saveBoundsFromWindow(window, { storageArea: storage, ...options })
+      );
+    },
+    setTimeoutFn(callback) {
+      const timer = { id: nextTimerId++, callback, cancelled: false };
+      scheduled.push(timer);
+      return timer.id;
+    },
+    clearTimeoutFn(timerId) {
+      const timer = scheduled.find((item) => item.id === timerId);
+      if (timer) {
+        timer.cancelled = true;
+      }
+    },
+    debounceMs: 400
+  });
+
+  await controller.handleBoundsChanged({
+    id: 1,
+    type: "popup",
+    left: 10,
+    top: 30,
+    width: 500,
+    height: 700
+  });
+  const firstCallback = scheduled.at(-1).callback();
+  await flushMicrotasks();
+
+  await controller.handleBoundsChanged({
+    id: 1,
+    type: "popup",
+    left: 20,
+    top: 40,
+    width: 510,
+    height: 710
+  });
+  const secondCallback = scheduled.at(-1).callback();
+  await flushMicrotasks();
+
+  saveDeferrals[1].deferred.resolve();
+  await secondCallback;
+  saveDeferrals[0].deferred.resolve();
   await firstCallback;
 
   assert.equal(storage.data.windowState.bounds.left, 20);

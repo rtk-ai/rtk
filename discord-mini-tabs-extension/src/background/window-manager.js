@@ -209,7 +209,10 @@ export async function updateMiniWindowSettings({
   return state;
 }
 
-export async function saveBoundsFromWindow(window, { storageArea, expectedWindowId }) {
+export async function saveBoundsFromWindow(
+  window,
+  { storageArea, expectedWindowId, shouldSave = () => true }
+) {
   if (!window || window.type !== "popup" || window.id !== expectedWindowId) {
     return null;
   }
@@ -217,6 +220,10 @@ export async function saveBoundsFromWindow(window, { storageArea, expectedWindow
   const state = await getExtensionState(storageArea);
   const windowState = normalizeWindowState(state.windowState);
   if (windowState.windowId !== window.id) {
+    return null;
+  }
+
+  if (!(await shouldSave())) {
     return null;
   }
 

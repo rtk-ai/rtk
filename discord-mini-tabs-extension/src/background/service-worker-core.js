@@ -160,7 +160,8 @@ export function createServiceWorkerController({
         }
 
         await saveBoundsFromWindow(changedWindow, {
-          expectedWindowId: state.windowState.windowId
+          expectedWindowId: state.windowState.windowId,
+          shouldSave: () => boundsSaveTokens.get(windowId) === token
         });
       } catch {
         // Background window events must not surface unhandled storage failures.
