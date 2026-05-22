@@ -256,10 +256,10 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
         return Ok(crate::core::utils::exit_code_from_output(&output, "aws"));
     }
 
-    let filtered = match json_cmd::filter_json_string(&raw, JSON_COMPRESS_DEPTH) {
-        Ok(schema) => {
-            println!("{}", schema);
-            schema
+    let filtered = match json_cmd::filter_json_compact(&raw, JSON_COMPRESS_DEPTH) {
+        Ok(compact) => {
+            println!("{}", compact);
+            compact
         }
         Err(_) => {
             // Fallback: print raw (maybe not JSON)
@@ -2748,5 +2748,22 @@ upload: file10.txt to s3://bucket/file10.txt
         let result = filter_cfn_events(&json).unwrap();
         // Should report all 30 failures, not capped at MAX_ITEMS (20)
         assert!(result.text.contains("30 failed"));
+    }
+
+    #[test]
+    fn test_generic_filter_preserves_actual_string_values() {
+        // Regression test for #1228: run_generic was calling filter_json_string (schema-only)
+        // which replaced actual values with type names ("string"). It should use
+        // filter_json_compact so LLMs see "DynamoDBFullAccessInline", not "string".
+        let json = r#"{"PolicyNames": ["DynamoDBFullAccessInline"]}"#;
+        let output = crate::cmds::system::json_cmd::filter_json_compact(json, 4).unwrap();
+        assert!(
+            output.contains("DynamoDBFullAccessInline"),
+            "Actual policy name must be preserved in output, got: {output}"
+        );
+        assert!(
+            !output.contains("\"string\"") && !output.contains(": string"),
+            "Type placeholders must not replace actual values, got: {output}"
+        );
     }
 }

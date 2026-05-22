@@ -521,10 +521,13 @@ fn run_log(
     };
 
     // Only add --no-merges if user didn't explicitly request merge commits
+    // AND the user is not using a custom format. Custom --format/--pretty/--oneline
+    // users are typically scripting (date extraction, SHA lookups, etc.) and need
+    // exact commit selection: silently skipping merge commits breaks their output.
     let wants_merges = args
         .iter()
         .any(|arg| arg == "--merges" || arg == "--min-parents=2");
-    if !wants_merges {
+    if !wants_merges && !has_format_flag {
         cmd.arg("--no-merges");
     }
 
@@ -612,14 +615,17 @@ pub(crate) fn filter_log_output(
     let truncate_width = if user_set_limit { 120 } else { 80 };
 
     // When user specified their own format (--oneline, --pretty, --format),
-    // RTK did not inject ---END--- markers. Use simple line-based truncation.
+    // RTK did not inject ---END--- markers. Pass output through verbatim — do not
+    // truncate individual lines. Format output is often consumed programmatically
+    // (date extraction, SHA lookups, scripts) and must not be silently corrupted.
+    // RTK's only contribution here is the commit-count limit (-50 or user's -N).
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
         return lines
             .iter()
             .take(max_lines)
-            .map(|l| truncate_line(l, truncate_width))
+            .copied()
             .collect::<Vec<_>>()
             .join("\n");
     }
@@ -2584,6 +2590,39 @@ no changes added to commit (use "git add" and/or "git commit -a")
         // user_set_limit=false means cap at limit
         let result = filter_log_output(oneline_output, 3, false, true);
         assert_eq!(result.lines().count(), 3);
+    }
+
+    /// Regression: `git log --format=%H` must not truncate full SHA hashes.
+    /// Before fix, user-format output was truncated at 80 chars which corrupted
+    /// programmatic output like 40-char SHAs, date strings, and custom fields.
+    #[test]
+    fn test_filter_log_output_user_format_no_line_truncation() {
+        // 40-char SHA, the canonical case
+        let sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let output = format!("{}\n{}\n", sha, sha);
+        let result = filter_log_output(&output, 50, false, true);
+        assert_eq!(result.lines().count(), 2);
+        for line in result.lines() {
+            assert_eq!(line, sha, "SHA must not be truncated by user-format filter");
+        }
+    }
+
+    /// Regression: multi-line user formats must not be truncated by line-count cap.
+    /// `--format='%H%n%s'` produces 2 lines per commit; a 50-commit -50 limit
+    /// yields 100 lines but a 50-line cap would silently drop 25 commits.
+    #[test]
+    fn test_filter_log_output_user_format_multiline() {
+        // Simulate --format='%H%n%s': each commit = hash line + subject line
+        let block = "a1b2c3d4 feat: add something\nfix: also this\n";
+        let output: String = block.repeat(5); // 5 commits, 10 lines
+
+        // user_set_limit=false, limit=5 — must cap at 5 LINES, not 5 commits
+        let result = filter_log_output(&output, 5, false, true);
+        assert_eq!(result.lines().count(), 5);
+
+        // user_set_limit=true — pass all lines through unchanged
+        let result = filter_log_output(&output, 5, true, true);
+        assert_eq!(result.lines().count(), 10);
     }
 
     /// Regression test: `git branch <name>` must create, not list.
