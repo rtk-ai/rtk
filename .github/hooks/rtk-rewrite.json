@@ -1,1 +1,12 @@
-{"hooks":{"PreToolUse":[{"type":"command","command":"'/Volumes/HomeExt/Users/Nicolas/.cargo/bin/rtk' hook auto","cwd":".","timeout":5}]}}
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "rtk hook auto",
+        "cwd": ".",
+        "timeout": 5
+      }
+    ]
+  }
+}
