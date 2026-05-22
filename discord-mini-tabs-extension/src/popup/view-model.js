@@ -1,4 +1,4 @@
-import { DEFAULT_BOUNDS, SHORTCUT_TYPES } from "../shared/constants.js";
+import { DEFAULT_BOUNDS, DEFAULT_ZOOM, SHORTCUT_TYPES } from "../shared/constants.js";
 import { filterShortcuts, splitShortcutsByType } from "../shared/shortcuts.js";
 
 export function formatWindowStatus(windowState) {
@@ -20,7 +20,7 @@ export function buildPopupModel({ shortcuts, query, activeType, windowState }) {
 
   return {
     status: formatWindowStatus(windowState),
-    zoomLabel: formatZoomPercent(windowState?.zoom),
+    zoomLabel: formatZoomPercent(windowState?.zoom ?? DEFAULT_ZOOM),
     boundsLabel: `${width} x ${height}`,
     activeType: normalizedActiveType,
     activeShortcuts: groupedShortcuts[normalizedActiveType],

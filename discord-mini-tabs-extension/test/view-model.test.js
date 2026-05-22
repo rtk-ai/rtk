@@ -61,3 +61,17 @@ test("filters popup shortcuts before applying active type", () => {
   assert.equal(model.activeShortcuts.length, 1);
   assert.equal(model.activeShortcuts[0].id, "b");
 });
+
+test("defaults popup zoom label when window state has no zoom", () => {
+  const model = buildPopupModel({
+    shortcuts,
+    query: "",
+    activeType: "text",
+    windowState: {
+      windowId: null,
+      bounds: { width: 420, height: 900 }
+    }
+  });
+
+  assert.equal(model.zoomLabel, "90%");
+});
