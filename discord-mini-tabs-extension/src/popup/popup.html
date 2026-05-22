@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Discord Mini Tabs</title>
+    <link rel="stylesheet" href="./popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Discord Mini Tabs</h1>
+          <p id="windowMeta">Closed | 420 x 900 | 90%</p>
+        </div>
+        <button id="saveCurrentButton" class="primary" type="button">Save current</button>
+      </header>
+
+      <p id="feedback" class="feedback" hidden></p>
+
+      <section class="panel controls" aria-label="Window controls">
+        <button id="focusButton" type="button">Focus</button>
+        <button id="closeButton" type="button">Close</button>
+        <button id="resetButton" type="button">Reset position</button>
+      </section>
+
+      <section class="panel shortcuts" aria-label="Shortcuts">
+        <input id="searchInput" type="search" placeholder="Search shortcuts" autocomplete="off">
+
+        <div class="segmented" role="tablist" aria-label="Shortcut type">
+          <button id="textTab" type="button" class="active">
+            Text <span id="textCount">0</span>
+          </button>
+          <button id="voiceTab" type="button">
+            Voice <span id="voiceCount">0</span>
+          </button>
+        </div>
+
+        <div id="shortcutList" class="shortcut-list" aria-live="polite"></div>
+      </section>
+
+      <form id="shortcutForm" class="panel form" aria-label="Shortcut form">
+        <h2 id="formTitle">Add shortcut</h2>
+        <input id="editingId" type="hidden">
+        <label>
+          Name
+          <input id="shortcutName" type="text" autocomplete="off" required>
+        </label>
+        <label>
+          URL
+          <input id="shortcutUrl" type="url" autocomplete="off" required>
+        </label>
+        <label>
+          Type
+          <select id="shortcutType">
+            <option value="text">Text</option>
+            <option value="voice">Voice</option>
+          </select>
+        </label>
+        <div class="form-actions">
+          <button id="cancelEditButton" type="button">Cancel</button>
+          <button class="primary" type="submit">Save shortcut</button>
+        </div>
+      </form>
+
+      <form id="settingsForm" class="panel settings" aria-label="Window settings">
+        <label>
+          Width
+          <input id="widthInput" type="number" min="320" max="1200" step="1" value="420">
+        </label>
+        <label>
+          Height
+          <input id="heightInput" type="number" min="480" max="1400" step="1" value="900">
+        </label>
+        <label>
+          Zoom
+          <input id="zoomInput" type="number" min="67" max="125" step="1" value="90">
+        </label>
+        <button class="primary" type="submit">Apply</button>
+      </form>
+    </main>
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>

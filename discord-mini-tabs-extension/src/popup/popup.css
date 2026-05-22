@@ -1,0 +1,232 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #121318;
+  color: #f3f4f8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  width: 380px;
+  min-height: 560px;
+  background: #121318;
+  color: #f3f4f8;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  min-height: 34px;
+  border: 1px solid #363946;
+  border-radius: 6px;
+  background: #20222b;
+  color: #f3f4f8;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+button:hover {
+  border-color: #5865f2;
+}
+
+button.primary {
+  border-color: #5865f2;
+  background: #5865f2;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+input,
+select {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid #363946;
+  border-radius: 6px;
+  padding: 7px 9px;
+  background: #171922;
+  color: #f3f4f8;
+}
+
+input::placeholder {
+  color: #858b9b;
+}
+
+label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: #c4c8d4;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.shell {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+h1 {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.2;
+}
+
+p {
+  margin: 0;
+}
+
+#windowMeta {
+  margin-top: 3px;
+  color: #aeb3c2;
+  font-size: 12px;
+}
+
+.feedback {
+  border: 1px solid #6b3a3a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #2a171b;
+  color: #ffb8bd;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.feedback[hidden] {
+  display: none;
+}
+
+.panel {
+  border: 1px solid #2d303a;
+  border-radius: 8px;
+  background: #191b23;
+  padding: 10px;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.35fr;
+  gap: 8px;
+}
+
+.shortcuts {
+  display: grid;
+  gap: 9px;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.segmented button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.segmented button.active {
+  border-color: #5865f2;
+  background: #2f344f;
+}
+
+.segmented span {
+  min-width: 20px;
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: #11131a;
+  color: #d9dcff;
+  font-size: 11px;
+}
+
+.shortcut-list {
+  display: grid;
+  gap: 8px;
+  min-height: 58px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.shortcut-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  border: 1px solid #30333e;
+  border-radius: 8px;
+  padding: 9px;
+  background: #20222b;
+}
+
+.shortcut-name {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.shortcut-url {
+  margin-top: 4px;
+  color: #aeb3c2;
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.shortcut-actions {
+  display: grid;
+  grid-template-columns: repeat(3, 32px);
+  gap: 5px;
+}
+
+.shortcut-actions button {
+  width: 32px;
+  min-height: 30px;
+  padding: 0;
+}
+
+.empty {
+  display: grid;
+  min-height: 58px;
+  place-items: center;
+  color: #858b9b;
+  font-size: 12px;
+}
+
+.form {
+  display: grid;
+  gap: 9px;
+}
+
+.form-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr;
+  gap: 8px;
+}
+
+.settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
