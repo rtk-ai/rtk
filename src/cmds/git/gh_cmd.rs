@@ -4,6 +4,7 @@
 //! Focuses on extracting essential information from JSON outputs.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
 use crate::git;
 use anyhow::Result;
@@ -260,7 +261,7 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
             format!("  {} #{} {} ({})", icon, number, truncate(title, 60), author)
         })
         .collect();
-    const MAX_LIST: usize = 20;
+    const MAX_LIST: usize = CAP_LIST;
     for line in all_lines.iter().take(MAX_LIST) {
         out.push_str(&format!("{}\n", line));
     }
@@ -607,7 +608,7 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
             format!("  {} #{} {}", icon, number, truncate(title, 60))
         })
         .collect();
-    const MAX_LIST: usize = 20;
+    const MAX_LIST: usize = CAP_LIST;
     for line in all_lines.iter().take(MAX_LIST) {
         out.push_str(&format!("{}\n", line));
     }

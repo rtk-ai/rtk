@@ -12,6 +12,7 @@
 
 use super::git;
 use crate::core::runner::{self, RunOptions};
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::Result;
 use lazy_static::lazy_static;
@@ -315,7 +316,7 @@ fn format_mr_list(json: &Value, ultra_compact: bool) -> String {
             format!("  {} !{} {} ({})", icon, iid, truncate(title, 60), author)
         })
         .collect();
-    const MAX_LIST: usize = 20;
+    const MAX_LIST: usize = CAP_LIST;
     for line in all_lines.iter().take(MAX_LIST) {
         filtered.push_str(&format!("{}\n", line));
     }
@@ -540,7 +541,7 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
             format!("  {} #{} {}", icon, iid, truncate(title, 60))
         })
         .collect();
-    const MAX_LIST: usize = 20;
+    const MAX_LIST: usize = CAP_LIST;
     for line in all_lines.iter().take(MAX_LIST) {
         filtered.push_str(&format!("{}\n", line));
     }
@@ -661,7 +662,7 @@ fn format_ci_list(json: &Value, ultra_compact: bool) -> String {
             format!("  {} #{} {} ({})", icon, id, status, ref_name)
         })
         .collect();
-    const MAX_CI_LIST: usize = 10;
+    const MAX_CI_LIST: usize = CAP_WARNINGS;
     for line in all_lines.iter().take(MAX_CI_LIST) {
         filtered.push_str(&format!("{}\n", line));
     }

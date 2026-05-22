@@ -1,10 +1,12 @@
 //! Filters pytest output to show only failures and the summary line.
 
 use crate::core::runner;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, tool_exists, truncate};
 use anyhow::Result;
 
-const MAX_XFAIL: usize = 10;
+const MAX_XFAIL: usize = CAP_WARNINGS;
+const MAX_PYTEST_FAILURES: usize = CAP_WARNINGS;
 
 #[derive(Debug, PartialEq)]
 enum ParseState {
@@ -225,7 +227,7 @@ fn build_pytest_summary(
     // Show failures (limit to key information)
     result.push_str("\nFailures:\n");
 
-    for (i, failure) in failures.iter().take(5).enumerate() {
+    for (i, failure) in failures.iter().take(MAX_PYTEST_FAILURES).enumerate() {
         // Extract test name and key error info
         let lines: Vec<&str> = failure.lines().collect();
 
@@ -270,8 +272,11 @@ fn build_pytest_summary(
         }
     }
 
-    if failures.len() > 5 {
-        result.push_str(&format!("\n… +{} more failures\n", failures.len() - 5));
+    if failures.len() > MAX_PYTEST_FAILURES {
+        result.push_str(&format!(
+            "\n… +{} more failures\n",
+            failures.len() - MAX_PYTEST_FAILURES
+        ));
         let all_failures = failures.join("\n\n");
         if let Some(hint) = crate::core::tee::force_tee_hint(&all_failures, "pytest-failures") {
             result.push_str(&format!("  {}\n", hint));

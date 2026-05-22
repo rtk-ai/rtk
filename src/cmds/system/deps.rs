@@ -1,10 +1,15 @@
 //! Summarizes project dependencies from lock files and manifests.
 
 use crate::core::tracking;
+use crate::core::truncate::{reduced, CAP_WARNINGS};
 use anyhow::Result;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
+
+const MAX_DEPS: usize = CAP_WARNINGS;
+// dev deps are secondary to prod — show fewer.
+const MAX_DEV_DEPS: usize = reduced(CAP_WARNINGS, 5);
 
 /// Summarize project dependencies
 pub fn run(path: &Path, verbose: u8) -> Result<()> {
@@ -107,20 +112,20 @@ fn summarize_cargo_str(path: &Path) -> Result<String> {
 
     if !deps.is_empty() {
         out.push_str(&format!("  Dependencies ({}):\n", deps.len()));
-        for d in deps.iter().take(10) {
+        for d in deps.iter().take(MAX_DEPS) {
             out.push_str(&format!("    {}\n", d));
         }
-        if deps.len() > 10 {
-            out.push_str(&format!("    ... +{} more\n", deps.len() - 10));
+        if deps.len() > MAX_DEPS {
+            out.push_str(&format!("    ... +{} more\n", deps.len() - MAX_DEPS));
         }
     }
     if !dev_deps.is_empty() {
         out.push_str(&format!("  Dev ({}):\n", dev_deps.len()));
-        for d in dev_deps.iter().take(5) {
+        for d in dev_deps.iter().take(MAX_DEV_DEPS) {
             out.push_str(&format!("    {}\n", d));
         }
-        if dev_deps.len() > 5 {
-            out.push_str(&format!("    ... +{} more\n", dev_deps.len() - 5));
+        if dev_deps.len() > MAX_DEV_DEPS {
+            out.push_str(&format!("    ... +{} more\n", dev_deps.len() - MAX_DEV_DEPS));
         }
     }
     Ok(out)
@@ -138,8 +143,8 @@ fn summarize_package_json_str(path: &Path) -> Result<String> {
     if let Some(deps) = json.get("dependencies").and_then(|v| v.as_object()) {
         out.push_str(&format!("  Dependencies ({}):\n", deps.len()));
         for (i, (name, version)) in deps.iter().enumerate() {
-            if i >= 10 {
-                out.push_str(&format!("    ... +{} more\n", deps.len() - 10));
+            if i >= MAX_DEPS {
+                out.push_str(&format!("    ... +{} more\n", deps.len() - MAX_DEPS));
                 break;
             }
             out.push_str(&format!(
@@ -152,8 +157,8 @@ fn summarize_package_json_str(path: &Path) -> Result<String> {
     if let Some(dev_deps) = json.get("devDependencies").and_then(|v| v.as_object()) {
         out.push_str(&format!("  Dev Dependencies ({}):\n", dev_deps.len()));
         for (i, (name, _)) in dev_deps.iter().enumerate() {
-            if i >= 5 {
-                out.push_str(&format!("    ... +{} more\n", dev_deps.len() - 5));
+            if i >= MAX_DEV_DEPS {
+                out.push_str(&format!("    ... +{} more\n", dev_deps.len() - MAX_DEV_DEPS));
                 break;
             }
             out.push_str(&format!("    {}\n", name));
@@ -181,11 +186,11 @@ fn summarize_requirements_str(path: &Path) -> Result<String> {
     }
 
     out.push_str(&format!("  Packages ({}):\n", deps.len()));
-    for d in deps.iter().take(15) {
+    for d in deps.iter().take(MAX_DEPS) {
         out.push_str(&format!("    {}\n", d));
     }
-    if deps.len() > 15 {
-        out.push_str(&format!("    ... +{} more\n", deps.len() - 15));
+    if deps.len() > MAX_DEPS {
+        out.push_str(&format!("    ... +{} more\n", deps.len() - MAX_DEPS));
     }
     Ok(out)
 }
@@ -216,11 +221,11 @@ fn summarize_pyproject_str(path: &Path) -> Result<String> {
 
     if !deps.is_empty() {
         out.push_str(&format!("  Dependencies ({}):\n", deps.len()));
-        for d in deps.iter().take(10) {
+        for d in deps.iter().take(MAX_DEPS) {
             out.push_str(&format!("    {}\n", d));
         }
-        if deps.len() > 10 {
-            out.push_str(&format!("    ... +{} more\n", deps.len() - 10));
+        if deps.len() > MAX_DEPS {
+            out.push_str(&format!("    ... +{} more\n", deps.len() - MAX_DEPS));
         }
     }
     Ok(out)
@@ -259,11 +264,11 @@ fn summarize_gomod_str(path: &Path) -> Result<String> {
     }
     if !deps.is_empty() {
         out.push_str(&format!("  Dependencies ({}):\n", deps.len()));
-        for d in deps.iter().take(10) {
+        for d in deps.iter().take(MAX_DEPS) {
             out.push_str(&format!("    {}\n", d));
         }
-        if deps.len() > 10 {
-            out.push_str(&format!("    ... +{} more\n", deps.len() - 10));
+        if deps.len() > MAX_DEPS {
+            out.push_str(&format!("    ... +{} more\n", deps.len() - MAX_DEPS));
         }
     }
     Ok(out)

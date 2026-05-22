@@ -2,6 +2,7 @@
 
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter, StreamFilter};
+use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use std::cmp::Ordering;
@@ -527,7 +528,8 @@ fn filter_cargo_install(output: &str) -> String {
         }
         result.push_str("═══════════════════════════════════════\n");
 
-        for (i, err) in errors.iter().enumerate().take(15) {
+        const MAX_INSTALL_ERRORS: usize = CAP_ERRORS;
+        for (i, err) in errors.iter().enumerate().take(MAX_INSTALL_ERRORS) {
             result.push_str(err);
             result.push('\n');
             if i < errors.len() - 1 {
@@ -535,8 +537,11 @@ fn filter_cargo_install(output: &str) -> String {
             }
         }
 
-        if errors.len() > 15 {
-            result.push_str(&format!("\n… +{} more issues\n", errors.len() - 15));
+        if errors.len() > MAX_INSTALL_ERRORS {
+            result.push_str(&format!(
+                "\n… +{} more issues\n",
+                errors.len() - MAX_INSTALL_ERRORS
+            ));
             let all_errors = errors.join("\n\n");
             if let Some(hint) = crate::core::tee::force_tee_hint(&all_errors, "cargo-build-errors")
             {
@@ -832,15 +837,19 @@ fn filter_cargo_build(output: &str) -> String {
         "cargo build: {} errors, {} warnings ({} crates)\n═══════════════════════════════════════\n",
         handler.error_count, handler.warnings, handler.compiled
     );
-    for (i, blk) in blocks.iter().enumerate().take(15) {
+    const MAX_CHECK_BLOCKS: usize = CAP_ERRORS;
+    for (i, blk) in blocks.iter().enumerate().take(MAX_CHECK_BLOCKS) {
         result.push_str(&blk.join("\n"));
         result.push('\n');
         if i < blocks.len() - 1 {
             result.push('\n');
         }
     }
-    if blocks.len() > 15 {
-        result.push_str(&format!("\n… +{} more issues\n", blocks.len() - 15));
+    if blocks.len() > MAX_CHECK_BLOCKS {
+        result.push_str(&format!(
+            "\n… +{} more issues\n",
+            blocks.len() - MAX_CHECK_BLOCKS
+        ));
         let all_blocks: String = blocks
             .iter()
             .map(|b| b.join("\n"))
@@ -1041,7 +1050,7 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
     if !failures.is_empty() {
         result.push_str(&format!("FAILURES ({}):\n", failures.len()));
         result.push_str("═══════════════════════════════════════\n");
-        const MAX_FAILURES: usize = 10;
+        const MAX_FAILURES: usize = CAP_WARNINGS;
         for (i, failure) in failures.iter().enumerate().take(MAX_FAILURES) {
             result.push_str(&format!("{}. {}\n", i + 1, truncate(failure, 200)));
         }
@@ -1201,15 +1210,19 @@ fn filter_cargo_clippy(output: &str) -> String {
 
     // Show full error blocks so developers can see what needs fixing
     if !error_blocks.is_empty() {
+        const MAX_CLIPPY_ERRORS: usize = CAP_WARNINGS;
         result.push_str("\nErrors:\n");
-        for block in error_blocks.iter().take(10) {
+        for block in error_blocks.iter().take(MAX_CLIPPY_ERRORS) {
             for block_line in block {
                 result.push_str(&format!("  {}\n", truncate(block_line, 160)));
             }
             result.push('\n');
         }
-        if error_blocks.len() > 10 {
-            result.push_str(&format!("  … +{} more errors\n", error_blocks.len() - 10));
+        if error_blocks.len() > MAX_CLIPPY_ERRORS {
+            result.push_str(&format!(
+                "  … +{} more errors\n",
+                error_blocks.len() - MAX_CLIPPY_ERRORS
+            ));
             let all_blocks: String = error_blocks
                 .iter()
                 .map(|b| b.join("\n"))
@@ -1227,7 +1240,7 @@ fn filter_cargo_clippy(output: &str) -> String {
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
     rule_counts.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
-    const MAX_RULES: usize = 15;
+    const MAX_RULES: usize = CAP_LIST;
     for (rule, locations) in rule_counts.iter().take(MAX_RULES) {
         result.push_str(&format!("  {} ({}x)\n", rule, locations.len()));
         for loc in locations.iter().take(3) {

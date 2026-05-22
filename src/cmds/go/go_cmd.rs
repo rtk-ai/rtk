@@ -2,6 +2,7 @@
 
 use crate::core::runner;
 use crate::core::tracking;
+use crate::core::truncate::CAP_ERRORS;
 use crate::core::utils::{exit_code_from_output, resolved_command, truncate};
 use crate::golangci_cmd;
 use anyhow::{Context, Result};
@@ -587,7 +588,7 @@ pub(crate) fn filter_go_build(output: &str) -> String {
     result.push_str(&format!("Go build: {} errors\n", errors.len()));
     result.push_str("═══════════════════════════════════════\n");
 
-    const MAX_GO_BUILD_ERRORS: usize = 20;
+    const MAX_GO_BUILD_ERRORS: usize = CAP_ERRORS;
     for (i, error) in errors.iter().take(MAX_GO_BUILD_ERRORS).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(error, 120)));
     }
@@ -679,7 +680,7 @@ fn filter_go_vet(output: &str) -> String {
     result.push_str(&format!("Go vet: {} issues\n", issues.len()));
     result.push_str("═══════════════════════════════════════\n");
 
-    const MAX_GO_VET_ISSUES: usize = 20;
+    const MAX_GO_VET_ISSUES: usize = CAP_ERRORS;
     for (i, issue) in issues.iter().take(MAX_GO_VET_ISSUES).enumerate() {
         result.push_str(&format!("{}. {}\n", i + 1, truncate(issue, 120)));
     }

@@ -3,6 +3,7 @@
 use crate::core::config;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
 use crate::core::utils::{package_manager_exec, resolved_command, truncate};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
@@ -282,7 +283,7 @@ fn filter_eslint_json(output: &str) -> String {
     }
 
     // Show top files with most issues, plus the top rules in each
-    const MAX_FILES: usize = 10;
+    const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
     for (file_result, count) in by_file.iter().take(MAX_FILES) {
         let short_path = compact_path(&file_result.file_path);
@@ -408,7 +409,7 @@ fn filter_pylint_json(output: &str) -> String {
     }
 
     // Show top files
-    const MAX_FILES: usize = 10;
+    const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
     for (file, count) in file_counts.iter().take(MAX_FILES) {
         let short_path = compact_path(file);
@@ -472,7 +473,7 @@ fn filter_generic_lint(output: &str) -> String {
     result.push_str(&format!("Lint: {} errors, {} warnings\n", errors, warnings));
     result.push_str("═══════════════════════════════════════\n");
 
-    const MAX_ISSUES: usize = 20;
+    const MAX_ISSUES: usize = CAP_ERRORS;
     for issue in issues.iter().take(MAX_ISSUES) {
         result.push_str(&format!("{}\n", truncate(issue, 100)));
     }

@@ -2,6 +2,7 @@
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -13,10 +14,7 @@ use crate::parser::{
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
 
-/// Max packages shown per category in `pnpm list` (mixed prod+dev).
-/// --prod and --dev filtered calls are never capped — they serve as hint
-/// targets so the LLM can retrieve the packages hidden by this cap.
-const MAX_LISTING: usize = 20;
+const MAX_LISTING: usize = CAP_LIST;
 
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]

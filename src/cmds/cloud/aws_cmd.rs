@@ -5,6 +5,7 @@
 
 use crate::core::tee::force_tee_hint;
 use crate::core::tracking;
+use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
 use crate::core::utils::{
     exit_code_from_output, exit_code_from_status, human_bytes, join_with_overflow,
     resolved_command, shorten_arn, truncate_iso_date,
@@ -15,7 +16,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
 
-const MAX_ITEMS: usize = 20;
+const MAX_ITEMS: usize = CAP_LIST;
 const JSON_COMPRESS_DEPTH: usize = 4;
 
 /// Result of a filter function: filtered text + whether items were truncated.
@@ -700,7 +701,7 @@ fn filter_cfn_describe_stacks(json_str: &str) -> Option<FilterResult> {
 
 // --- P0 filters: CloudWatch Logs, CloudFormation Events, Lambda ---
 
-const MAX_LOG_EVENTS: usize = 50;
+const MAX_LOG_EVENTS: usize = CAP_INVENTORY;
 
 /// Convert days since Unix epoch to (year, month, day). Civil calendar, UTC.
 fn days_to_ymd(days: i64) -> (i64, i64, i64) {

@@ -262,7 +262,7 @@ cargo fmt --all --check && cargo clippy --all-targets && cargo test
 - [ ] Unit tests added/updated for changed code
 - [ ] Snapshot tests reviewed (`cargo insta review`)
 - [ ] Token savings >=60% verified
-- [ ] Any truncated list has a recovery hint (`force_tee_tail_hint` or `force_tee_hint`)
+- [ ] Any truncated list has a recovery hint (`force_tee_tail_hint` or `force_tee_hint`) and uses a `CAP_*` from `src/core/truncate.rs`
 - [ ] Edge cases covered
 - [ ] `cargo fmt --all --check && cargo clippy --all-targets && cargo test` passes
 - [ ] Manual test: run `rtk <cmd>` and inspect output
