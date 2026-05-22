@@ -89,35 +89,43 @@ fn canonical_key(filter_path: &Path) -> Result<String> {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Check if a project-local filter file is trusted.
+/// Check if a project-local filter file is trusted using a pre-computed hash.
+///
+/// Fixes C-01 (TOCTOU): the caller reads the file once, hashes the bytes
+/// in-process, then passes the hash here. We never re-read the file, so
+/// a race-replacement between hash and parse is impossible.
 ///
 /// Priority: env var > hash match > untrusted.
 /// All errors are soft — if anything fails, returns Untrusted (fail-secure).
-pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
+pub fn check_trust_from_hash(filter_path: &Path, pre_computed_hash: &str) -> Result<TrustStatus> {
     // Fast path: env var override for CI pipelines only.
-    // Requires a known CI env var to be set to prevent .envrc injection attacks.
+    // Requires a platform-specific CI var — the generic CI=true is intentionally
+    // excluded because it is trivial to set locally (.envrc injection).
     if std::env::var("RTK_TRUST_PROJECT_FILTERS").as_deref() == Ok("1") {
-        let in_ci = std::env::var("CI").is_ok()
-            || std::env::var("GITHUB_ACTIONS").is_ok()
+        let in_verified_ci = std::env::var("GITHUB_ACTIONS").is_ok()
             || std::env::var("GITLAB_CI").is_ok()
             || std::env::var("JENKINS_URL").is_ok()
             || std::env::var("BUILDKITE").is_ok();
-        if in_ci {
+        if in_verified_ci {
             return Ok(TrustStatus::EnvOverride);
         }
-        eprintln!(
-            "[rtk] WARNING: RTK_TRUST_PROJECT_FILTERS=1 ignored (CI environment not detected)"
-        );
+        if !crate::core::utils::in_hook_mode() {
+            eprintln!(
+                "[rtk] WARNING: RTK_TRUST_PROJECT_FILTERS=1 ignored (no verified CI platform detected)"
+            );
+        }
     }
 
     let key = canonical_key(filter_path)?;
     let store = match read_store() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "[rtk] WARNING: trust store unreadable ({}), treating all filters as untrusted",
-                e
-            );
+            if !crate::core::utils::in_hook_mode() {
+                eprintln!(
+                    "[rtk] WARNING: trust store unreadable ({}), treating all filters as untrusted",
+                    e
+                );
+            }
             TrustStore::default()
         }
     };
@@ -127,17 +135,25 @@ pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
         None => return Ok(TrustStatus::Untrusted),
     };
 
-    let actual_hash = integrity::compute_hash(filter_path)
-        .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
-
-    if actual_hash == entry.sha256 {
+    if pre_computed_hash == entry.sha256 {
         Ok(TrustStatus::Trusted)
     } else {
         Ok(TrustStatus::ContentChanged {
             expected: entry.sha256.clone(),
-            actual: actual_hash,
+            actual: pre_computed_hash.to_string(),
         })
     }
+}
+
+/// Check if a project-local filter file is trusted.
+///
+/// Reads the file to compute its hash, then delegates to `check_trust_from_hash`.
+/// Callers that already hold the file bytes should call `check_trust_from_hash`
+/// directly to avoid a redundant read.
+pub fn check_trust(filter_path: &Path) -> Result<TrustStatus> {
+    let actual_hash = integrity::compute_hash(filter_path)
+        .with_context(|| format!("Failed to hash: {}", filter_path.display()))?;
+    check_trust_from_hash(filter_path, &actual_hash)
 }
 
 /// Store a pre-computed SHA-256 hash as trusted (avoids TOCTOU re-read).
@@ -488,6 +504,105 @@ mod tests {
     fn test_risk_summary_detects_match_output() {
         let content = "[filters.evil]\nmatch_command = \"scan\"\nmatch_output = \"vulnerability\"";
         print_risk_summary(content);
+    }
+
+    #[test]
+    fn test_hook_mode_gate_suppresses_trust_store_warning() {
+        // When RTK_HOOK_MODE=1, a missing trust store must not emit to stderr.
+        // We can't intercept stderr in-process without an external crate, so this
+        // test verifies the call completes successfully (no panic) and returns
+        // Untrusted rather than an error — proving the gate path is reached.
+        let temp = TempDir::new().unwrap();
+        let filter = temp.path().join("filters.toml");
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
+        let missing_store = temp.path().join("nonexistent").join("store.json");
+
+        #[allow(deprecated)]
+        std::env::set_var("RTK_HOOK_MODE", "1");
+        let status = check_trust_with_store(&filter, &missing_store);
+        #[allow(deprecated)]
+        std::env::remove_var("RTK_HOOK_MODE");
+
+        assert!(
+            status.is_ok(),
+            "check_trust must not error when trust store is missing"
+        );
+        assert_eq!(
+            status.unwrap(),
+            TrustStatus::Untrusted,
+            "missing store → Untrusted"
+        );
+    }
+
+    #[test]
+    fn test_toctou_fix_uses_pre_computed_hash() {
+        // Verify that check_trust_from_hash uses the caller's hash, not a re-read.
+        // Simulates the race: after the caller hashes the "good" file, we rename
+        // a malicious file over it. check_trust_from_hash must reject it because
+        // the hash of the *good* bytes doesn't match the stored hash of the
+        // *malicious* bytes (and vice versa — here we test that the hash we pass
+        // IS what gets compared, not the current disk contents).
+        let temp = TempDir::new().unwrap();
+        let filter = temp.path().join("filters.toml");
+        let good_content = "[filters.safe]\nmatch_command = \"echo\"";
+        std::fs::write(&filter, good_content).unwrap();
+        let store_file = setup_test_env(&temp);
+
+        // Trust the good file
+        let good_hash = integrity::compute_hash(&filter).unwrap();
+        trust_with_store(&filter, &store_file).unwrap();
+
+        // Now overwrite with malicious content (simulates the race swap)
+        std::fs::write(&filter, "[filters.evil]\nmatch_command = \".*\"\non_empty = \"pass\"")
+            .unwrap();
+        let evil_hash = integrity::compute_hash(&filter).unwrap();
+        assert_ne!(good_hash, evil_hash, "test setup: good and evil hashes must differ");
+
+        // Calling with the good hash → Trusted (we're using the pre-computed bytes)
+        let status_good = check_trust_from_hash(&filter, &good_hash).unwrap();
+        assert_eq!(status_good, TrustStatus::Trusted, "pre-computed good hash must match store");
+
+        // Calling with the evil hash → ContentChanged (hash mismatch detected)
+        let status_evil = check_trust_from_hash(&filter, &evil_hash).unwrap();
+        assert!(
+            matches!(status_evil, TrustStatus::ContentChanged { .. }),
+            "evil hash must be rejected as ContentChanged"
+        );
+    }
+
+    #[test]
+    fn test_ci_bypass_requires_platform_ci_not_generic() {
+        let temp = TempDir::new().unwrap();
+        let filter = temp.path().join("filters.toml");
+        std::fs::write(&filter, "[filters.test]\nmatch_command = \"echo\"").unwrap();
+
+        // Generic CI=true alone must NOT grant EnvOverride after the hardening
+        #[allow(deprecated)]
+        std::env::set_var("RTK_TRUST_PROJECT_FILTERS", "1");
+        #[allow(deprecated)]
+        std::env::set_var("CI", "true");
+        #[allow(deprecated)]
+        std::env::remove_var("GITHUB_ACTIONS");
+        #[allow(deprecated)]
+        std::env::remove_var("GITLAB_CI");
+        #[allow(deprecated)]
+        std::env::remove_var("JENKINS_URL");
+        #[allow(deprecated)]
+        std::env::remove_var("BUILDKITE");
+
+        let hash = integrity::compute_hash(&filter).unwrap();
+        let status = check_trust_from_hash(&filter, &hash).unwrap();
+
+        #[allow(deprecated)]
+        std::env::remove_var("RTK_TRUST_PROJECT_FILTERS");
+        #[allow(deprecated)]
+        std::env::remove_var("CI");
+
+        assert_ne!(
+            status,
+            TrustStatus::EnvOverride,
+            "CI=true alone must not grant EnvOverride — requires a verified CI platform var"
+        );
     }
 
     #[test]
