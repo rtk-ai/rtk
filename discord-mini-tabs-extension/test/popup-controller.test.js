@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { createPopupApp } from "../src/popup/popup.js";
 import { MESSAGE_TYPES, SHORTCUT_TYPES } from "../src/shared/constants.js";
 
 const textUrl = "https://discord.com/channels/123456789012345678/987654321098765432";
+const voiceUrl = "https://discord.com/channels/223456789012345678/887654321098765432";
 
 class FakeClassList {
   constructor() {
@@ -105,7 +107,7 @@ function createPopupDocument() {
     "feedback",
     "focusButton",
     "closeButton",
-    "resetPositionButton",
+    "resetButton",
     "searchInput",
     "textTab",
     "voiceTab",
@@ -138,6 +140,13 @@ function createChromeApi(respond) {
   };
 }
 
+test("popup markup exposes resetButton id contract", async () => {
+  const html = await readFile(new URL("../src/popup/popup.html", import.meta.url), "utf8");
+
+  assert.match(html, /id="resetButton"/);
+  assert.doesNotMatch(html, /resetPositionButton/);
+});
+
 test("initializes from service worker state and renders popup controls", async () => {
   const document = createPopupDocument();
   const chromeApi = createChromeApi(async () => ({
@@ -166,7 +175,7 @@ test("initializes from service worker state and renders popup controls", async (
   assert.match(document.getElementById("shortcutList").textContent, /123456789012345678 \/ 987654321098765432/);
 });
 
-test("submits window settings as bounds and decimal zoom then refreshes", async () => {
+test("submits exponent-style window settings as bounds and decimal zoom then refreshes", async () => {
   const document = createPopupDocument();
   const chromeApi = createChromeApi(async (message) => {
     if (message.type === MESSAGE_TYPES.UPDATE_WINDOW_SETTINGS) {
@@ -188,9 +197,9 @@ test("submits window settings as bounds and decimal zoom then refreshes", async 
   const app = createPopupApp({ document, chromeApi });
   await app.init();
 
-  document.getElementById("widthInput").value = "500";
-  document.getElementById("heightInput").value = "800";
-  document.getElementById("zoomInput").value = "100";
+  document.getElementById("widthInput").value = "5e2";
+  document.getElementById("heightInput").value = "8e2";
+  document.getElementById("zoomInput").value = "1e2";
   await document.getElementById("settingsForm").dispatchEvent("submit");
 
   assert.deepEqual(chromeApi.messages, [
@@ -201,4 +210,76 @@ test("submits window settings as bounds and decimal zoom then refreshes", async 
     },
     { type: MESSAGE_TYPES.GET_STATE, payload: {} }
   ]);
+});
+
+test("switching tabs while editing does not change the edited shortcut type", async () => {
+  const document = createPopupDocument();
+  const chromeApi = createChromeApi(async (message) => {
+    if (message.type === MESSAGE_TYPES.UPDATE_SHORTCUT) {
+      return { ok: true, data: null };
+    }
+    return {
+      ok: true,
+      data: {
+        shortcuts: [
+          { id: "voice-1", name: "Voice Room", type: SHORTCUT_TYPES.VOICE, url: voiceUrl }
+        ],
+        windowState: {
+          windowId: null,
+          bounds: { width: 420, height: 900 },
+          zoom: 0.9
+        }
+      }
+    };
+  });
+
+  const app = createPopupApp({ document, chromeApi });
+  await app.init();
+
+  document.getElementById("voiceTab").dispatchEvent("click");
+  document.getElementById("editingId").value = "voice-1";
+  document.getElementById("shortcutName").value = "Voice Room";
+  document.getElementById("shortcutUrl").value = voiceUrl;
+  document.getElementById("shortcutType").value = SHORTCUT_TYPES.VOICE;
+
+  await document.getElementById("textTab").dispatchEvent("click");
+  await document.getElementById("shortcutForm").dispatchEvent("submit");
+
+  assert.deepEqual(chromeApi.messages[1], {
+    type: MESSAGE_TYPES.UPDATE_SHORTCUT,
+    payload: {
+      id: "voice-1",
+      name: "Voice Room",
+      url: voiceUrl,
+      type: SHORTCUT_TYPES.VOICE
+    }
+  });
+});
+
+test("search render does not overwrite unsaved settings values", async () => {
+  const document = createPopupDocument();
+  const chromeApi = createChromeApi(async () => ({
+    ok: true,
+    data: {
+      shortcuts: [{ id: "text-1", name: "Dev Chat", type: SHORTCUT_TYPES.TEXT, url: textUrl }],
+      windowState: {
+        windowId: 12,
+        bounds: { width: 420, height: 900 },
+        zoom: 0.9
+      }
+    }
+  }));
+
+  const app = createPopupApp({ document, chromeApi });
+  await app.init();
+
+  document.getElementById("widthInput").value = "777";
+  document.getElementById("heightInput").value = "888";
+  document.getElementById("zoomInput").value = "101";
+  document.getElementById("searchInput").value = "dev";
+  await document.getElementById("searchInput").dispatchEvent("input");
+
+  assert.equal(document.getElementById("widthInput").value, "777");
+  assert.equal(document.getElementById("heightInput").value, "888");
+  assert.equal(document.getElementById("zoomInput").value, "101");
 });

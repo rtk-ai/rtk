@@ -13,7 +13,7 @@ const CONTROL_IDS = {
   feedback: "feedback",
   focusButton: "focusButton",
   closeButton: "closeButton",
-  resetPositionButton: "resetPositionButton",
+  resetButton: "resetButton",
   searchInput: "searchInput",
   textTab: "textTab",
   voiceTab: "voiceTab",
@@ -32,8 +32,8 @@ const CONTROL_IDS = {
   zoomInput: "zoomInput"
 };
 
-function toInteger(value, fallback) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
+function toNumber(value, fallback) {
+  const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
@@ -100,7 +100,9 @@ export function createPopupApp({ document, chromeApi }) {
 
   function setActiveType(type) {
     state.activeType = type === SHORTCUT_TYPES.VOICE ? SHORTCUT_TYPES.VOICE : SHORTCUT_TYPES.TEXT;
-    elements.shortcutType.value = state.activeType;
+    if (!elements.editingId.value.trim()) {
+      elements.shortcutType.value = state.activeType;
+    }
     render();
   }
 
@@ -177,25 +179,28 @@ export function createPopupApp({ document, chromeApi }) {
       activeType: state.activeType,
       windowState: state.windowState
     });
-    const bounds = state.windowState.bounds;
 
     setText(elements.windowMeta, `${model.status} | ${model.boundsLabel} | ${model.zoomLabel}`);
     setText(elements.textCount, model.textCount);
     setText(elements.voiceCount, model.voiceCount);
     elements.textTab.classList.toggle("active", model.activeType === SHORTCUT_TYPES.TEXT);
     elements.voiceTab.classList.toggle("active", model.activeType === SHORTCUT_TYPES.VOICE);
+    const shortcutNodes = model.activeShortcuts.map(renderShortcut);
+    elements.shortcutList.replaceChildren(...(shortcutNodes.length ? shortcutNodes : [renderEmpty()]));
+  }
+
+  function renderSettingsInputs() {
+    const bounds = state.windowState.bounds;
     elements.widthInput.value = String(bounds.width);
     elements.heightInput.value = String(bounds.height);
     elements.zoomInput.value = String(toZoomPercent(state.windowState.zoom));
-
-    const shortcutNodes = model.activeShortcuts.map(renderShortcut);
-    elements.shortcutList.replaceChildren(...(shortcutNodes.length ? shortcutNodes : [renderEmpty()]));
   }
 
   async function refresh() {
     const data = await sendMessage(MESSAGE_TYPES.GET_STATE);
     state.shortcuts = Array.isArray(data?.shortcuts) ? data.shortcuts : [];
     state.windowState = getSafeWindowState(data?.windowState);
+    renderSettingsInputs();
     render();
   }
 
@@ -228,7 +233,7 @@ export function createPopupApp({ document, chromeApi }) {
       await sendMessage(MESSAGE_TYPES.CLOSE_WINDOW);
       await refresh();
     }));
-    elements.resetPositionButton.addEventListener("click", () => runAction(async () => {
+    elements.resetButton.addEventListener("click", () => runAction(async () => {
       await sendMessage(MESSAGE_TYPES.RESET_POSITION);
       await refresh();
     }));
@@ -265,10 +270,10 @@ export function createPopupApp({ document, chromeApi }) {
       event.preventDefault();
       const payload = {
         bounds: {
-          width: toInteger(elements.widthInput.value, DEFAULT_BOUNDS.width),
-          height: toInteger(elements.heightInput.value, DEFAULT_BOUNDS.height)
+          width: toNumber(elements.widthInput.value, DEFAULT_BOUNDS.width),
+          height: toNumber(elements.heightInput.value, DEFAULT_BOUNDS.height)
         },
-        zoom: toInteger(elements.zoomInput.value, toZoomPercent(DEFAULT_ZOOM)) / 100
+        zoom: toNumber(elements.zoomInput.value, toZoomPercent(DEFAULT_ZOOM)) / 100
       };
       await sendMessage(MESSAGE_TYPES.UPDATE_WINDOW_SETTINGS, payload);
       await refresh();
