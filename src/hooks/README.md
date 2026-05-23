@@ -32,6 +32,9 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
+| Kilo Code | `rtk init --agent kilocode` | `.kilocode/rules/rtk-rules.md` | -- |
+| Trae.ai | `rtk init --agent trae` | `.trae/rules/rtk-rules.md` | -- |
+| Google Antigravity | `rtk init --agent antigravity` | `.agents/rules/antigravity-rtk-rules.md` | -- |
 
 
 ## Integrity Verification
