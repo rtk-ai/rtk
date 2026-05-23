@@ -19,11 +19,13 @@ lazy_static! {
     .unwrap();
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let show_all = args
-        .iter()
-        .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
-
+/// Build the argv passed to `ls`, given the user's args.
+///
+/// Forces `-la` (long format with hidden entries) so the parser sees a
+/// predictable layout, then merges the user's flags while stripping the
+/// chars already implied by `-la`. Returns `(argv, paths)` so the caller
+/// can build a display string for tracking.
+fn build_ls_args(args: &[String]) -> (Vec<String>, Vec<&str>) {
     let flags: Vec<&str> = args
         .iter()
         .filter(|a| a.starts_with('-'))
@@ -35,13 +37,11 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         .map(|s| s.as_str())
         .collect();
 
-    let mut cmd = resolved_command("ls");
-    cmd.env("LC_ALL", "C");
-    cmd.arg("-la");
+    let mut argv: Vec<String> = vec!["-la".to_string()];
     for flag in &flags {
         if flag.starts_with("--") {
             if *flag != "--all" {
-                cmd.arg(flag);
+                argv.push((*flag).to_string());
             }
         } else {
             let stripped = flag.trim_start_matches('-');
@@ -50,17 +50,33 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
                 .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
                 .collect();
             if !extra.is_empty() {
-                cmd.arg(format!("-{}", extra));
+                argv.push(format!("-{}", extra));
             }
         }
     }
 
     if paths.is_empty() {
-        cmd.arg(".");
+        argv.push(".".to_string());
     } else {
         for p in &paths {
-            cmd.arg(p);
+            argv.push((*p).to_string());
         }
+    }
+
+    (argv, paths)
+}
+
+pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    let show_all = args
+        .iter()
+        .any(|a| (a.starts_with('-') && !a.starts_with("--") && a.contains('a')) || a == "--all");
+
+    let (argv, paths) = build_ls_args(args);
+
+    let mut cmd = resolved_command("ls");
+    cmd.env("LC_ALL", "C");
+    for arg in &argv {
+        cmd.arg(arg);
     }
 
     let target_display = if paths.is_empty() {
