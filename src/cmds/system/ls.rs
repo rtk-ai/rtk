@@ -45,9 +45,15 @@ fn build_ls_args(args: &[String]) -> (Vec<String>, Vec<&str>) {
             }
         } else {
             let stripped = flag.trim_start_matches('-');
+            // Strip flags that conflict with the forced `-la` long format.
+            // `-l`/`-a`/`-h`: already enforced. `-1`/`-C`/`-m`/`-x`: alternate
+            // display formats that override `-l` (last flag wins on BSD ls),
+            // producing filename-only output that the parser can't decode.
+            // RTK's compact output is one-per-line anyway, so dropping these
+            // gives users the format they wanted.
             let extra: String = stripped
                 .chars()
-                .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
+                .filter(|c| !matches!(*c, 'l' | 'a' | 'h' | '1' | 'C' | 'm' | 'x'))
                 .collect();
             if !extra.is_empty() {
                 argv.push(format!("-{}", extra));
@@ -570,6 +576,23 @@ mod tests {
         assert_eq!(ft, '-');
         assert_eq!(size, 5678);
         assert_eq!(name, "old.tar.gz");
+    }
+
+    // Regression for #2058: `rtk ls -1 path/` returned "(empty)" (or raw
+    // filenames on the fallback path) because BSD `/bin/ls` honors the
+    // last format flag — `ls -la -1` produces filename-only output the
+    // parser can't decode. The fix strips `-1` before invoking ls.
+    #[test]
+    fn test_build_ls_args_strips_dash_one_issue_2058() {
+        let build = |args: &[&str]| {
+            let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+            build_ls_args(&owned).0
+        };
+        assert_eq!(
+            build(&["-1", "path/"]),
+            vec!["-la", "path/"],
+            "issue #2058: -1 must be stripped so -la format survives"
+        );
     }
 
     #[test]
