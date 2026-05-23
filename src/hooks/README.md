@@ -32,7 +32,7 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
-| Oh My Pi | `rtk init --omp` / `rtk init -g --omp` | OMP extension | -- |
+| Oh My Pi | `rtk init --agent omp` / `rtk init -g --agent omp` | OMP extension | -- |
 
 
 ## Integrity Verification

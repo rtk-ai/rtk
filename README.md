@@ -111,7 +111,7 @@ rtk init --agent cline          # Cline / Roo Code
 rtk init --agent kilocode       # Kilo Code
 rtk init --agent antigravity    # Google Antigravity
 rtk init --agent hermes         # Hermes
-rtk init --omp                  # Oh My Pi (OMP)
+rtk init --agent omp            # Oh My Pi (OMP)
 
 # 2. Restart your AI tool, then test
 git status  # Automatically rewritten to rtk git status
@@ -367,7 +367,7 @@ RTK supports 13 AI coding tools. Each integration rewrites shell commands to `rt
 | **OpenCode** | `rtk init -g --opencode` | Plugin TS (tool.execute.before) |
 | **OpenClaw** | `openclaw plugins install ./openclaw` | Plugin TS (before_tool_call) |
 | **Hermes** | `rtk init --agent hermes` | Python plugin adapter (terminal command mutation via `rtk rewrite`) |
-| **Oh My Pi (OMP)** | `rtk init --omp` / `rtk init -g --omp` | OMP extension (`tool_call`) |
+| **Oh My Pi (OMP)** | `rtk init --agent omp` / `rtk init -g --agent omp` | OMP extension (`tool_call`) |
 | **Mistral Vibe** | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Blocked on upstream |
 | **Kilo Code** | `rtk init --agent kilocode` | .kilocode/rules/rtk-rules.md (project-scoped) |
 | **Google Antigravity** | `rtk init --agent antigravity` | .agents/rules/antigravity-rtk-rules.md (project-scoped) |

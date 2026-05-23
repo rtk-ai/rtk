@@ -15,9 +15,9 @@ use super::constants::{
     BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    OMP_GLOBAL_EXTENSION_PATH, OMP_PROJECT_EXTENSION_PATH,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    OMP_GLOBAL_EXTENSION_PATH, OMP_PROJECT_EXTENSION_PATH, PI_CODING_AGENT_DIR_ENV, PI_DIR,
+    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
+    SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -606,53 +606,90 @@ fn remove_hook_from_settings(ctx: InitContext) -> Result<bool> {
     Ok(removed)
 }
 
-/// Full uninstall for Claude, Gemini, Codex, Cursor, or Pi artifacts.
+/// Full uninstall for Claude, Gemini, Codex, Cursor, Pi, or OMP artifacts.
 pub fn uninstall(
     global: bool,
     gemini: bool,
     codex: bool,
     cursor: bool,
     pi: bool,
+    omp: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
-    if codex {
-        uninstall_codex(global, ctx)?;
-        if dry_run {
-            print_dry_run_footer();
-        }
-        return Ok(());
-    }
 
-    if cursor {
-        if !global {
+    let selected_target = gemini || codex || cursor || pi || omp;
+    if selected_target {
+        if codex && !global {
+            anyhow::bail!(
+                "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
+            );
+        }
+        if cursor && !global {
             anyhow::bail!("Cursor uninstall only works with --global flag");
         }
-        let cursor_removed = remove_cursor_hooks(ctx).context("Failed to remove Cursor hooks")?;
-        if !cursor_removed.is_empty() {
-            let header = if dry_run {
-                "[dry-run] would uninstall RTK (Cursor):"
-            } else {
-                "RTK uninstalled (Cursor):"
-            };
-            println!("{}", header);
-            for item in &cursor_removed {
-                println!("  - {}", item);
-            }
-            if !dry_run {
-                println!("\nRestart Cursor to apply changes.");
-            }
-        } else {
-            println!("RTK Cursor support was not installed (nothing to remove)");
+        if gemini && !global {
+            anyhow::bail!(
+                "Uninstall only works with --global flag. For local projects, manually remove RTK from GEMINI.md"
+            );
         }
+
+        if gemini {
+            let gemini_removed = uninstall_gemini(ctx)?;
+            if !gemini_removed.is_empty() {
+                let header = if dry_run {
+                    "[dry-run] would uninstall RTK (Gemini):"
+                } else {
+                    "RTK uninstalled (Gemini):"
+                };
+                println!("{}", header);
+                for item in &gemini_removed {
+                    println!("  - {}", item);
+                }
+                if !dry_run {
+                    println!("\nRestart Gemini CLI to apply changes.");
+                }
+            } else {
+                println!("RTK Gemini support was not installed (nothing to remove)");
+            }
+        }
+
+        if codex {
+            uninstall_codex(global, ctx)?;
+        }
+
+        if cursor {
+            let cursor_removed =
+                remove_cursor_hooks(ctx).context("Failed to remove Cursor hooks")?;
+            if !cursor_removed.is_empty() {
+                let header = if dry_run {
+                    "[dry-run] would uninstall RTK (Cursor):"
+                } else {
+                    "RTK uninstalled (Cursor):"
+                };
+                println!("{}", header);
+                for item in &cursor_removed {
+                    println!("  - {}", item);
+                }
+                if !dry_run {
+                    println!("\nRestart Cursor to apply changes.");
+                }
+            } else {
+                println!("RTK Cursor support was not installed (nothing to remove)");
+            }
+        }
+
+        if pi {
+            uninstall_pi(global, ctx)?;
+        }
+
+        if omp {
+            uninstall_omp(global, ctx)?;
+        }
+
         if dry_run {
             print_dry_run_footer();
         }
-        return Ok(());
-    }
-
-    if pi {
-        uninstall_pi(global, ctx)?;
         return Ok(());
     }
 
@@ -662,32 +699,6 @@ pub fn uninstall(
 
     let claude_dir = resolve_claude_dir()?;
     let mut removed = Vec::new();
-
-    // Also uninstall Gemini artifacts if --gemini or always (clean everything)
-    if gemini {
-        let gemini_removed = uninstall_gemini(ctx)?;
-        removed.extend(gemini_removed);
-        if !removed.is_empty() {
-            let header = if dry_run {
-                "[dry-run] would uninstall RTK (Gemini):"
-            } else {
-                "RTK uninstalled (Gemini):"
-            };
-            println!("{}", header);
-            for item in &removed {
-                println!("  - {}", item);
-            }
-            if !dry_run {
-                println!("\nRestart Gemini CLI to apply changes.");
-            }
-        } else {
-            println!("RTK Gemini support was not installed (nothing to remove)");
-        }
-        if dry_run {
-            print_dry_run_footer();
-        }
-        return Ok(());
-    }
 
     // 1. Remove legacy hook file (if exists from old installation)
     let hook_path = claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE);
@@ -1821,9 +1832,6 @@ pub fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
 
     if !extension_path.exists() {
         println!("RTK was not installed for Oh My Pi (nothing to remove)");
-        if dry_run {
-            print_dry_run_footer();
-        }
         return Ok(());
     }
 
@@ -1836,7 +1844,6 @@ pub fn uninstall_omp(global: bool, ctx: InitContext) -> Result<()> {
                 "[dry-run] would remove OMP extension: {}",
                 extension_path.display()
             );
-            print_dry_run_footer();
         } else {
             fs::remove_file(&extension_path).with_context(|| {
                 format!(
@@ -1895,10 +1902,10 @@ fn show_omp_config() -> Result<()> {
     print_omp_extension_status("Project extension", &project_extension)?;
 
     println!("\nUsage:");
-    println!("  rtk init --omp                 # Configure ./.omp/extensions/rtk.ts");
-    println!("  rtk init -g --omp              # Configure ~/.omp/agent/extensions/rtk.ts");
-    println!("  rtk init --omp --uninstall     # Remove project OMP RTK extension");
-    println!("  rtk init -g --omp --uninstall  # Remove global OMP RTK extension");
+    println!("  rtk init --agent omp                 # Configure ./.omp/extensions/rtk.ts");
+    println!("  rtk init -g --agent omp              # Configure ~/.omp/agent/extensions/rtk.ts");
+    println!("  rtk init --agent omp --uninstall     # Remove project OMP RTK extension");
+    println!("  rtk init -g --agent omp --uninstall  # Remove global OMP RTK extension");
 
     Ok(())
 }
@@ -2976,8 +2983,9 @@ fn uninstall_pi(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
     let plugin_path = pi_plugin_path_for_scope(global)?;
     let mut removed: Vec<String> = Vec::new();
+    let plugin_exists = plugin_path.exists();
 
-    if plugin_path.exists() {
+    if plugin_exists {
         if dry_run {
             println!(
                 "[dry-run] would remove Pi extension: {}",
@@ -2996,7 +3004,9 @@ fn uninstall_pi(global: bool, ctx: InitContext) -> Result<()> {
     }
 
     if dry_run {
-        print_dry_run_footer();
+        if !plugin_exists {
+            println!("RTK Pi extension was not installed (nothing to remove)");
+        }
     } else if !removed.is_empty() {
         println!("RTK uninstalled (Pi):");
         for item in &removed {
@@ -5764,7 +5774,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -5892,7 +5911,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             };
-            uninstall(true, false, false, false, false, dry).unwrap();
+            uninstall(true, false, false, false, false, false, dry).unwrap();
 
             // Files must still exist with identical content
             assert!(
@@ -6118,7 +6137,16 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                true,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -6132,7 +6160,15 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, InitContext::default());
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        );
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -6231,6 +6267,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 InitContext {
                     verbose: 0,
                     dry_run: true,
@@ -6269,6 +6306,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             InitContext {
                 verbose: 0,
                 dry_run: true,

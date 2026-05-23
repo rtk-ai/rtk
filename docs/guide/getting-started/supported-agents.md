@@ -129,8 +129,8 @@ The plugin fails open. If `rtk` is missing at load time, the hook is not registe
 ### Oh My Pi
 
 ```bash
-rtk init --omp       # creates ./.omp/extensions/rtk.ts
-rtk init -g --omp    # creates ~/.omp/agent/extensions/rtk.ts
+rtk init --agent omp       # creates ./.omp/extensions/rtk.ts
+rtk init -g --agent omp    # creates ~/.omp/agent/extensions/rtk.ts
 ```
 
 ### Cline / Roo Code

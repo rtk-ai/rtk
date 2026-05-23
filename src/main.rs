@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Pi coding agent
     Pi,
+    /// Oh My Pi (OMP)
+    Omp,
     /// Hermes CLI
     Hermes,
 }
@@ -336,10 +338,6 @@ enum Commands {
         /// Install OpenCode plugin (in addition to Claude Code)
         #[arg(long)]
         opencode: bool,
-
-        /// Install Oh My Pi extension
-        #[arg(long)]
-        omp: bool,
 
         /// Initialize for Gemini CLI instead of Claude Code
         #[arg(long)]
@@ -1381,14 +1379,16 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard:
+        FnOnce(bool, bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let omp = agent == Some(AgentTarget::Omp);
+        uninstall_standard(global, gemini, codex, cursor, pi, omp, ctx)
     }
 }
 
@@ -1817,7 +1817,6 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
-            omp,
             dry_run,
         } => {
             let ctx = hooks::init::InitContext {
@@ -1825,21 +1824,17 @@ fn run_cli() -> Result<i32> {
                 dry_run,
             };
             if show {
-                hooks::init::show_config(codex, omp)?;
+                hooks::init::show_config(codex, agent == Some(AgentTarget::Omp))?;
             } else if uninstall {
-                if omp {
-                    hooks::init::uninstall_omp(global, ctx)?;
-                } else {
-                    uninstall_init_dispatch(
-                        agent,
-                        global,
-                        gemini,
-                        codex,
-                        ctx,
-                        hooks::init::uninstall_hermes,
-                        hooks::init::uninstall,
-                    )?;
-                }
+                uninstall_init_dispatch(
+                    agent,
+                    global,
+                    gemini,
+                    codex,
+                    ctx,
+                    hooks::init::uninstall_hermes,
+                    hooks::init::uninstall,
+                )?;
             } else if gemini {
                 let patch_mode = if auto_patch {
                     hooks::init::PatchMode::Auto
@@ -1867,7 +1862,7 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
-            } else if omp {
+            } else if agent == Some(AgentTarget::Omp) {
                 hooks::init::run_omp_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
@@ -2700,26 +2695,27 @@ mod tests {
     }
 
     #[test]
-    fn test_try_parse_init_omp() {
-        let cli = Cli::try_parse_from(["rtk", "init", "--omp"]).unwrap();
+    fn test_try_parse_init_agent_omp() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "omp"]).unwrap();
         match cli.command {
-            Commands::Init { omp, .. } => assert!(omp),
+            Commands::Init { agent, .. } => assert_eq!(agent, Some(AgentTarget::Omp)),
             _ => panic!("Expected Init command"),
         }
     }
 
     #[test]
-    fn test_try_parse_init_omp_global_uninstall() {
-        let cli = Cli::try_parse_from(["rtk", "init", "-g", "--omp", "--uninstall"]).unwrap();
+    fn test_try_parse_init_agent_omp_global_uninstall() {
+        let cli =
+            Cli::try_parse_from(["rtk", "init", "-g", "--agent", "omp", "--uninstall"]).unwrap();
         match cli.command {
             Commands::Init {
                 global,
-                omp,
+                agent,
                 uninstall,
                 ..
             } => {
                 assert!(global);
-                assert!(omp);
+                assert_eq!(agent, Some(AgentTarget::Omp));
                 assert!(uninstall);
             }
             _ => panic!("Expected Init command"),
@@ -2747,7 +2743,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
@@ -2756,6 +2752,48 @@ mod tests {
         assert!(result.is_ok());
         assert!(hermes_called.get());
         assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_passes_omp_to_standard_cleanup() {
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 1,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Omp),
+            true,
+            false,
+            true,
+            ctx,
+            |_| panic!("Hermes cleanup should not run"),
+            |global, gemini, codex, cursor, pi, omp, ctx| {
+                standard_called.set(true);
+                assert!(global);
+                assert!(!gemini);
+                assert!(codex);
+                assert!(!cursor);
+                assert!(!pi);
+                assert!(omp);
+                assert_eq!(ctx.verbose, 1);
+                assert!(ctx.dry_run);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(standard_called.get());
+    }
+
+    #[test]
+    fn test_init_omp_flag_rejected() {
+        let result = Cli::try_parse_from(["rtk", "init", "--omp"]);
+        assert!(
+            result.is_err(),
+            "--omp must be rejected as unknown argument"
+        );
     }
 
     #[test]
