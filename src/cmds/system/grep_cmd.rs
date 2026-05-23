@@ -250,6 +250,7 @@ fn compact_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_clean_line() {
@@ -395,12 +396,13 @@ mod tests {
     fn test_rg_no_ignore_vcs_flag_accepted() {
         // Verify rg accepts --no-ignore-vcs (used to match grep -r behavior for .gitignore)
         let mut cmd = resolved_command("rg");
+        let temp = tempdir().unwrap();
         cmd.args([
             "-n",
             "--no-heading",
             "--no-ignore-vcs",
             "NONEXISTENT_PATTERN_12345",
-            ".",
+            temp.path().to_str().unwrap(),
         ]);
         if let Ok(output) = cmd.output() {
             assert!(

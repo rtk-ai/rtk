@@ -1,10 +1,10 @@
-# RTK - Rust Token Killer (Codex CLI)
+# RTK - Rust Token Killer (Codex)
 
-**Usage**: Token-optimized CLI proxy for shell commands.
+**Usage**: Token-optimized CLI proxy for shell commands in Codex.
 
 ## Rule
 
-Always prefix shell commands with `rtk`.
+Always prefix RTK-covered shell commands with `rtk`.
 
 Examples:
 
@@ -13,7 +13,26 @@ rtk git status
 rtk cargo test
 rtk npm run build
 rtk pytest -q
+rtk read src/main.rs
+rtk grep "TODO" src
 ```
+
+## Compound Commands
+
+In compound commands, prefix each RTK-covered segment instead of only the first command.
+
+```bash
+rtk git add . && rtk cargo test
+cd app && rtk npm test
+```
+
+## Windows / PowerShell
+
+On Windows, prefer explicit RTK commands because Codex always reads `AGENTS.md`, while shell-hook support may vary by Codex environment.
+
+- Use `rtk read`, `rtk grep`, and `rtk find` for file inspection
+- Use `rtk git ...`, `rtk cargo ...`, `rtk pytest`, `rtk npm ...` for verbose workflows
+- Keep PowerShell-native helpers for verification only, such as `Get-Command rtk`
 
 ## Meta Commands
 
@@ -28,5 +47,8 @@ rtk proxy <cmd>     # Run raw command without filtering
 ```bash
 rtk --version
 rtk gain
-which rtk
+```
+
+```powershell
+Get-Command rtk
 ```
