@@ -52,9 +52,9 @@ pub enum AgentTarget {
 #[derive(Parser)]
 #[command(
     name = "rtk",
-    version,
-    about = "Rust Token Killer - Minimize LLM token consumption",
-    long_about = "A high-performance CLI proxy designed to filter and summarize system outputs before they reach your LLM context."
+    version = concat!(env!("CARGO_PKG_VERSION"), " (Rust Token Killer)"),
+    about = "rtk (Rust Token Killer) - Minimize LLM token consumption",
+    long_about = "rtk (Rust Token Killer) - A high-performance CLI proxy designed to filter and summarize system outputs before they reach your LLM context.\n\nNOTE: This is NOT 'Rust Type Kit' (reachingforthejack/rtk). If you installed this by mistake, run: cargo install --git https://github.com/rtk-ai/rtk"
 )]
 struct Cli {
     #[command(subcommand)]

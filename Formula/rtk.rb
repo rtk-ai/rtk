@@ -4,7 +4,7 @@
 # Homebrew formula for rtk - Rust Token Killer
 # To install: brew tap rtk-ai/tap && brew install rtk
 class Rtk < Formula
-  desc "High-performance CLI proxy to minimize LLM token consumption"
+  desc "rtk (Rust Token Killer) - High-performance CLI proxy to minimize LLM token consumption"
   homepage "https://www.rtk-ai.app"
   version "0.1.0"
   license "MIT"
@@ -38,6 +38,6 @@ class Rtk < Formula
   end
 
   test do
-    assert_match "rtk #{version}", shell_output("#{bin}/rtk --version")
+    assert_match "rtk #{version} (Rust Token Killer)", shell_output("#{bin}/rtk --version")
   end
 end

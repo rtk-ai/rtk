@@ -145,7 +145,9 @@ main() {
     verify
 
     echo ""
-    info "Installation complete! Run '$BINARY_NAME --help' to get started."
+    info "Installation complete! rtk (Rust Token Killer) is ready."
+    info "NOTE: This is NOT 'Rust Type Kit' (reachingforthejack/rtk)."
+    info "Run '$BINARY_NAME --help' to get started."
 }
 
 main
