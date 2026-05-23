@@ -49,6 +49,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Qoder IDE
+    Qoder,
 }
 
 #[derive(Parser)]
@@ -775,6 +777,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Qoder IDE PreToolUse hook (reads JSON from stdin)
+    Qoder,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1377,14 +1381,15 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let qoder = agent == Some(AgentTarget::Qoder);
+        uninstall_standard(global, gemini, codex, cursor, pi, qoder, ctx)
     }
 }
 
@@ -1856,6 +1861,11 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Qoder) {
+                if !global {
+                    anyhow::bail!("Qoder hooks are global-only. Use: rtk init -g --agent qoder");
+                }
+                hooks::init::install_qoder_hooks(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
             } else {
@@ -2189,6 +2199,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Qoder => {
+                hooks::hook_cmd::run_qoder()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2709,7 +2723,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
