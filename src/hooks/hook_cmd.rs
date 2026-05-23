@@ -290,6 +290,10 @@ enum PayloadAction {
         rewritten: String,
         output: Value,
     },
+    Block {
+        cmd: String,
+        output: Value,
+    },
     Skip {
         reason: &'static str,
         cmd: String,
@@ -379,6 +383,10 @@ pub fn run_claude() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             let _ = writeln!(io::stdout(), "{output}");
         }
+        PayloadAction::Block { cmd, output } => {
+            audit_log("deny", &cmd, "");
+            let _ = writeln!(io::stdout(), "{output}");
+        }
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
         }
@@ -393,6 +401,138 @@ fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
     match process_claude_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
+// ── Codex native hook ──────────────────────────────────────────
+
+fn process_codex_payload_with_checker<F>(v: &Value, check_command: F) -> PayloadAction
+where
+    F: FnOnce(&str) -> PermissionVerdict,
+{
+    let cmd = match v
+        .pointer("/tool_input/command")
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return PayloadAction::Ignore,
+    };
+
+    if check_command(cmd) == PermissionVerdict::Deny {
+        return PayloadAction::Block {
+            cmd: cmd.to_string(),
+            output: json!({
+                "hookSpecificOutput": {
+                    "hookEventName": PRE_TOOL_USE_KEY,
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "Blocked by RTK permission rule"
+                }
+            }),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_match",
+                cmd: cmd.to_string(),
+            }
+        }
+    };
+
+    let updated_input = {
+        let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = ti.as_object_mut() {
+            obj.insert("command".into(), Value::String(rewritten.clone()));
+        }
+        ti
+    };
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output: json!({
+            "hookSpecificOutput": {
+                "hookEventName": PRE_TOOL_USE_KEY,
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "RTK auto-rewrite",
+                "updatedInput": updated_input
+            }
+        }),
+    }
+}
+
+fn process_codex_payload(v: &Value) -> PayloadAction {
+    process_codex_payload_with_checker(v, permissions::check_command)
+}
+
+/// Run the Codex CLI PreToolUse hook natively.
+pub fn run_codex() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Block { cmd, output } => {
+            audit_log("deny", &cmd, "");
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_codex_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_codex_payload(&v) {
+        PayloadAction::Rewrite { output, .. } | PayloadAction::Block { output, .. } => {
+            Some(output.to_string())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn run_codex_inner_with_rules(
+    input: &str,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_codex_payload_with_checker(&v, |cmd| {
+        permissions::check_command_with_rules(cmd, deny_rules, ask_rules, allow_rules)
+    }) {
+        PayloadAction::Rewrite { output, .. } | PayloadAction::Block { output, .. } => {
+            Some(output.to_string())
+        }
         _ => None,
     }
 }
@@ -778,6 +918,35 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_codex_rewrite_git_status_allows_updated_input() {
+        let result = run_codex_inner(&claude_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "allow");
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_deny_blocks_with_explicit_permission_decision() {
+        let deny = vec!["git status".to_string()];
+        let result = run_codex_inner_with_rules(&claude_input("git status"), &deny, &[], &[])
+            .expect("codex deny should emit blocking hook output");
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecision"], "deny");
+        assert_eq!(
+            hook["permissionDecisionReason"],
+            "Blocked by RTK permission rule"
+        );
+        assert!(hook.get("updatedInput").is_none() || hook["updatedInput"].is_null());
     }
 
     // --- Cursor handler ---
