@@ -194,6 +194,8 @@ rtk prettier --check .          # Files needing formatting
 rtk cargo build                 # Cargo build (-80%)
 rtk cargo clippy                # Cargo clippy (-80%)
 rtk ruff check                  # Python linting (JSON, -80%)
+rtk pre-commit                  # Hook output compacted (no dots, -65%)
+rtk prek                        # Same as pre-commit (-65%)
 rtk golangci-lint run           # Go linting (JSON, -85%)
 rtk rubocop                     # Ruby linting (JSON, -60%+)
 ```

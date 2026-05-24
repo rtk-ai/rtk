@@ -28,7 +28,7 @@ Each subdirectory has its own README with file descriptions, parsing strategies,
 - **[`git/`](git/README.md)** — git, gh, gt, diff — `trailing_var_arg` parsing, gh markdown filtering, gt passthrough
 - **[`rust/`](rust/README.md)** — cargo, runner (err/test) — Cargo sub-enum routing, runner dual-mode
 - **[`js/`](js/README.md)** — npm, pnpm, vitest, lint, tsc, next, prettier, playwright, prisma — Package manager auto-detection, lint routing, cross-deps with python
-- **[`python/`](python/README.md)** — ruff, pytest, mypy, pip — JSON check vs text format, state machine parsing, uv auto-detection
+- **[`python/`](python/README.md)** — ruff, pytest, mypy, pip, pre-commit, prek — JSON check vs text format, state machine parsing, uv auto-detection, hook output compacting
 - **[`go/`](go/README.md)** — go test/build/vet, golangci-lint — NDJSON streaming, Go sub-enum pattern
 - **[`dotnet/`](dotnet/README.md)** — dotnet, binlog, trx, format_report — DotnetCommands sub-enum, internal helper modules
 - **[`cloud/`](cloud/README.md)** — aws, docker/kubectl, curl, wget, psql — Docker/Kubectl sub-enums, JSON forced output
