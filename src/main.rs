@@ -16,7 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::gradlew_cmd;
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, pre_commit_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
@@ -704,6 +704,13 @@ enum Commands {
     /// Pip package manager with compact output (auto-detects uv)
     Pip {
         /// Pip arguments (e.g., list, outdated, install)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Pre-commit hook runner with compact output (removes `...` separators)
+    PreCommit {
+        /// Pre-commit arguments (run, install, autoupdate, etc.)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2148,6 +2155,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Pip { args } => pip_cmd::run(&args, cli.verbose)?,
 
+        Commands::PreCommit { args } => pre_commit_cmd::run(&args, cli.verbose)?,
+
         Commands::Go { command } => match command {
             GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,
             GoCommands::Build { args } => go_cmd::run_build(&args, cli.verbose)?,
@@ -2506,6 +2515,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
+            | Commands::PreCommit { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }
