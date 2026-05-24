@@ -107,9 +107,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
             }
             filtered
         },
-        RunOptions::stdout_only()
-            .early_exit_on_failure()
-            .no_trailing_newline(),
+        RunOptions::stdout_only().no_trailing_newline(),
     )
 }
 
@@ -376,6 +374,22 @@ mod tests {
         assert_eq!(human_size(1234), "1.2K");
         assert_eq!(human_size(1_048_576), "1.0M");
         assert_eq!(human_size(2_500_000), "2.4M");
+    }
+
+    #[test]
+    fn test_compact_partial_failure_shows_successful_entries() {
+        // When ls is given multiple paths and some don't exist, ls exits non-zero
+        // but still emits valid entries for the paths that DO exist on stdout.
+        // The filter must show those entries (not suppress them due to non-zero exit).
+        // Error messages go to stderr and are forwarded separately by the runner.
+        let input = "total 8\n\
+                     drwxrwxr-x  2 user  staff  4096 Mar 29 14:19 /home/user/.config/opencode\n\
+                     -rw-rw-r--  1 user  staff   844 Mar 28 23:16 settings.json\n";
+        let (entries, _summary, _) = compact_ls(input, false);
+        assert!(
+            entries.contains("settings.json"),
+            "successful entries must appear even when some paths failed"
+        );
     }
 
     #[test]
