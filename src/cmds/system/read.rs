@@ -63,19 +63,35 @@ pub fn run(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    // Capture post-filter content before user-requested truncation.
+    // --max-lines/--tail-lines is a user choice, not RTK compression — savings
+    // are tracked against filtered (not truncated) output to avoid inflation.
+    // mem::take avoids cloning the entire filtered buffer (can be large).
+    let pre_truncation: Option<String> = if max_lines.is_some() || tail_lines.is_some() {
+        Some(std::mem::take(&mut filtered))
+    } else {
+        None
+    };
+    let windowed = apply_line_window(
+        pre_truncation.as_deref().unwrap_or(&filtered),
+        max_lines,
+        tail_lines,
+        &lang,
+    );
 
     let rtk_output = if line_numbers {
-        format_with_line_numbers(&filtered)
+        format_with_line_numbers(&windowed)
     } else {
-        filtered.clone()
+        windowed
     };
     print!("{}", rtk_output);
+
+    let tracking_output = pick_tracking_output(pre_truncation.as_deref(), &rtk_output);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk read",
         &content,
-        &rtk_output,
+        tracking_output,
     );
     Ok(())
 }
@@ -127,16 +143,27 @@ pub fn run_stdin(
         );
     }
 
-    filtered = apply_line_window(&filtered, max_lines, tail_lines, &lang);
+    let pre_truncation: Option<String> = if max_lines.is_some() || tail_lines.is_some() {
+        Some(std::mem::take(&mut filtered))
+    } else {
+        None
+    };
+    let windowed = apply_line_window(
+        pre_truncation.as_deref().unwrap_or(&filtered),
+        max_lines,
+        tail_lines,
+        &lang,
+    );
 
     let rtk_output = if line_numbers {
-        format_with_line_numbers(&filtered)
+        format_with_line_numbers(&windowed)
     } else {
-        filtered.clone()
+        windowed
     };
     print!("{}", rtk_output);
 
-    timer.track("cat - (stdin)", "rtk read -", &content, &rtk_output);
+    let tracking_output = pick_tracking_output(pre_truncation.as_deref(), &rtk_output);
+    timer.track("cat - (stdin)", "rtk read -", &content, tracking_output);
     Ok(())
 }
 
@@ -148,6 +175,17 @@ fn format_with_line_numbers(content: &str) -> String {
         out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
     }
     out
+}
+
+/// Selects the tracking baseline for `timer.track()`.
+///
+/// When the user passes `--max-lines` or `--tail-lines`, the truncated output is
+/// not RTK compression — it's user-requested windowing. Tracking against it
+/// would inflate savings by the entire skipped portion (see #1045). In that
+/// case `pre_truncation` holds the post-filter, pre-truncation content and is
+/// returned as the baseline. Otherwise, `rtk_output` itself is the baseline.
+fn pick_tracking_output<'a>(pre_truncation: Option<&'a str>, rtk_output: &'a str) -> &'a str {
+    pre_truncation.unwrap_or(rtk_output)
 }
 
 fn apply_line_window(
@@ -294,6 +332,163 @@ fn main() {{
             stderr.contains("stdin specified more than once"),
             "should warn about duplicate stdin, got stderr: {}",
             stderr
+        );
+    }
+
+    // ── Regression tests for #1045 ─────────────────────────────────────────
+    //
+    // These exercise the real `pick_tracking_output` + `apply_line_window`
+    // functions used by `run()`, so a regression in the production selection
+    // logic fails them.
+
+    /// When --max-lines is active, savings must be calculated against the
+    /// pre-truncation (filtered) content, not the truncated output.
+    /// Without this fix: savings ≈ 100k tokens for a 100k-line file.
+    /// With this fix   : savings ≈ 0 tokens (no RTK compression happened).
+    #[test]
+    fn test_max_lines_tracking_uses_pretruncation_content() {
+        let filtered: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let windowed = apply_line_window(&filtered, Some(5), None, &Language::Unknown);
+        let tracking = pick_tracking_output(Some(&filtered), &windowed);
+
+        assert_eq!(
+            tracking, filtered,
+            "tracking_output must equal full filtered content, not the truncated slice"
+        );
+        assert!(
+            windowed.len() < filtered.len(),
+            "sanity check: truncation must have reduced content"
+        );
+        assert!(
+            tracking.len() > windowed.len(),
+            "tracking_output must be larger than truncated_output to prevent savings inflation"
+        );
+    }
+
+    /// Same invariant for --tail-lines.
+    #[test]
+    fn test_tail_lines_tracking_uses_pretruncation_content() {
+        let filtered: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let windowed = apply_line_window(&filtered, None, Some(5), &Language::Unknown);
+        let tracking = pick_tracking_output(Some(&filtered), &windowed);
+
+        assert_eq!(tracking, filtered);
+        assert!(windowed.len() < filtered.len());
+        assert!(tracking.len() > windowed.len());
+    }
+
+    /// Without any truncation flag, tracking_output == rtk_output (no change
+    /// in behaviour for the normal code path).
+    #[test]
+    fn test_no_truncation_tracking_unchanged() {
+        let filtered: String = (0..10).map(|i| format!("line {i}\n")).collect();
+        let windowed = apply_line_window(&filtered, None, None, &Language::Unknown);
+        let tracking = pick_tracking_output(None, &windowed);
+
+        assert_eq!(
+            tracking, windowed,
+            "without truncation flags, tracking_output must equal rtk_output"
+        );
+    }
+
+    /// Numerical proof: the bug would have reported huge artificial savings;
+    /// the fix reports ≈0 savings (content unchanged by RTK filtering).
+    #[test]
+    fn test_savings_inflation_is_zero_with_fix() {
+        use crate::core::tracking::estimate_tokens;
+
+        // 1000-line file, each line ~20 chars = ~5k tokens input
+        let filtered: String = (0..1000).map(|i| format!("{:020}\n", i)).collect();
+        let windowed = apply_line_window(&filtered, Some(5), None, &Language::Unknown);
+        let tracking = pick_tracking_output(Some(&filtered), &windowed);
+
+        let input_tokens = estimate_tokens(&filtered);
+
+        // Savings reported by the BUGGY version (tracking against truncated output)
+        let buggy_savings = input_tokens as i64 - estimate_tokens(&windowed) as i64;
+        // Savings reported by the FIXED version (tracking against pre-truncation content)
+        let fixed_savings = input_tokens as i64 - estimate_tokens(tracking) as i64;
+
+        assert!(
+            buggy_savings > 1_000,
+            "bug would report >1k fake token savings, got {buggy_savings}"
+        );
+        assert_eq!(
+            fixed_savings, 0,
+            "fix must report 0 savings when content wasn't actually compressed, got {fixed_savings}"
+        );
+    }
+
+    /// End-to-end regression: drive the real `run()` path, then read what was
+    /// actually persisted to the SQLite tracking DB. Catches the class of
+    /// regression where someone rewires `pick_tracking_output(Some(&windowed), …)`
+    /// — the unit tests above pass `Some(&filtered)` directly so they would not.
+    #[test]
+    fn test_run_does_not_inflate_savings_with_max_lines_e2e() {
+        use rusqlite::Connection;
+        use std::env;
+        use std::sync::Mutex;
+        // Serialize against any other test that mutates RTK_DB_PATH (see
+        // tracking.rs::test_db_path_env_and_default for the same pattern).
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        // Don't recover a poisoned guard: poison means a prior test panicked
+        // while RTK_DB_PATH was set, and proceeding here would leak that env
+        // var into our run(). Propagate the original panic instead.
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let tmpdir = tempfile::tempdir().expect("create tempdir");
+        let db_path = tmpdir.path().join("rtk_e2e.db");
+
+        let mut input = NamedTempFile::with_suffix(".txt").expect("create tempfile");
+        // 1000 plain text lines — `Language::Unknown` filter is identity, so
+        // any reported savings can only come from a tracking-baseline bug.
+        let big: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        input.write_all(big.as_bytes()).expect("write tempfile");
+        let input_path = input.path().to_path_buf();
+
+        let prev_db = env::var("RTK_DB_PATH").ok();
+        env::set_var("RTK_DB_PATH", &db_path);
+
+        let result = run(
+            &input_path,
+            FilterLevel::Minimal,
+            Some(5), // --max-lines 5: keep 5/1000 lines
+            None,
+            false,
+            0,
+        );
+
+        match prev_db {
+            Some(v) => env::set_var("RTK_DB_PATH", v),
+            None => env::remove_var("RTK_DB_PATH"),
+        }
+        result.expect("run() must succeed");
+
+        // Inspect what `timer.track()` persisted. If `pick_tracking_output`
+        // is wired to the truncated buffer, output_tokens collapses to ~5
+        // lines and saved_tokens explodes — the #1045 regression.
+        let conn = Connection::open(&db_path).expect("open tracking DB");
+        let (input_tokens, output_tokens, saved_tokens): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens, saved_tokens
+                 FROM commands ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("at least one row recorded");
+
+        // Filter is identity for plain text → tracking baseline must equal
+        // input. Tolerate small drift from line-numbering / formatting.
+        let drift = (input_tokens - output_tokens).abs();
+        assert!(
+            drift < 50,
+            "Expected near-zero savings on identity filter, got input={input_tokens} \
+             output={output_tokens} saved={saved_tokens} drift={drift}. \
+             A large drift means run() is tracking the truncated buffer (the #1045 bug)."
+        );
+        assert!(
+            saved_tokens.abs() < 50,
+            "saved_tokens must be near-zero when no compression happened, got {saved_tokens}"
         );
     }
 }
