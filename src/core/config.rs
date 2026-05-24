@@ -23,12 +23,32 @@ pub struct Config {
     pub limits: LimitsConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HookMode {
+    /// Historical behavior: rewrite any supported command unless excluded.
+    Rewrite,
+    /// Observation-only mode: never rewrite commands.
+    Suggest,
+    /// Conservative AI-agent mode: only rewrite an explicit low-risk allowlist.
+    #[default]
+    HermesSafe,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HooksConfig {
+    /// Hook behavior: rewrite / suggest / hermes-safe.
+    #[serde(default)]
+    pub mode: HookMode,
+
     /// Commands to exclude from auto-rewrite (e.g. ["curl", "playwright"]).
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
     #[serde(default)]
     pub exclude_commands: Vec<String>,
+
+    /// Explicit allowlist used when hooks.mode = "hermes-safe".
+    #[serde(default = "default_hermes_allowlist")]
+    pub hermes_allowlist: Vec<String>,
 
     /// Wrapper prefixes that should be transparently stripped before routing
     /// to a filter, then re-prepended on the rewrite. For example, with
@@ -53,10 +73,44 @@ pub struct HooksConfig {
     pub transparent_prefixes: Vec<String>,
 }
 
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            mode: HookMode::HermesSafe,
+            exclude_commands: Vec::new(),
+            hermes_allowlist: default_hermes_allowlist(),
+            transparent_prefixes: Vec::new(),
+        }
+    }
+}
+
+fn default_hermes_allowlist() -> Vec<String> {
+    vec![
+        "git status".into(),
+        "git diff --stat".into(),
+        "git log --oneline".into(),
+        "ls".into(),
+        "tree".into(),
+        "du".into(),
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandStorageMode {
+    #[default]
+    Redacted,
+    ToolOnly,
+    Full,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TrackingConfig {
     pub enabled: bool,
     pub history_days: u32,
+    /// Controls how much command text is persisted in local SQLite.
+    #[serde(default)]
+    pub command_storage: CommandStorageMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database_path: Option<PathBuf>,
 }
@@ -66,6 +120,7 @@ impl Default for TrackingConfig {
         Self {
             enabled: true,
             history_days: DEFAULT_HISTORY_DAYS as u32,
+            command_storage: CommandStorageMode::Redacted,
             database_path: None,
         }
     }
@@ -223,6 +278,8 @@ exclude_commands = ["curl", "gh"]
     fn test_hooks_config_default_empty() {
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
+        assert_eq!(config.hooks.mode, HookMode::HermesSafe);
+        assert!(!config.hooks.hermes_allowlist.is_empty());
         assert!(config.hooks.transparent_prefixes.is_empty());
     }
 

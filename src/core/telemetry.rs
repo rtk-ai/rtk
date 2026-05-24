@@ -18,6 +18,10 @@ const PING_INTERVAL_SECS: u64 = 23 * 3600; // 23 hours
 /// Send a telemetry ping if enabled and not already sent today.
 /// Fire-and-forget: errors are silently ignored.
 pub fn maybe_ping() {
+    if enterprise_offline() {
+        return;
+    }
+
     // No URL compiled in → telemetry disabled
     if TELEMETRY_URL.is_none() {
         return;
@@ -66,7 +70,14 @@ pub fn maybe_ping() {
     });
 }
 
+fn enterprise_offline() -> bool {
+    matches!(std::env::var("RTK_ENTERPRISE_OFFLINE").as_deref(), Ok("1") | Ok("true") | Ok("yes"))
+}
+
 fn send_ping() -> Result<(), Box<dyn std::error::Error>> {
+    if enterprise_offline() {
+        return Ok(());
+    }
     let url = TELEMETRY_URL.ok_or("no telemetry URL")?;
     let device_hash = generate_device_hash();
     let version = env!("CARGO_PKG_VERSION").to_string();

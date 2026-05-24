@@ -37,6 +37,61 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::core::config::{CommandStorageMode, Config};
+
+fn first_shell_word(s: &str) -> String {
+    s.split_whitespace().next().unwrap_or("").to_string()
+}
+
+fn looks_sensitive(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    [
+        "secret", "token", "api_key", "apikey", "password", "passwd", "cookie",
+        "credential", "authorization", "bearer ", ".env", "id_rsa", "private_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn truncate_for_storage(s: &str) -> String {
+    const CAP: usize = 512;
+    if s.len() <= CAP {
+        return s.to_string();
+    }
+    let boundary = s
+        .char_indices()
+        .take_while(|(i, _)| *i < CAP)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    format!("{}... [truncated]", &s[..boundary])
+}
+
+fn sanitize_for_storage(s: &str, mode: &CommandStorageMode) -> String {
+    match mode {
+        CommandStorageMode::Full => truncate_for_storage(s),
+        CommandStorageMode::ToolOnly => first_shell_word(s),
+        CommandStorageMode::Redacted => {
+            if looks_sensitive(s) {
+                let tool = first_shell_word(s);
+                if tool.is_empty() {
+                    "[REDACTED]".to_string()
+                } else {
+                    format!("{} [REDACTED]", tool)
+                }
+            } else {
+                truncate_for_storage(s)
+            }
+        }
+    }
+}
+
+fn tracking_storage_mode() -> CommandStorageMode {
+    Config::load()
+        .map(|c| c.tracking.command_storage)
+        .unwrap_or_default()
+}
+
 // ── Project path helpers ── // added: project-scoped tracking support
 
 /// Get the canonical project path string for the current working directory.
@@ -415,14 +470,17 @@ impl Tracker {
         };
 
         let project_path = current_project_path_string(); // added: record cwd
+        let storage_mode = tracking_storage_mode();
+        let original_cmd = sanitize_for_storage(original_cmd, &storage_mode);
+        let rtk_cmd = sanitize_for_storage(rtk_cmd, &storage_mode);
 
         self.conn.execute(
             "INSERT INTO commands (timestamp, original_cmd, rtk_cmd, project_path, input_tokens, output_tokens, saved_tokens, savings_pct, exec_time_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", // added: project_path
             params![
                 Utc::now().to_rfc3339(),
-                original_cmd,
-                rtk_cmd,
+                original_cmd.as_str(),
+                rtk_cmd.as_str(),
                 project_path, // added
                 input_tokens as i64,
                 output_tokens as i64,
@@ -469,13 +527,16 @@ impl Tracker {
         error_message: &str,
         fallback_succeeded: bool,
     ) -> Result<()> {
+        let storage_mode = tracking_storage_mode();
+        let raw_command = sanitize_for_storage(raw_command, &storage_mode);
+        let error_message = sanitize_for_storage(error_message, &storage_mode);
         self.conn.execute(
             "INSERT INTO parse_failures (timestamp, raw_command, error_message, fallback_succeeded)
              VALUES (?1, ?2, ?3, ?4)",
             params![
                 Utc::now().to_rfc3339(),
-                raw_command,
-                error_message,
+                raw_command.as_str(),
+                error_message.as_str(),
                 fallback_succeeded as i32,
             ],
         )?;

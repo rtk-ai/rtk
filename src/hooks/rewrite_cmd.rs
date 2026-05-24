@@ -1,6 +1,7 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
 use super::permissions::{check_command, PermissionVerdict};
+use crate::core::config::{Config, HookMode};
 use crate::discover::registry;
 use std::io::Write;
 
@@ -16,9 +17,17 @@ use std::io::Write;
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
 pub fn run(cmd: &str) -> anyhow::Result<()> {
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
+    let hooks = Config::load().map(|c| c.hooks).unwrap_or_default();
+
+    if matches!(hooks.mode, HookMode::Suggest) {
+        std::process::exit(1);
+    }
+
+    if matches!(hooks.mode, HookMode::HermesSafe)
+        && !is_hermes_safe_command(cmd, &hooks.hermes_allowlist)
+    {
+        std::process::exit(1);
+    }
 
     // SECURITY: check deny/ask BEFORE rewrite so non-RTK commands are also covered.
     let verdict = check_command(cmd);
@@ -27,7 +36,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
-    match registry::rewrite_command(cmd, &excluded, &transparent_prefixes) {
+    match registry::rewrite_command(cmd, &hooks.exclude_commands, &hooks.transparent_prefixes) {
         Some(rewritten) => match verdict {
             PermissionVerdict::Allow => {
                 print!("{}", rewritten);
@@ -47,6 +56,29 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+fn is_hermes_safe_command(cmd: &str, allowlist: &[String]) -> bool {
+    let normalized = cmd.trim();
+    if normalized.is_empty() || looks_sensitive_command(normalized) {
+        return false;
+    }
+    allowlist.iter().any(|prefix| command_prefix_match(normalized, prefix))
+}
+
+fn command_prefix_match(cmd: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim();
+    cmd == prefix || (cmd.starts_with(prefix) && cmd.as_bytes().get(prefix.len()) == Some(&b' '))
+}
+
+fn looks_sensitive_command(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    [
+        "secret", "token", "api_key", "apikey", "password", "passwd", "cookie",
+        "credential", "authorization", "bearer ", ".env", "id_rsa", "private_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 #[cfg(test)]
