@@ -185,6 +185,17 @@ pub fn run_gemini() -> Result<()> {
 
     let json: Value = serde_json::from_str(&input).context("Failed to parse hook input as JSON")?;
 
+    // agy (Antigravity CLI) sends a rich format: toolCall.args.CommandLine.
+    // Gemini CLI sends the simple format: tool_name + tool_input.command.
+    if let Some(cmd) = json
+        .pointer("/toolCall/args/CommandLine")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return handle_gemini_rich(&json, cmd);
+    }
+
+    // Simple Gemini CLI format.
     let tool_name = json.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
 
     if tool_name != "run_shell_command" {
@@ -219,6 +230,42 @@ pub fn run_gemini() -> Result<()> {
         Some(ref rewritten) => {
             audit_log("rewrite", cmd, rewritten);
             print_rewrite(rewritten);
+        }
+        None => print_allow(),
+    }
+
+    Ok(())
+}
+
+/// Handle agy's rich payload format (toolCall.args.CommandLine).
+/// Preserves all extra args (Cwd, WaitMsBeforeAsync, etc.) and returns a toolCall.args response.
+fn handle_gemini_rich(json: &Value, cmd: &str) -> Result<()> {
+    if permissions::check_command(cmd) == PermissionVerdict::Deny {
+        let _ = writeln!(
+            io::stdout(),
+            r#"{{"decision":"deny","reason":"Blocked by RTK permission rule"}}"#
+        );
+        return Ok(());
+    }
+
+    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
+        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
+        .unwrap_or_default();
+
+    match rewrite_command(cmd, &excluded, &transparent_prefixes) {
+        Some(ref rewritten) => {
+            audit_log("rewrite", cmd, rewritten);
+            let mut updated_args = json
+                .pointer("/toolCall/args")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            updated_args.insert("CommandLine".to_string(), Value::String(rewritten.clone()));
+            let output = json!({
+                "decision": "allow",
+                "toolCall": {"args": updated_args}
+            });
+            let _ = writeln!(io::stdout(), "{}", output);
         }
         None => print_allow(),
     }
