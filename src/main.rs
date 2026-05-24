@@ -715,6 +715,13 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// Prek hook runner (pre-commit equivalent) with the same filter
+    Prek {
+        /// Prek arguments (run, install, autoupdate, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Go commands with compact output
     Go {
         #[command(subcommand)]
@@ -2157,6 +2164,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::PreCommit { args } => pre_commit_cmd::run(&args, cli.verbose)?,
 
+        Commands::Prek { args } => pre_commit_cmd::run_prek(&args, cli.verbose)?,
+
         Commands::Go { command } => match command {
             GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,
             GoCommands::Build { args } => go_cmd::run_build(&args, cli.verbose)?,
@@ -2516,6 +2525,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Rspec { .. }
             | Commands::Pip { .. }
             | Commands::PreCommit { .. }
+            | Commands::Prek { .. }
             | Commands::Go { .. }
             | Commands::GolangciLint { .. }
             | Commands::Gt { .. }

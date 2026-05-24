@@ -735,6 +735,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^prek\b",
+        rtk_cmd: "rtk prek",
+        rewrite_prefixes: &["prek"],
+        category: "Build",
+        savings_pct: 65.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^ps(\s|$)",
         rtk_cmd: "rtk ps",
         rewrite_prefixes: &["ps"],

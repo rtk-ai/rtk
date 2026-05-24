@@ -8,22 +8,30 @@ use anyhow::Result;
 const HOOK_STATUSES: [&str; 4] = ["Passed", "Failed", "Skipped", "Ignored"];
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command("pre-commit");
+    run_with_tool("pre-commit", args, verbose)
+}
+
+pub fn run_prek(args: &[String], verbose: u8) -> Result<i32> {
+    run_with_tool("prek", args, verbose)
+}
+
+fn run_with_tool(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
+    let mut cmd = resolved_command(tool);
 
     for arg in args {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        eprintln!("Running: pre-commit {}", args.join(" "));
+        eprintln!("Running: {} {}", tool, args.join(" "));
     }
 
     runner::run_filtered(
         cmd,
-        "pre-commit",
+        tool,
         &args.join(" "),
         filter_pre_commit_output,
-        runner::RunOptions::stdout_only().tee("pre-commit"),
+        runner::RunOptions::stdout_only().tee(tool),
     )
 }
 
