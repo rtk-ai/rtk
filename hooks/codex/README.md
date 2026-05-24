@@ -7,3 +7,4 @@
 - Prompt-level guidance via awareness document -- no programmatic hook
 - `rtk-awareness.md` is injected into `AGENTS.md` with an `@RTK.md` reference
 - Installed to `$CODEX_HOME` when set, otherwise `~/.codex/`, by `rtk init --codex`
+- For an optional native Codex `PreToolUse` adapter, see [`../../docs/usage/CODEX_PRETOOLUSE_ADAPTER.md`](../../docs/usage/CODEX_PRETOOLUSE_ADAPTER.md)
