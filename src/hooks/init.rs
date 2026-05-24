@@ -3983,6 +3983,35 @@ mod tests {
     }
 
     #[test]
+    fn test_hook_augments_path_before_rtk_check() {
+        // PATH augmentation must exist so that rtk is found in Claude Code's restricted
+        // hook environment (e.g. Homebrew installs at /opt/homebrew/bin are absent otherwise).
+        // The inline `REWRITE_HOOK` constant was removed on develop in favor of an
+        // external script — assert the same invariants directly against that file.
+        const REWRITE_HOOK_SCRIPT: &str = include_str!("../../hooks/claude/rtk-rewrite.sh");
+        assert!(
+            REWRITE_HOOK_SCRIPT.contains("export PATH="),
+            "Hook must export an augmented PATH"
+        );
+        // The PATH export must appear before the `command -v rtk` guard.
+        let path_export_pos = REWRITE_HOOK_SCRIPT.find("export PATH=").unwrap();
+        let rtk_check_pos = REWRITE_HOOK_SCRIPT.find("command -v rtk").unwrap();
+        assert!(
+            path_export_pos < rtk_check_pos,
+            "PATH augmentation must precede the `command -v rtk` guard"
+        );
+        // Verify key directories are covered.
+        assert!(
+            REWRITE_HOOK_SCRIPT.contains(".cargo/bin"),
+            "cargo install path missing"
+        );
+        assert!(
+            REWRITE_HOOK_SCRIPT.contains("/opt/homebrew/bin"),
+            "Homebrew (Apple Silicon) path missing"
+        );
+    }
+
+    #[test]
     fn test_migration_removes_old_block() {
         let input = format!(
             "# My Config\n\n{} v2 -->\nOLD RTK STUFF\n{}\n\nMore content",

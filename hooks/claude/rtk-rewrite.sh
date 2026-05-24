@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# rtk-hook-version: 3
+# rtk-hook-version: 4
+# Augment PATH so rtk is found in Claude Code's restricted hook environment.
+# Common locations: Homebrew (Apple Silicon /opt/homebrew/bin, Intel /usr/local/bin)
+# and cargo installs ($HOME/.cargo/bin). Safe to add even if already in PATH.
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 # RTK Claude Code hook — rewrites commands to use rtk for token savings.
 # Requires: rtk >= 0.23.0, jq
 #
