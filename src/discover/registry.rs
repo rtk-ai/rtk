@@ -2202,6 +2202,224 @@ mod tests {
         );
     }
 
+    // --- #1148: npm subcommands beyond run/exec ---
+
+    #[test]
+    fn test_rewrite_npm_install() {
+        assert_eq!(
+            rewrite_command("npm install", &[], &[]),
+            Some("rtk npm install".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_install_package() {
+        assert_eq!(
+            rewrite_command("npm install express --save", &[], &[]),
+            Some("rtk npm install express --save".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_ci() {
+        assert_eq!(
+            rewrite_command("npm ci", &[], &[]),
+            Some("rtk npm ci".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_list() {
+        assert_eq!(
+            rewrite_command("npm list", &[], &[]),
+            Some("rtk npm list".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_audit() {
+        assert_eq!(
+            rewrite_command("npm audit", &[], &[]),
+            Some("rtk npm audit".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_outdated() {
+        assert_eq!(
+            rewrite_command("npm outdated", &[], &[]),
+            Some("rtk npm outdated".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_npm_install() {
+        assert!(matches!(
+            classify_command("npm install"),
+            Classification::Supported {
+                rtk_equivalent: "rtk npm",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_classify_npm_ci() {
+        assert!(matches!(
+            classify_command("npm ci"),
+            Classification::Supported {
+                rtk_equivalent: "rtk npm",
+                ..
+            }
+        ));
+    }
+
+    // --- npm prefix collision edge cases (#1148) ---
+
+    #[test]
+    fn test_rewrite_npm_no_prefix_collision_showcase() {
+        // "show" must not match "showcase"
+        assert_eq!(rewrite_command("npm showcase", &[], &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_npm_no_prefix_collision_installer() {
+        // "install" must not match "installer"
+        assert_eq!(rewrite_command("npm installer", &[], &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_npm_no_prefix_collision_packages() {
+        // "pack" must not match "packages"
+        assert_eq!(rewrite_command("npm packages", &[], &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_npm_no_prefix_collision_invoke() {
+        // "i" must not match "invoke"
+        assert_eq!(rewrite_command("npm invoke", &[], &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_npm_no_prefix_collision_viewers() {
+        // "view" must not match "viewers"
+        assert_eq!(rewrite_command("npm viewers", &[], &[]), None);
+    }
+
+    #[test]
+    fn test_rewrite_npm_init() {
+        assert_eq!(
+            rewrite_command("npm init", &[], &[]),
+            Some("rtk npm init".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_link() {
+        assert_eq!(
+            rewrite_command("npm link", &[], &[]),
+            Some("rtk npm link".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_run_with_args() {
+        assert_eq!(
+            rewrite_command("npm run build", &[], &[]),
+            Some("rtk npm run build".into())
+        );
+    }
+
+    /// Sweep the full NPM_SUBCOMMANDS list (#1148): every entry must rewrite,
+    /// otherwise the corresponding `npm <subcmd>` call bypasses RTK silently.
+    #[test]
+    fn test_rewrite_npm_login() {
+        assert_eq!(
+            rewrite_command("npm login", &[], &[]),
+            Some("rtk npm login".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_logout() {
+        assert_eq!(
+            rewrite_command("npm logout", &[], &[]),
+            Some("rtk npm logout".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_diff() {
+        assert_eq!(
+            rewrite_command("npm diff", &[], &[]),
+            Some("rtk npm diff".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_pkg() {
+        assert_eq!(
+            rewrite_command("npm pkg get name", &[], &[]),
+            Some("rtk npm pkg get name".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_dist_tag() {
+        assert_eq!(
+            rewrite_command("npm dist-tag ls", &[], &[]),
+            Some("rtk npm dist-tag ls".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_whoami() {
+        assert_eq!(
+            rewrite_command("npm whoami", &[], &[]),
+            Some("rtk npm whoami".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_set() {
+        assert_eq!(
+            rewrite_command("npm set foo bar", &[], &[]),
+            Some("rtk npm set foo bar".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_get() {
+        assert_eq!(
+            rewrite_command("npm get foo", &[], &[]),
+            Some("rtk npm get foo".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_doctor() {
+        assert_eq!(
+            rewrite_command("npm doctor", &[], &[]),
+            Some("rtk npm doctor".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_unpublish() {
+        assert_eq!(
+            rewrite_command("npm unpublish foo", &[], &[]),
+            Some("rtk npm unpublish foo".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_npm_adduser() {
+        assert_eq!(
+            rewrite_command("npm adduser", &[], &[]),
+            Some("rtk npm adduser".into())
+        );
+    }
+
     // --- Python tooling ---
 
     #[test]
