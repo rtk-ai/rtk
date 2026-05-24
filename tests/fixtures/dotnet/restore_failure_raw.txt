@@ -1,0 +1,8 @@
+  Determining projects to restore...
+  /private/tmp/RtkDotnetSmoke/RtkDotnetSmoke.csproj : error NU1101: Unable to find package Foo. No packages exist with this id in source(s): nuget.org
+  Failed to restore /private/tmp/RtkDotnetSmoke/RtkDotnetSmoke.csproj (in 421 ms).
+Build FAILED.
+  /private/tmp/RtkDotnetSmoke/RtkDotnetSmoke.csproj : error NU1101: Unable to find package Foo. No packages exist with this id in source(s): nuget.org
+    0 Warning(s)
+    1 Error(s)
+Time Elapsed 00:00:01.00
