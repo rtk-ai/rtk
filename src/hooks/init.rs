@@ -500,12 +500,20 @@ fn prompt_telemetry_consent() -> Result<()> {
 fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
     println!("\n  MANUAL STEP: Add this to ~/.claude/settings.json:");
     println!("  {{");
-    println!("    \"hooks\": {{ \"PreToolUse\": [{{");
-    println!("      \"matcher\": \"Bash\",");
-    println!("      \"hooks\": [{{ \"type\": \"command\",");
-    println!("        \"command\": \"{}\"", hook_command);
-    println!("      }}]");
-    println!("    }}]}}");
+    println!("    \"hooks\": {{ \"PreToolUse\": [");
+    println!("      {{");
+    println!("        \"matcher\": \"Bash\",");
+    println!("        \"hooks\": [{{ \"type\": \"command\",");
+    println!("          \"command\": \"{}\"", hook_command);
+    println!("        }}]");
+    println!("      }},");
+    println!("      {{");
+    println!("        \"matcher\": \"PowerShell\",");
+    println!("        \"hooks\": [{{ \"type\": \"command\",");
+    println!("          \"command\": \"{}\"", hook_command);
+    println!("        }}]");
+    println!("      }}");
+    println!("    ]}}");
     println!("  }}");
     if include_opencode {
         println!("\n  Then restart Claude Code and OpenCode. Test with: git status\n");
@@ -1074,6 +1082,13 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
 
     pre_tool_use.push(serde_json::json!({
         "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": hook_command
+        }]
+    }));
+    pre_tool_use.push(serde_json::json!({
+        "matcher": "PowerShell",
         "hooks": [{
             "type": "command",
             "command": hook_command
@@ -5064,10 +5079,17 @@ mod tests {
             .is_some());
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 1);
+        assert_eq!(pre_tool_use.len(), 2);
 
-        let command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(command, hook_command);
+        let bash_matcher = pre_tool_use[0]["matcher"].as_str().unwrap();
+        assert_eq!(bash_matcher, "Bash");
+        let bash_command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(bash_command, hook_command);
+
+        let ps_matcher = pre_tool_use[1]["matcher"].as_str().unwrap();
+        assert_eq!(ps_matcher, "PowerShell");
+        let ps_command = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(ps_command, hook_command);
     }
 
     #[test]
@@ -5088,15 +5110,23 @@ mod tests {
         insert_hook_entry(&mut json_content, hook_command).unwrap();
 
         let pre_tool_use = json_content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool_use.len(), 2); // Should have both hooks
+        assert_eq!(pre_tool_use.len(), 3); // Should have existing + Bash + PowerShell
 
         // Check first hook is preserved
         let first_command = pre_tool_use[0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(first_command, "/some/other/hook.sh");
 
-        // Check second hook is RTK
+        // Check Bash RTK hook
+        let bash_matcher = pre_tool_use[1]["matcher"].as_str().unwrap();
+        assert_eq!(bash_matcher, "Bash");
         let second_command = pre_tool_use[1]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(second_command, hook_command);
+
+        // Check PowerShell RTK hook
+        let ps_matcher = pre_tool_use[2]["matcher"].as_str().unwrap();
+        assert_eq!(ps_matcher, "PowerShell");
+        let third_command = pre_tool_use[2]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(third_command, hook_command);
     }
 
     #[test]
