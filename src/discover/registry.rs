@@ -2207,7 +2207,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_install() {
         assert_eq!(
-            rewrite_command("npm install", &[]),
+            rewrite_command("npm install", &[], &[]),
             Some("rtk npm install".into())
         );
     }
@@ -2215,20 +2215,23 @@ mod tests {
     #[test]
     fn test_rewrite_npm_install_package() {
         assert_eq!(
-            rewrite_command("npm install express --save", &[]),
+            rewrite_command("npm install express --save", &[], &[]),
             Some("rtk npm install express --save".into())
         );
     }
 
     #[test]
     fn test_rewrite_npm_ci() {
-        assert_eq!(rewrite_command("npm ci", &[]), Some("rtk npm ci".into()));
+        assert_eq!(
+            rewrite_command("npm ci", &[], &[]),
+            Some("rtk npm ci".into())
+        );
     }
 
     #[test]
     fn test_rewrite_npm_list() {
         assert_eq!(
-            rewrite_command("npm list", &[]),
+            rewrite_command("npm list", &[], &[]),
             Some("rtk npm list".into())
         );
     }
@@ -2236,7 +2239,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_audit() {
         assert_eq!(
-            rewrite_command("npm audit", &[]),
+            rewrite_command("npm audit", &[], &[]),
             Some("rtk npm audit".into())
         );
     }
@@ -2244,7 +2247,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_outdated() {
         assert_eq!(
-            rewrite_command("npm outdated", &[]),
+            rewrite_command("npm outdated", &[], &[]),
             Some("rtk npm outdated".into())
         );
     }
@@ -2276,37 +2279,37 @@ mod tests {
     #[test]
     fn test_rewrite_npm_no_prefix_collision_showcase() {
         // "show" must not match "showcase"
-        assert_eq!(rewrite_command("npm showcase", &[]), None);
+        assert_eq!(rewrite_command("npm showcase", &[], &[]), None);
     }
 
     #[test]
     fn test_rewrite_npm_no_prefix_collision_installer() {
         // "install" must not match "installer"
-        assert_eq!(rewrite_command("npm installer", &[]), None);
+        assert_eq!(rewrite_command("npm installer", &[], &[]), None);
     }
 
     #[test]
     fn test_rewrite_npm_no_prefix_collision_packages() {
         // "pack" must not match "packages"
-        assert_eq!(rewrite_command("npm packages", &[]), None);
+        assert_eq!(rewrite_command("npm packages", &[], &[]), None);
     }
 
     #[test]
     fn test_rewrite_npm_no_prefix_collision_invoke() {
         // "i" must not match "invoke"
-        assert_eq!(rewrite_command("npm invoke", &[]), None);
+        assert_eq!(rewrite_command("npm invoke", &[], &[]), None);
     }
 
     #[test]
     fn test_rewrite_npm_no_prefix_collision_viewers() {
         // "view" must not match "viewers"
-        assert_eq!(rewrite_command("npm viewers", &[]), None);
+        assert_eq!(rewrite_command("npm viewers", &[], &[]), None);
     }
 
     #[test]
     fn test_rewrite_npm_init() {
         assert_eq!(
-            rewrite_command("npm init", &[]),
+            rewrite_command("npm init", &[], &[]),
             Some("rtk npm init".into())
         );
     }
@@ -2314,7 +2317,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_link() {
         assert_eq!(
-            rewrite_command("npm link", &[]),
+            rewrite_command("npm link", &[], &[]),
             Some("rtk npm link".into())
         );
     }
@@ -2322,7 +2325,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_run_with_args() {
         assert_eq!(
-            rewrite_command("npm run build", &[]),
+            rewrite_command("npm run build", &[], &[]),
             Some("rtk npm run build".into())
         );
     }
@@ -2332,7 +2335,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_login() {
         assert_eq!(
-            rewrite_command("npm login", &[]),
+            rewrite_command("npm login", &[], &[]),
             Some("rtk npm login".into())
         );
     }
@@ -2340,7 +2343,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_logout() {
         assert_eq!(
-            rewrite_command("npm logout", &[]),
+            rewrite_command("npm logout", &[], &[]),
             Some("rtk npm logout".into())
         );
     }
@@ -2348,7 +2351,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_diff() {
         assert_eq!(
-            rewrite_command("npm diff", &[]),
+            rewrite_command("npm diff", &[], &[]),
             Some("rtk npm diff".into())
         );
     }
@@ -2356,7 +2359,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_pkg() {
         assert_eq!(
-            rewrite_command("npm pkg get name", &[]),
+            rewrite_command("npm pkg get name", &[], &[]),
             Some("rtk npm pkg get name".into())
         );
     }
@@ -2364,7 +2367,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_dist_tag() {
         assert_eq!(
-            rewrite_command("npm dist-tag ls", &[]),
+            rewrite_command("npm dist-tag ls", &[], &[]),
             Some("rtk npm dist-tag ls".into())
         );
     }
@@ -2372,7 +2375,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_whoami() {
         assert_eq!(
-            rewrite_command("npm whoami", &[]),
+            rewrite_command("npm whoami", &[], &[]),
             Some("rtk npm whoami".into())
         );
     }
@@ -2380,7 +2383,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_set() {
         assert_eq!(
-            rewrite_command("npm set foo bar", &[]),
+            rewrite_command("npm set foo bar", &[], &[]),
             Some("rtk npm set foo bar".into())
         );
     }
@@ -2388,7 +2391,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_get() {
         assert_eq!(
-            rewrite_command("npm get foo", &[]),
+            rewrite_command("npm get foo", &[], &[]),
             Some("rtk npm get foo".into())
         );
     }
@@ -2396,7 +2399,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_doctor() {
         assert_eq!(
-            rewrite_command("npm doctor", &[]),
+            rewrite_command("npm doctor", &[], &[]),
             Some("rtk npm doctor".into())
         );
     }
@@ -2404,7 +2407,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_unpublish() {
         assert_eq!(
-            rewrite_command("npm unpublish foo", &[]),
+            rewrite_command("npm unpublish foo", &[], &[]),
             Some("rtk npm unpublish foo".into())
         );
     }
@@ -2412,7 +2415,7 @@ mod tests {
     #[test]
     fn test_rewrite_npm_adduser() {
         assert_eq!(
-            rewrite_command("npm adduser", &[]),
+            rewrite_command("npm adduser", &[], &[]),
             Some("rtk npm adduser".into())
         );
     }
