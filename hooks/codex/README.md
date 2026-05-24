@@ -34,3 +34,5 @@ Codex currently supports rewritten input only with `permissionDecision: "allow"`
 Codex plugin hooks require the Codex `hooks` and `plugin_hooks` features to be active. After installation, restart Codex and use `/hooks` to review and trust the RTK plugin hook when Codex asks for hook trust.
 
 The legacy `rtk-awareness.md` file is retained only as compatibility context for previous instruction-only installs.
+
+For a user-facing setup and verification walkthrough, see [`../../docs/usage/CODEX_PRETOOLUSE_ADAPTER.md`](../../docs/usage/CODEX_PRETOOLUSE_ADAPTER.md).

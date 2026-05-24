@@ -94,7 +94,7 @@ Rules are loaded from all Claude Code `settings.json` files (project + global, i
 
 - `permissions.rs` — loads deny/ask/allow rules, evaluates precedence, returns `PermissionVerdict`
 - `rewrite_cmd.rs` — maps verdict to exit code (consumed by shell hook)
-- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini)
+- `hook_cmd.rs` — maps verdict to JSON `permissionDecision` field (Copilot/Gemini/Codex)
 
 ## Exit Code Contract
 

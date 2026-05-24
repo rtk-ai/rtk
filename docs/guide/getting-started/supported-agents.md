@@ -158,8 +158,7 @@ rtk init --codex       # registers local RTK Codex plugin marketplace
 rtk init -g --codex    # registers personal RTK Codex plugin marketplace
 ```
 
-The Codex plugin bundles an RTK skill and a Bash `PreToolUse` hook. The hook matches Codex's Bash tool payloads, but the installed command delegates directly to the native RTK binary with `rtk hook codex` on Linux/macOS and `rtk.exe hook codex` on Windows. After installation, restart Codex, enable or install the RTK plugin if Codex prompts for it, and review/trust the plugin hook in `/hooks`. Codex currently supports rewritten input only with `permissionDecision: "allow"`, so RTK does not emit unsupported `ask` rewrites.
-RTK preserves the original Bash `tool_input` and replaces only `command`.
+The Codex plugin bundles an RTK skill and a Bash `PreToolUse` hook. The hook matches Codex's Bash tool payloads, but the installed command delegates directly to the native RTK binary with `rtk hook codex` on Linux/macOS and `rtk.exe hook codex` on Windows. After installation, restart Codex, enable or install the RTK plugin if Codex prompts for it, and review/trust the plugin hook in `/hooks`. Codex currently supports rewritten input only with `permissionDecision: "allow"`, so RTK does not emit unsupported `ask` rewrites. RTK preserves the original Bash `tool_input` and replaces only `command`.
 
 ### Kilo Code
 

@@ -478,6 +478,14 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         }
     };
 
+    let updated_input = {
+        let mut tool_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+        if let Some(obj) = tool_input.as_object_mut() {
+            obj.insert("command".into(), Value::String(rewritten.clone()));
+        }
+        tool_input
+    };
+
     PayloadAction::Rewrite {
         cmd: cmd.to_string(),
         rewritten: rewritten.clone(),
@@ -486,7 +494,7 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
                 "hookEventName": PRE_TOOL_USE_KEY,
                 "permissionDecision": "allow",
                 "permissionDecisionReason": "RTK auto-rewrite",
-                "updatedInput": { "command": rewritten }
+                "updatedInput": updated_input
             }
         }),
     }
@@ -1124,6 +1132,19 @@ mod tests {
         .to_string()
     }
 
+    fn codex_input_with_fields(tool: &str, cmd: &str, timeout: u64, description: &str) -> String {
+        json!({
+            "hook_event_name": PRE_TOOL_USE_KEY,
+            "tool_name": tool,
+            "tool_input": {
+                "command": cmd,
+                "timeout": timeout,
+                "description": description
+            }
+        })
+        .to_string()
+    }
+
     #[test]
     fn test_codex_rewrite_git_status() {
         let result = run_codex_inner(&codex_input("Bash", "git status")).unwrap();
@@ -1134,6 +1155,23 @@ mod tests {
         assert_eq!(hook["permissionDecision"], "allow");
         assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
         assert_eq!(hook["updatedInput"]["command"], "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_rewrite_preserves_tool_input_fields() {
+        let result = run_codex_inner(&codex_input_with_fields(
+            "Bash",
+            "git status",
+            30000,
+            "Check repo",
+        ))
+        .unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+
+        assert_eq!(updated["command"], "rtk git status");
+        assert_eq!(updated["timeout"], 30000);
+        assert_eq!(updated["description"], "Check repo");
     }
 
     #[test]

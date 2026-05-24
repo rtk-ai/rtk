@@ -141,7 +141,7 @@ The plugin hook matcher is `Bash`, because Codex exposes shell tool calls under 
 {
   "hook_event_name": "PreToolUse",
   "tool_name": "Bash",
-  "tool_input": { "command": "git status" }
+  "tool_input": { "command": "git status", "timeout": 30000 }
 }
 ```
 
@@ -153,14 +153,12 @@ The plugin hook matcher is `Bash`, because Codex exposes shell tool calls under 
     "hookEventName": "PreToolUse",
     "permissionDecision": "allow",
     "permissionDecisionReason": "RTK auto-rewrite",
-    "updatedInput": { "command": "rtk git status" }
+    "updatedInput": { "command": "rtk git status", "timeout": 30000 }
   }
 }
 ```
 
-Codex currently requires `permissionDecision: "allow"` when returning `updatedInput`; `permissionDecision: "ask"` with rewritten input is not supported.
-
-**Output**: Same as Claude Code format (with `updatedInput`).
+Codex currently requires `permissionDecision: "allow"` when returning `updatedInput`; `permissionDecision: "ask"` with rewritten input is not supported. RTK preserves the rest of Codex's original `tool_input` and replaces only `command`.
 
 ### Gemini CLI (Rust Binary)
 
