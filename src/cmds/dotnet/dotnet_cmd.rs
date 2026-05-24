@@ -1513,7 +1513,14 @@ mod tests {
 
         let count_tokens = |s: &str| s.split_whitespace().count();
         assert!(!filtered.is_empty(), "Filtered must not be empty on failure");
-        assert!(filtered.starts_with("fail dotnet restore"));
+        // Verdict line is emitted LAST (issue #1574) when an Errors section
+        // precedes it — assert against the last line to match the new layout.
+        let last_line = filtered.lines().last().expect("filtered must not be empty");
+        assert!(
+            last_line.starts_with("fail dotnet restore"),
+            "verdict must end the output, got last_line={:?}",
+            last_line
+        );
         // #914 regression guard: filtered alone must compress vs raw.
         assert!(
             count_tokens(&filtered) < count_tokens(raw_stdout),
