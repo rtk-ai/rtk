@@ -2,6 +2,7 @@ pub const REWRITE_HOOK_FILE: &str = "rtk-rewrite.sh";
 pub const GEMINI_HOOK_FILE: &str = "rtk-hook-gemini.sh";
 pub const CLAUDE_DIR: &str = ".claude";
 pub const CODEBUDDY_DIR: &str = ".codebuddy";
+pub const WORKBUDDY_DIR: &str = ".workbuddy";
 pub const HOOKS_SUBDIR: &str = "hooks";
 pub const SETTINGS_JSON: &str = "settings.json";
 pub const SETTINGS_LOCAL_JSON: &str = "settings.local.json";
@@ -15,6 +16,8 @@ pub const CLAUDE_HOOK_COMMAND: &str = "rtk hook claude";
 pub const CURSOR_HOOK_COMMAND: &str = "rtk hook cursor";
 /// Native Rust hook command for CodeBuddy Code.
 pub const CODEBUDDY_HOOK_COMMAND: &str = "rtk hook codebuddy";
+/// Native Rust hook command for WorkBuddy.
+pub const WORKBUDDY_HOOK_COMMAND: &str = "rtk hook workbuddy";
 
 pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";

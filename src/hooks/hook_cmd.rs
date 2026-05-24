@@ -383,6 +383,11 @@ pub fn run_codebuddy() -> Result<()> {
     run_claude_compatible_hook("codebuddy", PermissionMode::NoPermissionCheck, true)
 }
 
+/// Run the WorkBuddy PreToolUse hook natively.
+pub fn run_workbuddy() -> Result<()> {
+    run_claude_compatible_hook("workbuddy", PermissionMode::NoPermissionCheck, true)
+}
+
 fn run_claude_compatible_hook(
     adapter: &str,
     permission_mode: PermissionMode,
@@ -431,6 +436,11 @@ fn run_claude_inner(input: &str) -> Option<String> {
 
 #[cfg(test)]
 fn run_codebuddy_inner(input: &str) -> Option<String> {
+    run_claude_compatible_inner(input, PermissionMode::NoPermissionCheck, true)
+}
+
+#[cfg(test)]
+fn run_workbuddy_inner(input: &str) -> Option<String> {
     run_claude_compatible_inner(input, PermissionMode::NoPermissionCheck, true)
 }
 
@@ -882,6 +892,72 @@ mod tests {
     #[test]
     fn test_codebuddy_already_rtk_passthrough() {
         assert!(run_codebuddy_inner(&codebuddy_input("rtk git status")).is_none());
+    }
+
+    // --- WorkBuddy handler ---
+
+    fn workbuddy_input(cmd: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "execute_command",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    fn workbuddy_input_with_fields(cmd: &str, timeout: u64, description: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "execute_command",
+            "tool_input": {
+                "command": cmd,
+                "timeout": timeout,
+                "description": description,
+                "extra": { "keep": true }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_workbuddy_rewrite_git_status() {
+        let result = run_workbuddy_inner(&workbuddy_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_workbuddy_rewrite_preserves_tool_input_fields() {
+        let input = workbuddy_input_with_fields("git status", 30000, "Check repo status");
+        let result = run_workbuddy_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk git status");
+        assert_eq!(updated["timeout"], 30000);
+        assert_eq!(updated["description"], "Check repo status");
+        assert_eq!(updated["extra"]["keep"], true);
+    }
+
+    #[test]
+    fn test_workbuddy_modified_input_matches_updated_input() {
+        let result = run_workbuddy_inner(&workbuddy_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+        assert_eq!(hook["modifiedInput"], hook["updatedInput"]);
+    }
+
+    #[test]
+    fn test_workbuddy_unsupported_command_passthrough() {
+        assert!(run_workbuddy_inner(&workbuddy_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_workbuddy_heredoc_passthrough() {
+        assert!(run_workbuddy_inner(&workbuddy_input("cat <<EOF\nhello\nEOF")).is_none());
     }
 
     // --- Cursor handler ---

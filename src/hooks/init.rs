@@ -15,6 +15,7 @@ use super::constants::{
     CODEBUDDY_PLUGIN_ENABLED_KEY, CODEBUDDY_PLUGIN_MANIFEST_DIR, CODEBUDDY_PLUGIN_MANIFEST_FILE,
     CODEBUDDY_PLUGIN_MARKETPLACE, CODEBUDDY_PLUGIN_NAME, CODEX_DIR, CURSOR_HOOK_COMMAND,
     GEMINI_HOOK_FILE, HOOKS_JSON, HOOKS_SUBDIR, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    WORKBUDDY_DIR, WORKBUDDY_HOOK_COMMAND,
 };
 use super::integrity;
 
@@ -1055,6 +1056,73 @@ fn patch_codebuddy_settings_json(path: &Path, verbose: u8) -> Result<PatchResult
     Ok(PatchResult::Patched)
 }
 
+/// Initialize WorkBuddy settings with the native RTK command hook.
+pub fn run_workbuddy(global: bool, verbose: u8) -> Result<()> {
+    let settings_path = resolve_workbuddy_settings_path(global)?;
+
+    let patch_result = patch_workbuddy_settings_json(&settings_path, verbose)?;
+    if patch_result == PatchResult::AlreadyPresent {
+        println!("\n  settings.json: WorkBuddy hook already present");
+    } else {
+        println!("\n  settings.json: WorkBuddy hook added");
+    }
+
+    println!("  WorkBuddy settings: {}", settings_path.display());
+    println!("  Command: {}", WORKBUDDY_HOOK_COMMAND);
+    if global {
+        println!("  Restart WorkBuddy. Test with: git status\n");
+    } else {
+        println!("  For global setup, run: rtk init -g --workbuddy\n");
+    }
+
+    Ok(())
+}
+
+fn resolve_workbuddy_settings_path(global: bool) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("Failed to determine current working directory")?;
+    workbuddy_settings_path_from(global, dirs::home_dir(), &cwd)
+}
+
+fn workbuddy_settings_path_from(
+    global: bool,
+    home_dir: Option<PathBuf>,
+    cwd: &Path,
+) -> Result<PathBuf> {
+    let workbuddy_dir = if global {
+        home_dir
+            .map(|home| home.join(WORKBUDDY_DIR))
+            .context("Cannot determine home directory. Is $HOME set?")?
+    } else {
+        cwd.join(WORKBUDDY_DIR)
+    };
+
+    Ok(workbuddy_dir.join(SETTINGS_JSON))
+}
+
+fn patch_workbuddy_settings_json(path: &Path, verbose: u8) -> Result<PatchResult> {
+    let mut root = read_json_object_or_empty(path)?;
+
+    if exact_command_hook_already_present(&root, WORKBUDDY_HOOK_COMMAND) {
+        if verbose > 0 {
+            eprintln!("WorkBuddy settings.json: hook already present");
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    insert_hook_entry_with_matcher(&mut root, WORKBUDDY_HOOK_COMMAND, "Bash|execute_command")?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+
+    let serialized = serde_json::to_string_pretty(&root)
+        .context("Failed to serialize WorkBuddy settings.json")?;
+    atomic_write(path, &serialized)?;
+
+    Ok(PatchResult::Patched)
+}
+
 fn read_json_object_or_empty(path: &Path) -> Result<serde_json::Value> {
     if !path.exists() {
         return Ok(serde_json::json!({}));
@@ -1119,6 +1187,14 @@ fn clean_double_blanks(content: &str) -> String {
 /// Deep-merge RTK hook entry into settings.json
 /// Creates hooks.PreToolUse structure if missing, preserves existing hooks
 fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
+    insert_hook_entry_with_matcher(root, hook_command, "Bash")
+}
+
+fn insert_hook_entry_with_matcher(
+    root: &mut serde_json::Value,
+    hook_command: &str,
+    matcher: &str,
+) -> Result<()> {
     let root_obj = match root.as_object_mut() {
         Some(obj) => obj,
         None => {
@@ -1140,7 +1216,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         .context("PreToolUse value is not an array")?;
 
     pre_tool_use.push(serde_json::json!({
-        "matcher": "Bash",
+        "matcher": matcher,
         "hooks": [{
             "type": "command",
             "command": hook_command
@@ -3946,6 +4022,55 @@ mod tests {
             true
         );
         assert_eq!(root["enabledPlugins"][CODEBUDDY_PLUGIN_ENABLED_KEY], true);
+    }
+
+    #[test]
+    fn test_workbuddy_settings_path_project_and_global() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+
+        assert_eq!(
+            workbuddy_settings_path_from(false, Some(home.clone()), &project).unwrap(),
+            project.join(WORKBUDDY_DIR).join(SETTINGS_JSON)
+        );
+        assert_eq!(
+            workbuddy_settings_path_from(true, Some(home.clone()), &project).unwrap(),
+            home.join(WORKBUDDY_DIR).join(SETTINGS_JSON)
+        );
+    }
+
+    #[test]
+    fn test_patch_workbuddy_settings_json_preserves_existing_fields() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(WORKBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "model": "preserve-me"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = patch_workbuddy_settings_json(&settings, 0).unwrap();
+        assert_eq!(result, PatchResult::Patched);
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(root["model"], "preserve-me");
+        assert_eq!(
+            root["hooks"][PRE_TOOL_USE_KEY][0]["matcher"],
+            "Bash|execute_command"
+        );
+        assert_eq!(
+            root["hooks"][PRE_TOOL_USE_KEY][0]["hooks"][0]["command"],
+            WORKBUDDY_HOOK_COMMAND
+        );
+
+        let result = patch_workbuddy_settings_json(&settings, 0).unwrap();
+        assert_eq!(result, PatchResult::AlreadyPresent);
     }
 
     // ─── Legacy migration tests ──────────────────────────────────────

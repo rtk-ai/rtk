@@ -375,6 +375,10 @@ enum Commands {
         /// Initialize CodeBuddy Code settings hooks
         #[arg(long)]
         codebuddy: bool,
+
+        /// Initialize WorkBuddy settings hooks
+        #[arg(long)]
+        workbuddy: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -766,6 +770,9 @@ enum HookCommands {
     /// Process CodeBuddy Code PreToolUse hook (reads JSON from stdin)
     #[command(name = "codebuddy")]
     CodeBuddy,
+    /// Process WorkBuddy PreToolUse hook (reads JSON from stdin)
+    #[command(name = "workbuddy")]
+    WorkBuddy,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1762,6 +1769,7 @@ fn run_cli() -> Result<i32> {
             codex,
             copilot,
             codebuddy,
+            workbuddy,
         } => {
             if show {
                 hooks::init::show_config(codex)?;
@@ -1781,6 +1789,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_copilot(cli.verbose)?;
             } else if codebuddy {
                 hooks::init::run_codebuddy(global, cli.verbose)?;
+            } else if workbuddy {
+                hooks::init::run_workbuddy(global, cli.verbose)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
@@ -2126,6 +2136,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::CodeBuddy => {
                 hooks::hook_cmd::run_codebuddy()?;
+                0
+            }
+            HookCommands::WorkBuddy => {
+                hooks::hook_cmd::run_workbuddy()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2742,6 +2756,45 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::CodeBuddy
+            }
+        ));
+    }
+
+    #[test]
+    fn test_try_parse_init_workbuddy() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--workbuddy"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                workbuddy, global, ..
+            } => {
+                assert!(workbuddy);
+                assert!(!global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_global_workbuddy() {
+        let cli = Cli::try_parse_from(["rtk", "init", "-g", "--workbuddy"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                workbuddy, global, ..
+            } => {
+                assert!(workbuddy);
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_workbuddy_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "workbuddy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::WorkBuddy
             }
         ));
     }
