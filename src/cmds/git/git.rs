@@ -1,13 +1,15 @@
 //! Filters git output — log, status, diff, and more — keeping just the essential info.
 
-use crate::core::config;
-use crate::core::stream::exec_capture;
+use crate::core::stream::{
+    self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
+};
 use crate::core::tracking;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
-use std::process::Stdio;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::process::Command;
+use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 pub enum GitCommand {
@@ -31,6 +33,46 @@ fn git_cmd(global_args: &[String]) -> Command {
     let mut cmd = resolved_command("git");
     for arg in global_args {
         cmd.arg(arg);
+    }
+    cmd
+}
+
+/// Create a git Command for internal parsing that must be locale-stable.
+///
+/// We only use this for non-user-facing parses where RTK depends on git's
+/// English status phrases. User-visible passthrough output keeps the user's
+/// locale.
+fn git_cmd_c_locale(global_args: &[String]) -> Command {
+    let mut cmd = git_cmd(global_args);
+    cmd.env("LC_ALL", "C");
+    cmd
+}
+
+fn uses_compact_status_path(args: &[String]) -> bool {
+    if args.is_empty() {
+        return true;
+    }
+
+    let mut saw_branch = false;
+    for arg in args {
+        match arg.as_str() {
+            "-b" | "--branch" => saw_branch = true,
+            "-sb" | "-bs" => return true,
+            "-s" | "--short" => {}
+            _ => return false,
+        }
+    }
+
+    saw_branch
+}
+
+fn build_status_command(args: &[String], global_args: &[String]) -> Command {
+    let mut cmd = git_cmd(global_args);
+    cmd.arg("status");
+    if uses_compact_status_path(args) {
+        cmd.args(["--porcelain", "-b"]);
+    } else {
+        cmd.args(args);
     }
     cmd
 }
@@ -60,14 +102,6 @@ pub fn run(
     }
 }
 
-/// Returns true if `arg` looks like a file-system path rather than a git revision.
-///
-/// Used by `normalize_diff_args` to decide where to inject `--`.
-fn looks_like_path(arg: &str) -> bool {
-    // Path separators are the strongest signal
-    arg.contains('/') || arg.contains('\\') || arg.starts_with('.') || arg.starts_with('~')
-}
-
 /// Re-insert `--` before the first path-like argument when clap has consumed it.
 ///
 /// clap's `trailing_var_arg = true` silently drops `--` when it appears as the
@@ -76,17 +110,46 @@ fn looks_like_path(arg: &str) -> bool {
 ///   `rtk git diff HEAD -- file` → args = ["HEAD", "--", "file"]  (preserved)
 ///
 /// Without the `--` separator git may treat an unambiguous path as a revision and
-/// emit "fatal: ambiguous argument".  We re-insert `--` before the first
-/// path-like argument when `--` is absent so git always gets the correct intent.
+/// emit "fatal: ambiguous argument".  We re-insert `--` before the first path-like
+/// argument; see `normalize_diff_args_impl` for the detection rules.
 fn normalize_diff_args(args: &[String]) -> Vec<String> {
+    normalize_diff_args_impl(args, |p| std::path::Path::new(p).exists())
+}
+
+/// Testable core of `normalize_diff_args` — accepts an injectable filesystem existence checker.
+///
+/// The path-detection logic is:
+/// 1. Explicit path prefixes (`.`, `~`) → always a path, no filesystem check needed.
+/// 2. Contains path separator (`/`, `\`) → use `path_exists` to distinguish branch names
+///    (e.g. `feature/auth`) from real paths (e.g. `src/main.rs`).
+/// 3. Bare word with no separator → never a path (avoids injecting `--` when a file
+///    happens to share a name with a branch or ref, e.g. a file named `main`).
+fn normalize_diff_args_impl<F>(args: &[String], path_exists: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
     // Already has `--` — nothing to do
     if args.iter().any(|a| a == "--") {
         return args.to_vec();
     }
-    // Find the first non-flag arg that looks like a path
-    let path_start = args
-        .iter()
-        .position(|arg| !arg.starts_with('-') && looks_like_path(arg));
+    let path_start = args.iter().position(|arg| {
+        if arg.starts_with('-') {
+            return false;
+        }
+        // Explicit path prefixes — always treat as path regardless of existence
+        if arg.starts_with('.') || arg.starts_with('~') {
+            return true;
+        }
+        // Contains path separator — use filesystem check to distinguish
+        // branch names (feature/auth) from real paths (src/main.rs)
+        if arg.contains('/') || arg.contains('\\') {
+            return path_exists(arg);
+        }
+        // Bare word (no separator, no special prefix) — never inject `--`
+        // This avoids misidentifying a ref/branch as a path even if a same-named
+        // file happens to exist on disk.
+        false
+    });
     match path_start {
         Some(idx) => {
             let mut out = args[..idx].to_vec();
@@ -460,8 +523,9 @@ fn run_log(
     // Only add --no-merges if user didn't explicitly request merge commits
     let wants_merges = args
         .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2");
-    if !wants_merges {
+        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
+    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
+    if !wants_merges && !has_limit_flag {
         cmd.arg("--no-merges");
     }
 
@@ -617,116 +681,156 @@ fn truncate_line(line: &str, width: usize) -> String {
 }
 
 pub(crate) fn format_status_output(porcelain: &str) -> String {
-    let lines: Vec<&str> = porcelain.lines().collect();
+    format_status_inner(porcelain, None)
+}
+
+pub(crate) fn format_status_output_detached(porcelain: &str, detached_ref: &str) -> String {
+    format_status_inner(porcelain, Some(detached_ref))
+}
+
+fn format_status_inner(porcelain: &str, detached: Option<&str>) -> String {
+    let lines: Vec<&str> = porcelain
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
 
     if lines.is_empty() {
         return "Clean working tree".to_string();
     }
 
-    let mut output = String::new();
+    let mut output = Vec::new();
 
-    // Parse branch info
     if let Some(branch_line) = lines.first() {
         if branch_line.starts_with("##") {
             let branch = branch_line.trim_start_matches("## ");
-            output.push_str(&format!("* {}\n", branch));
+            let display = detached.unwrap_or(branch);
+            output.push(format!("* {}", display));
+        } else {
+            output.push((*branch_line).to_string());
         }
     }
-
-    // Count changes by type
-    let mut staged = 0;
-    let mut modified = 0;
-    let mut untracked = 0;
-    let mut conflicts = 0;
-
-    let mut staged_files = Vec::new();
-    let mut modified_files = Vec::new();
-    let mut untracked_files = Vec::new();
 
     for line in lines.iter().skip(1) {
-        if line.len() < 3 {
-            continue;
-        }
-        let status = line.get(0..2).unwrap_or("  ");
-        let file = line.get(3..).unwrap_or("");
+        output.push((*line).to_string());
+    }
 
-        match status.chars().next().unwrap_or(' ') {
-            'M' | 'A' | 'D' | 'R' | 'C' => {
-                staged += 1;
-                staged_files.push(file);
-            }
-            'U' => conflicts += 1,
-            _ => {}
+    if lines.len() == 1 && lines[0].starts_with("##") {
+        output.push("clean — nothing to commit".to_string());
+    }
+
+    output.join("\n")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitStatusState {
+    Rebase,
+    MergeConflicts,
+    MergeReadyToCommit,
+    CherryPick,
+    Revert,
+    Bisect,
+    Am,
+    SparseCheckout,
+}
+
+impl GitStatusState {
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Rebase => "rebase in progress",
+            Self::MergeConflicts => "merge in progress. unresolved conflicts",
+            Self::MergeReadyToCommit => "merge in progress. no conflicts",
+            Self::CherryPick => "cherry-pick in progress",
+            Self::Revert => "revert in progress",
+            Self::Bisect => "bisect in progress",
+            Self::Am => "am session in progress",
+            Self::SparseCheckout => "sparse checkout enabled",
+        }
+    }
+}
+
+const REBASE_INDICATORS: &[&str] = &[
+    "rebase in progress",
+    "You are currently rebasing",
+    "You are currently editing",
+    "You are currently splitting",
+    "Last command done",
+    "Next command to do",
+    "No commands remaining",
+];
+
+fn detect_status_state(line: &str) -> Option<GitStatusState> {
+    if line.contains("All conflicts fixed but you are still merging") {
+        Some(GitStatusState::MergeReadyToCommit)
+    } else if line.contains("You have unmerged paths") {
+        Some(GitStatusState::MergeConflicts)
+    } else if line.contains("You are currently cherry-picking") {
+        Some(GitStatusState::CherryPick)
+    } else if line.contains("You are currently reverting") {
+        Some(GitStatusState::Revert)
+    } else if line.contains("You are currently bisecting") {
+        Some(GitStatusState::Bisect)
+    } else if line.contains("You are in the middle of an am session") {
+        Some(GitStatusState::Am)
+    } else if line.contains("You are in a sparse checkout") {
+        Some(GitStatusState::SparseCheckout)
+    } else if REBASE_INDICATORS.iter().any(|i| line.contains(i)) {
+        Some(GitStatusState::Rebase)
+    } else {
+        None
+    }
+}
+
+/// Extract a compact in-progress state summary from plain `git status` output.
+///
+/// Compact mode runs `git status --porcelain -b`, which omits the state header
+/// git prints for rebase / merge / cherry-pick / revert / bisect / am / sparse
+/// checkout. Hiding that block is a correctness bug — e.g. during an interactive
+/// rebase edit, the user sees a "clean" status and misses "You are currently
+/// editing a commit while rebasing ...".
+///
+/// This helper walks the plain-status output we already capture for tracking
+/// and emits a compact, RTK-style summary rather than dumping git's full prose.
+/// Returns `None` when no state is in progress.
+fn extract_state_header(raw: &str) -> Option<String> {
+    // Headers of the file-change blocks — everything relevant to state appears
+    // above these in git's output, so they double as a terminator.
+    const STOPPERS: &[&str] = &[
+        "Changes to be committed:",
+        "Changes not staged for commit:",
+        "Untracked files:",
+        "Unmerged paths:",
+        "no changes added to commit",
+        "nothing to commit",
+        "nothing added to commit",
+    ];
+
+    for line in raw.lines() {
+        let stripped = line.trim();
+
+        if STOPPERS.iter().any(|s| stripped.starts_with(s)) {
+            break;
         }
 
-        match status.chars().nth(1).unwrap_or(' ') {
-            'M' | 'D' => {
-                modified += 1;
-                modified_files.push(file);
-            }
-            _ => {}
-        }
-
-        if status == "??" {
-            untracked += 1;
-            untracked_files.push(file);
+        if let Some(state) = detect_status_state(stripped) {
+            return Some(state.summary().to_string());
         }
     }
 
-    // Build summary
-    let limits = config::limits();
-    let max_files = limits.status_max_files;
-    let max_untracked = limits.status_max_untracked;
+    None
+}
 
-    if staged > 0 {
-        output.push_str(&format!("+ Staged: {} files\n", staged));
-        for f in staged_files.iter().take(max_files) {
-            output.push_str(&format!("   {}\n", f));
-        }
-        if staged_files.len() > max_files {
-            output.push_str(&format!(
-                "   ... +{} more\n",
-                staged_files.len() - max_files
-            ));
-        }
-    }
-
-    if modified > 0 {
-        output.push_str(&format!("~ Modified: {} files\n", modified));
-        for f in modified_files.iter().take(max_files) {
-            output.push_str(&format!("   {}\n", f));
-        }
-        if modified_files.len() > max_files {
-            output.push_str(&format!(
-                "   ... +{} more\n",
-                modified_files.len() - max_files
-            ));
-        }
-    }
-
-    if untracked > 0 {
-        output.push_str(&format!("? Untracked: {} files\n", untracked));
-        for f in untracked_files.iter().take(max_untracked) {
-            output.push_str(&format!("   {}\n", f));
-        }
-        if untracked_files.len() > max_untracked {
-            output.push_str(&format!(
-                "   ... +{} more\n",
-                untracked_files.len() - max_untracked
-            ));
-        }
-    }
-
-    if conflicts > 0 {
-        output.push_str(&format!("conflicts: {} files\n", conflicts));
-    }
-
-    // When working tree is clean (only branch line, no changes)
-    if staged == 0 && modified == 0 && untracked == 0 && conflicts == 0 {
-        output.push_str("clean — nothing to commit\n");
-    }
-
-    output.trim_end().to_string()
+/// Extract the explicit "HEAD detached at/from <ref>" line from plain
+/// `git status` output.
+///
+/// Porcelain `-b` collapses a detached HEAD to the opaque `## HEAD (no branch)`,
+/// which an agent (or a distracted human) can misread as a branch literally
+/// named `HEAD`. The plain-status output keeps the explicit SHA/ref, so we
+/// surface that instead. Returns `None` when HEAD is on a branch.
+fn extract_detached_head(raw: &str) -> Option<String> {
+    raw.lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("HEAD detached "))
+        .map(str::to_string)
 }
 
 /// Minimal filtering for git status with user-provided args
@@ -769,10 +873,10 @@ fn filter_status_with_args(output: &str) -> String {
 fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // If user provided flags, apply minimal filtering
-    if !args.is_empty() {
-        let mut cmd = git_cmd(global_args);
-        cmd.arg("status").args(args);
+    // Keep a narrow compact path for no-arg status and branch/short-only flags.
+    // More complex explicit args still use the existing minimal-filter path.
+    if !uses_compact_status_path(args) {
+        let mut cmd = build_status_command(args, global_args);
         let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
         if !result.success() {
@@ -806,31 +910,60 @@ fn run_status(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(0);
     }
 
-    // Default RTK compact mode (no args provided)
-    // Get raw git status for tracking
-    let mut raw_cmd = git_cmd(global_args);
-    raw_cmd.args(["status"]);
+    let mut raw_cmd = git_cmd_c_locale(global_args);
+    raw_cmd.arg("status");
+    raw_cmd.args(args);
     let raw_output = exec_capture(&mut raw_cmd)
         .map(|r| r.stdout)
         .unwrap_or_default();
 
-    let mut cmd = git_cmd(global_args);
-    cmd.args(["status", "--porcelain", "-b"]);
+    let mut cmd = build_status_command(args, global_args);
     let result = exec_capture(&mut cmd).context("Failed to run git status")?;
 
     if !result.stderr.is_empty() && result.stderr.contains("not a git repository") {
         let message = "Not a git repository".to_string();
         eprintln!("{}", message);
-        timer.track("git status", "rtk git status", &raw_output, &message);
+        let original_cmd = if args.is_empty() {
+            "git status".to_string()
+        } else {
+            format!("git status {}", args.join(" "))
+        };
+        let rtk_cmd = if args.is_empty() {
+            "rtk git status".to_string()
+        } else {
+            format!("rtk git status {}", args.join(" "))
+        };
+        timer.track(&original_cmd, &rtk_cmd, &raw_output, &message);
         return Ok(result.exit_code);
     }
 
-    let formatted = format_status_output(&result.stdout);
+    let formatted = match extract_detached_head(&raw_output) {
+        Some(detached_ref) => format_status_output_detached(&result.stdout, &detached_ref),
+        None => format_status_output(&result.stdout),
+    };
 
-    println!("{}", formatted);
+    // Surface in-progress state (rebase/merge/cherry-pick/bisect/am) from the
+    // plain-status output we already captured for tracking. Porcelain omits it
+    // and hiding it misleads the user about the true repo state.
+    let final_output = match extract_state_header(&raw_output) {
+        Some(state) => format!("{}\n{}", state, formatted),
+        None => formatted,
+    };
 
-    // Track for statistics
-    timer.track("git status", "rtk git status", &raw_output, &formatted);
+    println!("{}", final_output);
+
+    let original_cmd = if args.is_empty() {
+        "git status".to_string()
+    } else {
+        format!("git status {}", args.join(" "))
+    };
+    let rtk_cmd = if args.is_empty() {
+        "rtk git status".to_string()
+    } else {
+        format!("rtk git status {}", args.join(" "))
+    };
+
+    timer.track(&original_cmd, &rtk_cmd, &raw_output, &final_output);
 
     Ok(0)
 }
@@ -862,11 +995,13 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
         // Count what was added
         let mut stat_cmd = git_cmd(global_args);
         stat_cmd.args(["diff", "--cached", "--stat", "--shortstat"]);
-        let stat_result =
-            exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
+        let stat_result = exec_capture(&mut stat_cmd).context("Failed to check staged files")?;
 
+        // Mirror git's own behaviour: a no-op `git add` is silent. Emitting a
+        // generic "ok" here is misleading — an agent can't tell "staged N files"
+        // from "staged nothing" when both print "ok".
         let compact = if stat_result.stdout.trim().is_empty() {
-            "ok (nothing to add)".to_string()
+            String::new()
         } else {
             // Parse "1 file changed, 5 insertions(+)" format
             let short = stat_result.stdout.lines().last().unwrap_or("").trim();
@@ -877,7 +1012,9 @@ fn run_add(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> 
             }
         };
 
-        println!("{}", compact);
+        if !compact.is_empty() {
+            println!("{}", compact);
+        }
 
         timer.track(
             &format!("git add {}", args.join(" ")),
@@ -969,6 +1106,62 @@ fn run_commit(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     Ok(0)
 }
 
+// Git push progress prefixes (stderr) — dropped from the stream.
+const GIT_PUSH_NOISE_PREFIXES: &[&str] = &[
+    "Enumerating objects:",
+    "Counting objects:",
+    "Compressing objects:",
+    "Writing objects:",
+    "Delta compression using",
+    "Total ",
+];
+
+#[derive(Default)]
+struct GitPushLineHandler {
+    up_to_date: bool,
+    pushed_ref: Option<String>,
+}
+
+impl LineHandler for GitPushLineHandler {
+    fn should_skip(&mut self, line: &str) -> bool {
+        if line.is_empty() {
+            return true;
+        }
+        let trimmed = line.trim_start();
+        GIT_PUSH_NOISE_PREFIXES
+            .iter()
+            .any(|p| trimmed.starts_with(p))
+    }
+
+    fn observe_line(&mut self, line: &str) {
+        if line.contains("Everything up-to-date") {
+            self.up_to_date = true;
+        }
+        if self.pushed_ref.is_none() {
+            if let Some(idx) = line.find(" -> ") {
+                let after = &line[idx + 4..];
+                if let Some(dest) = after.split_whitespace().next() {
+                    self.pushed_ref = Some(dest.to_string());
+                }
+            }
+        }
+    }
+
+    fn format_summary(&self, exit_code: i32, _raw: &str) -> Option<String> {
+        if exit_code != 0 {
+            return None;
+        }
+        let summary = if self.up_to_date {
+            "ok (up-to-date)".to_string()
+        } else if let Some(dest) = &self.pushed_ref {
+            format!("ok {}", dest)
+        } else {
+            "ok".to_string()
+        };
+        Some(format!("{}\n", summary))
+    }
+}
+
 fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
@@ -982,53 +1175,23 @@ fn run_push(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let output = cmd.stdin(Stdio::inherit()).output().context("Failed to run git push")?;
+    let cmd_label = format!("git push {}", args.join(" "));
+    let filter = LineStreamFilter::new(GitPushLineHandler::default());
+    let result = stream::run_streaming(
+        &mut cmd,
+        StdinMode::Inherit,
+        FilterMode::Streaming(Box::new(filter)),
+    )
+    .context("Failed to run git push")?;
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let raw = format!("{}{}", stdout, stderr);
+    timer.track(
+        &cmd_label,
+        &format!("rtk {}", cmd_label),
+        &result.raw,
+        &result.filtered,
+    );
 
-    if output.status.success() {
-        let compact = if stderr.contains("Everything up-to-date") {
-            "ok (up-to-date)".to_string()
-        } else {
-            let mut push_info = String::new();
-            for line in stderr.lines() {
-                if line.contains("->") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 {
-                        push_info = format!("ok {}", parts[parts.len() - 1]);
-                        break;
-                    }
-                }
-            }
-            if !push_info.is_empty() {
-                push_info
-            } else {
-                "ok".to_string()
-            }
-        };
-
-        println!("{}", compact);
-
-        timer.track(
-            &format!("git push {}", args.join(" ")),
-            &format!("rtk git push {}", args.join(" ")),
-            &raw,
-            &compact,
-        );
-    } else {
-        eprintln!("FAILED: git push");
-        if !stderr.trim().is_empty() {
-            eprintln!("{}", stderr);
-        }
-        if !stdout.trim().is_empty() {
-            eprintln!("{}", stdout);
-        }
-        return Ok(exit_code_from_output(&output, "git push"));
-    }
-
-    Ok(0)
+    Ok(result.exit_code)
 }
 
 fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32> {
@@ -1203,11 +1366,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         let result = exec_capture(&mut cmd).context("Failed to run git branch")?;
         let combined = result.combined();
 
-        let msg = if result.success() {
-            "ok"
-        } else {
-            &combined
-        };
+        let msg = if result.success() { "ok" } else { &combined };
 
         timer.track(
             &format!("git branch {}", args.join(" ")),
@@ -1314,12 +1473,16 @@ fn filter_branch_output(output: &str) -> String {
             .filter(|r| *r != &current && !local.contains(r))
             .collect();
         if !remote_only.is_empty() {
+            const MAX_REMOTE_BRANCHES: usize = CAP_WARNINGS;
             result.push(format!("  remote-only ({}):", remote_only.len()));
-            for b in remote_only.iter().take(10) {
+            for b in remote_only.iter().take(MAX_REMOTE_BRANCHES) {
                 result.push(format!("    {}", b));
             }
-            if remote_only.len() > 10 {
-                result.push(format!("    ... +{} more", remote_only.len() - 10));
+            if remote_only.len() > MAX_REMOTE_BRANCHES {
+                result.push(format!(
+                    "    ... +{} more",
+                    remote_only.len() - MAX_REMOTE_BRANCHES
+                ));
             }
         }
     }
@@ -1370,6 +1533,26 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
     Ok(0)
 }
 
+/// Format status message for stash operations.
+/// - For create operations (push/save): checks for "No local changes"
+/// - For other operations: uses "ok stash <subcommand>" format
+fn format_stash_message(subcommand: Option<&str>, result: &CaptureResult) -> String {
+    match subcommand {
+        None | Some("push") | Some("save") => {
+            // A successful stash collapses to "ok stashed" (the WIP ref/sha git
+            // prints isn't needed to `git stash pop`). But a no-op must NOT look
+            // like success — pass git's "No local changes to save" through so the
+            // agent can tell nothing was stashed.
+            if result.combined().contains("No local changes") {
+                "No local changes to save".to_string()
+            } else {
+                "ok stashed".to_string()
+            }
+        }
+        Some(sub) => format!("ok stash {}", sub),
+    }
+}
+
 fn run_stash(
     subcommand: Option<&str>,
     args: &[String],
@@ -1386,8 +1569,7 @@ fn run_stash(
         Some("list") => {
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", "list"]);
-            let result =
-                exec_capture(&mut cmd).context("Failed to run git stash list")?;
+            let result = exec_capture(&mut cmd).context("Failed to run git stash list")?;
 
             if result.stdout.trim().is_empty() {
                 let msg = "No stashes";
@@ -1411,8 +1593,7 @@ fn run_stash(
             for arg in args {
                 cmd.arg(arg);
             }
-            let result =
-                exec_capture(&mut cmd).context("Failed to run git stash show")?;
+            let result = exec_capture(&mut cmd).context("Failed to run git stash show")?;
 
             let filtered = if result.stdout.trim().is_empty() {
                 let msg = "Empty stash";
@@ -1431,7 +1612,8 @@ fn run_stash(
                 &filtered,
             );
         }
-        Some("pop") | Some("apply") | Some("drop") | Some("push") => {
+        Some("apply") | Some("branch") | Some("clear") | Some("create") | Some("drop")
+        | Some("export") | Some("import") | Some("pop") | Some("store") => {
             let sub = subcommand.unwrap();
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", sub]);
@@ -1442,7 +1624,7 @@ fn run_stash(
             let combined = result.combined();
 
             let msg = if result.success() {
-                let msg = format!("ok stash {}", sub);
+                let msg = format_stash_message(subcommand, &result);
                 println!("{}", msg);
                 msg
             } else {
@@ -1464,10 +1646,19 @@ fn run_stash(
                 return Ok(result.exit_code);
             }
         }
-        Some(sub) => {
-            // Unrecognized subcommand: passthrough to git stash <sub> [args]
+        // Default: "git stash [push] [--] [<pathspec>...]" or "git stash save [<message>]"
+        Some(_) | None => {
+            let (sub, arg) = match subcommand {
+                Some("save") => ("save", None),
+                Some("push") => ("push", None),
+                Some(s) => ("push", Some(s)),
+                None => ("push", None),
+            };
             let mut cmd = git_cmd(global_args);
             cmd.args(["stash", sub]);
+            if let Some(arg) = arg {
+                cmd.arg(arg);
+            }
             for arg in args {
                 cmd.arg(arg);
             }
@@ -1475,7 +1666,7 @@ fn run_stash(
             let combined = result.combined();
 
             let msg = if result.success() {
-                let msg = format!("ok stash {}", sub);
+                let msg = format_stash_message(subcommand, &result);
                 println!("{}", msg);
                 msg
             } else {
@@ -1492,40 +1683,6 @@ fn run_stash(
                 &combined,
                 &msg,
             );
-
-            if !result.success() {
-                return Ok(result.exit_code);
-            }
-        }
-        None => {
-            // Default: git stash (push)
-            let mut cmd = git_cmd(global_args);
-            cmd.arg("stash");
-            for arg in args {
-                cmd.arg(arg);
-            }
-            let result = exec_capture(&mut cmd).context("Failed to run git stash")?;
-            let combined = result.combined();
-
-            let msg = if result.success() {
-                if result.stdout.contains("No local changes") {
-                    let msg = "ok (nothing to stash)";
-                    println!("{}", msg);
-                    msg.to_string()
-                } else {
-                    let msg = "ok stashed";
-                    println!("{}", msg);
-                    msg.to_string()
-                }
-            } else {
-                eprintln!("FAILED: git stash");
-                if !result.stderr.trim().is_empty() {
-                    eprintln!("{}", result.stderr);
-                }
-                combined.clone()
-            };
-
-            timer.track("git stash", "rtk git stash", &combined, &msg);
 
             if !result.success() {
                 return Ok(result.exit_code);
@@ -1578,11 +1735,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
         let result = exec_capture(&mut cmd).context("Failed to run git worktree")?;
         let combined = result.combined();
 
-        let msg = if result.success() {
-            "ok"
-        } else {
-            &combined
-        };
+        let msg = if result.success() { "ok" } else { &combined };
 
         timer.track(
             &format!("git worktree {}", args.join(" ")),
@@ -1606,8 +1759,7 @@ fn run_worktree(args: &[String], verbose: u8, global_args: &[String]) -> Result<
     // Default: list mode
     let mut cmd = git_cmd(global_args);
     cmd.args(["worktree", "list"]);
-    let result =
-        exec_capture(&mut cmd).context("Failed to run git worktree list")?;
+    let result = exec_capture(&mut cmd).context("Failed to run git worktree list")?;
 
     let filtered = filter_worktree_list(&result.stdout);
     println!("{}", filtered);
@@ -1733,6 +1885,57 @@ mod tests {
     }
 
     #[test]
+    fn test_git_cmd_c_locale_sets_stable_env() {
+        let cmd = git_cmd_c_locale(&[]);
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.expect("env value").to_string_lossy().to_string(),
+                )
+            })
+            .collect();
+        assert!(envs.contains(&("LC_ALL".to_string(), "C".to_string())));
+    }
+
+    #[test]
+    fn test_build_status_command_default_compact() {
+        let cmd = build_status_command(&[], &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, vec!["status", "--porcelain", "-b"]);
+    }
+
+    #[test]
+    fn test_uses_compact_status_path_for_branch_and_short_flags() {
+        assert!(uses_compact_status_path(&["-b".to_string()]));
+        assert!(uses_compact_status_path(&["--branch".to_string()]));
+        assert!(uses_compact_status_path(&["-sb".to_string()]));
+        assert!(uses_compact_status_path(&["-s".to_string(), "-b".to_string()]));
+        assert!(uses_compact_status_path(&["--short".to_string(), "--branch".to_string()]));
+        assert!(!uses_compact_status_path(&["-s".to_string()]));
+        assert!(!uses_compact_status_path(&["--short".to_string()]));
+        assert!(!uses_compact_status_path(&["--porcelain".to_string()]));
+        assert!(!uses_compact_status_path(&["-uno".to_string()]));
+    }
+
+    #[test]
+    fn test_build_status_command_with_user_args_passthrough() {
+        let args = vec!["--short".to_string(), "--branch".to_string()];
+        let cmd = build_status_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
+    }
+
+    #[test]
+    fn test_build_status_command_with_incompatible_user_args_passthrough() {
+        let args = vec!["--porcelain".to_string(), "-uno".to_string()];
+        let cmd = build_status_command(&args, &[]);
+        let cmd_args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-uno"]);
+    }
+
+    #[test]
     fn test_compact_diff() {
         let diff = r#"diff --git a/foo.rs b/foo.rs
 --- a/foo.rs
@@ -1799,7 +2002,14 @@ mod tests {
         );
     }
 
-    // ----- normalize_diff_args (issue #1215) -----
+    // ----- normalize_diff_args (issue #1215 + branch-name fix #1431) -----
+    //
+    // Tests use normalize_diff_args_impl with a mock path-existence checker so
+    // they don't depend on the real filesystem.
+
+    fn exists_mock<'a>(existing: &'a [&'a str]) -> impl Fn(&str) -> bool + 'a {
+        move |p| existing.contains(&p)
+    }
 
     /// Baseline: `--` already present → no-op, args unchanged.
     #[test]
@@ -1809,41 +2019,55 @@ mod tests {
             "--".to_string(),
             "src/main.rs".to_string(),
         ];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
     }
 
-    /// Core regression: clap ate `--` before a path with `/`.
-    /// `normalize_diff_args` must re-insert it.
+    /// Core regression (issue #1215): clap ate `--` before a real file path.
+    /// When the path exists on disk, `--` must be re-inserted.
     #[test]
-    fn test_normalize_diff_args_reinserts_separator_before_path_with_slash() {
+    fn test_normalize_diff_args_reinserts_separator_before_existing_path() {
         let args = vec!["apps/client/frontend/src/MyComponent.tsx".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args_impl(
+            &args,
+            exists_mock(&["apps/client/frontend/src/MyComponent.tsx"]),
+        );
         assert_eq!(
             normalized,
-            vec!["--".to_string(), "apps/client/frontend/src/MyComponent.tsx".to_string()],
-            "-- must be injected before the path argument"
+            vec![
+                "--".to_string(),
+                "apps/client/frontend/src/MyComponent.tsx".to_string()
+            ],
+            "-- must be injected before an existing path"
         );
     }
 
-    /// Ref before path: args like ["HEAD", "src/foo.rs"] get `--` inserted before the path.
+    /// Ref before path: ["HEAD", "src/foo.rs"] where src/foo.rs exists → inject after HEAD.
     #[test]
     fn test_normalize_diff_args_reinserts_separator_after_ref() {
         let args = vec!["HEAD".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
         assert_eq!(
             normalized,
-            vec!["HEAD".to_string(), "--".to_string(), "src/foo.rs".to_string()]
+            vec![
+                "HEAD".to_string(),
+                "--".to_string(),
+                "src/foo.rs".to_string()
+            ]
         );
     }
 
-    /// Flags before path: `["--cached", "src/foo.rs"]` → `["--cached", "--", "src/foo.rs"]`.
+    /// Flags before path: ["--cached", "src/foo.rs"] where src/foo.rs exists.
     #[test]
     fn test_normalize_diff_args_reinserts_separator_after_flag() {
         let args = vec!["--cached".to_string(), "src/foo.rs".to_string()];
-        let normalized = normalize_diff_args(&args);
+        let normalized = normalize_diff_args_impl(&args, exists_mock(&["src/foo.rs"]));
         assert_eq!(
             normalized,
-            vec!["--cached".to_string(), "--".to_string(), "src/foo.rs".to_string()]
+            vec![
+                "--cached".to_string(),
+                "--".to_string(),
+                "src/foo.rs".to_string()
+            ]
         );
     }
 
@@ -1851,25 +2075,59 @@ mod tests {
     #[test]
     fn test_normalize_diff_args_no_injection_for_pure_flags() {
         let args = vec!["--stat".to_string(), "--cached".to_string()];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
     }
 
-    /// Dotfile / relative-path detection (starts with `.`).
+    /// Dotfile that exists on disk → inject `--`.
     #[test]
     fn test_normalize_diff_args_dotfile_is_path() {
         let args = vec![".gitignore".to_string()];
-        let normalized = normalize_diff_args(&args);
-        assert_eq!(
-            normalized,
-            vec!["--".to_string(), ".gitignore".to_string()]
-        );
+        let normalized = normalize_diff_args_impl(&args, exists_mock(&[".gitignore"]));
+        assert_eq!(normalized, vec!["--".to_string(), ".gitignore".to_string()]);
     }
 
-    /// A bare word that isn't path-like (e.g. a branch name) → no injection.
+    /// A bare ref (HEAD) that doesn't exist as a file → no injection.
     #[test]
     fn test_normalize_diff_args_no_injection_for_bare_ref() {
         let args = vec!["HEAD".to_string()];
-        assert_eq!(normalize_diff_args(&args), args);
+        assert_eq!(normalize_diff_args_impl(&args, exists_mock(&[])), args);
+    }
+
+    /// Branch name with `/` that does NOT exist as a file → no injection.
+    /// Regression for issue #1431: `rtk git diff feature/user-auth` must not inject `--`.
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_branch_with_slash() {
+        let args = vec!["feature/user-auth".to_string()];
+        assert_eq!(
+            normalize_diff_args_impl(&args, exists_mock(&[])),
+            args,
+            "branch names containing '/' must not trigger -- injection"
+        );
+    }
+
+    /// Range syntax with `/` → no injection.
+    /// Regression: `rtk git diff main...feature/user-auth` produced no output.
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_range_with_slash() {
+        let args = vec!["main...feature/user-auth".to_string()];
+        assert_eq!(
+            normalize_diff_args_impl(&args, exists_mock(&[])),
+            args,
+            "revision ranges like main...feature/user-auth must not trigger -- injection"
+        );
+    }
+
+    /// Bare word that happens to exist as a file on disk → still no injection.
+    /// A file named "main" must not cause `--` to be injected when the user
+    /// intends `rtk git diff main` as a branch comparison.
+    #[test]
+    fn test_normalize_diff_args_no_injection_for_bare_word_even_if_file_exists() {
+        let args = vec!["main".to_string()];
+        assert_eq!(
+            normalize_diff_args_impl(&args, exists_mock(&["main"])),
+            args,
+            "bare words must never trigger -- injection even when a same-named file exists"
+        );
     }
 
     #[test]
@@ -1908,7 +2166,11 @@ mod tests {
         let result = filter_branch_output(output);
         assert!(result.contains("* main"));
         assert!(result.contains("develop"));
-        assert!(result.contains("feature-x"), "origin branch shown: {}", result);
+        assert!(
+            result.contains("feature-x"),
+            "origin branch shown: {}",
+            result
+        );
         assert!(
             result.contains("release-v3"),
             "upstream branch shown: {}",
@@ -1954,33 +2216,91 @@ mod tests {
 
     #[test]
     fn test_format_status_output_clean() {
-        let porcelain = "";
+        let porcelain = "## main...origin/main\n";
         let result = format_status_output(porcelain);
-        assert_eq!(result, "Clean working tree");
+        assert_eq!(result, "* main...origin/main\nclean — nothing to commit");
     }
 
     #[test]
-    fn test_format_status_output_modified_files() {
-        let porcelain = "## main...origin/main\n M src/main.rs\n M src/lib.rs\n";
-        let result = format_status_output(porcelain);
-        assert!(result.contains("* main...origin/main"));
-        assert!(result.contains("~ Modified: 2 files"));
-        assert!(result.contains("src/main.rs"));
-        assert!(result.contains("src/lib.rs"));
-        assert!(!result.contains("Staged"));
-        assert!(!result.contains("Untracked"));
+    fn test_extract_state_header_clean_returns_none() {
+        let raw = "On branch main\nYour branch is up to date with 'origin/main'.\n\nnothing to commit, working tree clean\n";
+        assert_eq!(extract_state_header(raw), None);
     }
 
     #[test]
-    fn test_format_status_output_untracked_files() {
-        let porcelain = "## feature/new\n?? temp.txt\n?? debug.log\n?? test.sh\n";
+    fn test_extract_state_header_no_state_with_changes_returns_none() {
+        let raw = "On branch main\nChanges not staged for commit:\n  (use \"git add <file>...\" to update what will be committed)\n\tmodified:   src/main.rs\n\nno changes added to commit\n";
+        assert_eq!(extract_state_header(raw), None);
+    }
+
+    #[test]
+    fn test_extract_state_header_editing_while_rebasing() {
+        let raw = "On branch feature\n\ninteractive rebase in progress; onto abc1234\nLast command done (1 command done):\n   edit abc123 some message\nNo commands remaining.\nYou are currently editing a commit while rebasing branch 'feature' on 'abc1234'.\n  (use \"git commit --amend\" to amend the current commit)\n  (use \"git rebase --continue\" once you are satisfied with your changes)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "rebase in progress");
+    }
+
+    #[test]
+    fn test_extract_state_header_merge_unresolved() {
+        let raw = "On branch main\nYou have unmerged paths.\n  (fix conflicts and run \"git commit\")\n  (use \"git merge --abort\" to abort the merge)\n\nUnmerged paths:\n\tboth modified:   src/main.rs\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "merge in progress. unresolved conflicts");
+    }
+
+    #[test]
+    fn test_extract_state_header_cherry_pick() {
+        let raw = "On branch main\n\nYou are currently cherry-picking commit abc1234.\n  (fix conflicts and run \"git cherry-pick --continue\")\n  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "cherry-pick in progress");
+    }
+
+    #[test]
+    fn test_extract_state_header_bisect() {
+        let raw = "On branch main\n\nYou are currently bisecting, started from branch 'main'.\n  (use \"git bisect reset\" to get back to the original branch)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "bisect in progress");
+    }
+
+    #[test]
+    fn test_extract_state_header_revert() {
+        let raw = "On branch main\n\nYou are currently reverting commit abc1234.\n  (fix conflicts and run \"git revert --continue\")\n  (use \"git revert --abort\" to cancel the revert operation)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "revert in progress");
+    }
+
+    #[test]
+    fn test_extract_state_header_merge_in_middle() {
+        let raw = "On branch main\n\nAll conflicts fixed but you are still merging.\n  (use \"git commit\" to conclude merge)\n\nChanges to be committed:\n\tmodified:   src/main.rs\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "merge in progress. no conflicts");
+    }
+
+    #[test]
+    fn test_extract_state_header_am_session() {
+        let raw = "On branch main\n\nYou are in the middle of an am session.\n  (use \"git am --continue\" to continue)\n  (use \"git am --abort\" to restore the original branch)\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "am session in progress");
+    }
+
+    #[test]
+    fn test_extract_state_header_sparse_checkout() {
+        let raw = "On branch main\n\nYou are in a sparse checkout with 17% of tracked files present.\n\nnothing to commit, working tree clean\n";
+        let out = extract_state_header(raw).expect("state expected");
+        assert_eq!(out, "sparse checkout enabled");
+    }
+
+    #[test]
+    fn test_format_status_output_preserves_nested_untracked_paths() {
+        let porcelain = "## main\n?? tmp/c.txt\n?? tmp/nested/d.txt\n";
         let result = format_status_output(porcelain);
-        assert!(result.contains("* feature/new"));
-        assert!(result.contains("? Untracked: 3 files"));
-        assert!(result.contains("temp.txt"));
-        assert!(result.contains("debug.log"));
-        assert!(result.contains("test.sh"));
-        assert!(!result.contains("Modified"));
+        assert!(result.contains("* main"));
+        assert!(result.contains("?? tmp/c.txt"));
+        assert!(result.contains("?? tmp/nested/d.txt"));
+        assert!(
+            result.lines().all(|line| line != "?? tmp/"),
+            "Nested untracked files must not collapse back to a directory marker:\n{}",
+            result
+        );
     }
 
     #[test]
@@ -1993,59 +2313,24 @@ A  added.rs
 "#;
         let result = format_status_output(porcelain);
         assert!(result.contains("* main"));
-        assert!(result.contains("+ Staged: 2 files"));
-        assert!(result.contains("staged.rs"));
-        assert!(result.contains("added.rs"));
-        assert!(result.contains("~ Modified: 1 files"));
-        assert!(result.contains("modified.rs"));
-        assert!(result.contains("? Untracked: 1 files"));
-        assert!(result.contains("untracked.txt"));
+        assert!(result.contains("M  staged.rs"));
+        assert!(result.contains(" M modified.rs"));
+        assert!(result.contains("A  added.rs"));
+        assert!(result.contains("?? untracked.txt"));
+        assert!(!result.contains("Staged"));
+        assert!(!result.contains("Modified"));
+        assert!(!result.contains("Untracked"));
     }
 
     #[test]
-    fn test_format_status_output_truncation() {
-        // Test that >15 staged files show "... +N more"
-        let mut porcelain = String::from("## main\n");
-        for i in 1..=20 {
-            porcelain.push_str(&format!("M  file{}.rs\n", i));
-        }
-        let result = format_status_output(&porcelain);
-        assert!(result.contains("+ Staged: 20 files"));
-        assert!(result.contains("file1.rs"));
-        assert!(result.contains("file15.rs"));
-        assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file16.rs"));
-        assert!(!result.contains("file20.rs"));
-    }
-
-    #[test]
-    fn test_format_status_modified_truncation() {
-        // Test that >15 modified files show "... +N more"
-        let mut porcelain = String::from("## main\n");
-        for i in 1..=20 {
-            porcelain.push_str(&format!(" M file{}.rs\n", i));
-        }
-        let result = format_status_output(&porcelain);
-        assert!(result.contains("~ Modified: 20 files"));
-        assert!(result.contains("file1.rs"));
-        assert!(result.contains("file15.rs"));
-        assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file16.rs"));
-    }
-
-    #[test]
-    fn test_format_status_untracked_truncation() {
-        // Test that >10 untracked files show "... +N more"
-        let mut porcelain = String::from("## main\n");
-        for i in 1..=15 {
-            porcelain.push_str(&format!("?? file{}.rs\n", i));
-        }
-        let result = format_status_output(&porcelain);
-        assert!(result.contains("? Untracked: 15 files"));
-        assert!(result.contains("file1.rs"));
-        assert!(result.contains("file10.rs"));
-        assert!(result.contains("... +5 more"));
-        assert!(!result.contains("file11.rs"));
+    fn test_format_status_output_preserves_rename_and_conflict_lines() {
+        let porcelain = "## main\nR  old.rs -> new.rs\nUU conflict.rs\nMM mixed.rs\n";
+        let result = format_status_output(porcelain);
+        assert!(result.contains("* main"));
+        assert!(result.contains("R  old.rs -> new.rs"));
+        assert!(result.contains("UU conflict.rs"));
+        assert!(result.contains("MM mixed.rs"));
+        assert!(!result.contains("conflicts:"));
     }
 
     #[test]
@@ -2455,22 +2740,25 @@ no changes added to commit (use "git add" and/or "git commit -a")
     // --- truncation accuracy ---
 
     #[test]
-    fn test_format_status_overflow_count_exact() {
-        // 25 staged files, default status_max_files = 15
-        // Should show 15, overflow = 25 - 15 = 10, report "+10 more"
+    fn test_format_status_output_shows_every_file_when_many_are_dirty() {
         let mut porcelain = String::from("## main...origin/main\n");
         for i in 0..25 {
             porcelain.push_str(&format!("M  staged_file_{}.rs\n", i));
         }
         let result = format_status_output(&porcelain);
         assert!(
-            result.contains("+10 more"),
-            "Expected '+10 more' for 25 staged files (max_files=15), got:\n{}",
+            result.contains("staged_file_24.rs"),
+            "Expected the last staged file to remain visible, got:\n{}",
             result
         );
         assert!(
-            result.contains("Staged: 25 files"),
-            "Expected 'Staged: 25 files', got:\n{}",
+            result.lines().count() == 26,
+            "Expected branch + all 25 staged files, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("... +"),
+            "Status output must not hide dirty paths behind overflow markers:\n{}",
             result
         );
     }
@@ -2514,6 +2802,35 @@ no changes added to commit (use "git add" and/or "git commit -a")
     }
 
     #[test]
+    fn test_extract_detached_head_returns_line() {
+        let raw = "HEAD detached at abc1234\nnothing to commit, working tree clean\n";
+        assert_eq!(
+            extract_detached_head(raw),
+            Some("HEAD detached at abc1234".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_detached_head_on_branch_is_none() {
+        let raw = "On branch main\nnothing to commit, working tree clean\n";
+        assert!(extract_detached_head(raw).is_none());
+    }
+
+    #[test]
+    fn test_format_status_output_detached_head() {
+        let porcelain = "## HEAD (no branch)\n M src/main.rs\n";
+        let result = format_status_output_detached(porcelain, "HEAD detached at abc1234");
+        assert!(
+            result.contains("HEAD detached at abc1234"),
+            "should use explicit detached ref, got: {result}"
+        );
+        assert!(
+            !result.contains("HEAD (no branch)"),
+            "should not show opaque porcelain string, got: {result}"
+        );
+    }
+
+    #[test]
     fn test_filter_log_output_body_omission_indicator() {
         // Commit with 6 meaningful body lines: only 3 shown, must signal "+3 lines omitted"
         let body_lines = (1..=6)
@@ -2529,6 +2846,125 @@ no changes added to commit (use "git add" and/or "git commit -a")
             result.contains("+3 lines omitted"),
             "Expected '+3 lines omitted' when 6 body lines truncated to 3, got:\n{}",
             result
+        );
+    }
+
+    fn run_push_filter(input: &str, exit_code: i32) -> String {
+        use crate::core::stream::StreamFilter;
+        let mut f = LineStreamFilter::new(GitPushLineHandler::default());
+        let mut out = String::new();
+        for line in input.lines() {
+            if let Some(s) = f.feed_line(line) {
+                out.push_str(&s);
+            }
+        }
+        out.push_str(&f.flush());
+        if let Some(s) = f.on_exit(exit_code, input) {
+            out.push_str(&s);
+        }
+        out
+    }
+
+    #[test]
+    fn test_push_filter_drops_progress_phases() {
+        let input = "\
+Enumerating objects: 5, done.
+Counting objects: 100% (5/5), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (3/3), done.
+Writing objects: 100% (3/3), 312 bytes | 312.00 KiB/s, done.
+Total 3 (delta 2), reused 0 (delta 0)
+To https://github.com/foo/bar.git
+   abc1234..def5678  master -> master
+";
+        let result = run_push_filter(input, 0);
+        for prefix in GIT_PUSH_NOISE_PREFIXES {
+            assert!(
+                !result.contains(prefix),
+                "noise prefix '{}' leaked through, got: {}",
+                prefix,
+                result
+            );
+        }
+        assert!(result.contains("To https://github.com/foo/bar.git"));
+        assert!(result.contains("master -> master"));
+        assert!(result.ends_with("ok master\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_up_to_date_summary() {
+        let input = "Everything up-to-date\n";
+        let result = run_push_filter(input, 0);
+        assert!(result.contains("Everything up-to-date"));
+        assert!(result.ends_with("ok (up-to-date)\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_passes_remote_messages_through() {
+        let input = "\
+remote: Resolving deltas: 100% (2/2), completed with 2 local objects.
+remote: GitHub found 1 vulnerability on foo/bar's default branch (1 moderate).
+To https://github.com/foo/bar.git
+   abc1234..def5678  feature -> feature
+";
+        let result = run_push_filter(input, 0);
+        assert!(result.contains("remote: Resolving deltas"));
+        assert!(result.contains("remote: GitHub found 1 vulnerability"));
+        assert!(result.ends_with("ok feature\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_no_summary_on_failure() {
+        let input = "\
+To https://github.com/foo/bar.git
+ ! [rejected]        master -> master (non-fast-forward)
+error: failed to push some refs to 'https://github.com/foo/bar.git'
+";
+        let result = run_push_filter(input, 1);
+        assert!(result.contains("[rejected]"));
+        assert!(result.contains("error: failed to push"));
+        assert!(
+            !result.contains("ok "),
+            "summary leaked on failure, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_push_filter_first_ref_wins_for_summary() {
+        let input = "\
+To https://github.com/foo/bar.git
+   abc1234..def5678  feat/a -> feat/a
+   1111111..2222222  feat/b -> feat/b
+";
+        let result = run_push_filter(input, 0);
+        assert!(result.ends_with("ok feat/a\n"), "got: {}", result);
+    }
+
+    #[test]
+    fn test_push_filter_token_savings_on_verbose_output() {
+        let input = "\
+Enumerating objects: 142, done.
+Counting objects: 100% (142/142), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (88/88), done.
+Writing objects: 100% (104/104), 28.50 KiB | 14.25 MiB/s, done.
+Total 104 (delta 64), reused 0 (delta 0), pack-reused 0
+remote: Resolving deltas: 100% (64/64), completed with 24 local objects.
+To https://github.com/foo/bar.git
+   abc1234..def5678  master -> master
+";
+        let result = run_push_filter(input, 0);
+        let count_tokens = |s: &str| s.split_whitespace().count();
+        let input_tokens = count_tokens(input);
+        let output_tokens = count_tokens(&result);
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "expected >=60% savings, got {:.1}% (in={}, out={})",
+            savings,
+            input_tokens,
+            output_tokens
         );
     }
 }

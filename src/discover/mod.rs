@@ -11,10 +11,12 @@ use std::collections::HashMap;
 
 use provider::{ClaudeProvider, SessionProvider};
 use registry::{
-    category_avg_tokens, classify_command, has_rtk_disabled_prefix, split_command_chain,
-    strip_disabled_prefix, Classification,
+    category_avg_tokens, classify_command, split_command_chain, strip_disabled_prefix,
+    Classification,
 };
 use report::{DiscoverReport, SupportedEntry, UnsupportedEntry};
+
+use crate::discover::registry::prefix_contains_rtk_disabled;
 
 /// Aggregation bucket for supported commands.
 struct SupportedBucket {
@@ -96,8 +98,8 @@ pub fn run(
                 total_commands += 1;
 
                 // Detect RTK_DISABLED= bypass before classification
-                if has_rtk_disabled_prefix(part) {
-                    let actual_cmd = strip_disabled_prefix(part);
+                let (env_prefix, actual_cmd) = strip_disabled_prefix(part);
+                if prefix_contains_rtk_disabled(env_prefix) {
                     // Only count if the underlying command is one RTK supports
                     match classify_command(actual_cmd) {
                         Classification::Supported { .. } => {
@@ -226,7 +228,7 @@ pub fn run(
         .collect();
 
     // Sort by estimated savings descending
-    supported.sort_by(|a, b| b.estimated_savings_tokens.cmp(&a.estimated_savings_tokens));
+    supported.sort_by_key(|b| std::cmp::Reverse(b.estimated_savings_tokens));
 
     let mut unsupported: Vec<UnsupportedEntry> = unsupported_map
         .into_iter()
@@ -238,7 +240,7 @@ pub fn run(
         .collect();
 
     // Sort by count descending
-    unsupported.sort_by(|a, b| b.count.cmp(&a.count));
+    unsupported.sort_by_key(|b| std::cmp::Reverse(b.count));
 
     // Build RTK_DISABLED examples sorted by frequency (top 5)
     let rtk_disabled_examples: Vec<String> = {
@@ -261,6 +263,7 @@ pub fn run(
         parse_errors,
         rtk_disabled_count,
         rtk_disabled_examples,
+        agent_status: report::AgentIntegrationStatus::detect(),
     };
 
     match format {

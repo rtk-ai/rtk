@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files for 7 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode).
+Owns: per-agent hook scripts and configuration files for 9 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -40,6 +40,8 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
 - **[`codex/`](codex/README.md)** — Awareness document, `AGENTS.md` integration, `$CODEX_HOME` or `~/.codex/` location
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
+- **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
+- **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
 
 ## Supported Agents
 
@@ -54,12 +56,15 @@ Each agent subdirectory has its own README with hook-specific details:
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | In-place mutation | Yes |
+| Pi | TypeScript extension (`tool_call` event) | In-place mutation | Yes |
+| Hermes | Python plugin (`pre_tool_call`) | In-place mutation | Yes |
 
 ## JSON Formats by Agent
 
 ### Claude Code (Shell Hook)
 
 **Input** (stdin):
+
 ```json
 {
   "tool_name": "Bash",
@@ -68,6 +73,7 @@ Each agent subdirectory has its own README with hook-specific details:
 ```
 
 **Output** (stdout, when rewritten):
+
 ```json
 {
   "hookSpecificOutput": {
@@ -84,6 +90,7 @@ Each agent subdirectory has its own README with hook-specific details:
 **Input**: Same as Claude Code.
 
 **Output** (stdout, when rewritten):
+
 ```json
 {
   "permission": "allow",
@@ -96,6 +103,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ### Copilot CLI (Rust Binary)
 
 **Input** (stdin, camelCase, `toolArgs` is JSON-stringified):
+
 ```json
 {
   "toolName": "bash",
@@ -104,6 +112,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```
 
 **Output** (no `updatedInput` support -- uses deny-with-suggestion):
+
 ```json
 {
   "permissionDecision": "deny",
@@ -114,6 +123,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ### VS Code Copilot Chat (Rust Binary)
 
 **Input** (stdin, snake_case):
+
 ```json
 {
   "tool_name": "Bash",
@@ -126,6 +136,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ### Gemini CLI (Rust Binary)
 
 **Input** (stdin):
+
 ```json
 {
   "tool_name": "run_shell_command",
@@ -134,6 +145,7 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```
 
 **Output** (when rewritten):
+
 ```json
 {
   "decision": "allow",
@@ -148,12 +160,24 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ### OpenCode (TypeScript Plugin)
 
 Mutates `args.command` in-place via the zx library:
+
 ```typescript
 const result = await $`rtk rewrite ${command}`.quiet().nothrow()
 const rewritten = String(result.stdout).trim()
 if (rewritten && rewritten !== command) {
   (args as Record<string, unknown>).command = rewritten
 }
+```
+
+### Hermes (Python Plugin)
+
+Mutates `args["command"]` in-place via the `pre_tool_call` hook:
+
+```python
+result = subprocess.run(["rtk", "rewrite", command], capture_output=True, text=True, timeout=2)
+rewritten = result.stdout.strip()
+if result.returncode in {0, 3} and rewritten and rewritten != command:
+    args["command"] = rewritten
 ```
 
 ## Command Rewrite Registry
@@ -184,7 +208,7 @@ Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk car
 ### Override Controls
 
 - **`RTK_DISABLED=1`**: Per-command override (`RTK_DISABLED=1 git status` runs raw)
-- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite
+- **`exclude_commands`**: In `~/.config/rtk/config.toml`, list commands to never rewrite. Matches against the full command after stripping env prefixes. Subcommand patterns work (`"git push"` excludes `git push origin main`). Patterns starting with `^` are treated as regex.
 - **Already-RTK**: `rtk git status` passes through unchanged (no `rtk rtk git`)
 
 ## Exit Code Contract
@@ -217,7 +241,7 @@ New integrations must follow the [Exit Code Contract](#exit-code-contract) and [
 | Tier | Mechanism | Maintenance | Examples |
 |------|-----------|-------------|----------|
 | **Full hook** | Shell script or Rust binary, intercepts commands via agent's hook API | High — must track agent API changes | Claude Code, Cursor, Copilot, Gemini |
-| **Plugin** | TypeScript/JS plugin in agent's plugin system | Medium — agent manages loading | OpenCode |
+| **Plugin** | TypeScript/JS/Python plugin in agent's plugin system | Medium — agent manages loading | OpenCode, Hermes, Pi |
 | **Rules file** | Prompt-level instructions the agent reads | Low — no code to break | Cline, Windsurf, Codex |
 
 ### Eligibility
@@ -232,4 +256,3 @@ RTK supports AI coding assistants that developers actually use day-to-day. To ad
 ### Maintenance
 
 If an agent's API changes and the hook breaks, the integration should be updated promptly. If the agent becomes unmaintained or the hook can't be fixed, the integration may be deprecated with a release note.
-

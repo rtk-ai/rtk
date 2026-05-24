@@ -7,14 +7,23 @@ on:
 jobs:
   check-target:
     runs-on: ubuntu-latest
+    permissions: {}
     # Skip develop→master PRs (maintainer releases)
     if: >-
       github.event.pull_request.base.ref == 'master' &&
       github.event.pull_request.head.ref != 'develop'
     steps:
-      - name: Add wrong-base label
-        uses: actions/github-script@v7
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
         with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
+      - name: Add wrong-base label and comment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const pr = context.payload.pull_request;
 
@@ -27,13 +36,9 @@ jobs:
             });
 
             // Post comment
-            const body = `👋 Thanks for the PR! It looks like this targets \`master\`, but all PRs should target the **\`develop\`** branch.
+            const body = `Automatic message from CI checks : It seems like this branch is targeting the wrong branch, any contribution should target develop branch.
 
-            Please update the base branch:
-            1. Click **Edit** at the top right of this PR
-            2. Change the base branch from \`master\` to \`develop\`
-
-            See [CONTRIBUTING.md](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/master/CONTRIBUTING.md) for details.`;
+            See [CONTRIBUTING.md](https://github.com/rtk-ai/rtk/blob/master/CONTRIBUTING.md) for details.`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,

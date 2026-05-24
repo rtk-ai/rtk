@@ -4,6 +4,7 @@
 //! Focuses on extracting essential information from JSON outputs.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
 use crate::git;
 use anyhow::Result;
@@ -249,25 +250,27 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
     } else {
         "Pull Requests\n"
     });
-    for pr in prs.iter().take(20) {
-        let number = pr["number"].as_i64().unwrap_or(0);
-        let title = pr["title"].as_str().unwrap_or("???");
-        let state = pr["state"].as_str().unwrap_or("???");
-        let author = pr["author"]["login"].as_str().unwrap_or("???");
-        let icon = state_icon(state, ultra_compact);
-        out.push_str(&format!(
-            "  {} #{} {} ({})\n",
-            icon,
-            number,
-            truncate(title, 60),
-            author
-        ));
+    let all_lines: Vec<String> = prs
+        .iter()
+        .map(|pr| {
+            let number = pr["number"].as_i64().unwrap_or(0);
+            let title = pr["title"].as_str().unwrap_or("???");
+            let state = pr["state"].as_str().unwrap_or("???");
+            let author = pr["author"]["login"].as_str().unwrap_or("???");
+            let icon = state_icon(state, ultra_compact);
+            format!("  {} #{} {} ({})", icon, number, truncate(title, 60), author)
+        })
+        .collect();
+    const MAX_LIST: usize = CAP_LIST;
+    for line in all_lines.iter().take(MAX_LIST) {
+        out.push_str(&format!("{}\n", line));
     }
-    if prs.len() > 20 {
-        out.push_str(&format!(
-            "  ... {} more (use gh pr list for all)\n",
-            prs.len() - 20
-        ));
+    if all_lines.len() > MAX_LIST {
+        out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-prs", MAX_LIST + 1) {
+            out.push_str(&format!("  {}\n", hint));
+        }
     }
     out
 }
@@ -589,25 +592,32 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
     }
     let mut out = String::new();
     out.push_str("Issues\n");
-    for issue in issues.iter().take(20) {
-        let number = issue["number"].as_i64().unwrap_or(0);
-        let title = issue["title"].as_str().unwrap_or("???");
-        let state = issue["state"].as_str().unwrap_or("???");
-        let icon = if ultra_compact {
-            if state == "OPEN" {
-                "O"
+    let all_lines: Vec<String> = issues
+        .iter()
+        .map(|issue| {
+            let number = issue["number"].as_i64().unwrap_or(0);
+            let title = issue["title"].as_str().unwrap_or("???");
+            let state = issue["state"].as_str().unwrap_or("???");
+            let icon = if ultra_compact {
+                if state == "OPEN" { "O" } else { "C" }
+            } else if state == "OPEN" {
+                "[open]"
             } else {
-                "C"
-            }
-        } else if state == "OPEN" {
-            "[open]"
-        } else {
-            "[closed]"
-        };
-        out.push_str(&format!("  {} #{} {}\n", icon, number, truncate(title, 60)));
+                "[closed]"
+            };
+            format!("  {} #{} {}", icon, number, truncate(title, 60))
+        })
+        .collect();
+    const MAX_LIST: usize = CAP_LIST;
+    for line in all_lines.iter().take(MAX_LIST) {
+        out.push_str(&format!("{}\n", line));
     }
-    if issues.len() > 20 {
-        out.push_str(&format!("  ... {} more\n", issues.len() - 20));
+    if all_lines.len() > MAX_LIST {
+        out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-issues", MAX_LIST + 1) {
+            out.push_str(&format!("  {}\n", hint));
+        }
     }
     out
 }
