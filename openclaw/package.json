@@ -25,5 +25,8 @@
   ],
   "peerDependencies": {
     "rtk": ">=0.28.0"
+  },
+  "openclaw": {
+    "extensions": ["./index.ts"]
   }
 }
