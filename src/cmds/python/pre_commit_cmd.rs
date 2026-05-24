@@ -96,12 +96,12 @@ pub(crate) fn filter_pre_commit_output(output: &str) -> String {
 }
 
 fn parse_hook_line(line: &str) -> Option<(&str, &str)> {
+    let dot_pos = line.find("...")?;
+    let name = line[..dot_pos].trim_end();
+    let tail = line[dot_pos..].trim_start_matches('.');
     for status in &HOOK_STATUSES {
-        if let Some(rest) = line.strip_suffix(status) {
-            let trimmed = rest.trim_end_matches('.');
-            if trimmed.len() < rest.len() {
-                return Some((trimmed.trim_end(), *status));
-            }
+        if tail.ends_with(status) {
+            return Some((name, *status));
         }
     }
     None
@@ -224,6 +224,20 @@ mixed line ending Passed
 ruff (lint + fix) Passed
 ruff (format) Passed
 pyrefly (type check) Passed";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_skipped_with_reason() {
+        let output = "\
+ruff (lint + fix)....................................(no files to check)Skipped
+ruff (format)........................................(no files to check)Skipped
+pyrefly (type check).................................(no files to check)Skipped";
+        let result = filter_pre_commit_output(output);
+        let expected = "\
+ruff (lint + fix) Skipped
+ruff (format) Skipped
+pyrefly (type check) Skipped";
         assert_eq!(result, expected);
     }
 }
