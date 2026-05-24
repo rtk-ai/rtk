@@ -240,4 +240,58 @@ ruff (format) Skipped
 pyrefly (type check) Skipped";
         assert_eq!(result, expected);
     }
+
+    #[test]
+    fn test_mixed_output_with_hook_modifications() {
+        let output = "\
+trim trailing whitespace.................................................Failed
+- hook id: trailing-whitespace
+- exit code: 1
+- files were modified by this hook
+
+Fixing CLAUDE.md
+
+fix end of files.........................................................Passed
+check yaml...........................................(no files to check)Skipped
+check toml...........................................(no files to check)Skipped
+check json...........................................(no files to check)Skipped
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+debug statements (python)................................................Passed
+detect private key.......................................................Passed
+mixed line ending........................................................Passed
+ruff (lint + fix)........................................................Failed
+- hook id: ruff
+- files were modified by this hook
+
+Found 1 error (1 fixed, 0 remaining).
+
+ruff (format)............................................................Failed
+- hook id: ruff-format
+- files were modified by this hook ";
+        let result = filter_pre_commit_output(output);
+        let expected = "\
+trailing-whitespace Failed
+- files were modified by this hook
+
+Fixing CLAUDE.md
+
+fix end of files Passed
+check yaml Skipped
+check toml Skipped
+check json Skipped
+check for added large files Passed
+check for merge conflicts Passed
+debug statements (python) Passed
+detect private key Passed
+mixed line ending Passed
+ruff Failed
+- files were modified by this hook
+
+Found 1 error (1 fixed, 0 remaining).
+
+ruff-format Failed
+- files were modified by this hook ";
+        assert_eq!(result, expected);
+    }
 }
