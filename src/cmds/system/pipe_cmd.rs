@@ -140,9 +140,9 @@ fn find_wrapper(input: &str) -> String {
 }
 
 pub fn auto_detect_filter(input: &str) -> fn(&str) -> String {
-    let end = input.len().min(1024);
+    let mut end = input.len().min(1024);
     // Avoid panic: byte 1024 may fall inside a multi-byte UTF-8 char
-    let end = input.floor_char_boundary(end);
+    while !input.is_char_boundary(end) { end -= 1; }
     let first_1k = &input[..end];
 
     if first_1k.contains("test result:") && first_1k.contains("passed;") {
