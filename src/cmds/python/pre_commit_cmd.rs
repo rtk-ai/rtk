@@ -75,7 +75,7 @@ pub(crate) fn filter_pre_commit_output(output: &str) -> String {
                     }
 
                     let id = hook_id.unwrap_or(name);
-                    let mut failure = format!("{} Failed", id);
+                    let mut failure = format!("{} [Failed]", id);
                     if !linter_output.is_empty() {
                         failure.push('\n');
                         failure.push_str(&linter_output.join("\n"));
@@ -83,7 +83,7 @@ pub(crate) fn filter_pre_commit_output(output: &str) -> String {
                     result.push(failure);
                 }
                 _ => {
-                    result.push(format!("{} {}", name, status));
+                    result.push(format!("{} [{}]", name, status));
                 }
             }
         } else {
@@ -119,7 +119,7 @@ Fix End of Files.........................................................Passed"
         let result = filter_pre_commit_output(output);
         assert_eq!(
             result,
-            "Trim Trailing Whitespace Passed\nFix End of Files Passed"
+            "Trim Trailing Whitespace [Passed]\nFix End of Files [Passed]"
         );
     }
 
@@ -135,7 +135,7 @@ Fix End of Files.........................................................Passed"
         let result = filter_pre_commit_output(output);
         assert_eq!(
             result,
-            "Trim Trailing Whitespace Passed\ncheck-yaml Failed\n.yaml-lint:13:1: expected a mapping\nFix End of Files Passed"
+            "Trim Trailing Whitespace [Passed]\ncheck-yaml [Failed]\n.yaml-lint:13:1: expected a mapping\nFix End of Files [Passed]"
         );
     }
 
@@ -147,7 +147,7 @@ Fix End of Files.........................................................Passed"
 isort....................................................................Passed
 black....................................................................Passed";
         let result = filter_pre_commit_output(output);
-        assert_eq!(result, "isort Passed\nblack Passed");
+        assert_eq!(result, "isort [Passed]\nblack [Passed]");
     }
 
     #[test]
@@ -157,7 +157,7 @@ Check Yaml...............................................................Failed
 - hook id: check-yaml
 - exit code: 1";
         let result = filter_pre_commit_output(output);
-        assert_eq!(result, "check-yaml Failed");
+        assert_eq!(result, "check-yaml [Failed]");
     }
 
     #[test]
@@ -165,7 +165,7 @@ Check Yaml...............................................................Failed
         let output =
             "check-ast................................................................Skipped";
         let result = filter_pre_commit_output(output);
-        assert_eq!(result, "check-ast Skipped");
+        assert_eq!(result, "check-ast [Skipped]");
     }
 
     #[test]
@@ -182,7 +182,7 @@ file.py:2:3: import not sorted";
         let result = filter_pre_commit_output(output);
         assert_eq!(
             result,
-            "black Failed\nfile.py:1:1: black would reformat\nisort Failed\nfile.py:2:3: import not sorted"
+            "black [Failed]\nfile.py:1:1: black would reformat\nisort [Failed]\nfile.py:2:3: import not sorted"
         );
     }
 
@@ -211,19 +211,19 @@ ruff (format)............................................................Passed
 pyrefly (type check).....................................................Passed";
         let result = filter_pre_commit_output(output);
         let expected = "\
-Trim trailing whitespace Passed
-fix end of files Passed
-check yaml Passed
-check toml Passed
-check json Passed
-check for added large files Passed
-check for merge conflicts Passed
-debug statements (python) Passed
-detect private key Passed
-mixed line ending Passed
-ruff (lint + fix) Passed
-ruff (format) Passed
-pyrefly (type check) Passed";
+Trim trailing whitespace [Passed]
+fix end of files [Passed]
+check yaml [Passed]
+check toml [Passed]
+check json [Passed]
+check for added large files [Passed]
+check for merge conflicts [Passed]
+debug statements (python) [Passed]
+detect private key [Passed]
+mixed line ending [Passed]
+ruff (lint + fix) [Passed]
+ruff (format) [Passed]
+pyrefly (type check) [Passed]";
         assert_eq!(result, expected);
     }
 
@@ -235,9 +235,9 @@ ruff (format)........................................(no files to check)Skipped
 pyrefly (type check).................................(no files to check)Skipped";
         let result = filter_pre_commit_output(output);
         let expected = "\
-ruff (lint + fix) Skipped
-ruff (format) Skipped
-pyrefly (type check) Skipped";
+ruff (lint + fix) [Skipped]
+ruff (format) [Skipped]
+pyrefly (type check) [Skipped]";
         assert_eq!(result, expected);
     }
 
@@ -271,26 +271,26 @@ ruff (format)............................................................Failed
 - files were modified by this hook ";
         let result = filter_pre_commit_output(output);
         let expected = "\
-trailing-whitespace Failed
+trailing-whitespace [Failed]
 - files were modified by this hook
 
 Fixing CLAUDE.md
 
-fix end of files Passed
-check yaml Skipped
-check toml Skipped
-check json Skipped
-check for added large files Passed
-check for merge conflicts Passed
-debug statements (python) Passed
-detect private key Passed
-mixed line ending Passed
-ruff Failed
+fix end of files [Passed]
+check yaml [Skipped]
+check toml [Skipped]
+check json [Skipped]
+check for added large files [Passed]
+check for merge conflicts [Passed]
+debug statements (python) [Passed]
+detect private key [Passed]
+mixed line ending [Passed]
+ruff [Failed]
 - files were modified by this hook
 
 Found 1 error (1 fixed, 0 remaining).
 
-ruff-format Failed
+ruff-format [Failed]
 - files were modified by this hook ";
         assert_eq!(result, expected);
     }
