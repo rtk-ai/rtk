@@ -28,12 +28,13 @@ pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_PLUGIN_FILE: &str = "rtk.ts";
 pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 
+#[allow(dead_code)]
 pub const ANTIGRAVITY_DIR: &str = ".agents";
 
 /// Native Rust hook command for Google Antigravity CLI (agy).
 pub const ANTIGRAVITY_HOOK_COMMAND: &str = "rtk hook antigravity";
-/// Regex matcher covering both Antigravity shell-execution tool names.
-pub const ANTIGRAVITY_TOOL_MATCHER: &str = "^(run_command|Bash)$";
+/// Config subdirectory for the Antigravity CLI (agy) under ~/.gemini/
+pub const AGY_CLI_SUBDIR: &str = "antigravity-cli";
 
 pub const HERMES_DIR: &str = ".hermes";
 pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";

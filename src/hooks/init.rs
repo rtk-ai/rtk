@@ -8,16 +8,16 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
-    CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
+    CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, HOOKS_JSON, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR,
+    PLUGIN_SUBDIR,
 };
 
 use super::constants::{
-    ANTIGRAVITY_DIR, ANTIGRAVITY_HOOK_COMMAND, ANTIGRAVITY_TOOL_MATCHER, BEFORE_TOOL_KEY,
-    CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR,
-    HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE,
-    HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR,
-    PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE,
-    SETTINGS_JSON,
+    AGY_CLI_SUBDIR, ANTIGRAVITY_HOOK_COMMAND, BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND,
+    CODEX_DIR, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR,
+    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -1753,135 +1753,151 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
 }
 
 // ─── Google Antigravity CLI (agy) hook support ─────────────────
+//
+// agy stores config in ~/.gemini/antigravity-cli/settings.json and uses the
+// same BeforeTool hook format as Gemini CLI.  Two matchers are registered —
+// one for "run_command" (CommandLine field) and one for "Bash" (command field)
+// — because agy uses both depending on context.
 
-/// Entry point for `rtk init --agent agy`.
+/// Entry point for `rtk init --agent agy` (global-only, like Gemini CLI).
 ///
-/// global=true  → `~/.agents/hooks.json`
-/// global=false → `.agents/hooks.json` (project-local)
+/// Writes hook entries into `~/.gemini/antigravity-cli/settings.json`.
 pub fn run_agy_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
 
-    let hooks_json_path = if global {
-        let agents_dir = resolve_home_subdir(ANTIGRAVITY_DIR)?;
-        agents_dir.join(HOOKS_JSON)
-    } else {
-        PathBuf::from(ANTIGRAVITY_DIR).join(HOOKS_JSON)
-    };
-
-    if !dry_run {
-        if let Some(parent) = hooks_json_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
+    if !global {
+        anyhow::bail!("agy CLI support is global-only. Use: rtk init -g --agent agy");
     }
 
-    let patched = patch_agy_hooks_json(&hooks_json_path, ctx)?;
+    let agy_dir = resolve_agy_dir()?;
+    let settings_path = agy_dir.join(SETTINGS_JSON);
+
+    if !dry_run {
+        fs::create_dir_all(&agy_dir)
+            .with_context(|| format!("Failed to create agy config dir: {}", agy_dir.display()))?;
+    }
+
+    let patched = patch_agy_settings(&settings_path, ctx)?;
 
     if dry_run {
         print_dry_run_footer();
     } else {
-        let scope = if global { "global" } else { "project-local" };
         if patched {
-            println!("\nGoogle Antigravity CLI (agy) hook installed ({scope}).\n");
+            println!("\nGoogle Antigravity CLI (agy) hook installed (global).\n");
         } else {
-            println!("\nGoogle Antigravity CLI (agy) hook already present ({scope}).\n");
+            println!("\nGoogle Antigravity CLI (agy) hook already present (global).\n");
         }
-        println!("  hooks.json: {}", hooks_json_path.display());
+        println!("  settings.json: {}", settings_path.display());
         println!("  Restart agy. Test with: git status\n");
     }
 
     Ok(())
 }
 
-/// Patch `hooks.json` with the RTK PreToolUse hook for agy.
+fn resolve_agy_dir() -> Result<PathBuf> {
+    let gemini_dir = resolve_home_subdir(GEMINI_DIR)?;
+    Ok(gemini_dir.join(AGY_CLI_SUBDIR))
+}
+
+/// Patch `~/.gemini/antigravity-cli/settings.json` with RTK BeforeTool hooks.
 /// Returns true if the file was modified.
-fn patch_agy_hooks_json(path: &Path, ctx: InitContext) -> Result<bool> {
+fn patch_agy_settings(path: &Path, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
 
-    let mut root = if path.exists() {
+    let mut settings: serde_json::Value = if path.exists() {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        if content.trim().is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {} as JSON", path.display()))?
-        }
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
     };
 
-    if agy_hook_already_present(&root) {
+    if agy_hook_already_present(&settings) {
         if verbose > 0 {
-            eprintln!("agy hooks.json: RTK hook already present");
+            eprintln!("agy settings.json: RTK hook already present");
         }
         return Ok(false);
     }
 
-    insert_agy_hook_entry(&mut root)?;
+    insert_agy_hook_entries(&mut settings)?;
 
     let serialized =
-        serde_json::to_string_pretty(&root).context("Failed to serialize hooks.json")?;
+        serde_json::to_string_pretty(&settings).context("Failed to serialize agy settings.json")?;
 
     if dry_run {
-        println!("[dry-run] would patch agy hooks.json: {}", path.display());
+        println!(
+            "[dry-run] would patch agy settings.json: {}",
+            path.display()
+        );
         if verbose > 0 {
             println!("[dry-run] content:\n{}", serialized);
         }
         return Ok(true);
     }
 
-    if path.exists() {
-        let backup = path.with_extension("json.bak");
-        fs::copy(path, &backup)
-            .with_context(|| format!("Failed to backup to {}", backup.display()))?;
-        if verbose > 0 {
-            eprintln!("Backup: {}", backup.display());
-        }
+    let tmp = NamedTempFile::new_in(
+        path.parent()
+            .context("agy settings.json has no parent directory")?,
+    )?;
+    fs::write(tmp.path(), &serialized)?;
+    tmp.persist(path)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    if verbose > 0 {
+        eprintln!("Patched {}", path.display());
     }
 
-    atomic_write(path, &serialized)?;
     Ok(true)
 }
 
-/// Returns true if an RTK hook is already in the agy hooks.json PreToolUse array.
-fn agy_hook_already_present(root: &serde_json::Value) -> bool {
-    root.get("hooks")
-        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+/// Returns true if an RTK BeforeTool hook is already present in agy settings.json.
+fn agy_hook_already_present(settings: &serde_json::Value) -> bool {
+    settings
+        .pointer(&format!("/hooks/{}", BEFORE_TOOL_KEY))
         .and_then(|v| v.as_array())
         .is_some_and(|arr| {
             arr.iter().any(|entry| {
                 entry
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(|cmd| cmd.contains("rtk"))
+                    .get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|cmd| cmd.contains("rtk"))
+                        })
+                    })
             })
         })
 }
 
-/// Insert the RTK PreToolUse hook entry into the agy hooks.json root.
-fn insert_agy_hook_entry(root: &mut serde_json::Value) -> Result<()> {
-    let root_obj = root
+/// Insert RTK BeforeTool hook entries into agy settings.json.
+///
+/// Registers one entry per tool name so agy calls the hook for both
+/// shell-execution tools it uses: "run_command" and "Bash".
+fn insert_agy_hook_entries(settings: &mut serde_json::Value) -> Result<()> {
+    let settings_obj = settings
         .as_object_mut()
-        .context("agy hooks.json root is not an object")?;
+        .context("agy settings.json is not an object")?;
 
-    let hooks = root_obj
+    let hooks = settings_obj
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .context("hooks value is not an object")?;
 
-    let pre_tool_use = hooks
-        .entry(PRE_TOOL_USE_KEY)
+    let before_tool = hooks
+        .entry(BEFORE_TOOL_KEY)
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
-        .context("PreToolUse value is not an array")?;
+        .context("BeforeTool value is not an array")?;
 
-    pre_tool_use.push(serde_json::json!({
-        "type": "command",
-        "command": ANTIGRAVITY_HOOK_COMMAND,
-        "toolNameMatcher": ANTIGRAVITY_TOOL_MATCHER
-    }));
+    for matcher in &["run_command", "Bash"] {
+        before_tool.push(serde_json::json!({
+            "matcher": matcher,
+            "hooks": [{"type": "command", "command": ANTIGRAVITY_HOOK_COMMAND}]
+        }));
+    }
 
     Ok(())
 }
@@ -1890,56 +1906,70 @@ fn insert_agy_hook_entry(root: &mut serde_json::Value) -> Result<()> {
 fn uninstall_agy_cli(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { verbose, dry_run } = ctx;
 
-    let hooks_json_path = if global {
-        let agents_dir = match resolve_home_subdir(ANTIGRAVITY_DIR) {
-            Ok(d) => d,
-            Err(_) => {
-                println!("RTK agy hook was not installed (nothing to remove)");
-                return Ok(());
-            }
-        };
-        agents_dir.join(HOOKS_JSON)
-    } else {
-        PathBuf::from(ANTIGRAVITY_DIR).join(HOOKS_JSON)
+    if !global {
+        println!("RTK agy hook was not installed (nothing to remove)");
+        return Ok(());
+    }
+
+    let settings_path = match resolve_agy_dir() {
+        Ok(d) => d.join(SETTINGS_JSON),
+        Err(_) => {
+            println!("RTK agy hook was not installed (nothing to remove)");
+            return Ok(());
+        }
     };
 
     let mut removed = Vec::new();
 
-    if hooks_json_path.exists() {
-        let content = fs::read_to_string(&hooks_json_path)
-            .with_context(|| format!("Failed to read {}", hooks_json_path.display()))?;
+    if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
 
-        if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(arr) = root
-                .pointer_mut(&format!("/hooks/{}", PRE_TOOL_USE_KEY))
+        if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(arr) = settings
+                .pointer_mut(&format!("/hooks/{}", BEFORE_TOOL_KEY))
                 .and_then(|v| v.as_array_mut())
             {
                 let before = arr.len();
                 arr.retain(|entry| {
                     !entry
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|cmd| cmd.contains("rtk"))
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|h| {
+                                h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(|cmd| cmd.contains("rtk"))
+                            })
+                        })
                 });
                 if arr.len() < before {
                     if dry_run {
                         println!(
-                            "[dry-run] would remove RTK hook from agy hooks.json: {}",
-                            hooks_json_path.display()
+                            "[dry-run] would remove RTK hooks from agy settings.json: {}",
+                            settings_path.display()
                         );
                     } else {
-                        let serialized = serde_json::to_string_pretty(&root)?;
-                        atomic_write(&hooks_json_path, &serialized)?;
+                        let serialized = serde_json::to_string_pretty(&settings)?;
+                        let tmp = NamedTempFile::new_in(
+                            settings_path
+                                .parent()
+                                .context("settings.json has no parent")?,
+                        )?;
+                        fs::write(tmp.path(), &serialized)?;
+                        tmp.persist(&settings_path).with_context(|| {
+                            format!("Failed to write {}", settings_path.display())
+                        })?;
                         if verbose > 0 {
                             eprintln!(
-                                "Removed RTK hook from agy hooks.json: {}",
-                                hooks_json_path.display()
+                                "Removed RTK hooks from agy settings.json: {}",
+                                settings_path.display()
                             );
                         }
                     }
                     removed.push(format!(
-                        "agy hooks.json: removed RTK hook ({})",
-                        hooks_json_path.display()
+                        "agy settings.json: removed RTK hooks ({})",
+                        settings_path.display()
                     ));
                 }
             }
@@ -5819,7 +5849,16 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         with_claude_dir_override(&tmp, |claude_dir| {
             run_default_mode(true, PatchMode::Auto, false, InitContext::default()).unwrap();
-            uninstall(true, false, false, false, false, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!claude_dir.join(RTK_MD).exists(), "RTK.md must be removed");
             let settings_content =
@@ -6173,7 +6212,16 @@ mod tests {
             let plugin = pi_dir.join(PI_EXTENSIONS_SUBDIR).join(PI_PLUGIN_FILE);
             assert!(plugin.exists());
 
-            uninstall(true, false, false, false, true, false, InitContext::default()).unwrap();
+            uninstall(
+                true,
+                false,
+                false,
+                false,
+                true,
+                false,
+                InitContext::default(),
+            )
+            .unwrap();
 
             assert!(!plugin.exists(), "plugin must be removed");
         });
@@ -6187,7 +6235,15 @@ mod tests {
         std::env::set_current_dir(tmp.path()).unwrap();
 
         run_pi_mode(false, InitContext::default()).unwrap();
-        let result = uninstall(false, false, false, false, true, false, InitContext::default());
+        let result = uninstall(
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            InitContext::default(),
+        );
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 

@@ -524,14 +524,87 @@ fn run_cursor_inner_with_rules(
 }
 
 // ── Google Antigravity (agy) hook ─────────────────────────────
+//
+// agy sends two distinct payload shapes depending on context:
+//
+// Simple (older/Bash tool):
+//   {"tool_name": "Bash",         "tool_input": {"command": "git status"}}
+//   {"tool_name": "run_command",  "tool_input": {"CommandLine": "git status"}}
+//
+// Rich (newer/run_command tool — includes metadata fields):
+//   {"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "..."}}, ...}
+//   {"toolCall": {"name": "Bash",        "args": {"command": "git status", ...}}, ...}
 
 fn process_antigravity_payload(v: &Value) -> PayloadAction {
-    let tool_name = v
-        .pointer("/toolCall/name")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    // Simple format: uses top-level "tool_name" key (same as Gemini CLI).
+    if let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) {
+        return process_agy_simple(v, tool_name);
+    }
 
-    // Map tool name → command field name.  Non-shell tools are ignored.
+    // Rich format: command buried inside toolCall.{name,args}.
+    if let Some(tool_name) = v.pointer("/toolCall/name").and_then(|t| t.as_str()) {
+        return process_agy_rich(v, tool_name);
+    }
+
+    PayloadAction::Ignore
+}
+
+fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
+    let (cmd, field) = match tool_name {
+        "run_command" => {
+            let c = v
+                .pointer("/tool_input/CommandLine")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            (c, "CommandLine")
+        }
+        "Bash" | "bash" => {
+            let c = v
+                .pointer("/tool_input/command")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            (c, "command")
+        }
+        _ => return PayloadAction::Ignore,
+    };
+
+    if cmd.is_empty() {
+        return PayloadAction::Ignore;
+    }
+
+    let verdict = permissions::check_command(cmd);
+    if verdict == PermissionVerdict::Deny {
+        return PayloadAction::Skip {
+            reason: "skip:deny_rule",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_match",
+                cmd: cmd.to_string(),
+            }
+        }
+    };
+
+    let output = json!({
+        "decision": "allow",
+        "hookSpecificOutput": {
+            "tool_input": { field: rewritten.clone() }
+        }
+    });
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output,
+    }
+}
+
+fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
     let (cmd, field) = match tool_name {
         "run_command" => {
             let c = v
@@ -572,8 +645,8 @@ fn process_antigravity_payload(v: &Value) -> PayloadAction {
         }
     };
 
-    // Mirror the full args object from the request, updating only the
-    // command field so extra fields like `Cwd` are preserved unchanged.
+    // Mirror the full args object so extra fields (Cwd, WaitMsBeforeAsync, …)
+    // are preserved unchanged in the rewritten call.
     let updated_args = {
         let mut args = v
             .pointer("/toolCall/args")
@@ -1113,77 +1186,104 @@ mod tests {
         );
     }
 
-    // --- Antigravity (agy) hook ---
+    // --- Antigravity (agy) — simple format (tool_name / tool_input) ---
 
-    fn agy_input_run_command(cmd: &str) -> String {
-        json!({
-            "toolCall": {
-                "name": "run_command",
-                "args": { "CommandLine": cmd }
-            }
-        })
-        .to_string()
+    fn agy_simple_bash(cmd: &str) -> String {
+        json!({"tool_name": "Bash", "tool_input": {"command": cmd}}).to_string()
     }
 
-    fn agy_input_bash(cmd: &str) -> String {
-        json!({
-            "toolCall": {
-                "name": "Bash",
-                "args": { "command": cmd }
-            }
-        })
-        .to_string()
+    fn agy_simple_run_command(cmd: &str) -> String {
+        json!({"tool_name": "run_command", "tool_input": {"CommandLine": cmd}}).to_string()
     }
 
     #[test]
-    fn test_agy_run_command_rewrite() {
-        let out = run_antigravity_inner(&agy_input_run_command("git status")).unwrap();
+    fn test_agy_simple_bash_rewrite() {
+        let out = run_antigravity_inner(&agy_simple_bash("git status")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(
+            v["hookSpecificOutput"]["tool_input"]["command"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_agy_simple_run_command_rewrite() {
+        let out = run_antigravity_inner(&agy_simple_run_command("git status")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(
+            v["hookSpecificOutput"]["tool_input"]["CommandLine"],
+            "rtk git status"
+        );
+    }
+
+    #[test]
+    fn test_agy_simple_unsupported_returns_none() {
+        assert!(run_antigravity_inner(&agy_simple_bash("htop")).is_none());
+    }
+
+    #[test]
+    fn test_agy_simple_non_shell_returns_none() {
+        assert!(
+            run_antigravity_inner(&json!({"tool_name": "ListPermissions"}).to_string()).is_none()
+        );
+    }
+
+    // --- Antigravity (agy) — rich format (toolCall / args) ---
+
+    fn agy_rich_run_command(cmd: &str) -> String {
+        json!({"toolCall": {"name": "run_command", "args": {"CommandLine": cmd}}}).to_string()
+    }
+
+    fn agy_rich_bash(cmd: &str) -> String {
+        json!({"toolCall": {"name": "Bash", "args": {"command": cmd}}}).to_string()
+    }
+
+    #[test]
+    fn test_agy_rich_run_command_rewrite() {
+        let out = run_antigravity_inner(&agy_rich_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["decision"], "allow");
         assert_eq!(v["toolCall"]["args"]["CommandLine"], "rtk git status");
     }
 
     #[test]
-    fn test_agy_bash_rewrite() {
-        let out = run_antigravity_inner(&agy_input_bash("cargo test")).unwrap();
+    fn test_agy_rich_bash_rewrite() {
+        let out = run_antigravity_inner(&agy_rich_bash("cargo test")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["decision"], "allow");
         assert_eq!(v["toolCall"]["args"]["command"], "rtk cargo test");
     }
 
     #[test]
-    fn test_agy_non_shell_tool_returns_none() {
-        let input = json!({
-            "toolCall": { "name": "ListPermissions", "args": {} }
-        })
-        .to_string();
-        assert!(run_antigravity_inner(&input).is_none());
-    }
-
-    #[test]
-    fn test_agy_already_rtk_returns_none() {
-        assert!(run_antigravity_inner(&agy_input_run_command("rtk git status")).is_none());
-    }
-
-    #[test]
-    fn test_agy_unsupported_command_returns_none() {
-        assert!(run_antigravity_inner(&agy_input_run_command("htop")).is_none());
-    }
-
-    #[test]
-    fn test_agy_extra_args_preserved() {
-        // Extra fields in toolCall.args (e.g. Cwd) must survive the rewrite
+    fn test_agy_rich_extra_args_preserved() {
         let input = json!({
             "toolCall": {
                 "name": "run_command",
-                "args": { "CommandLine": "git status", "Cwd": "/tmp" }
+                "args": {"CommandLine": "git status", "Cwd": "/tmp", "WaitMsBeforeAsync": 2000}
             }
         })
         .to_string();
         let out = run_antigravity_inner(&input).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["toolCall"]["args"]["Cwd"], "/tmp");
+        assert_eq!(v["toolCall"]["args"]["WaitMsBeforeAsync"], 2000);
         assert_eq!(v["toolCall"]["args"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_agy_rich_non_shell_returns_none() {
+        assert!(run_antigravity_inner(
+            &json!({"toolCall": {"name": "ListPermissions", "args": {}}}).to_string()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn test_agy_already_rtk_returns_none() {
+        assert!(run_antigravity_inner(&agy_simple_bash("rtk git status")).is_none());
+        assert!(run_antigravity_inner(&agy_rich_run_command("rtk git status")).is_none());
     }
 
     #[test]
