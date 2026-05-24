@@ -385,7 +385,7 @@ mod tests {
         let input = "total 8\n\
                      drwxrwxr-x  2 user  staff  4096 Mar 29 14:19 /home/user/.config/opencode\n\
                      -rw-rw-r--  1 user  staff   844 Mar 28 23:16 settings.json\n";
-        let (entries, _summary) = compact_ls(input, false);
+        let (entries, _summary, _) = compact_ls(input, false);
         assert!(
             entries.contains("settings.json"),
             "successful entries must appear even when some paths failed"
