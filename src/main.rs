@@ -371,6 +371,10 @@ enum Commands {
         /// Install GitHub Copilot integration (VS Code + CLI)
         #[arg(long)]
         copilot: bool,
+
+        /// Initialize CodeBuddy Code settings hooks
+        #[arg(long)]
+        codebuddy: bool,
     },
 
     /// Download with compact output (strips progress bars)
@@ -759,6 +763,9 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process CodeBuddy Code PreToolUse hook (reads JSON from stdin)
+    #[command(name = "codebuddy")]
+    CodeBuddy,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1754,6 +1761,7 @@ fn run_cli() -> Result<i32> {
             uninstall,
             codex,
             copilot,
+            codebuddy,
         } => {
             if show {
                 hooks::init::show_config(codex)?;
@@ -1771,6 +1779,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_gemini(global, hook_only, patch_mode, cli.verbose)?;
             } else if copilot {
                 hooks::init::run_copilot(cli.verbose)?;
+            } else if codebuddy {
+                hooks::init::run_codebuddy(global, cli.verbose)?;
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
@@ -2112,6 +2122,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::CodeBuddy => {
+                hooks::hook_cmd::run_codebuddy()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2689,6 +2703,45 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_try_parse_init_codebuddy() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--codebuddy"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                codebuddy, global, ..
+            } => {
+                assert!(codebuddy);
+                assert!(!global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_global_codebuddy() {
+        let cli = Cli::try_parse_from(["rtk", "init", "-g", "--codebuddy"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                codebuddy, global, ..
+            } => {
+                assert!(codebuddy);
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_hook_codebuddy_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "codebuddy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::CodeBuddy
             }
         ));
     }

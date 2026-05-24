@@ -297,7 +297,17 @@ enum PayloadAction {
     Ignore,
 }
 
-fn process_claude_payload(v: &Value) -> PayloadAction {
+#[derive(Clone, Copy)]
+enum PermissionMode {
+    Claude,
+    NoPermissionCheck,
+}
+
+fn process_claude_payload(
+    v: &Value,
+    permission_mode: PermissionMode,
+    include_modified_input: bool,
+) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -307,7 +317,10 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
         None => return PayloadAction::Ignore,
     };
 
-    let verdict = permissions::check_command(cmd);
+    let verdict = match permission_mode {
+        PermissionMode::Claude => permissions::check_command(cmd),
+        PermissionMode::NoPermissionCheck => PermissionVerdict::Default,
+    };
     if verdict == PermissionVerdict::Deny {
         return PayloadAction::Skip {
             reason: "skip:deny_rule",
@@ -336,8 +349,15 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     let mut hook_output = json!({
         "hookEventName": PRE_TOOL_USE_KEY,
         "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": updated_input
+        "updatedInput": updated_input.clone()
     });
+
+    if include_modified_input {
+        hook_output
+            .as_object_mut()
+            .unwrap()
+            .insert("modifiedInput".into(), updated_input);
+    }
 
     if verdict == PermissionVerdict::Allow {
         hook_output
@@ -355,6 +375,19 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
 
 /// Run the Claude Code PreToolUse hook natively.
 pub fn run_claude() -> Result<()> {
+    run_claude_compatible_hook("claude", PermissionMode::Claude, false)
+}
+
+/// Run the CodeBuddy Code PreToolUse hook natively.
+pub fn run_codebuddy() -> Result<()> {
+    run_claude_compatible_hook("codebuddy", PermissionMode::NoPermissionCheck, true)
+}
+
+fn run_claude_compatible_hook(
+    adapter: &str,
+    permission_mode: PermissionMode,
+    include_modified_input: bool,
+) -> Result<()> {
     let input = read_stdin_limited()?;
 
     let input = input.trim();
@@ -365,12 +398,15 @@ pub fn run_claude() -> Result<()> {
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
-            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            let _ = writeln!(
+                io::stderr(),
+                "[rtk hook {adapter}] Failed to parse JSON input: {e}"
+            );
             return Ok(());
         }
     };
 
-    match process_claude_payload(&v) {
+    match process_claude_payload(&v, permission_mode, include_modified_input) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -390,8 +426,22 @@ pub fn run_claude() -> Result<()> {
 
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
+    run_claude_compatible_inner(input, PermissionMode::Claude, false)
+}
+
+#[cfg(test)]
+fn run_codebuddy_inner(input: &str) -> Option<String> {
+    run_claude_compatible_inner(input, PermissionMode::NoPermissionCheck, true)
+}
+
+#[cfg(test)]
+fn run_claude_compatible_inner(
+    input: &str,
+    permission_mode: PermissionMode,
+    include_modified_input: bool,
+) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    match process_claude_payload(&v) {
+    match process_claude_payload(&v, permission_mode, include_modified_input) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -754,6 +804,84 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- CodeBuddy handler ---
+
+    fn codebuddy_input(cmd: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    fn codebuddy_input_with_fields(cmd: &str, timeout: u64, description: &str) -> String {
+        json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": cmd,
+                "timeout": timeout,
+                "description": description,
+                "extra": { "keep": true }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codebuddy_rewrite_git_status() {
+        let result = run_codebuddy_inner(&codebuddy_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_codebuddy_rewrite_preserves_tool_input_fields() {
+        let input = codebuddy_input_with_fields("git status", 30000, "Check repo status");
+        let result = run_codebuddy_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk git status");
+        assert_eq!(updated["timeout"], 30000);
+        assert_eq!(updated["description"], "Check repo status");
+        assert_eq!(updated["extra"]["keep"], true);
+    }
+
+    #[test]
+    fn test_codebuddy_modified_input_matches_updated_input() {
+        let result = run_codebuddy_inner(&codebuddy_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+        assert_eq!(hook["modifiedInput"], hook["updatedInput"]);
+    }
+
+    #[test]
+    fn test_claude_output_does_not_include_codebuddy_modified_input() {
+        let result = run_claude_inner(&claude_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert!(v["hookSpecificOutput"].get("modifiedInput").is_none());
+    }
+
+    #[test]
+    fn test_codebuddy_unsupported_command_passthrough() {
+        assert!(run_codebuddy_inner(&codebuddy_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_codebuddy_heredoc_passthrough() {
+        assert!(run_codebuddy_inner(&codebuddy_input("cat <<EOF\nhello\nEOF")).is_none());
+    }
+
+    #[test]
+    fn test_codebuddy_already_rtk_passthrough() {
+        assert!(run_codebuddy_inner(&codebuddy_input("rtk git status")).is_none());
     }
 
     // --- Cursor handler ---
