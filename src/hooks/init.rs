@@ -30,6 +30,19 @@ const PI_PLUGIN: &str = include_str!("../../hooks/pi/rtk.ts");
 const RTK_SLIM: &str = include_str!("../../hooks/claude/rtk-awareness.md");
 const RTK_SLIM_CODEX: &str = include_str!("../../hooks/codex/rtk-awareness.md");
 
+// Embedded Codex plugin package
+const CODEX_PLUGIN_NAME: &str = "rtk-codex";
+const CODEX_PLUGIN_MARKETPLACE_NAME: &str = "rtk-local";
+const CODEX_PLUGIN_MARKETPLACE_DISPLAY_NAME: &str = "RTK Local Plugins";
+const CODEX_PERSONAL_MARKETPLACE_NAME: &str = "personal";
+const CODEX_PERSONAL_MARKETPLACE_DISPLAY_NAME: &str = "Personal";
+const CODEX_PLUGIN_MANIFEST: &str =
+    include_str!("../../hooks/codex/rtk-codex/.codex-plugin/plugin.json");
+const CODEX_PLUGIN_SKILL: &str = include_str!("../../hooks/codex/rtk-codex/skills/rtk/SKILL.md");
+const CODEX_PLUGIN_HOOKS_JSON: &str = include_str!("../../hooks/codex/rtk-codex/hooks/hooks.json");
+const CODEX_PLUGIN_LAUNCHER: &str =
+    include_str!("../../hooks/codex/rtk-codex/hooks/run-rtk-codex-hook.sh");
+
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
 # Filters here override user-global and built-in filters.
@@ -836,22 +849,16 @@ pub fn uninstall(
 
 fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if !global {
-        anyhow::bail!(
-            "Uninstall only works with --global flag. For local projects, manually remove RTK from AGENTS.md"
-        );
-    }
-
-    let codex_dir = resolve_codex_dir()?;
-    let removed = uninstall_codex_at(&codex_dir, ctx)?;
+    let paths = codex_plugin_paths(global)?;
+    let removed = uninstall_codex_at(&paths, global, ctx)?;
 
     if removed.is_empty() {
-        println!("RTK was not installed for Codex CLI (nothing to remove)");
+        println!("RTK Codex plugin was not installed (nothing to remove)");
     } else {
         let header = if dry_run {
-            "[dry-run] would uninstall RTK for Codex CLI:"
+            "[dry-run] would uninstall RTK Codex plugin:"
         } else {
-            "RTK uninstalled for Codex CLI:"
+            "RTK Codex plugin uninstalled:"
         };
         println!("{}", header);
         for item in removed {
@@ -862,56 +869,30 @@ fn uninstall_codex(global: bool, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
-fn uninstall_codex_at(codex_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
+fn uninstall_codex_at(
+    paths: &CodexPluginPaths,
+    global: bool,
+    ctx: InitContext,
+) -> Result<Vec<String>> {
     let mut removed = Vec::new();
-    let absolute_rtk_md_ref = codex_rtk_md_ref(codex_dir);
 
-    let rtk_md_path = codex_dir.join(RTK_MD);
-    if rtk_md_path.exists() {
-        if dry_run {
-            println!("[dry-run] would remove RTK.md: {}", rtk_md_path.display());
-        } else {
-            fs::remove_file(&rtk_md_path)
-                .with_context(|| format!("Failed to remove RTK.md: {}", rtk_md_path.display()))?;
-            if verbose > 0 {
-                eprintln!("Removed RTK.md: {}", rtk_md_path.display());
-            }
-        }
-        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    if remove_codex_plugin_dir(paths, ctx)? {
+        removed.push(format!("Plugin package: {}", paths.plugin_dir.display()));
     }
 
-    let agents_md_path = codex_dir.join(AGENTS_MD);
-    if agents_md_path.exists() {
-        let content = fs::read_to_string(&agents_md_path)
-            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
-
-        let mut working_content = content.clone();
-        let mut agents_changed = false;
-
-        if working_content.contains(RTK_BLOCK_START) {
-            let (cleaned, did_remove) = remove_rtk_block(&working_content);
-            if did_remove {
-                working_content = cleaned;
-                agents_changed = true;
-                removed.push("AGENTS.md: removed rtk-instructions block".to_string());
-            }
-        }
-
-        if agents_changed {
-            atomic_write(&agents_md_path, &working_content).with_context(|| {
-                format!("Failed to write AGENTS.md: {}", agents_md_path.display())
-            })?;
-        }
+    if remove_codex_plugin_marketplace_entry(paths, ctx)? {
+        removed.push(format!(
+            "Marketplace entry: {}",
+            paths.marketplace_path.display()
+        ));
     }
 
-    if remove_rtk_reference_from_agents(
-        &agents_md_path,
-        &[RTK_MD_REF, absolute_rtk_md_ref.as_str()],
+    removed.extend(remove_codex_legacy_at(
+        &paths.legacy_agents_md_path,
+        &paths.legacy_rtk_md_path,
+        global,
         ctx,
-    )? {
-        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
-    }
+    )?);
 
     Ok(removed)
 }
@@ -2244,73 +2225,473 @@ fn normalized_yaml_scalar(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
-    let (agents_md_path, rtk_md_path) = if global {
-        let codex_dir = resolve_codex_dir()?;
-        (codex_dir.join(AGENTS_MD), codex_dir.join(RTK_MD))
-    } else {
-        (PathBuf::from(AGENTS_MD), PathBuf::from(RTK_MD))
-    };
+#[derive(Debug, Clone)]
+struct CodexPluginPaths {
+    plugin_dir: PathBuf,
+    marketplace_path: PathBuf,
+    marketplace_source_path: String,
+    marketplace_name: &'static str,
+    marketplace_display_name: &'static str,
+    legacy_agents_md_path: PathBuf,
+    legacy_rtk_md_path: PathBuf,
+}
 
-    run_codex_mode_with_paths(agents_md_path, rtk_md_path, global, ctx)
+fn run_codex_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let paths = codex_plugin_paths(global)?;
+    run_codex_mode_with_paths(paths, global, ctx)
+}
+
+fn codex_plugin_paths(global: bool) -> Result<CodexPluginPaths> {
+    if global {
+        let codex_dir = resolve_codex_dir()?;
+        let home_dir = dirs::home_dir().context("Cannot determine home directory for Codex")?;
+        Ok(CodexPluginPaths {
+            plugin_dir: codex_dir.join(PLUGIN_SUBDIR).join(CODEX_PLUGIN_NAME),
+            marketplace_path: home_dir
+                .join(".agents")
+                .join(PLUGIN_SUBDIR)
+                .join("marketplace.json"),
+            marketplace_source_path: format!("./{CODEX_DIR}/{PLUGIN_SUBDIR}/{CODEX_PLUGIN_NAME}"),
+            marketplace_name: CODEX_PERSONAL_MARKETPLACE_NAME,
+            marketplace_display_name: CODEX_PERSONAL_MARKETPLACE_DISPLAY_NAME,
+            legacy_agents_md_path: codex_dir.join(AGENTS_MD),
+            legacy_rtk_md_path: codex_dir.join(RTK_MD),
+        })
+    } else {
+        Ok(CodexPluginPaths {
+            plugin_dir: PathBuf::from(PLUGIN_SUBDIR).join(CODEX_PLUGIN_NAME),
+            marketplace_path: PathBuf::from(".agents")
+                .join(PLUGIN_SUBDIR)
+                .join("marketplace.json"),
+            marketplace_source_path: format!("./{PLUGIN_SUBDIR}/{CODEX_PLUGIN_NAME}"),
+            marketplace_name: CODEX_PLUGIN_MARKETPLACE_NAME,
+            marketplace_display_name: CODEX_PLUGIN_MARKETPLACE_DISPLAY_NAME,
+            legacy_agents_md_path: PathBuf::from(AGENTS_MD),
+            legacy_rtk_md_path: PathBuf::from(RTK_MD),
+        })
+    }
 }
 
 fn run_codex_mode_with_paths(
-    agents_md_path: PathBuf,
-    rtk_md_path: PathBuf,
+    paths: CodexPluginPaths,
     global: bool,
     ctx: InitContext,
 ) -> Result<()> {
     let InitContext { dry_run, .. } = ctx;
-    if global && !dry_run {
-        if let Some(parent) = agents_md_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create Codex config directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
-    }
-
-    // ISSUE #892: In global mode, use absolute path so @RTK.md resolves
-    // from any CWD (worktrees, nested projects). Codex resolves @ references
-    // relative to CWD, not the AGENTS.md file location.
-    let rtk_md_ref = if global {
-        codex_rtk_md_ref(
-            rtk_md_path
-                .parent()
-                .context("RTK.md path missing parent directory")?,
-        )
-    } else {
-        RTK_MD_REF.to_string()
-    };
-
-    write_if_changed(&rtk_md_path, RTK_SLIM_CODEX, RTK_MD, ctx)?;
-    let added_ref = patch_agents_md(&agents_md_path, &rtk_md_ref, ctx)?;
+    install_codex_plugin_package(&paths, ctx)?;
+    let legacy_removed = remove_codex_legacy_at(
+        &paths.legacy_agents_md_path,
+        &paths.legacy_rtk_md_path,
+        global,
+        ctx,
+    )?;
 
     if !dry_run {
-        println!("\nRTK configured for Codex CLI.\n");
-        println!("  RTK.md:    {}", rtk_md_path.display());
-        if added_ref {
-            println!("  AGENTS.md: {} reference added", rtk_md_ref);
-        } else {
-            println!("  AGENTS.md: {} reference already present", rtk_md_ref);
+        println!("\nRTK Codex plugin registered.\n");
+        println!("  Plugin:      {}", paths.plugin_dir.display());
+        println!("  Marketplace: {}", paths.marketplace_path.display());
+        println!(
+            "  Hook config: {}/hooks/hooks.json",
+            paths.plugin_dir.display()
+        );
+        if !legacy_removed.is_empty() {
+            println!("  Legacy cleanup:");
+            for item in legacy_removed {
+                println!("    - {}", item);
+            }
         }
-        if global {
-            println!(
-                "\n  Codex global instructions path: {}",
-                agents_md_path.display()
-            );
-        } else {
-            println!(
-                "\n  Codex project instructions path: {}",
-                agents_md_path.display()
-            );
-        }
+        println!("\n  Restart Codex, enable/install the RTK plugin if prompted, then review and trust the RTK plugin hook in /hooks.");
+        println!("  Codex plugin hooks require the hooks and plugin_hooks features to be enabled.");
     }
 
     Ok(())
+}
+
+fn install_codex_plugin_package(paths: &CodexPluginPaths, ctx: InitContext) -> Result<()> {
+    write_codex_plugin_file(
+        &paths.plugin_dir.join(".codex-plugin").join("plugin.json"),
+        CODEX_PLUGIN_MANIFEST,
+        "Codex plugin manifest",
+        ctx,
+    )?;
+    write_codex_plugin_file(
+        &paths.plugin_dir.join("skills").join("rtk").join("SKILL.md"),
+        CODEX_PLUGIN_SKILL,
+        "Codex plugin skill",
+        ctx,
+    )?;
+    write_codex_plugin_file(
+        &paths.plugin_dir.join(HOOKS_SUBDIR).join(HOOKS_JSON),
+        CODEX_PLUGIN_HOOKS_JSON,
+        "Codex plugin hooks",
+        ctx,
+    )?;
+    let launcher_path = paths
+        .plugin_dir
+        .join(HOOKS_SUBDIR)
+        .join("run-rtk-codex-hook.sh");
+    write_codex_plugin_file(
+        &launcher_path,
+        CODEX_PLUGIN_LAUNCHER,
+        "Codex plugin hook launcher",
+        ctx,
+    )?;
+
+    #[cfg(unix)]
+    if !ctx.dry_run && launcher_path.exists() {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Failed to chmod {}", launcher_path.display()))?;
+    }
+
+    upsert_codex_plugin_marketplace_entry(paths, ctx)?;
+    Ok(())
+}
+
+fn write_codex_plugin_file(
+    path: &Path,
+    content: &str,
+    name: &str,
+    ctx: InitContext,
+) -> Result<bool> {
+    if !ctx.dry_run {
+        let parent = path
+            .parent()
+            .with_context(|| format!("{} path has no parent: {}", name, path.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+
+    write_if_changed(path, content, name, ctx)
+}
+
+fn codex_plugin_marketplace_entry(source_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": CODEX_PLUGIN_NAME,
+        "source": {
+            "source": "local",
+            "path": source_path
+        },
+        "policy": {
+            "installation": "AVAILABLE",
+            "authentication": "ON_INSTALL"
+        },
+        "category": "Developer Tools"
+    })
+}
+
+fn read_or_create_codex_marketplace(paths: &CodexPluginPaths) -> Result<serde_json::Value> {
+    if paths.marketplace_path.exists() {
+        let content = fs::read_to_string(&paths.marketplace_path).with_context(|| {
+            format!(
+                "Failed to read Codex marketplace: {}",
+                paths.marketplace_path.display()
+            )
+        })?;
+        if !content.trim().is_empty() {
+            return serde_json::from_str(&content).with_context(|| {
+                format!(
+                    "Failed to parse Codex marketplace as JSON: {}",
+                    paths.marketplace_path.display()
+                )
+            });
+        }
+    }
+
+    Ok(serde_json::json!({
+        "name": paths.marketplace_name,
+        "interface": {
+            "displayName": paths.marketplace_display_name
+        },
+        "plugins": []
+    }))
+}
+
+fn upsert_codex_plugin_marketplace_entry(
+    paths: &CodexPluginPaths,
+    ctx: InitContext,
+) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut root = read_or_create_codex_marketplace(paths)?;
+    let mut changed = !paths.marketplace_path.exists();
+
+    let root_obj = root
+        .as_object_mut()
+        .context("Codex marketplace root must be a JSON object")?;
+    if !root_obj.contains_key("name") {
+        root_obj.insert("name".into(), serde_json::json!(paths.marketplace_name));
+        changed = true;
+    }
+    if !root_obj.contains_key("interface") {
+        root_obj.insert(
+            "interface".into(),
+            serde_json::json!({ "displayName": paths.marketplace_display_name }),
+        );
+        changed = true;
+    }
+
+    let plugins = root_obj
+        .entry("plugins")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .context("Codex marketplace plugins must be an array")?;
+    let entry = codex_plugin_marketplace_entry(&paths.marketplace_source_path);
+
+    if let Some(existing) = plugins
+        .iter_mut()
+        .find(|plugin| plugin.get("name").and_then(|name| name.as_str()) == Some(CODEX_PLUGIN_NAME))
+    {
+        if *existing != entry {
+            *existing = entry;
+            changed = true;
+        }
+    } else {
+        plugins.push(entry);
+        changed = true;
+    }
+
+    if !changed {
+        if verbose > 0 {
+            eprintln!(
+                "Codex marketplace entry already up to date: {}",
+                paths.marketplace_path.display()
+            );
+        }
+        return Ok(false);
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Codex marketplace")?;
+
+    if dry_run {
+        println!(
+            "[dry-run] would update Codex marketplace: {}",
+            paths.marketplace_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(true);
+    }
+
+    if let Some(parent) = paths.marketplace_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    atomic_write(&paths.marketplace_path, &serialized).with_context(|| {
+        format!(
+            "Failed to write Codex marketplace: {}",
+            paths.marketplace_path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn marketplace_has_codex_plugin(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    root.get("plugins")
+        .and_then(|plugins| plugins.as_array())
+        .is_some_and(|plugins| {
+            plugins.iter().any(|plugin| {
+                plugin.get("name").and_then(|name| name.as_str()) == Some(CODEX_PLUGIN_NAME)
+            })
+        })
+}
+
+fn remove_codex_plugin_marketplace_entry(
+    paths: &CodexPluginPaths,
+    ctx: InitContext,
+) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !paths.marketplace_path.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(&paths.marketplace_path).with_context(|| {
+        format!(
+            "Failed to read Codex marketplace: {}",
+            paths.marketplace_path.display()
+        )
+    })?;
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+
+    let mut root: serde_json::Value = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "Failed to parse Codex marketplace as JSON: {}",
+            paths.marketplace_path.display()
+        )
+    })?;
+    let Some(plugins) = root
+        .get_mut("plugins")
+        .and_then(|plugins| plugins.as_array_mut())
+    else {
+        return Ok(false);
+    };
+
+    let original_len = plugins.len();
+    plugins.retain(|plugin| {
+        plugin.get("name").and_then(|name| name.as_str()) != Some(CODEX_PLUGIN_NAME)
+    });
+    if plugins.len() == original_len {
+        return Ok(false);
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize Codex marketplace")?;
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK Codex plugin marketplace entry from {}",
+            paths.marketplace_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(true);
+    }
+
+    atomic_write(&paths.marketplace_path, &serialized).with_context(|| {
+        format!(
+            "Failed to write Codex marketplace: {}",
+            paths.marketplace_path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn remove_codex_plugin_dir(paths: &CodexPluginPaths, ctx: InitContext) -> Result<bool> {
+    let InitContext { dry_run, .. } = ctx;
+    if !paths.plugin_dir.exists() {
+        return Ok(false);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove RTK Codex plugin package: {}",
+            paths.plugin_dir.display()
+        );
+        return Ok(true);
+    }
+
+    // nosemgrep: filesystem-deletion
+    fs::remove_dir_all(&paths.plugin_dir).with_context(|| {
+        format!(
+            "Failed to remove RTK Codex plugin package: {}",
+            paths.plugin_dir.display()
+        )
+    })?;
+    Ok(true)
+}
+
+fn remove_codex_legacy_at(
+    agents_md_path: &Path,
+    rtk_md_path: &Path,
+    global: bool,
+    ctx: InitContext,
+) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut removed = Vec::new();
+
+    let rtk_md_existed = rtk_md_path.exists();
+    let removed_rtk_md = remove_codex_legacy_rtk_md(rtk_md_path, ctx)?;
+    if removed_rtk_md {
+        removed.push(format!("RTK.md: {}", rtk_md_path.display()));
+    }
+
+    let mut removed_inline_block = false;
+    if agents_md_path.exists() {
+        let content = fs::read_to_string(agents_md_path)
+            .with_context(|| format!("Failed to read AGENTS.md: {}", agents_md_path.display()))?;
+        if content.contains(RTK_BLOCK_START) {
+            let (cleaned, did_remove) = remove_rtk_block(&content);
+            if did_remove {
+                removed_inline_block = true;
+                if dry_run {
+                    println!(
+                        "[dry-run] would remove legacy RTK block from AGENTS.md: {}",
+                        agents_md_path.display()
+                    );
+                    if verbose > 0 {
+                        println!("[dry-run] content:\n{}", cleaned);
+                    }
+                } else {
+                    atomic_write(agents_md_path, &cleaned).with_context(|| {
+                        format!("Failed to write AGENTS.md: {}", agents_md_path.display())
+                    })?;
+                }
+                removed.push("AGENTS.md: removed rtk-instructions block".to_string());
+            }
+        }
+    }
+
+    let mut refs = vec![RTK_MD_REF.to_string()];
+    if global {
+        if let Some(parent) = rtk_md_path.parent() {
+            refs.push(codex_rtk_md_ref(parent));
+        }
+    }
+    let ref_slices = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let preserve_existing_unmanaged_rtk_md = rtk_md_existed && !removed_rtk_md;
+    if !preserve_existing_unmanaged_rtk_md
+        && remove_rtk_reference_from_agents(agents_md_path, &ref_slices, ctx)?
+    {
+        removed.push("AGENTS.md: removed @RTK.md reference".to_string());
+    } else if removed_inline_block && verbose > 0 && preserve_existing_unmanaged_rtk_md {
+        eprintln!(
+            "Preserved AGENTS.md RTK.md reference because RTK.md is not RTK-managed: {}",
+            rtk_md_path.display()
+        );
+    }
+
+    Ok(removed)
+}
+
+fn remove_codex_legacy_rtk_md(rtk_md_path: &Path, ctx: InitContext) -> Result<bool> {
+    let InitContext { verbose, dry_run } = ctx;
+    if !rtk_md_path.exists() {
+        return Ok(false);
+    }
+
+    let content = fs::read_to_string(rtk_md_path).with_context(|| {
+        format!(
+            "Failed to read legacy Codex RTK.md: {}",
+            rtk_md_path.display()
+        )
+    })?;
+    if content != RTK_SLIM_CODEX {
+        if verbose > 0 {
+            eprintln!(
+                "Preserved RTK.md because it is not RTK-managed: {}",
+                rtk_md_path.display()
+            );
+        }
+        return Ok(false);
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would remove legacy RTK.md: {}",
+            rtk_md_path.display()
+        );
+        return Ok(true);
+    }
+
+    fs::remove_file(rtk_md_path).with_context(|| {
+        format!(
+            "Failed to remove legacy Codex RTK.md: {}",
+            rtk_md_path.display()
+        )
+    })?;
+    if verbose > 0 {
+        eprintln!("Removed legacy RTK.md: {}", rtk_md_path.display());
+    }
+    Ok(true)
 }
 
 // --- upsert_rtk_block: idempotent RTK block management ---
@@ -2523,6 +2904,7 @@ fn patch_claude_md(path: &Path, ctx: InitContext) -> Result<bool> {
 }
 
 /// Patch AGENTS.md: add @RTK.md (or absolute path), migrate old inline block if present
+#[cfg(test)]
 fn patch_agents_md(path: &Path, rtk_md_ref: &str, ctx: InitContext) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
     let mut content = if path.exists() {
@@ -3496,8 +3878,8 @@ fn show_claude_config() -> Result<()> {
     println!("  rtk init -g --uninstall     # Remove all RTK artifacts");
     println!("  rtk init -g --claude-md     # Legacy: full injection into ~/.claude/CLAUDE.md");
     println!("  rtk init -g --hook-only     # Hook only, no RTK.md");
-    println!("  rtk init --codex            # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex         # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
+    println!("  rtk init --codex            # Register local RTK Codex plugin marketplace");
+    println!("  rtk init -g --codex         # Register personal RTK Codex plugin marketplace");
     println!("  rtk init -g --opencode      # OpenCode plugin only");
     println!("  rtk init -g --agent cursor  # Install Cursor Agent hooks");
 
@@ -3506,56 +3888,137 @@ fn show_claude_config() -> Result<()> {
 
 fn show_codex_config() -> Result<()> {
     let codex_dir = resolve_codex_dir()?;
-    let global_agents_md = codex_dir.join(AGENTS_MD);
-    let global_rtk_md = codex_dir.join(RTK_MD);
-    let global_rtk_md_ref = codex_rtk_md_ref(&codex_dir);
-    let local_agents_md = PathBuf::from(AGENTS_MD);
-    let local_rtk_md = PathBuf::from(RTK_MD);
+    let global_paths = codex_plugin_paths(true)?;
+    let local_paths = codex_plugin_paths(false)?;
 
     println!("rtk Configuration (Codex CLI):\n");
 
-    if global_rtk_md.exists() {
-        println!("[ok] Global RTK.md: {}", global_rtk_md.display());
-    } else {
-        println!("[--] Global RTK.md: not found");
-    }
+    print_codex_plugin_scope("Global", &global_paths);
+    print_codex_plugin_scope("Local", &local_paths);
+    print_codex_feature_status(&codex_dir)?;
 
-    if global_agents_md.exists() {
-        let content = fs::read_to_string(&global_agents_md)?;
-        if has_rtk_reference(&content, &[RTK_MD_REF, global_rtk_md_ref.as_str()]) {
-            println!("[ok] Global AGENTS.md: RTK.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
-            println!("[!!] Global AGENTS.md: old inline RTK block");
-        } else {
-            println!("[--] Global AGENTS.md: exists but rtk not configured");
-        }
-    } else {
-        println!("[--] Global AGENTS.md: not found");
-    }
-
-    if local_rtk_md.exists() {
-        println!("[ok] Local RTK.md: {}", local_rtk_md.display());
-    } else {
-        println!("[--] Local RTK.md: not found");
-    }
-
-    if local_agents_md.exists() {
-        let content = fs::read_to_string(&local_agents_md)?;
-        if has_rtk_reference(&content, &[RTK_MD_REF]) {
-            println!("[ok] Local AGENTS.md: @RTK.md reference");
-        } else if content.contains(RTK_BLOCK_START) {
-            println!("[!!] Local AGENTS.md: old inline RTK block");
-        } else {
-            println!("[--] Local AGENTS.md: exists but rtk not configured");
-        }
-    } else {
-        println!("[--] Local AGENTS.md: not found");
-    }
+    print_codex_legacy_scope("Global", &global_paths, true)?;
+    print_codex_legacy_scope("Local", &local_paths, false)?;
 
     println!("\nUsage:");
-    println!("  rtk init --codex              # Configure local AGENTS.md + RTK.md");
-    println!("  rtk init -g --codex           # Configure $CODEX_HOME/AGENTS.md + $CODEX_HOME/RTK.md (or ~/.codex/)");
-    println!("  rtk init -g --codex --uninstall  # Remove global Codex RTK artifacts");
+    println!("  rtk init --codex                  # Register local RTK Codex plugin marketplace");
+    println!(
+        "  rtk init -g --codex               # Register personal RTK Codex plugin marketplace"
+    );
+    println!("  rtk init --codex --uninstall      # Remove local RTK Codex plugin state");
+    println!("  rtk init -g --codex --uninstall   # Remove personal RTK Codex plugin state");
+
+    Ok(())
+}
+
+fn print_codex_plugin_scope(label: &str, paths: &CodexPluginPaths) {
+    let manifest_path = paths.plugin_dir.join(".codex-plugin").join("plugin.json");
+    let hooks_path = paths.plugin_dir.join(HOOKS_SUBDIR).join(HOOKS_JSON);
+
+    if manifest_path.exists() {
+        println!(
+            "[ok] {label} plugin package: {}",
+            paths.plugin_dir.display()
+        );
+    } else {
+        println!(
+            "[--] {label} plugin package: not found ({})",
+            paths.plugin_dir.display()
+        );
+    }
+
+    if marketplace_has_codex_plugin(&paths.marketplace_path) {
+        println!(
+            "[ok] {label} marketplace: RTK entry in {}",
+            paths.marketplace_path.display()
+        );
+    } else if paths.marketplace_path.exists() {
+        println!(
+            "[--] {label} marketplace: exists without RTK entry ({})",
+            paths.marketplace_path.display()
+        );
+    } else {
+        println!(
+            "[--] {label} marketplace: not found ({})",
+            paths.marketplace_path.display()
+        );
+    }
+
+    if hooks_path.exists() {
+        println!("[ok] {label} plugin hook config: {}", hooks_path.display());
+    } else {
+        println!(
+            "[--] {label} plugin hook config: not found ({})",
+            hooks_path.display()
+        );
+    }
+}
+
+fn print_codex_feature_status(codex_dir: &Path) -> Result<()> {
+    let config_path = codex_dir.join("config.toml");
+    if !config_path.exists() {
+        println!(
+            "[--] Codex config.toml: not found; hook feature defaults apply ({})",
+            config_path.display()
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read Codex config: {}", config_path.display()))?;
+    let parsed: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse Codex config: {}", config_path.display()))?;
+
+    print_codex_feature_line("hooks", codex_feature_value(&parsed, "hooks"));
+    print_codex_feature_line("plugin_hooks", codex_feature_value(&parsed, "plugin_hooks"));
+    Ok(())
+}
+
+fn codex_feature_value(config: &toml::Value, name: &str) -> Option<bool> {
+    config
+        .get("features")
+        .and_then(|features| features.get(name))
+        .and_then(|value| value.as_bool())
+}
+
+fn print_codex_feature_line(name: &str, state: Option<bool>) {
+    match state {
+        Some(true) => println!("[ok] Codex feature {name}: enabled"),
+        Some(false) => println!("[warn] Codex feature {name}: disabled"),
+        None => println!("[--] Codex feature {name}: not set; Codex default applies"),
+    }
+}
+
+fn print_codex_legacy_scope(label: &str, paths: &CodexPluginPaths, global: bool) -> Result<()> {
+    let mut refs = vec![RTK_MD_REF.to_string()];
+    if global {
+        if let Some(parent) = paths.legacy_rtk_md_path.parent() {
+            refs.push(codex_rtk_md_ref(parent));
+        }
+    }
+    let ref_slices = refs.iter().map(String::as_str).collect::<Vec<_>>();
+
+    if paths.legacy_rtk_md_path.exists() {
+        println!(
+            "[!!] {label} legacy RTK.md: {}",
+            paths.legacy_rtk_md_path.display()
+        );
+    } else {
+        println!("[ok] {label} legacy RTK.md: not present");
+    }
+
+    if paths.legacy_agents_md_path.exists() {
+        let content = fs::read_to_string(&paths.legacy_agents_md_path)?;
+        if has_rtk_reference(&content, &ref_slices) {
+            println!("[!!] {label} legacy AGENTS.md: RTK.md reference");
+        } else if content.contains(RTK_BLOCK_START) {
+            println!("[!!] {label} legacy AGENTS.md: old inline RTK block");
+        } else {
+            println!("[ok] {label} legacy AGENTS.md: no RTK-managed reference");
+        }
+    } else {
+        println!("[ok] {label} legacy AGENTS.md: not present");
+    }
 
     Ok(())
 }
@@ -3943,6 +4406,22 @@ fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn codex_test_paths(temp: &TempDir) -> CodexPluginPaths {
+        CodexPluginPaths {
+            plugin_dir: temp.path().join(PLUGIN_SUBDIR).join(CODEX_PLUGIN_NAME),
+            marketplace_path: temp
+                .path()
+                .join(".agents")
+                .join(PLUGIN_SUBDIR)
+                .join("marketplace.json"),
+            marketplace_source_path: format!("./{PLUGIN_SUBDIR}/{CODEX_PLUGIN_NAME}"),
+            marketplace_name: CODEX_PLUGIN_MARKETPLACE_NAME,
+            marketplace_display_name: CODEX_PLUGIN_MARKETPLACE_DISPLAY_NAME,
+            legacy_agents_md_path: temp.path().join(AGENTS_MD),
+            legacy_rtk_md_path: temp.path().join(RTK_MD),
+        }
+    }
 
     #[test]
     fn test_init_mentions_all_top_level_commands() {
@@ -4746,25 +5225,143 @@ mod tests {
     }
 
     #[test]
-    fn test_run_codex_mode_global_writes_absolute_reference_to_codex_dir() {
+    fn test_run_codex_mode_registers_plugin_package_and_marketplace() {
         let temp = TempDir::new().unwrap();
-        let agents_md = temp.path().join("AGENTS.md");
-        let rtk_md = temp.path().join("RTK.md");
+        let paths = codex_test_paths(&temp);
 
-        run_codex_mode_with_paths(
-            agents_md.clone(),
-            rtk_md.clone(),
-            true,
-            InitContext::default(),
+        run_codex_mode_with_paths(paths.clone(), false, InitContext::default()).unwrap();
+
+        assert!(paths
+            .plugin_dir
+            .join(".codex-plugin")
+            .join("plugin.json")
+            .exists());
+        assert!(paths
+            .plugin_dir
+            .join(HOOKS_SUBDIR)
+            .join("run-rtk-codex-hook.sh")
+            .exists());
+        assert!(marketplace_has_codex_plugin(&paths.marketplace_path));
+        assert!(
+            !paths.legacy_rtk_md_path.exists(),
+            "Codex plugin setup must not create loose RTK.md"
+        );
+        assert!(
+            !paths.legacy_agents_md_path.exists(),
+            "Codex plugin setup must not create AGENTS.md"
+        );
+    }
+
+    #[test]
+    fn test_codex_plugin_manifest_points_to_existing_paths() {
+        let manifest: serde_json::Value = serde_json::from_str(CODEX_PLUGIN_MANIFEST).unwrap();
+        assert_eq!(manifest["name"], CODEX_PLUGIN_NAME);
+        assert_eq!(manifest["skills"], "./skills/");
+        assert_eq!(manifest["hooks"], "./hooks/hooks.json");
+
+        let plugin_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("hooks")
+            .join("codex")
+            .join(CODEX_PLUGIN_NAME);
+        assert!(plugin_root
+            .join("skills")
+            .join("rtk")
+            .join("SKILL.md")
+            .exists());
+        assert!(plugin_root.join(HOOKS_SUBDIR).join(HOOKS_JSON).exists());
+        assert!(plugin_root
+            .join(HOOKS_SUBDIR)
+            .join("run-rtk-codex-hook.sh")
+            .exists());
+    }
+
+    #[test]
+    fn test_codex_plugin_hooks_json_pretooluse_bash() {
+        let hooks: serde_json::Value = serde_json::from_str(CODEX_PLUGIN_HOOKS_JSON).unwrap();
+        let pre_tool_use = hooks["hooks"][PRE_TOOL_USE_KEY].as_array().unwrap();
+        let hook = &pre_tool_use[0];
+        assert_eq!(hook["matcher"], "Bash");
+        assert_eq!(
+            hook["hooks"][0]["statusMessage"],
+            "RTK is rewriting a Bash command for token-optimized output"
+        );
+        assert!(hook["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("run-rtk-codex-hook.sh"));
+    }
+
+    #[test]
+    fn test_codex_plugin_launcher_delegates_to_native_processor() {
+        assert!(CODEX_PLUGIN_LAUNCHER.contains("RTK_EXE"));
+        assert!(CODEX_PLUGIN_LAUNCHER.contains("command -v rtk"));
+        assert!(CODEX_PLUGIN_LAUNCHER.contains("hook codex"));
+        assert!(CODEX_PLUGIN_LAUNCHER.contains("exit 0"));
+    }
+
+    #[test]
+    fn test_codex_marketplace_upsert_preserves_unrelated_plugins() {
+        let temp = TempDir::new().unwrap();
+        let paths = codex_test_paths(&temp);
+        fs::create_dir_all(paths.marketplace_path.parent().unwrap()).unwrap();
+        fs::write(
+            &paths.marketplace_path,
+            r#"{
+  "name": "local",
+  "plugins": [
+    {
+      "name": "other",
+      "source": { "source": "local", "path": "./plugins/other" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}"#,
         )
         .unwrap();
 
-        assert!(rtk_md.exists());
-        assert_eq!(fs::read_to_string(&rtk_md).unwrap(), RTK_SLIM_CODEX);
-        assert_eq!(
-            fs::read_to_string(&agents_md).unwrap(),
-            format!("{}\n", codex_rtk_md_ref(temp.path()))
-        );
+        upsert_codex_plugin_marketplace_entry(&paths, InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&paths.marketplace_path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let plugins = root["plugins"].as_array().unwrap();
+        assert!(plugins
+            .iter()
+            .any(|plugin| plugin["name"].as_str() == Some("other")));
+        assert!(plugins
+            .iter()
+            .any(|plugin| plugin["name"].as_str() == Some(CODEX_PLUGIN_NAME)));
+    }
+
+    #[test]
+    fn test_codex_uninstall_preserves_unrelated_marketplace_plugins() {
+        let temp = TempDir::new().unwrap();
+        let paths = codex_test_paths(&temp);
+        fs::create_dir_all(paths.marketplace_path.parent().unwrap()).unwrap();
+        fs::write(
+            &paths.marketplace_path,
+            r#"{
+  "name": "local",
+  "plugins": [
+    {
+      "name": "other",
+      "source": { "source": "local", "path": "./plugins/other" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Developer Tools"
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+        upsert_codex_plugin_marketplace_entry(&paths, InitContext::default()).unwrap();
+
+        remove_codex_plugin_marketplace_entry(&paths, InitContext::default()).unwrap();
+
+        let content = fs::read_to_string(&paths.marketplace_path).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let plugins = root["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["name"], "other");
     }
 
     #[test]
@@ -4810,21 +5407,24 @@ mod tests {
     #[test]
     fn test_uninstall_codex_at_is_idempotent() {
         let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path();
-        let agents_md = codex_dir.join("AGENTS.md");
-        let rtk_md = codex_dir.join("RTK.md");
+        let paths = codex_test_paths(&temp);
+        let agents_md = &paths.legacy_agents_md_path;
+        let rtk_md = &paths.legacy_rtk_md_path;
 
-        fs::write(&agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        install_codex_plugin_package(&paths, InitContext::default()).unwrap();
+        fs::write(agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
+        fs::write(rtk_md, RTK_SLIM_CODEX).unwrap();
 
-        let removed_first = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
-        let removed_second = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
+        let removed_first = uninstall_codex_at(&paths, false, InitContext::default()).unwrap();
+        let removed_second = uninstall_codex_at(&paths, false, InitContext::default()).unwrap();
 
-        assert_eq!(removed_first.len(), 2);
+        assert_eq!(removed_first.len(), 4);
         assert!(removed_second.is_empty());
         assert!(!rtk_md.exists());
+        assert!(!paths.plugin_dir.exists());
+        assert!(!marketplace_has_codex_plugin(&paths.marketplace_path));
 
-        let content = fs::read_to_string(&agents_md).unwrap();
+        let content = fs::read_to_string(agents_md).unwrap();
         assert!(!content.contains("@RTK.md"));
         assert!(content.contains("# Team rules"));
     }
@@ -4832,20 +5432,48 @@ mod tests {
     #[test]
     fn test_uninstall_codex_at_removes_absolute_reference() {
         let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path();
-        let agents_md = codex_dir.join("AGENTS.md");
-        let rtk_md = codex_dir.join("RTK.md");
-        let absolute_ref = codex_rtk_md_ref(codex_dir);
+        let mut paths = codex_test_paths(&temp);
+        paths.legacy_agents_md_path = temp.path().join(CODEX_DIR).join("AGENTS.md");
+        paths.legacy_rtk_md_path = temp.path().join(CODEX_DIR).join("RTK.md");
+        let absolute_ref = codex_rtk_md_ref(
+            paths
+                .legacy_rtk_md_path
+                .parent()
+                .expect("RTK.md test path has parent"),
+        );
+        fs::create_dir_all(paths.legacy_rtk_md_path.parent().unwrap()).unwrap();
 
-        fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(
+            &paths.legacy_agents_md_path,
+            format!("# Team rules\n\n{}\n", absolute_ref),
+        )
+        .unwrap();
+        fs::write(&paths.legacy_rtk_md_path, RTK_SLIM_CODEX).unwrap();
 
-        let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
+        let removed = uninstall_codex_at(&paths, true, InitContext::default()).unwrap();
 
         assert_eq!(removed.len(), 2);
-        let content = fs::read_to_string(&agents_md).unwrap();
+        let content = fs::read_to_string(&paths.legacy_agents_md_path).unwrap();
         assert!(!content.contains(&absolute_ref));
         assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_uninstall_codex_at_preserves_unmanaged_rtk_md_and_reference() {
+        let temp = TempDir::new().unwrap();
+        let paths = codex_test_paths(&temp);
+        let agents_md = &paths.legacy_agents_md_path;
+        let rtk_md = &paths.legacy_rtk_md_path;
+        let custom_content = "# Team-owned RTK notes\n";
+
+        fs::write(agents_md, "# Team rules\n\n@RTK.md\n").unwrap();
+        fs::write(rtk_md, custom_content).unwrap();
+
+        let removed = uninstall_codex_at(&paths, false, InitContext::default()).unwrap();
+
+        assert!(removed.is_empty());
+        assert_eq!(fs::read_to_string(rtk_md).unwrap(), custom_content);
+        assert!(fs::read_to_string(agents_md).unwrap().contains("@RTK.md"));
     }
 
     #[test]
@@ -4903,13 +5531,11 @@ mod tests {
     #[test]
     fn test_run_codex_mode_dry_run_writes_nothing() {
         let temp = TempDir::new().unwrap();
-        let agents_md = temp.path().join("AGENTS.md");
-        let rtk_md = temp.path().join("RTK.md");
+        let paths = codex_test_paths(&temp);
 
         run_codex_mode_with_paths(
-            agents_md.clone(),
-            rtk_md.clone(),
-            true,
+            paths.clone(),
+            false,
             InitContext {
                 dry_run: true,
                 ..Default::default()
@@ -4918,37 +5544,37 @@ mod tests {
         .unwrap();
 
         assert!(
-            !rtk_md.exists(),
-            "dry-run must not create RTK.md: {}",
-            rtk_md.display()
+            !paths.plugin_dir.exists(),
+            "dry-run must not create plugin package: {}",
+            paths.plugin_dir.display()
         );
         assert!(
-            !agents_md.exists(),
-            "dry-run must not create AGENTS.md: {}",
-            agents_md.display()
+            !paths.marketplace_path.exists(),
+            "dry-run must not create marketplace: {}",
+            paths.marketplace_path.display()
         );
     }
 
     #[test]
     fn test_uninstall_codex_at_removes_rtk_instructions_block() {
         let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path();
-        let agents_md = codex_dir.join("AGENTS.md");
-        let rtk_md = codex_dir.join("RTK.md");
+        let paths = codex_test_paths(&temp);
+        let agents_md = &paths.legacy_agents_md_path;
+        let rtk_md = &paths.legacy_rtk_md_path;
 
         fs::write(
-            &agents_md,
+            agents_md,
             format!(
                 "# Team rules\n\n{} v2 -->\nOLD RTK STUFF\n{}\n\nMore content",
                 RTK_BLOCK_START, RTK_BLOCK_END
             ),
         )
         .unwrap();
-        fs::write(&rtk_md, "codex config").unwrap();
+        fs::write(rtk_md, RTK_SLIM_CODEX).unwrap();
 
-        let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();
+        let removed = uninstall_codex_at(&paths, false, InitContext::default()).unwrap();
 
-        let content = fs::read_to_string(&agents_md).unwrap();
+        let content = fs::read_to_string(agents_md).unwrap();
         assert!(!content.contains("OLD RTK STUFF"));
         assert!(content.contains("# Team rules"));
         assert!(content.contains("More content"));
@@ -5544,6 +6170,7 @@ mod tests {
 
     use std::sync::Mutex;
     static CLAUDE_DIR_LOCK: Mutex<()> = Mutex::new(());
+    static CODEX_ENV_LOCK: Mutex<()> = Mutex::new(());
     static PI_DIR_LOCK: Mutex<()> = Mutex::new(());
     /// Serialises all tests that mutate the process-wide working directory.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
@@ -5562,6 +6189,28 @@ mod tests {
         }
     }
 
+    fn with_codex_env_override<F: FnOnce(&Path, &Path)>(tmp: &TempDir, f: F) {
+        let _guard = CODEX_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home_dir = tmp.path().join("home");
+        let codex_dir = tmp.path().join("codex");
+        fs::create_dir_all(&home_dir).unwrap();
+        fs::create_dir_all(&codex_dir).unwrap();
+
+        let orig_home = std::env::var_os("HOME");
+        let orig_codex_home = std::env::var_os("CODEX_HOME");
+        std::env::set_var("HOME", &home_dir);
+        std::env::set_var("CODEX_HOME", &codex_dir);
+        f(&home_dir, &codex_dir);
+        match orig_codex_home {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        match orig_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     fn with_pi_dir_override<F: FnOnce(&Path)>(tmp: &TempDir, f: F) {
         let _guard = PI_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let pi_dir = tmp.path().join("pi_agent");
@@ -5574,6 +6223,73 @@ mod tests {
             Some(v) => std::env::set_var(PI_CODING_AGENT_DIR_ENV, v),
             None => std::env::remove_var(PI_CODING_AGENT_DIR_ENV),
         }
+    }
+
+    #[test]
+    fn test_run_codex_mode_global_registers_plugin_package_and_marketplace() {
+        let tmp = TempDir::new().unwrap();
+        with_codex_env_override(&tmp, |home_dir, codex_dir| {
+            run_codex_mode(true, InitContext::default()).unwrap();
+
+            let paths = codex_plugin_paths(true).unwrap();
+            assert_eq!(
+                paths.plugin_dir,
+                codex_dir.join(PLUGIN_SUBDIR).join(CODEX_PLUGIN_NAME)
+            );
+            assert_eq!(
+                paths.marketplace_path,
+                home_dir
+                    .join(".agents")
+                    .join(PLUGIN_SUBDIR)
+                    .join("marketplace.json")
+            );
+            assert!(paths
+                .plugin_dir
+                .join(".codex-plugin")
+                .join("plugin.json")
+                .exists());
+            assert!(paths
+                .plugin_dir
+                .join(HOOKS_SUBDIR)
+                .join("run-rtk-codex-hook.sh")
+                .exists());
+            assert!(marketplace_has_codex_plugin(&paths.marketplace_path));
+            assert!(!paths.legacy_rtk_md_path.exists());
+            assert!(!paths.legacy_agents_md_path.exists());
+        });
+    }
+
+    #[test]
+    fn test_show_codex_config_handles_installed_plugin_and_feature_flags() {
+        let tmp = TempDir::new().unwrap();
+        with_codex_env_override(&tmp, |_home_dir, codex_dir| {
+            fs::write(
+                codex_dir.join("config.toml"),
+                "[features]\nhooks = true\nplugin_hooks = false\n",
+            )
+            .unwrap();
+
+            let project_dir = tmp.path().join("project");
+            fs::create_dir_all(&project_dir).unwrap();
+            let _cwd_guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&project_dir).unwrap();
+
+            let result = (|| -> Result<()> {
+                run_codex_mode(false, InitContext::default())?;
+                run_codex_mode(true, InitContext::default())?;
+                show_codex_config()
+            })();
+            std::env::set_current_dir(&cwd).unwrap();
+
+            result.unwrap();
+            assert!(project_dir
+                .join(PLUGIN_SUBDIR)
+                .join(CODEX_PLUGIN_NAME)
+                .join(".codex-plugin")
+                .join("plugin.json")
+                .exists());
+        });
     }
 
     #[test]

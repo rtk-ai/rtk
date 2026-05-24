@@ -39,7 +39,7 @@ Agent runs "cargo test"
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
-| Codex CLI | AGENTS.md instructions | N/A |
+| Codex CLI | Codex plugin (`PreToolUse`) | Yes |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
@@ -142,8 +142,11 @@ rtk init --windsurf    # creates .windsurfrules in current project
 ### Codex CLI
 
 ```bash
-rtk init --codex    # creates AGENTS.md or patches existing one
+rtk init --codex       # registers local RTK Codex plugin marketplace
+rtk init -g --codex    # registers personal RTK Codex plugin marketplace
 ```
+
+The Codex plugin bundles an RTK skill and a Bash `PreToolUse` hook. After installation, restart Codex, enable or install the RTK plugin if Codex prompts for it, and review/trust the plugin hook in `/hooks`. Codex currently supports rewritten input only with `permissionDecision: "allow"`, so RTK does not emit unsupported `ask` rewrites.
 
 ### Kilo Code
 
@@ -173,7 +176,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini, Codex) are guaranteed after their hooks are enabled and trusted -- the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi, Hermes) use the agent's plugin API to mutate commands before execution.
 
 ## Windows support
 
