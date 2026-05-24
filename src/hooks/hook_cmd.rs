@@ -523,6 +523,130 @@ fn run_cursor_inner_with_rules(
     }
 }
 
+// ── Google Antigravity (agy) hook ─────────────────────────────
+
+fn process_antigravity_payload(v: &Value) -> PayloadAction {
+    let tool_name = v
+        .pointer("/toolCall/name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    // Map tool name → command field name.  Non-shell tools are ignored.
+    let (cmd, field) = match tool_name {
+        "run_command" => {
+            let c = v
+                .pointer("/toolCall/args/CommandLine")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            (c, "CommandLine")
+        }
+        "Bash" | "bash" => {
+            let c = v
+                .pointer("/toolCall/args/command")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            (c, "command")
+        }
+        _ => return PayloadAction::Ignore,
+    };
+
+    if cmd.is_empty() {
+        return PayloadAction::Ignore;
+    }
+
+    let verdict = permissions::check_command(cmd);
+    if verdict == PermissionVerdict::Deny {
+        return PayloadAction::Skip {
+            reason: "skip:deny_rule",
+            cmd: cmd.to_string(),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_match",
+                cmd: cmd.to_string(),
+            }
+        }
+    };
+
+    // Mirror the full args object from the request, updating only the
+    // command field so extra fields like `Cwd` are preserved unchanged.
+    let updated_args = {
+        let mut args = v
+            .pointer("/toolCall/args")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if let Some(obj) = args.as_object_mut() {
+            obj.insert(field.to_string(), Value::String(rewritten.clone()));
+        }
+        args
+    };
+
+    let output = json!({
+        "decision": "allow",
+        "toolCall": { "args": updated_args }
+    });
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output,
+    }
+}
+
+/// Run the Google Antigravity (agy) CLI PreToolUse hook.
+///
+/// Reads a JSON payload from stdin, rewrites shell commands through RTK,
+/// and outputs the modified tool call.  Non-shell tools and commands that
+/// don't match any RTK filter produce no output so the tool runs unchanged.
+pub fn run_antigravity() -> Result<()> {
+    let input = read_stdin_limited()?;
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_antigravity_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+            // No stdout output — the Antigravity CLI runs the tool unchanged.
+        }
+        PayloadAction::Ignore => {
+            // Non-shell tool — no output, let it pass through natively.
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_antigravity_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_antigravity_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,5 +1111,88 @@ mod tests {
             get_rewritten("cargo test").is_some(),
             "cargo test should be rewritable when not denied"
         );
+    }
+
+    // --- Antigravity (agy) hook ---
+
+    fn agy_input_run_command(cmd: &str) -> String {
+        json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": { "CommandLine": cmd }
+            }
+        })
+        .to_string()
+    }
+
+    fn agy_input_bash(cmd: &str) -> String {
+        json!({
+            "toolCall": {
+                "name": "Bash",
+                "args": { "command": cmd }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_agy_run_command_rewrite() {
+        let out = run_antigravity_inner(&agy_input_run_command("git status")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["toolCall"]["args"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_agy_bash_rewrite() {
+        let out = run_antigravity_inner(&agy_input_bash("cargo test")).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["decision"], "allow");
+        assert_eq!(v["toolCall"]["args"]["command"], "rtk cargo test");
+    }
+
+    #[test]
+    fn test_agy_non_shell_tool_returns_none() {
+        let input = json!({
+            "toolCall": { "name": "ListPermissions", "args": {} }
+        })
+        .to_string();
+        assert!(run_antigravity_inner(&input).is_none());
+    }
+
+    #[test]
+    fn test_agy_already_rtk_returns_none() {
+        assert!(run_antigravity_inner(&agy_input_run_command("rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_agy_unsupported_command_returns_none() {
+        assert!(run_antigravity_inner(&agy_input_run_command("htop")).is_none());
+    }
+
+    #[test]
+    fn test_agy_extra_args_preserved() {
+        // Extra fields in toolCall.args (e.g. Cwd) must survive the rewrite
+        let input = json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": { "CommandLine": "git status", "Cwd": "/tmp" }
+            }
+        })
+        .to_string();
+        let out = run_antigravity_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["toolCall"]["args"]["Cwd"], "/tmp");
+        assert_eq!(v["toolCall"]["args"]["CommandLine"], "rtk git status");
+    }
+
+    #[test]
+    fn test_agy_empty_input_returns_none() {
+        assert!(run_antigravity_inner("").is_none());
+    }
+
+    #[test]
+    fn test_agy_invalid_json_returns_none() {
+        assert!(run_antigravity_inner("not json").is_none());
     }
 }

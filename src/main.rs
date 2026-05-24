@@ -43,8 +43,10 @@ pub enum AgentTarget {
     Cline,
     /// Kilo Code
     Kilocode,
-    /// Google Antigravity
+    /// Google Antigravity IDE (formerly Antigravity)
     Antigravity,
+    /// Google Antigravity CLI (agy) - successor to Gemini CLI
+    Agy,
     /// Pi coding agent
     Pi,
     /// Hermes CLI
@@ -775,6 +777,9 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Google Antigravity (agy) CLI PreToolUse hook (reads JSON from stdin)
+    #[command(alias = "agy")]
+    Antigravity,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1377,14 +1382,16 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard:
+        FnOnce(bool, bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let antigravity_cli = agent == Some(AgentTarget::Agy);
+        uninstall_standard(global, gemini, codex, cursor, pi, antigravity_cli, ctx)
     }
 }
 
@@ -1852,10 +1859,12 @@ fn run_cli() -> Result<i32> {
             } else if agent == Some(AgentTarget::Antigravity) {
                 if global {
                     anyhow::bail!(
-                        "Antigravity is project-scoped. Use: rtk init --agent antigravity"
+                        "Antigravity IDE is project-scoped. Use: rtk init --agent antigravity"
                     );
                 }
                 hooks::init::run_antigravity_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Agy) {
+                hooks::init::run_agy_cli_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
             } else {
@@ -2189,6 +2198,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Antigravity => {
+                hooks::hook_cmd::run_antigravity()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2709,7 +2722,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
