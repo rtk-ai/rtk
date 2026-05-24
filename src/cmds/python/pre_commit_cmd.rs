@@ -1,6 +1,3 @@
-//! Filters pre-commit output, removing dots between hook names and status.
-//! Success/skipped hooks show one line; failures show hook-id + full error.
-
 use crate::core::runner;
 use crate::core::utils::resolved_command;
 use anyhow::Result;
@@ -22,7 +19,6 @@ fn run_with_tool(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} {}", tool, display);
     }
 
-    // Only apply the hook filter for `run` subcommand (install, autoupdate, etc. passthrough)
     if args.first().map(|a| a == "run").unwrap_or(false) {
         let mut cmd = resolved_command(tool);
         for arg in args {
