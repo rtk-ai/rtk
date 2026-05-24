@@ -1,3 +1,6 @@
+<h1>This README is from the developer of rtk-ai. rtk-rust-ai is a clone of rtk-ai and under investigation. It seems that rtk-ai was completely created by AI (Claude) and the developer doesn't have a clue about what he sent into the AI-world.</h1>
+
+
 <p align="center">
   <img src="https://avatars.githubusercontent.com/u/258253854?v=4" alt="RTK - Rust Token Killer" width="500">
 </p>
