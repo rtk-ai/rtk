@@ -13,8 +13,8 @@ use crate::hooks::constants::{
 };
 
 use super::constants::{
-    AGY_CLI_SUBDIR, ANTIGRAVITY_HOOK_COMMAND, BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND,
-    CODEX_DIR, CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    AGY_CLI_SUBDIR, BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR,
+    CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
     HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_SUBDIR,
     PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
     PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
@@ -1769,6 +1769,13 @@ pub fn run_agy_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
         anyhow::bail!("agy CLI support is global-only. Use: rtk init -g --agent agy");
     }
 
+    // Use the absolute path so agy can find the binary regardless of its PATH.
+    let rtk_bin = std::env::current_exe()
+        .context("Failed to resolve rtk binary path")?
+        .to_string_lossy()
+        .to_string();
+    let hook_command = format!("{} hook antigravity", rtk_bin);
+
     let agy_dir = resolve_agy_dir()?;
     let settings_path = agy_dir.join(SETTINGS_JSON);
 
@@ -1777,7 +1784,7 @@ pub fn run_agy_cli_mode(global: bool, ctx: InitContext) -> Result<()> {
             .with_context(|| format!("Failed to create agy config dir: {}", agy_dir.display()))?;
     }
 
-    let patched = patch_agy_settings(&settings_path, ctx)?;
+    let patched = patch_agy_settings(&settings_path, ctx, &hook_command)?;
 
     if dry_run {
         print_dry_run_footer();
@@ -1801,7 +1808,7 @@ fn resolve_agy_dir() -> Result<PathBuf> {
 
 /// Patch `~/.gemini/antigravity-cli/settings.json` with RTK BeforeTool hooks.
 /// Returns true if the file was modified.
-fn patch_agy_settings(path: &Path, ctx: InitContext) -> Result<bool> {
+fn patch_agy_settings(path: &Path, ctx: InitContext, hook_command: &str) -> Result<bool> {
     let InitContext { verbose, dry_run } = ctx;
 
     let mut settings: serde_json::Value = if path.exists() {
@@ -1812,14 +1819,17 @@ fn patch_agy_settings(path: &Path, ctx: InitContext) -> Result<bool> {
         serde_json::json!({})
     };
 
-    if agy_hook_already_present(&settings) {
+    if agy_hook_command_matches(&settings, hook_command) {
         if verbose > 0 {
             eprintln!("agy settings.json: RTK hook already present");
         }
         return Ok(false);
     }
 
-    insert_agy_hook_entries(&mut settings)?;
+    // Remove any stale RTK entries (e.g. old installs with bare `rtk` command).
+    remove_agy_rtk_entries(&mut settings);
+
+    insert_agy_hook_entries(&mut settings, hook_command)?;
 
     let serialized =
         serde_json::to_string_pretty(&settings).context("Failed to serialize agy settings.json")?;
@@ -1850,8 +1860,9 @@ fn patch_agy_settings(path: &Path, ctx: InitContext) -> Result<bool> {
     Ok(true)
 }
 
-/// Returns true if an RTK BeforeTool hook is already present in agy settings.json.
-fn agy_hook_already_present(settings: &serde_json::Value) -> bool {
+/// Returns true when an existing entry already uses exactly `hook_command`.
+/// A mismatch (bare `rtk` vs absolute path) triggers re-installation.
+fn agy_hook_command_matches(settings: &serde_json::Value, hook_command: &str) -> bool {
     settings
         .pointer(&format!("/hooks/{}", BEFORE_TOOL_KEY))
         .and_then(|v| v.as_array())
@@ -1864,18 +1875,39 @@ fn agy_hook_already_present(settings: &serde_json::Value) -> bool {
                         hooks.iter().any(|h| {
                             h.get("command")
                                 .and_then(|c| c.as_str())
-                                .is_some_and(|cmd| cmd.contains("rtk"))
+                                .is_some_and(|cmd| cmd == hook_command)
                         })
                     })
             })
         })
 }
 
+/// Remove all RTK-owned BeforeTool entries (any command containing "rtk").
+fn remove_agy_rtk_entries(settings: &mut serde_json::Value) {
+    if let Some(arr) = settings
+        .pointer_mut(&format!("/hooks/{}", BEFORE_TOOL_KEY))
+        .and_then(|v| v.as_array_mut())
+    {
+        arr.retain(|entry| {
+            !entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .is_some_and(|hooks| {
+                    hooks.iter().any(|h| {
+                        h.get("command")
+                            .and_then(|c| c.as_str())
+                            .is_some_and(|cmd| cmd.contains("rtk"))
+                    })
+                })
+        });
+    }
+}
+
 /// Insert RTK BeforeTool hook entries into agy settings.json.
 ///
 /// Registers one entry per tool name so agy calls the hook for both
 /// shell-execution tools it uses: "run_command" and "Bash".
-fn insert_agy_hook_entries(settings: &mut serde_json::Value) -> Result<()> {
+fn insert_agy_hook_entries(settings: &mut serde_json::Value, hook_command: &str) -> Result<()> {
     let settings_obj = settings
         .as_object_mut()
         .context("agy settings.json is not an object")?;
@@ -1895,7 +1927,7 @@ fn insert_agy_hook_entries(settings: &mut serde_json::Value) -> Result<()> {
     for matcher in &["run_command", "Bash"] {
         before_tool.push(serde_json::json!({
             "matcher": matcher,
-            "hooks": [{"type": "command", "command": ANTIGRAVITY_HOOK_COMMAND}]
+            "hooks": [{"type": "command", "command": hook_command}]
         }));
     }
 
