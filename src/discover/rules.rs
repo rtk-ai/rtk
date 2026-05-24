@@ -735,10 +735,10 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^prek\b",
+        pattern: r"^(python[0-9.]*\s+-m\s+)?prek(\s|$)",
         rtk_cmd: "rtk prek",
-        rewrite_prefixes: &["prek"],
-        category: "Build",
+        rewrite_prefixes: &["python3 -m prek", "python -m prek", "prek"],
+        category: "Python",
         savings_pct: 65.0,
         subcmd_savings: &[],
         subcmd_status: &[],
