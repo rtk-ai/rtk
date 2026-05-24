@@ -106,19 +106,49 @@ pub fn truncate_passthrough(output: &str) -> String {
     truncate_output(output, max_chars)
 }
 
-/// Truncate output to max length with ellipsis
+/// Truncate output to max length, preserving both head and tail so CI summaries are visible.
+///
+/// When output exceeds `max_chars`:
+/// - Head: first two-thirds of the allowed budget
+/// - Tail: last 20 lines (CI tools print pass/fail summaries at the end)
+/// - Middle: replaced with a `[RTK:PASSTHROUGH] N chars omitted` marker
+///
+/// When head and tail overlap (e.g. single-line input), falls back to head-only truncation
+/// to avoid showing duplicate content.
 pub fn truncate_output(output: &str, max_chars: usize) -> String {
+    const TAIL_LINES: usize = 20;
+
     let chars: Vec<char> = output.chars().collect();
     if chars.len() <= max_chars {
         return output.to_string();
     }
 
-    let truncated: String = chars[..max_chars].iter().collect();
+    let total = chars.len();
+
+    // Tail: last TAIL_LINES lines — CI tools print summaries at the end
+    let all_lines: Vec<&str> = output.lines().collect();
+    let tail_start = all_lines.len().saturating_sub(TAIL_LINES);
+    let tail = all_lines[tail_start..].join("\n");
+    let tail_char_count = tail.chars().count();
+
+    // Head: first 2/3 of budget (unicode-safe char indexing)
+    let head_budget = max_chars * 2 / 3;
+    let head: String = chars[..head_budget].iter().collect();
+
+    // Fall back to head-only when head and tail overlap (e.g. no newlines in input)
+    let covered = head_budget.saturating_add(tail_char_count);
+    if covered >= total {
+        let truncated: String = chars[..max_chars].iter().collect();
+        return format!(
+            "{}\n\n[RTK:PASSTHROUGH] Output truncated ({} chars → {} chars)",
+            truncated, total, max_chars
+        );
+    }
+
+    let omitted = total - head_budget - tail_char_count;
     format!(
-        "{}\n\n[RTK:PASSTHROUGH] Output truncated ({} chars → {} chars)",
-        truncated,
-        chars.len(),
-        max_chars
+        "{}\n\n[RTK:PASSTHROUGH] {} chars omitted — showing last {} lines\n\n{}",
+        head, omitted, TAIL_LINES, tail
     )
 }
 
@@ -237,10 +267,49 @@ mod tests {
         let short = "hello";
         assert_eq!(truncate_output(short, 10), "hello");
 
+        // Single-line input: no tail lines → head-only fallback with original format
         let long = "a".repeat(1000);
         let truncated = truncate_output(&long, 100);
         assert!(truncated.contains("[RTK:PASSTHROUGH]"));
         assert!(truncated.contains("1000 chars → 100 chars"));
+    }
+
+    #[test]
+    fn test_truncate_output_preserves_tail() {
+        // Build a long multi-line input simulating CI output with a summary at the end
+        let mut lines: Vec<String> = (1..=100).map(|i| format!("test_{}: running", i)).collect();
+        lines.push("251 passed, 18 skipped".to_string()); // CI summary always at the end
+        let input = lines.join("\n");
+
+        // max_chars small enough to trigger truncation
+        let result = truncate_output(&input, 500);
+
+        // Summary line must always be present — this is the core of the fix
+        assert!(
+            result.contains("251 passed, 18 skipped"),
+            "CI summary line must be preserved in truncated output"
+        );
+        // Beginning of output must also be present
+        assert!(result.contains("test_1: running"));
+        // Must contain the passthrough marker
+        assert!(result.contains("[RTK:PASSTHROUGH]"));
+        // Must indicate chars were omitted
+        assert!(result.contains("chars omitted"));
+    }
+
+    #[test]
+    fn test_truncate_output_tail_shows_last_20_lines() {
+        // 50-line input where only the last 20 lines contain the summary
+        let mut lines: Vec<String> = (1..=30).map(|i| format!("noise_{}", i)).collect();
+        lines.extend((1..=20).map(|i| format!("summary_line_{}", i)));
+        let input = lines.join("\n");
+
+        let result = truncate_output(&input, 200);
+
+        // All 20 summary lines must appear in the tail
+        assert!(result.contains("summary_line_1"));
+        assert!(result.contains("summary_line_20"));
+        assert!(result.contains("[RTK:PASSTHROUGH]"));
     }
 
     #[test]
