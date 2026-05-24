@@ -2,6 +2,7 @@
 
 use crate::core::config;
 use crate::core::runner;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
@@ -149,9 +150,11 @@ pub fn filter_ruff_check_json(output: &str) -> String {
     let mut rule_counts: Vec<_> = by_rule.iter().collect();
     rule_counts.sort_by(|a, b| b.1.cmp(a.1));
 
+    const MAX_RUFF_RULES: usize = CAP_WARNINGS;
+    const MAX_RUFF_FILES: usize = CAP_WARNINGS;
     if !rule_counts.is_empty() {
         result.push_str("Top rules:\n");
-        for (rule, count) in rule_counts.iter().take(10) {
+        for (rule, count) in rule_counts.iter().take(MAX_RUFF_RULES) {
             result.push_str(&format!("  {} ({}x)\n", rule, count));
         }
         result.push('\n');
@@ -159,7 +162,7 @@ pub fn filter_ruff_check_json(output: &str) -> String {
 
     // Show top files
     result.push_str("Top files:\n");
-    for (file, count) in file_counts.iter().take(10) {
+    for (file, count) in file_counts.iter().take(MAX_RUFF_FILES) {
         let short_path = compact_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
@@ -177,8 +180,11 @@ pub fn filter_ruff_check_json(output: &str) -> String {
         }
     }
 
-    if file_counts.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", file_counts.len() - 10));
+    if file_counts.len() > MAX_RUFF_FILES {
+        result.push_str(&format!(
+            "\n... +{} more files\n",
+            file_counts.len() - MAX_RUFF_FILES
+        ));
     }
 
     const MAX_VIOLATIONS: usize = 50;
@@ -284,14 +290,19 @@ pub fn filter_ruff_format(output: &str) -> String {
             ));
             result.push_str("═══════════════════════════════════════\n");
 
-            for (i, file) in files_to_format.iter().take(10).enumerate() {
+            const MAX_RUFF_FORMAT_FILES: usize = CAP_WARNINGS;
+            for (i, file) in files_to_format
+                .iter()
+                .take(MAX_RUFF_FORMAT_FILES)
+                .enumerate()
+            {
                 result.push_str(&format!("{}. {}\n", i + 1, compact_path(file)));
             }
 
-            if files_to_format.len() > 10 {
+            if files_to_format.len() > MAX_RUFF_FORMAT_FILES {
                 result.push_str(&format!(
                     "\n... +{} more files\n",
-                    files_to_format.len() - 10
+                    files_to_format.len() - MAX_RUFF_FORMAT_FILES
                 ));
             }
 

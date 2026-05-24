@@ -3,6 +3,7 @@
 use crate::core::runner::{self, RunOptions};
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::{CAP_INVENTORY, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -83,7 +84,7 @@ fn docker_ps(_verbose: u8) -> Result<i32> {
         return Ok(0);
     }
 
-    const MAX_CONTAINERS: usize = 20;
+    const MAX_CONTAINERS: usize = CAP_LIST;
     let lines: Vec<String> = stdout
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -271,12 +272,8 @@ fn docker_images(_verbose: u8) -> Result<i32> {
         total_display
     ));
 
-    // Show images with their full `repository:tag` name — truncating the
-    // registry/user prefix to "..." breaks exact-match lookups against
-    // deployment manifests and CI configs. The list is generously capped (a
-    // higher bound than before, and only the count, never the names, is
-    // abbreviated) so token savings still hold on machines with many images.
-    const MAX_IMAGES: usize = 60;
+    // a full image list is an inventory query, like pip list.
+    const MAX_IMAGES: usize = CAP_INVENTORY;
     let image_lines: Vec<String> = lines
         .iter()
         .map(|line| {
@@ -401,7 +398,7 @@ fn format_kubectl_pods(json: &Value) -> String {
 
     let mut out = format!("{} pods: {}\n", pods.len(), parts.join(", "));
     if !issues.is_empty() {
-        const MAX_PODS_ISSUES: usize = 10;
+        const MAX_PODS_ISSUES: usize = CAP_WARNINGS;
         out.push_str("[warn] Issues:\n");
         for issue in issues.iter().take(MAX_PODS_ISSUES) {
             out.push_str(&format!("  {}\n", issue));
@@ -463,7 +460,7 @@ fn format_kubectl_services(json: &Value) -> String {
         })
         .collect();
 
-    const MAX_KUBECTL_SERVICES: usize = 15;
+    const MAX_KUBECTL_SERVICES: usize = CAP_LIST;
     for line in all_lines.iter().take(MAX_KUBECTL_SERVICES) {
         out.push_str(&format!("{}\n", line));
     }
@@ -513,7 +510,7 @@ fn kubectl_logs(args: &[String], _verbose: u8) -> Result<i32> {
 /// Expects tab-separated lines: Name\tImage\tStatus\tPorts
 /// (no header row — `--format` output is headerless)
 pub fn format_compose_ps(raw: &str) -> String {
-    const MAX_COMPOSE_SERVICES: usize = 20;
+    const MAX_COMPOSE_SERVICES: usize = CAP_LIST;
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
 
     if lines.is_empty() {

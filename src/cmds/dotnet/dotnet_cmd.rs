@@ -3,6 +3,7 @@
 use crate::binlog;
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::{CAP_ERRORS, CAP_LIST, CAP_WARNINGS};
 use crate::core::utils::{resolved_command, truncate};
 use crate::dotnet_format_report;
 use crate::dotnet_trx;
@@ -369,7 +370,7 @@ fn format_dotnet_format_output(
     let mut output = format!("Format: {} files need formatting", changed_count);
     output.push_str("\n---------------------------------------");
 
-    const MAX_FORMAT_FILES: usize = 20;
+    const MAX_FORMAT_FILES: usize = CAP_LIST;
     for (index, file) in summary
         .files_with_changes
         .iter()
@@ -998,8 +999,8 @@ fn format_build_output(summary: &binlog::BuildSummary, _binlog_path: &Path) -> S
     let status_icon = if summary.succeeded { "ok" } else { "fail" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
-    const MAX_BUILD_ERRORS: usize = 20;
-    const MAX_BUILD_WARNINGS: usize = 10;
+    const MAX_BUILD_ERRORS: usize = CAP_ERRORS;
+    const MAX_BUILD_WARNINGS: usize = CAP_WARNINGS;
 
     let mut errors = String::new();
     if !summary.errors.is_empty() {
@@ -1125,25 +1126,26 @@ fn format_test_output(
         )
     };
 
+    const MAX_DOTNET_FAILURES: usize = CAP_WARNINGS;
     let mut failed_tests_section = String::new();
     if has_failures && !summary.failed_tests.is_empty() {
         failed_tests_section.push_str("Failed Tests:\n");
-        for failed in summary.failed_tests.iter().take(15) {
+        for failed in summary.failed_tests.iter().take(MAX_DOTNET_FAILURES) {
             failed_tests_section.push_str(&format!("  {}\n", failed.name));
             for detail in &failed.details {
                 failed_tests_section.push_str(&format!("    {}\n", truncate(detail, 320)));
             }
             failed_tests_section.push('\n');
         }
-        if summary.failed_tests.len() > 15 {
+        if summary.failed_tests.len() > MAX_DOTNET_FAILURES {
             failed_tests_section.push_str(&format!(
                 "… +{} more failed tests\n",
-                summary.failed_tests.len() - 15
+                summary.failed_tests.len() - MAX_DOTNET_FAILURES
             ));
             let all_failed = summary
                 .failed_tests
                 .iter()
-                .skip(15)
+                .skip(MAX_DOTNET_FAILURES)
                 .map(|t| {
                     let mut s = t.name.clone();
                     for detail in &t.details {
@@ -1161,8 +1163,8 @@ fn format_test_output(
         }
     }
 
-    const MAX_TEST_ERRORS: usize = 10;
-    const MAX_TEST_WARNINGS: usize = 10;
+    const MAX_TEST_ERRORS: usize = CAP_WARNINGS;
+    const MAX_TEST_WARNINGS: usize = CAP_WARNINGS;
 
     let mut errors_section = String::new();
     if !errors.is_empty() {
@@ -1254,8 +1256,8 @@ fn format_restore_output(
     let status_icon = if has_errors { "fail" } else { "ok" };
     let duration = summary.duration_text.as_deref().unwrap_or("unknown");
 
-    const MAX_FORMAT_ERRORS: usize = 20;
-    const MAX_FORMAT_WARNINGS: usize = 10;
+    const MAX_FORMAT_ERRORS: usize = CAP_ERRORS;
+    const MAX_FORMAT_WARNINGS: usize = CAP_WARNINGS;
 
     let mut errors_section = String::new();
     if !errors.is_empty() {

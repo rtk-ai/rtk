@@ -2,6 +2,7 @@
 
 use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::{reduced, CAP_LIST};
 use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
@@ -168,7 +169,8 @@ fn passthrough_gt(subcommand: &str, args: &[String], verbose: u8) -> Result<i32>
     crate::core::runner::run_passthrough("gt", &os_args, verbose)
 }
 
-const MAX_LOG_ENTRIES: usize = 15;
+// gt log entries are multi-line — trim the list cap to keep token savings above 60%.
+const MAX_LOG_ENTRIES: usize = reduced(CAP_LIST, 5);
 
 fn filter_gt_log_entries(input: &str) -> String {
     let trimmed = input.trim();

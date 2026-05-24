@@ -1,5 +1,8 @@
 /// Token-efficient formatting trait for canonical types
 use super::types::*;
+use crate::core::truncate::CAP_INVENTORY;
+
+const MAX_DEPS_LISTING: usize = CAP_INVENTORY;
 
 /// Output formatting modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,12 +131,15 @@ impl TokenFormatter for DependencyState {
         if is_listing {
             let total = self.total_packages.max(self.dependencies.len());
             let mut lines = vec![format!("{} packages", total)];
-            for dep in self.dependencies.iter().take(50) {
+            for dep in self.dependencies.iter().take(MAX_DEPS_LISTING) {
                 let dev = if dep.dev_dependency { " (dev)" } else { "" };
                 lines.push(format!("  {} {}{}", dep.name, dep.current_version, dev));
             }
-            if self.dependencies.len() > 50 {
-                lines.push(format!("  ... +{} more", self.dependencies.len() - 50));
+            if self.dependencies.len() > MAX_DEPS_LISTING {
+                lines.push(format!(
+                    "  ... +{} more",
+                    self.dependencies.len() - MAX_DEPS_LISTING
+                ));
             }
             return lines.join("\n");
         }

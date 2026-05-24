@@ -1,6 +1,7 @@
 //! Filters Next.js build output down to route metrics and bundle sizes.
 
 use crate::core::runner;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
@@ -131,7 +132,8 @@ fn filter_next_build(output: &str) -> String {
         // Sort by size (descending) and show top 10
         bundles.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        for (route, size, pct_change) in bundles.iter().take(10) {
+        const MAX_BUNDLES: usize = CAP_WARNINGS;
+        for (route, size, pct_change) in bundles.iter().take(MAX_BUNDLES) {
             let warning_marker = if let Some(pct) = pct_change {
                 if *pct > 10.0 {
                     format!(" [warn] (+{:.0}%)", pct)
@@ -150,8 +152,11 @@ fn filter_next_build(output: &str) -> String {
             ));
         }
 
-        if bundles.len() > 10 {
-            result.push_str(&format!("\n  ... +{} more routes\n", bundles.len() - 10));
+        if bundles.len() > MAX_BUNDLES {
+            result.push_str(&format!(
+                "\n  ... +{} more routes\n",
+                bundles.len() - MAX_BUNDLES
+            ));
         }
 
         result.push('\n');

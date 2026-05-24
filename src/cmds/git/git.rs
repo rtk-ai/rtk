@@ -4,6 +4,7 @@ use crate::core::stream::{
     self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{exit_code_from_output, exit_code_from_status, resolved_command};
 use anyhow::{Context, Result};
 use std::ffi::OsString;
@@ -69,7 +70,7 @@ fn build_status_command(args: &[String], global_args: &[String]) -> Command {
     let mut cmd = git_cmd(global_args);
     cmd.arg("status");
     if uses_compact_status_path(args) {
-        cmd.args(["--porcelain", "-b", "-uall"]);
+        cmd.args(["--porcelain", "-b"]);
     } else {
         cmd.args(args);
     }
@@ -522,8 +523,9 @@ fn run_log(
     // Only add --no-merges if user didn't explicitly request merge commits
     let wants_merges = args
         .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2");
-    if !wants_merges {
+        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
+    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
+    if !wants_merges && !has_limit_flag {
         cmd.arg("--no-merges");
     }
 
@@ -1471,12 +1473,16 @@ fn filter_branch_output(output: &str) -> String {
             .filter(|r| *r != &current && !local.contains(r))
             .collect();
         if !remote_only.is_empty() {
+            const MAX_REMOTE_BRANCHES: usize = CAP_WARNINGS;
             result.push(format!("  remote-only ({}):", remote_only.len()));
-            for b in remote_only.iter().take(10) {
+            for b in remote_only.iter().take(MAX_REMOTE_BRANCHES) {
                 result.push(format!("    {}", b));
             }
-            if remote_only.len() > 10 {
-                result.push(format!("    ... +{} more", remote_only.len() - 10));
+            if remote_only.len() > MAX_REMOTE_BRANCHES {
+                result.push(format!(
+                    "    ... +{} more",
+                    remote_only.len() - MAX_REMOTE_BRANCHES
+                ));
             }
         }
     }
@@ -1894,10 +1900,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_status_command_default_includes_uall() {
+    fn test_build_status_command_default_compact() {
         let cmd = build_status_command(&[], &[]);
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, vec!["status", "--porcelain", "-b", "-uall"]);
+        assert_eq!(args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]
@@ -1918,7 +1924,7 @@ mod tests {
         let args = vec!["--short".to_string(), "--branch".to_string()];
         let cmd = build_status_command(&args, &[]);
         let cmd_args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b", "-uall"]);
+        assert_eq!(cmd_args, vec!["status", "--porcelain", "-b"]);
     }
 
     #[test]
