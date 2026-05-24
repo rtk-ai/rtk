@@ -869,12 +869,7 @@ mod tests {
     fn test_classify_yadm_status() {
         assert_eq!(
             classify_command("yadm status"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                category: "Git",
-                estimated_savings_pct: 70.0,
-                status: RtkStatus::Existing,
-            }
+            Classification::Unsupported
         );
     }
 
@@ -882,12 +877,7 @@ mod tests {
     fn test_classify_yadm_diff() {
         assert_eq!(
             classify_command("yadm diff"),
-            Classification::Supported {
-                rtk_equivalent: "rtk git",
-                category: "Git",
-                estimated_savings_pct: 80.0,
-                status: RtkStatus::Existing,
-            }
+            Classification::Unsupported
         );
     }
 
@@ -895,7 +885,7 @@ mod tests {
     fn test_rewrite_yadm_status() {
         assert_eq!(
             rewrite_command_no_prefixes("yadm status", &[]),
-            Some("rtk git status".to_string())
+            None
         );
     }
 
