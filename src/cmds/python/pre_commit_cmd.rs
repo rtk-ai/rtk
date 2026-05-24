@@ -192,4 +192,38 @@ file.py:2:3: import not sorted";
         let result = filter_pre_commit_output(output);
         assert_eq!(result, "pre-commit checks completed");
     }
+
+    #[test]
+    fn test_real_all_pass_output() {
+        let output = "\
+Trim trailing whitespace.................................................Passed
+fix end of files.........................................................Passed
+check yaml...............................................................Passed
+check toml...............................................................Passed
+check json...............................................................Passed
+check for added large files..............................................Passed
+check for merge conflicts................................................Passed
+debug statements (python)................................................Passed
+detect private key.......................................................Passed
+mixed line ending........................................................Passed
+ruff (lint + fix)........................................................Passed
+ruff (format)............................................................Passed
+pyrefly (type check).....................................................Passed";
+        let result = filter_pre_commit_output(output);
+        let expected = "\
+Trim trailing whitespace Passed
+fix end of files Passed
+check yaml Passed
+check toml Passed
+check json Passed
+check for added large files Passed
+check for merge conflicts Passed
+debug statements (python) Passed
+detect private key Passed
+mixed line ending Passed
+ruff (lint + fix) Passed
+ruff (format) Passed
+pyrefly (type check) Passed";
+        assert_eq!(result, expected);
+    }
 }
