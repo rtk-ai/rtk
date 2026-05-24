@@ -16,7 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::gradlew_cmd;
-use cmds::python::{mypy_cmd, pip_cmd, pre_commit_cmd, pytest_cmd, ruff_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, pre_commit_cmd, prek_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
@@ -2164,7 +2164,7 @@ fn run_cli() -> Result<i32> {
 
         Commands::PreCommit { args } => pre_commit_cmd::run(&args, cli.verbose)?,
 
-        Commands::Prek { args } => pre_commit_cmd::run_prek(&args, cli.verbose)?,
+        Commands::Prek { args } => prek_cmd::run(&args, cli.verbose)?,
 
         Commands::Go { command } => match command {
             GoCommands::Test { args } => go_cmd::run_test(&args, cli.verbose)?,

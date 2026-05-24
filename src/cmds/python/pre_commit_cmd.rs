@@ -5,35 +5,28 @@ use anyhow::Result;
 const HOOK_STATUSES: [&str; 4] = ["Passed", "Failed", "Skipped", "Ignored"];
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    run_with_tool("pre-commit", args, verbose)
-}
-
-pub fn run_prek(args: &[String], verbose: u8) -> Result<i32> {
-    run_with_tool("prek", args, verbose)
-}
-
-fn run_with_tool(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
     let display = args.join(" ");
 
     if verbose > 0 {
-        eprintln!("Running: {} {}", tool, display);
+        eprintln!("Running: pre-commit {}", display);
     }
 
     if args.first().map(|a| a == "run").unwrap_or(false) {
-        let mut cmd = resolved_command(tool);
+        let mut cmd = resolved_command("pre-commit");
         for arg in args {
             cmd.arg(arg);
         }
         runner::run_filtered(
             cmd,
-            tool,
+            "pre-commit",
             &display,
             filter_pre_commit_output,
-            runner::RunOptions::stdout_only().tee(tool),
+            runner::RunOptions::stdout_only().tee("pre-commit"),
         )
     } else {
-        let os_args: Vec<std::ffi::OsString> = args.iter().map(std::ffi::OsString::from).collect();
-        runner::run_passthrough(tool, &os_args, verbose)
+        let os_args: Vec<std::ffi::OsString> =
+            args.iter().map(std::ffi::OsString::from).collect();
+        runner::run_passthrough("pre-commit", &os_args, verbose)
     }
 }
 
