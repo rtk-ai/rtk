@@ -40,8 +40,9 @@ const CODEX_PLUGIN_MANIFEST: &str =
     include_str!("../../hooks/codex/rtk-codex/.codex-plugin/plugin.json");
 const CODEX_PLUGIN_SKILL: &str = include_str!("../../hooks/codex/rtk-codex/skills/rtk/SKILL.md");
 const CODEX_PLUGIN_HOOKS_JSON: &str = include_str!("../../hooks/codex/rtk-codex/hooks/hooks.json");
-const CODEX_PLUGIN_LAUNCHER: &str =
-    include_str!("../../hooks/codex/rtk-codex/hooks/run-rtk-codex-hook.sh");
+const CODEX_HOOK_COMMAND: &str = "rtk hook codex";
+const CODEX_HOOK_COMMAND_WINDOWS: &str = "rtk.exe hook codex";
+const RTK_EXE_ENV: &str = "RTK_EXE";
 
 /// Template written by `rtk init` when no filters.toml exists yet.
 const FILTERS_TEMPLATE: &str = r#"# Project-local RTK filters — commit this file with your repo.
@@ -2308,6 +2309,7 @@ fn run_codex_mode_with_paths(
 }
 
 fn install_codex_plugin_package(paths: &CodexPluginPaths, ctx: InitContext) -> Result<()> {
+    let hooks_json = codex_plugin_hooks_json(&codex_hook_commands())?;
     write_codex_plugin_file(
         &paths.plugin_dir.join(".codex-plugin").join("plugin.json"),
         CODEX_PLUGIN_MANIFEST,
@@ -2322,30 +2324,68 @@ fn install_codex_plugin_package(paths: &CodexPluginPaths, ctx: InitContext) -> R
     )?;
     write_codex_plugin_file(
         &paths.plugin_dir.join(HOOKS_SUBDIR).join(HOOKS_JSON),
-        CODEX_PLUGIN_HOOKS_JSON,
+        &hooks_json,
         "Codex plugin hooks",
         ctx,
     )?;
-    let launcher_path = paths
-        .plugin_dir
-        .join(HOOKS_SUBDIR)
-        .join("run-rtk-codex-hook.sh");
-    write_codex_plugin_file(
-        &launcher_path,
-        CODEX_PLUGIN_LAUNCHER,
-        "Codex plugin hook launcher",
-        ctx,
-    )?;
-
-    #[cfg(unix)]
-    if !ctx.dry_run && launcher_path.exists() {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&launcher_path, fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("Failed to chmod {}", launcher_path.display()))?;
-    }
 
     upsert_codex_plugin_marketplace_entry(paths, ctx)?;
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexHookCommands {
+    command: String,
+    command_windows: String,
+}
+
+fn codex_hook_commands() -> CodexHookCommands {
+    let override_exe = std::env::var(RTK_EXE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    codex_hook_commands_from_override(override_exe.as_deref())
+}
+
+fn codex_hook_commands_from_override(override_exe: Option<&str>) -> CodexHookCommands {
+    match override_exe {
+        Some(exe) => CodexHookCommands {
+            command: format!("{} hook codex", quote_posix_command_program(exe)),
+            command_windows: format!("{} hook codex", quote_windows_command_program(exe)),
+        },
+        None => CodexHookCommands {
+            command: CODEX_HOOK_COMMAND.to_string(),
+            command_windows: CODEX_HOOK_COMMAND_WINDOWS.to_string(),
+        },
+    }
+}
+
+fn quote_posix_command_program(program: &str) -> String {
+    format!("'{}'", program.replace('\'', "'\\''"))
+}
+
+fn quote_windows_command_program(program: &str) -> String {
+    format!("\"{}\"", program.replace('"', "\\\""))
+}
+
+fn codex_plugin_hooks_json(commands: &CodexHookCommands) -> Result<String> {
+    let mut root: serde_json::Value =
+        serde_json::from_str(CODEX_PLUGIN_HOOKS_JSON).context("Invalid Codex plugin hooks JSON")?;
+    let pointer = format!("/hooks/{PRE_TOOL_USE_KEY}/0/hooks/0");
+    let hook = root
+        .pointer_mut(&pointer)
+        .context("Codex plugin hooks JSON command entry is missing")?
+        .as_object_mut()
+        .context("Codex plugin hooks JSON command entry is not an object")?;
+    hook.insert(
+        "command".into(),
+        serde_json::Value::String(commands.command.clone()),
+    );
+    hook.insert(
+        "commandWindows".into(),
+        serde_json::Value::String(commands.command_windows.clone()),
+    );
+    serde_json::to_string_pretty(&root).context("Failed to serialize Codex plugin hooks JSON")
 }
 
 fn write_codex_plugin_file(
@@ -5239,8 +5279,16 @@ mod tests {
         assert!(paths
             .plugin_dir
             .join(HOOKS_SUBDIR)
-            .join("run-rtk-codex-hook.sh")
+            .join(HOOKS_JSON)
             .exists());
+        assert!(
+            !paths
+                .plugin_dir
+                .join(HOOKS_SUBDIR)
+                .join("run-rtk-codex-hook.sh")
+                .exists(),
+            "Codex plugin must not install a Unix-only shell launcher"
+        );
         assert!(marketplace_has_codex_plugin(&paths.marketplace_path));
         assert!(
             !paths.legacy_rtk_md_path.exists(),
@@ -5269,7 +5317,7 @@ mod tests {
             .join("SKILL.md")
             .exists());
         assert!(plugin_root.join(HOOKS_SUBDIR).join(HOOKS_JSON).exists());
-        assert!(plugin_root
+        assert!(!plugin_root
             .join(HOOKS_SUBDIR)
             .join("run-rtk-codex-hook.sh")
             .exists());
@@ -5285,18 +5333,44 @@ mod tests {
             hook["hooks"][0]["statusMessage"],
             "RTK is rewriting a Bash command for token-optimized output"
         );
-        assert!(hook["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains("run-rtk-codex-hook.sh"));
+        assert_eq!(hook["hooks"][0]["command"], CODEX_HOOK_COMMAND);
+        assert_eq!(
+            hook["hooks"][0]["commandWindows"],
+            CODEX_HOOK_COMMAND_WINDOWS
+        );
+        let command = hook["hooks"][0]["command"].as_str().unwrap();
+        assert!(!command.contains("bash"));
+        assert!(!command.contains("PLUGIN_ROOT"));
+        assert!(!command.contains(".sh"));
     }
 
     #[test]
-    fn test_codex_plugin_launcher_delegates_to_native_processor() {
-        assert!(CODEX_PLUGIN_LAUNCHER.contains("RTK_EXE"));
-        assert!(CODEX_PLUGIN_LAUNCHER.contains("command -v rtk"));
-        assert!(CODEX_PLUGIN_LAUNCHER.contains("hook codex"));
-        assert!(CODEX_PLUGIN_LAUNCHER.contains("exit 0"));
+    fn test_codex_hook_commands_support_executable_override() {
+        let commands = codex_hook_commands_from_override(Some("/opt/RTK Builds/rtk"));
+
+        assert_eq!(commands.command, "'/opt/RTK Builds/rtk' hook codex");
+        assert_eq!(
+            commands.command_windows,
+            "\"/opt/RTK Builds/rtk\" hook codex"
+        );
+    }
+
+    #[test]
+    fn test_codex_plugin_hooks_json_accepts_generated_commands() {
+        let commands = codex_hook_commands_from_override(Some("/opt/rtk/bin/rtk"));
+        let hooks_json = codex_plugin_hooks_json(&commands).unwrap();
+        let hooks: serde_json::Value = serde_json::from_str(&hooks_json).unwrap();
+        let command_hook = &hooks["hooks"][PRE_TOOL_USE_KEY][0]["hooks"][0];
+
+        assert_eq!(command_hook["command"], "'/opt/rtk/bin/rtk' hook codex");
+        assert_eq!(
+            command_hook["commandWindows"],
+            "\"/opt/rtk/bin/rtk\" hook codex"
+        );
+        assert_eq!(
+            command_hook["statusMessage"],
+            "RTK is rewriting a Bash command for token-optimized output"
+        );
     }
 
     #[test]
@@ -6249,6 +6323,11 @@ mod tests {
                 .join("plugin.json")
                 .exists());
             assert!(paths
+                .plugin_dir
+                .join(HOOKS_SUBDIR)
+                .join(HOOKS_JSON)
+                .exists());
+            assert!(!paths
                 .plugin_dir
                 .join(HOOKS_SUBDIR)
                 .join("run-rtk-codex-hook.sh")

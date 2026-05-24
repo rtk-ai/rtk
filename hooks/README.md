@@ -38,7 +38,7 @@ Each agent subdirectory has its own README with hook-specific details:
 - **[`cursor/`](cursor/README.md)** — Shell hook, Cursor JSON format, empty `{}` response requirement
 - **[`cline/`](cline/README.md)** — Rules file (prompt-level), `.clinerules` project-local installation
 - **[`windsurf/`](windsurf/README.md)** — Rules file (prompt-level), `.windsurfrules` workspace-scoped
-- **[`codex/`](codex/README.md)** — Codex plugin package, bundled RTK skill, `PreToolUse` hook launcher, local marketplace registration
+- **[`codex/`](codex/README.md)** — Codex plugin package, bundled RTK skill, native `PreToolUse` hook command, local marketplace registration
 - **[`opencode/`](opencode/README.md)** — TypeScript plugin, `zx` library, `tool.execute.before` event, in-place mutation
 - **[`pi/`](pi/README.md)** — TypeScript extension, `tool_call` event, `isToolCallEventType` guard, in-place mutation, `~/.pi/agent/extensions/`
 - **[`hermes/`](hermes/README.md)** — Python plugin, `pre_tool_call` hook, in-place terminal command mutation
@@ -132,6 +132,8 @@ Returns `{}` when no rewrite (Cursor requires JSON for all paths).
 ```
 
 ### Codex CLI (Plugin Hook)
+
+The plugin hook matcher is `Bash`, because Codex exposes shell tool calls under that tool name. The hook command itself is native: `rtk hook codex` on Linux/macOS and `rtk.exe hook codex` through `commandWindows` on native Windows.
 
 **Input** (stdin):
 
