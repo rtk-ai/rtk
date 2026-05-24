@@ -1,6 +1,6 @@
 [package]
 name = "rtk"
-version = "0.35.0"
+version = "0.40.0"
 edition = "2021"
 authors = ["Patrick Szymkowiak"]
 description = "Rust Token Killer - High-performance CLI proxy to minimize LLM token consumption"
@@ -28,7 +28,6 @@ chrono = "0.4"
 tempfile = "3"
 sha2 = "0.10"
 ureq = "2"
-hostname = "0.4"
 getrandom = "0.4"
 flate2 = "1.0"
 quick-xml = "0.37"
@@ -61,9 +60,12 @@ priority = "optional"
 assets = [
     ["target/release/rtk", "usr/bin/", "755"],
 ]
-
 # cargo-generate-rpm configuration
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/rtk", dest = "/usr/bin/rtk", mode = "755" },
 ]
+
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"

@@ -1,0 +1,24 @@
+> Configure project :app
+> Task :app:preBuild UP-TO-DATE
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :app:compileDebugKotlin FAILED
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileDebugKotlin'.
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleKotlinCompilerWork
+   > Compilation error. See log for more details
+
+e: /Users/user/MyApp/app/src/main/java/com/example/myapp/MainActivity.kt: (42, 5): Unresolved reference: MyService
+e: /Users/user/MyApp/app/src/main/java/com/example/myapp/MainActivity.kt: (56, 17): Type mismatch: inferred type is String but Int was expected
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+
+* Get more help at https://help.gradle.org
+
+BUILD FAILED in 12s
+2 actionable tasks: 2 executed

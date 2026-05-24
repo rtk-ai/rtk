@@ -1,6 +1,8 @@
 //! Filters pnpm output — dependency trees, install logs, outdated packages.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::CAP_LIST;
 use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -12,20 +14,23 @@ use crate::parser::{
     DependencyState, FormatMode, OutputParser, ParseResult, TokenFormatter,
 };
 
+const MAX_LISTING: usize = CAP_LIST;
+
 /// pnpm list JSON output structure
 #[derive(Debug, Deserialize)]
 struct PnpmListOutput {
+    name: String,
     #[serde(flatten)]
-    packages: HashMap<String, PnpmPackage>,
+    package: PackageJsonListItem,
 }
 
 #[derive(Debug, Deserialize)]
-struct PnpmPackage {
+struct PackageJsonListItem {
     version: Option<String>,
     #[serde(rename = "dependencies", default)]
-    dependencies: HashMap<String, PnpmPackage>,
+    dependencies: HashMap<String, PackageJsonListItem>,
     #[serde(rename = "devDependencies", default)]
-    dev_dependencies: HashMap<String, PnpmPackage>,
+    dev_dependencies: HashMap<String, PackageJsonListItem>,
 }
 
 /// pnpm outdated JSON output structure
@@ -52,13 +57,19 @@ impl OutputParser for PnpmListParser {
 
     fn parse(input: &str) -> ParseResult<DependencyState> {
         // Tier 1: Try JSON parsing
-        match serde_json::from_str::<PnpmListOutput>(input) {
+        match serde_json::from_str::<Vec<PnpmListOutput>>(input) {
             Ok(json) => {
                 let mut dependencies = Vec::new();
                 let mut total_count = 0;
 
-                for (name, pkg) in &json.packages {
-                    collect_dependencies(name, pkg, false, &mut dependencies, &mut total_count);
+                for pkg in &json {
+                    collect_dependencies(
+                        pkg.name.as_str(),
+                        &pkg.package,
+                        false,
+                        &mut dependencies,
+                        &mut total_count,
+                    );
                 }
 
                 let result = DependencyState {
@@ -88,7 +99,7 @@ impl OutputParser for PnpmListParser {
 /// Recursively collect dependencies from pnpm package tree
 fn collect_dependencies(
     name: &str,
-    pkg: &PnpmPackage,
+    pkg: &PackageJsonListItem,
     is_dev: bool,
     deps: &mut Vec<Dependency>,
     count: &mut usize,
@@ -117,20 +128,32 @@ fn collect_dependencies(
 fn extract_list_text(output: &str) -> Option<DependencyState> {
     let mut dependencies = Vec::new();
     let mut count = 0;
+    let mut is_dev = false;
 
     for line in output.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "devDependencies:" {
+            is_dev = true;
+            continue;
+        }
+        if trimmed == "dependencies:" {
+            is_dev = false;
+            continue;
+        }
+
         // Skip box-drawing and metadata
         if line.contains('│')
             || line.contains('├')
             || line.contains('└')
             || line.contains("Legend:")
-            || line.trim().is_empty()
+            || trimmed.is_empty()
         {
             continue;
         }
 
         // Parse lines like: "package@1.2.3"
-        let parts: Vec<&str> = line.split_whitespace().collect();
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
         if !parts.is_empty() {
             let pkg_str = parts[0];
             if let Some(at_pos) = pkg_str.rfind('@') {
@@ -142,7 +165,7 @@ fn extract_list_text(output: &str) -> Option<DependencyState> {
                         current_version: version.to_string(),
                         latest_version: None,
                         wanted_version: None,
-                        dev_dependency: false,
+                        dev_dependency: is_dev,
                     });
                     count += 1;
                 }
@@ -262,34 +285,79 @@ fn extract_outdated_text(output: &str) -> Option<DependencyState> {
     }
 }
 
-/// Validates npm package name according to official rules
-fn is_valid_package_name(name: &str) -> bool {
-    if name.is_empty() || name.len() > 214 {
-        return false;
+/// Format a dependency listing with grouped [prod]/[dev] sections.
+/// `cap = true` for plain `pnpm list` (both categories present, may truncate).
+/// `cap = false` for `pnpm list --prod` / `pnpm list --dev` (hint targets,
+/// must show every package so the LLM can find what was hidden by the cap).
+fn format_dependency_listing(state: &DependencyState, cap: bool) -> String {
+    let prod: Vec<_> = state.dependencies.iter().filter(|d| !d.dev_dependency).collect();
+    let dev: Vec<_> = state.dependencies.iter().filter(|d| d.dev_dependency).collect();
+    let total = state.total_packages.max(state.dependencies.len());
+
+    let mut lines = vec![format!(
+        "{} packages ({} prod / {} dev)",
+        total,
+        prod.len(),
+        dev.len()
+    )];
+
+    if !prod.is_empty() {
+        lines.push("[prod]".to_string());
+        let shown = if cap { prod.len().min(MAX_LISTING) } else { prod.len() };
+        for dep in prod.iter().take(shown) {
+            lines.push(format!("  {} {}", dep.name, dep.current_version));
+        }
+        if cap && prod.len() > MAX_LISTING {
+            lines.push(format!("  … +{} more", prod.len() - MAX_LISTING));
+            let all_prod = prod
+                .iter()
+                .map(|dep| format!("  {} {}", dep.name, dep.current_version))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) =
+                crate::core::tee::force_tee_tail_hint(&all_prod, "pnpm-prod", MAX_LISTING + 1)
+            {
+                lines.push(format!("  {}", hint));
+            }
+        }
     }
 
-    // No path traversal
-    if name.contains("..") {
-        return false;
+    if !dev.is_empty() {
+        lines.push("[dev]".to_string());
+        let shown = if cap { dev.len().min(MAX_LISTING) } else { dev.len() };
+        for dep in dev.iter().take(shown) {
+            lines.push(format!("  {} {}", dep.name, dep.current_version));
+        }
+        if cap && dev.len() > MAX_LISTING {
+            lines.push(format!("  … +{} more", dev.len() - MAX_LISTING));
+            let all_dev = dev
+                .iter()
+                .map(|dep| format!("  {} {}", dep.name, dep.current_version))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(hint) =
+                crate::core::tee::force_tee_tail_hint(&all_dev, "pnpm-dev", MAX_LISTING + 1)
+            {
+                lines.push(format!("  {}", hint));
+            }
+        }
     }
 
-    // Only safe characters
-    name.chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '@' | '/' | '-' | '_' | '.'))
+    lines.join("\n")
 }
 
 #[derive(Debug, Clone)]
 pub enum PnpmCommand {
     List { depth: usize },
     Outdated,
-    Install { packages: Vec<String> },
+    Install,
 }
 
 pub fn run(cmd: PnpmCommand, args: &[String], verbose: u8) -> Result<i32> {
     match cmd {
         PnpmCommand::List { depth } => run_list(depth, args, verbose),
         PnpmCommand::Outdated => run_outdated(args, verbose),
-        PnpmCommand::Install { packages } => run_install(&packages, args, verbose),
+        PnpmCommand::Install => run_install(args, verbose),
     }
 }
 
@@ -305,32 +373,31 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run pnpm list")?;
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm list")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprint!("{}", stderr);
-        return Ok(crate::core::utils::exit_code_from_output(&output, "pnpm"));
+    if !result.success() {
+        eprint!("{}", result.stderr);
+        return Ok(result.exit_code);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let is_filtered = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--prod" | "-P" | "--dev" | "-D"));
 
-    // Parse output using PnpmListParser
-    let parse_result = PnpmListParser::parse(&stdout);
-    let mode = FormatMode::from_verbosity(verbose);
+    let parse_result = PnpmListParser::parse(&result.stdout);
 
     let filtered = match parse_result {
         ParseResult::Full(data) => {
             if verbose > 0 {
                 eprintln!("pnpm list (Tier 1: Full JSON parse)");
             }
-            data.format(mode)
+            format_dependency_listing(&data, !is_filtered)
         }
         ParseResult::Degraded(data, warnings) => {
             if verbose > 0 {
                 emit_degradation_warning("pnpm list", &warnings.join(", "));
             }
-            data.format(mode)
+            format_dependency_listing(&data, !is_filtered)
         }
         ParseResult::Passthrough(raw) => {
             emit_passthrough_warning("pnpm list", "All parsing tiers failed");
@@ -343,7 +410,7 @@ fn run_list(depth: usize, args: &[String], verbose: u8) -> Result<i32> {
     timer.track(
         &format!("pnpm list --depth={}", depth),
         &format!("rtk pnpm list --depth={}", depth),
-        &stdout,
+        &result.stdout,
         &filtered,
     );
 
@@ -362,13 +429,11 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
 
-    let output = cmd.output().context("Failed to run pnpm outdated")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm outdated")?;
+    let combined = result.combined();
 
     // Parse output using PnpmOutdatedParser
-    let parse_result = PnpmOutdatedParser::parse(&stdout);
+    let parse_result = PnpmOutdatedParser::parse(&result.stdout);
     let mode = FormatMode::from_verbosity(verbose);
 
     let filtered = match parse_result {
@@ -401,25 +466,11 @@ fn run_outdated(args: &[String], verbose: u8) -> Result<i32> {
     Ok(0)
 }
 
-fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<i32> {
+fn run_install(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
-
-    // Validate package names to prevent command injection
-    for pkg in packages {
-        if !is_valid_package_name(pkg) {
-            anyhow::bail!(
-                "Invalid package name: '{}' (contains unsafe characters)",
-                pkg
-            );
-        }
-    }
 
     let mut cmd = resolved_command("pnpm");
     cmd.arg("install");
-
-    for pkg in packages {
-        cmd.arg(pkg);
-    }
 
     for arg in args {
         cmd.arg(arg);
@@ -429,26 +480,19 @@ fn run_install(packages: &[String], args: &[String], verbose: u8) -> Result<i32>
         eprintln!("pnpm install running...");
     }
 
-    let output = cmd.output().context("Failed to run pnpm install")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let result = exec_capture(&mut cmd).context("Failed to run pnpm install")?;
 
-    if !output.status.success() {
-        eprint!("{}", stderr);
-        return Ok(crate::core::utils::exit_code_from_output(&output, "pnpm"));
+    if !result.success() {
+        eprint!("{}", result.stderr);
+        return Ok(result.exit_code);
     }
 
-    let combined = format!("{}{}", stdout, stderr);
+    let combined = result.combined();
     let filtered = filter_pnpm_install(&combined);
 
     println!("{}", filtered);
 
-    timer.track(
-        &format!("pnpm install {}", packages.join(" ")),
-        &format!("rtk pnpm install {}", packages.join(" ")),
-        &combined,
-        &filtered,
-    );
+    timer.track("pnpm install", "rtk pnpm install", &combined, &filtered);
 
     Ok(0)
 }
@@ -502,8 +546,9 @@ mod tests {
 
     #[test]
     fn test_pnpm_list_parser_json() {
-        let json = r#"{
-            "my-project": {
+        let json = r#"[
+            {
+                "name": "my-project",
                 "version": "1.0.0",
                 "dependencies": {
                     "express": {
@@ -511,7 +556,7 @@ mod tests {
                     }
                 }
             }
-        }"#;
+        ]"#;
 
         let result = PnpmListParser::parse(json);
         assert_eq!(result.tier(), 1);
@@ -541,17 +586,87 @@ mod tests {
     }
 
     #[test]
-    fn test_package_name_validation() {
-        assert!(is_valid_package_name("lodash"));
-        assert!(is_valid_package_name("@clerk/express"));
-        assert!(!is_valid_package_name("../../../etc/passwd"));
-        assert!(!is_valid_package_name("lodash; rm -rf /"));
-    }
-
-    #[test]
     fn test_run_passthrough_accepts_args() {
         // Test that run_passthrough compiles and has correct signature
         let _args: Vec<OsString> = vec![OsString::from("help")];
         // Compile-time verification that the function exists with correct signature
+    }
+
+    fn make_state(prod: &[&str], dev: &[&str]) -> DependencyState {
+        let mut deps = Vec::new();
+        for name in prod {
+            deps.push(Dependency {
+                name: name.to_string(),
+                current_version: "1.0.0".to_string(),
+                latest_version: None,
+                wanted_version: None,
+                dev_dependency: false,
+            });
+        }
+        for name in dev {
+            deps.push(Dependency {
+                name: name.to_string(),
+                current_version: "1.0.0".to_string(),
+                latest_version: None,
+                wanted_version: None,
+                dev_dependency: true,
+            });
+        }
+        DependencyState {
+            total_packages: deps.len(),
+            outdated_count: 0,
+            dependencies: deps,
+        }
+    }
+
+    #[test]
+    fn test_format_listing_grouped_sections() {
+        let state = make_state(&["react", "typescript"], &["eslint", "vitest"]);
+        let out = format_dependency_listing(&state, true);
+        assert!(out.contains("[prod]"), "prod section missing");
+        assert!(out.contains("[dev]"), "dev section missing");
+        assert!(out.contains("react"), "prod package missing");
+        assert!(out.contains("eslint"), "dev package missing");
+        assert!(!out.contains("(dev)"), "per-line (dev) marker should be gone");
+    }
+
+    #[test]
+    fn test_format_listing_cap_shows_hint_with_offset() {
+        let prod: Vec<&str> = (0..60).map(|_| "pkg").collect();
+        let state = make_state(&prod, &["eslint"]);
+        let out = format_dependency_listing(&state, true);
+        let prod_count = 60usize;
+        assert!(
+            out.contains(&format!("… +{} more", prod_count - MAX_LISTING)),
+            "truncation count missing: got\n{out}"
+        );
+    }
+
+    #[test]
+    fn test_format_listing_no_cap_when_prod_only() {
+        let prod: Vec<&str> = (0..60).map(|_| "pkg").collect();
+        let state = make_state(&prod, &[]);
+        let out = format_dependency_listing(&state, false);
+        assert!(!out.contains("… +"), "should not truncate when cap=false");
+        assert!(!out.contains("[dev]"), "no dev section for prod-only state");
+    }
+
+    #[test]
+    fn test_format_listing_no_cap_when_dev_only() {
+        let dev: Vec<&str> = (0..60).map(|_| "pkg").collect();
+        let state = make_state(&[], &dev);
+        let out = format_dependency_listing(&state, false);
+        assert!(!out.contains("… +"), "should not truncate when cap=false");
+        assert!(!out.contains("[prod]"), "no prod section for dev-only state");
+    }
+
+    #[test]
+    fn test_extract_list_text_tracks_dev_section() {
+        let input = "dependencies:\nreact@18.0.0\ndevDependencies:\neslint@8.0.0\n";
+        let state = extract_list_text(input).expect("should parse");
+        let react = state.dependencies.iter().find(|d| d.name == "react").unwrap();
+        let eslint = state.dependencies.iter().find(|d| d.name == "eslint").unwrap();
+        assert!(!react.dev_dependency, "react should be prod");
+        assert!(eslint.dev_dependency, "eslint should be dev");
     }
 }

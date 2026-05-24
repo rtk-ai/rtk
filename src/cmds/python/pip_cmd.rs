@@ -1,7 +1,9 @@
 //! Filters pip and uv package manager output.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command, tool_exists};
+use crate::core::truncate::{CAP_INVENTORY, CAP_LIST};
+use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -16,12 +18,16 @@ struct Package {
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 
-    // Auto-detect uv vs pip
-    let use_uv = tool_exists("uv");
+    // The user ran `pip` — run `pip` so RTK stays transparent and reports the
+    // *same* environment the bare command would. Only fall back to `uv pip` when
+    // `pip` genuinely isn't on PATH (uv-only environments). Auto-substituting
+    // `uv pip` unconditionally made `pip list` show uv's discovered env instead
+    // of the active one — often just the 2-package base interpreter.
+    let use_uv = !tool_exists("pip") && tool_exists("uv");
     let base_cmd = if use_uv { "uv" } else { "pip" };
 
     if verbose > 0 && use_uv {
-        eprintln!("Using uv (pip-compatible)");
+        eprintln!("pip not found — falling back to `uv pip`");
     }
 
     // Detect subcommand
@@ -67,19 +73,15 @@ fn run_list(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, Str
         eprintln!("Running: {} pip list --format=json", base_cmd);
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip list", base_cmd))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_list(&stdout);
+    let filtered = filter_pip_list(&result.stdout);
     println!("{}", filtered);
 
-    let exit_code = exit_code_from_output(&output, "pip");
-    Ok((raw, filtered, exit_code))
+    Ok((raw, filtered, result.exit_code))
 }
 
 fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
@@ -99,19 +101,15 @@ fn run_outdated(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String,
         eprintln!("Running: {} pip list --outdated --format=json", base_cmd);
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip list --outdated", base_cmd))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let filtered = filter_pip_outdated(&stdout);
+    let filtered = filter_pip_outdated(&result.stdout);
     println!("{}", filtered);
 
-    let exit_code = exit_code_from_output(&output, "pip");
-    Ok((raw, filtered, exit_code))
+    Ok((raw, filtered, result.exit_code))
 }
 
 fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(String, String, i32)> {
@@ -129,19 +127,15 @@ fn run_passthrough(base_cmd: &str, args: &[String], verbose: u8) -> Result<(Stri
         eprintln!("Running: {} pip {}", base_cmd, args.join(" "));
     }
 
-    let output = cmd
-        .output()
+    let result = exec_capture(&mut cmd)
         .with_context(|| format!("Failed to run {} pip {}", base_cmd, args.join(" ")))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    print!("{}", stdout);
-    eprint!("{}", stderr);
+    print!("{}", result.stdout);
+    eprint!("{}", result.stderr);
 
-    let exit_code = exit_code_from_output(&output, "pip");
-    Ok((raw.clone(), raw, exit_code))
+    Ok((raw.clone(), raw, result.exit_code))
 }
 
 /// Filter pip list JSON output
@@ -173,16 +167,21 @@ fn filter_pip_list(output: &str) -> String {
     let mut letters: Vec<_> = by_letter.keys().collect();
     letters.sort();
 
+    // `pip list` is an inventory query — dependency audits need every package
+    // visible. The compression here is structural (drop the alignment padding,
+    // group by initial); the per-group cap is just a safety bound for
+    // pathological environments, not a normal-case truncation.
+    const MAX_PER_LETTER: usize = CAP_INVENTORY;
     for letter in letters {
         let pkgs = by_letter.get(letter).unwrap();
         result.push_str(&format!("\n[{}]\n", letter.to_uppercase()));
 
-        for pkg in pkgs.iter().take(10) {
+        for pkg in pkgs.iter().take(MAX_PER_LETTER) {
             result.push_str(&format!("  {} ({})\n", pkg.name, pkg.version));
         }
 
-        if pkgs.len() > 10 {
-            result.push_str(&format!("  ... +{} more\n", pkgs.len() - 10));
+        if pkgs.len() > MAX_PER_LETTER {
+            result.push_str(&format!("  ... +{} more\n", pkgs.len() - MAX_PER_LETTER));
         }
     }
 
@@ -206,7 +205,8 @@ fn filter_pip_outdated(output: &str) -> String {
     result.push_str(&format!("pip outdated: {} packages\n", packages.len()));
     result.push_str("═══════════════════════════════════════\n");
 
-    for (i, pkg) in packages.iter().take(20).enumerate() {
+    const MAX_PIP_PACKAGES: usize = CAP_LIST;
+    for (i, pkg) in packages.iter().take(MAX_PIP_PACKAGES).enumerate() {
         let latest = pkg.latest_version.as_deref().unwrap_or("unknown");
         result.push_str(&format!(
             "{}. {} ({} → {})\n",
@@ -217,8 +217,11 @@ fn filter_pip_outdated(output: &str) -> String {
         ));
     }
 
-    if packages.len() > 20 {
-        result.push_str(&format!("\n... +{} more packages\n", packages.len() - 20));
+    if packages.len() > MAX_PIP_PACKAGES {
+        result.push_str(&format!(
+            "\n... +{} more packages\n",
+            packages.len() - MAX_PIP_PACKAGES
+        ));
     }
 
     result.push_str("\n[hint] Run `pip install --upgrade <package>` to update\n");

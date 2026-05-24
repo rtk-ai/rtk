@@ -1,4 +1,6 @@
 use super::constants::{CLAUDE_DIR, SETTINGS_JSON, SETTINGS_LOCAL_JSON};
+use crate::core::stream::exec_capture;
+use crate::discover::lexer::split_on_operators;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -34,21 +36,27 @@ pub(crate) fn check_command_with_rules(
 ) -> PermissionVerdict {
     let segments = split_compound_command(cmd);
     let mut any_ask = false;
-    let mut any_allow = false;
+    // Every non-empty segment must independently match an allow rule for the
+    // compound command to receive Allow. See issue #1213: previously a single
+    // matching segment escalated the entire chain to Allow, enabling bypass.
+    let mut all_segments_allowed = true;
+    let mut saw_segment = false;
 
     for segment in &segments {
         let segment = segment.trim();
         if segment.is_empty() {
             continue;
         }
+        saw_segment = true;
 
-        // Deny takes highest priority
+        // Deny takes highest priority — any segment matching Deny blocks the whole chain.
         for pattern in deny_rules {
             if command_matches_pattern(segment, pattern) {
                 return PermissionVerdict::Deny;
             }
         }
 
+        // Ask — if any segment matches an ask rule, the final verdict is Ask.
         if !any_ask {
             for pattern in ask_rules {
                 if command_matches_pattern(segment, pattern) {
@@ -58,20 +66,23 @@ pub(crate) fn check_command_with_rules(
             }
         }
 
-        if !any_allow && !any_ask {
-            for pattern in allow_rules {
-                if command_matches_pattern(segment, pattern) {
-                    any_allow = true;
-                    break;
-                }
+        // Allow — every non-empty segment must match an allow rule independently.
+        // As soon as one segment fails to match, the entire chain loses Allow status.
+        if all_segments_allowed {
+            let matched = allow_rules
+                .iter()
+                .any(|pattern| command_matches_pattern(segment, pattern));
+            if !matched {
+                all_segments_allowed = false;
             }
         }
     }
 
-    // Precedence: Deny > Ask > Allow > Default (ask)
+    // Precedence: Deny > Ask > Allow > Default (ask).
+    // Allow requires (1) at least one segment seen, (2) all segments matched, (3) non-empty rules.
     if any_ask {
         PermissionVerdict::Ask
-    } else if any_allow {
+    } else if saw_segment && all_segments_allowed && !allow_rules.is_empty() {
         PermissionVerdict::Allow
     } else {
         PermissionVerdict::Default
@@ -97,6 +108,10 @@ fn load_permission_rules() -> (Vec<String>, Vec<String>, Vec<String>) {
             continue;
         };
         let Ok(json) = serde_json::from_str::<Value>(&content) else {
+            eprintln!(
+                "[rtk] warning: failed to parse permissions from {}",
+                path.display()
+            );
             continue;
         };
         let Some(permissions) = json.get("permissions") else {
@@ -159,14 +174,12 @@ fn find_project_root() -> Option<PathBuf> {
     }
 
     // Fallback: git (spawns a subprocess, slower but handles monorepo layouts).
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "--show-toplevel"]);
+    let result = exec_capture(&mut cmd).ok()?;
 
-    if output.status.success() {
-        let path = String::from_utf8(output.stdout).ok()?;
-        return Some(PathBuf::from(path.trim()));
+    if result.success() {
+        return Some(PathBuf::from(result.stdout.trim()));
     }
 
     None
@@ -253,10 +266,20 @@ fn glob_matches(cmd: &str, pattern: &str) -> bool {
                 return false;
             }
         } else {
-            // Middle segment: find next occurrence
-            match cmd[search_from..].find(*part) {
-                Some(pos) => search_from += pos + part.len(),
-                None => return false,
+            // Middle segment: find next occurrence.
+            // Also accept end-of-string when the segment ends with whitespace — this
+            // handles commands that terminate at the middle token without trailing args,
+            // e.g. "git -C * diff:*" should match bare "git -C /path diff" (#1105).
+            let remaining = &cmd[search_from..];
+            if let Some(pos) = remaining.find(*part) {
+                search_from += pos + part.len();
+            } else {
+                let trimmed = part.trim_end();
+                if !trimmed.is_empty() && remaining.ends_with(trimmed) {
+                    search_from += remaining.len();
+                } else {
+                    return false;
+                }
             }
         }
     }
@@ -264,14 +287,8 @@ fn glob_matches(cmd: &str, pattern: &str) -> bool {
     true
 }
 
-/// Split a compound shell command into individual segments.
-///
-/// Splits on `&&`, `||`, `|`, and `;`. Not a full shell parser — handles common cases.
 fn split_compound_command(cmd: &str) -> Vec<&str> {
-    cmd.split("&&")
-        .flat_map(|s| s.split("||"))
-        .flat_map(|s| s.split(['|', ';']))
-        .collect()
+    split_on_operators(cmd, false)
 }
 
 #[cfg(test)]
@@ -389,6 +406,25 @@ mod tests {
     }
 
     #[test]
+    fn test_quoted_operators_not_split() {
+        // "&&" inside quotes must NOT cause a split — old naive splitter got this wrong
+        let deny = vec!["git push --force".to_string()];
+        assert_eq!(
+            check_command_with_rules(r#"echo "git push --force && danger""#, &deny, &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_pipe_segments_checked() {
+        let deny = vec!["rm -rf".to_string()];
+        assert_eq!(
+            check_command_with_rules("cat file | rm -rf /", &deny, &[], &[]),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
     fn test_ask_verdict() {
         let ask = vec!["git push".to_string()];
         assert_eq!(
@@ -436,6 +472,26 @@ mod tests {
     #[test]
     fn test_middle_wildcard_no_match() {
         assert!(!command_matches_pattern("git push develop", "git * main"));
+    }
+
+    // Bug 3: middle wildcard at end-of-command (no trailing args) — #1105
+    #[test]
+    fn test_middle_wildcard_at_end_of_command() {
+        // "git -C * diff:*" should match bare "git -C /path diff" (no trailing flags)
+        assert!(command_matches_pattern(
+            "git -C /path diff",
+            "git -C * diff:*"
+        ));
+        // Must still match when there ARE trailing args
+        assert!(command_matches_pattern(
+            "git -C /path diff --stat",
+            "git -C * diff:*"
+        ));
+        // Must NOT match a different subcommand
+        assert!(!command_matches_pattern(
+            "git -C /path status",
+            "git -C * diff:*"
+        ));
     }
 
     // Bug 3: multiple wildcards
@@ -530,6 +586,122 @@ mod tests {
         assert_eq!(
             check_command_with_rules("cargo build", &[], &[], &allow),
             PermissionVerdict::Default
+        );
+    }
+
+    // --- Regression tests for #1213 ---
+    // Compound command permission escalation: a single allowed segment must NOT
+    // grant Allow to the entire chain. Every non-empty segment must match
+    // independently.
+
+    #[test]
+    fn test_compound_allow_requires_every_segment() {
+        // Reproduces #1213: `git status` is allowed but `git add .` is not.
+        // Previously the chain was escalated to Allow — must now demote to Default.
+        let allow = vec![
+            "git status *".to_string(),
+            "git status".to_string(),
+            "cargo *".to_string(),
+        ];
+
+        // Single allowed command → Allow
+        assert_eq!(
+            check_command_with_rules("git status", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+
+        // Single unallowed command → Default
+        assert_eq!(
+            check_command_with_rules("git add .", &[], &[], &allow),
+            PermissionVerdict::Default
+        );
+
+        // BUG #1213: chain with one allowed + one unallowed → must be Default
+        assert_eq!(
+            check_command_with_rules("git status && git add .", &[], &[], &allow),
+            PermissionVerdict::Default,
+            "allowed segment must not escalate unallowed segment"
+        );
+
+        // Three-segment chain with middle unallowed → Default
+        assert_eq!(
+            check_command_with_rules(
+                "cargo test && git add . && git commit -m foo",
+                &[],
+                &[],
+                &allow,
+            ),
+            PermissionVerdict::Default,
+            "middle unallowed segment must demote the whole chain"
+        );
+
+        // Unallowed-then-allowed ordering must also demote
+        assert_eq!(
+            check_command_with_rules("git add . && git status", &[], &[], &allow),
+            PermissionVerdict::Default,
+            "unallowed first segment must demote the chain"
+        );
+    }
+
+    #[test]
+    fn test_compound_allow_all_segments_matched() {
+        // All segments match → Allow (regression: wildcard allow still works)
+        let allow = vec!["git *".to_string(), "cargo *".to_string()];
+
+        assert_eq!(
+            check_command_with_rules("git status && cargo test", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+
+        assert_eq!(
+            check_command_with_rules(
+                "git log --oneline && cargo build && git status",
+                &[],
+                &[],
+                &allow
+            ),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_compound_allow_semicolon_separator() {
+        // `;` separator must be handled identically to `&&`.
+        let allow = vec!["git status".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status; git push", &[], &[], &allow),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_compound_allow_pipe_separator() {
+        // `|` separator must be handled identically to `&&`.
+        let allow = vec!["git log".to_string()];
+        assert_eq!(
+            check_command_with_rules("git log | grep foo", &[], &[], &allow),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_compound_allow_or_separator() {
+        // `||` separator must also split segments.
+        let allow = vec!["cargo build".to_string()];
+        assert_eq!(
+            check_command_with_rules("cargo build || cargo clean", &[], &[], &allow),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_compound_ask_still_wins_over_partial_allow() {
+        // If any segment hits an ask rule, verdict is Ask (ask > allow).
+        let ask = vec!["git push".to_string()];
+        let allow = vec!["git *".to_string()];
+        assert_eq!(
+            check_command_with_rules("git status && git push origin main", &[], &ask, &allow),
+            PermissionVerdict::Ask
         );
     }
 }

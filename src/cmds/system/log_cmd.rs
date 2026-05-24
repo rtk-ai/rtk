@@ -1,6 +1,7 @@
 //! Deduplicates repeated log lines and shows counts instead.
 
 use crate::core::tracking;
+use crate::core::truncate::{reduced, CAP_WARNINGS};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -81,17 +82,24 @@ fn analyze_logs(content: &str) -> String {
         let normalized =
             normalize_log_line(line, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
 
-        // Categorize
+        // Categorize. The error bucket also covers severity labels above ERROR
+        // (CRITICAL, FATAL, ALERT, EMERGENCY, SEVERE, PANIC) — these are the most
+        // important lines in a log and were previously dropped as noise when they
+        // didn't literally contain "error".
         if line_lower.contains("error")
             || line_lower.contains("fatal")
             || line_lower.contains("panic")
+            || line_lower.contains("critical")
+            || line_lower.contains("alert")
+            || line_lower.contains("emerg")
+            || line_lower.contains("severe")
         {
             let count = error_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
                 unique_errors.push(line.to_string());
             }
             *count += 1;
-        } else if line_lower.contains("warn") {
+        } else if line_lower.contains("warn") || line_lower.contains("notice") {
             let count = warn_counts.entry(normalized.clone()).or_insert(0);
             if *count == 0 {
                 unique_warnings.push(line.to_string());
@@ -129,7 +137,8 @@ fn analyze_logs(content: &str) -> String {
         let mut error_list: Vec<_> = error_counts.iter().collect();
         error_list.sort_by(|a, b| b.1.cmp(a.1));
 
-        for (normalized, count) in error_list.iter().take(10) {
+        const MAX_LOG_ERRORS: usize = CAP_WARNINGS;
+        for (normalized, count) in error_list.iter().take(MAX_LOG_ERRORS) {
             // Find original message
             let original = unique_errors
                 .iter()
@@ -154,10 +163,10 @@ fn analyze_logs(content: &str) -> String {
             }
         }
 
-        if error_list.len() > 10 {
+        if error_list.len() > MAX_LOG_ERRORS {
             result.push(format!(
                 "   ... +{} more unique errors",
-                error_list.len() - 10
+                error_list.len() - MAX_LOG_ERRORS
             ));
         }
         result.push(String::new());
@@ -170,7 +179,9 @@ fn analyze_logs(content: &str) -> String {
         let mut warn_list: Vec<_> = warn_counts.iter().collect();
         warn_list.sort_by(|a, b| b.1.cmp(a.1));
 
-        for (normalized, count) in warn_list.iter().take(5) {
+        // warnings are lower severity than errors — show fewer.
+        const MAX_LOG_WARNS: usize = reduced(CAP_WARNINGS, 5);
+        for (normalized, count) in warn_list.iter().take(MAX_LOG_WARNS) {
             let original = unique_warnings
                 .iter()
                 .find(|w| {
@@ -194,10 +205,10 @@ fn analyze_logs(content: &str) -> String {
             }
         }
 
-        if warn_list.len() > 5 {
+        if warn_list.len() > MAX_LOG_WARNS {
             result.push(format!(
                 "   ... +{} more unique warnings",
-                warn_list.len() - 5
+                warn_list.len() - MAX_LOG_WARNS
             ));
         }
     }
@@ -237,6 +248,18 @@ mod tests {
         let result = analyze_logs(logs);
         assert!(result.contains("×3"));
         assert!(result.contains("ERRORS"));
+    }
+
+    #[test]
+    fn test_analyze_logs_extended_severity_keywords() {
+        let logs = "2024-01-01 10:00:00 CRITICAL: disk full\n\
+                    2024-01-01 10:00:01 ALERT: memory pressure\n\
+                    2024-01-01 10:00:02 emerg: system shutdown imminent\n\
+                    2024-01-01 10:00:03 SEVERE: data corruption detected\n\
+                    2024-01-01 10:00:04 notice: config reloaded\n";
+        let result = analyze_logs(logs);
+        assert!(result.contains("ERRORS"), "critical/alert/emerg/severe should count as errors");
+        assert!(result.contains("WARNINGS"), "notice should count as warning");
     }
 
     #[test]

@@ -50,8 +50,13 @@ impl ClaudeProvider {
     }
 
     /// Get the base directory for Claude Code projects.
-    fn claude_projects_dir() -> Result<PathBuf> {
-        Ok(Self::home_dir()?.join(CLAUDE_DIR).join("projects"))
+    fn projects_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("could not determine home directory")?;
+        Ok(Self::projects_dir_for_home(&home))
+    }
+
+    fn projects_dir_for_home(home: &Path) -> PathBuf {
+        home.join(CLAUDE_DIR).join("projects")
     }
 
     /// Get the known Codex session roots.
@@ -61,12 +66,6 @@ impl ClaudeProvider {
             codex_dir.join("sessions"),
             codex_dir.join("archived_sessions"),
         ])
-    }
-
-    /// Encode a filesystem path to Claude Code's directory name format.
-    /// `/Users/foo/bar` → `-Users-foo-bar`
-    pub fn encode_project_path(path: &str) -> String {
-        path.replace('/', "-")
     }
 
     fn matches_cutoff(path: &Path, cutoff: Option<SystemTime>) -> bool {
@@ -118,14 +117,19 @@ impl ClaudeProvider {
         let preview: String = text.chars().take(1000).collect();
         (text.len(), preview)
     }
-}
 
-impl SessionProvider for ClaudeProvider {
-    fn discover_sessions(
-        &self,
+    fn discover_sessions_in_projects_dir(
+        projects_dir: &Path,
         project_filter: Option<&str>,
         since_days: Option<u64>,
     ) -> Result<Vec<PathBuf>> {
+        if !projects_dir
+            .try_exists()
+            .with_context(|| format!("failed to access {}", projects_dir.display()))?
+        {
+            return Ok(Vec::new());
+        }
+
         let cutoff = since_days.map(|days| {
             SystemTime::now()
                 .checked_sub(Duration::from_secs(days * 86400))
@@ -133,42 +137,38 @@ impl SessionProvider for ClaudeProvider {
         });
 
         let mut sessions = Vec::new();
-        let mut found_any_root = false;
+        let mut found_any_root = true;
 
-        let projects_dir = Self::claude_projects_dir()?;
-        if projects_dir.exists() {
-            found_any_root = true;
+        // List project directories
+        let entries = fs::read_dir(projects_dir)
+            .with_context(|| format!("failed to read {}", projects_dir.display()))?;
 
-            let entries = fs::read_dir(&projects_dir)
-                .with_context(|| format!("failed to read {}", projects_dir.display()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
 
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
+            if let Some(filter) = project_filter {
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !dir_name.contains(filter) {
                     continue;
                 }
+            }
 
-                if let Some(filter) = project_filter {
-                    let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if !dir_name.contains(filter) {
-                        continue;
-                    }
+            for walk_entry in WalkDir::new(&path)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                let file_path = walk_entry.path();
+                if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
                 }
-
-                for walk_entry in WalkDir::new(&path)
-                    .follow_links(false)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                {
-                    let file_path = walk_entry.path();
-                    if file_path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                        continue;
-                    }
-                    if !Self::matches_cutoff(file_path, cutoff) {
-                        continue;
-                    }
-                    sessions.push(file_path.to_path_buf());
+                if !Self::matches_cutoff(file_path, cutoff) {
+                    continue;
                 }
+                sessions.push(file_path.to_path_buf());
             }
         }
 
@@ -206,6 +206,40 @@ impl SessionProvider for ClaudeProvider {
         }
 
         Ok(sessions)
+    }
+
+    /// Encode a filesystem path to Claude Code's directory name format.
+    ///
+    /// Claude Code replaces `/`, `.`, `_`, `\`, and any non-ASCII character
+    /// with `-` when computing the project directory slug under `~/.claude/projects/`.
+    ///
+    /// `/Users/foo/bar`          → `-Users-foo-bar`
+    /// `/Users/first.last/bar`   → `-Users-first-last-bar`
+    /// `/home/chris/2_project`   → `-home-chris-2-project`
+    /// `C:\Users\foo\bar`        → `C:-Users-foo-bar`
+    pub fn encode_project_path(path: &str) -> String {
+        const SANITIZED_CHARS: &[char] = &['/', '.', '_', '\\'];
+
+        path.chars()
+            .map(|c| {
+                if !c.is_ascii() || SANITIZED_CHARS.contains(&c) {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect()
+    }
+}
+
+impl SessionProvider for ClaudeProvider {
+    fn discover_sessions(
+        &self,
+        project_filter: Option<&str>,
+        since_days: Option<u64>,
+    ) -> Result<Vec<PathBuf>> {
+        let projects_dir = Self::projects_dir()?;
+        Self::discover_sessions_in_projects_dir(&projects_dir, project_filter, since_days)
     }
 
     fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>> {
@@ -489,10 +523,108 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_project_path_dot_in_username() {
+        // Claude Code replaces both '/' and '.' with '-'.
+        // A cwd like /Users/first.last must produce the same slug as
+        // Claude's projects directory (-Users-first-last), otherwise
+        // `rtk discover` finds zero sessions for that project.
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/first.last/my-project"),
+            "-Users-first-last-my-project"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_multiple_dots() {
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/Users/a.b.c/proj"),
+            "-Users-a-b-c-proj"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_underscore() {
+        // Claude Code also replaces '_' with '-' (https://github.com/anthropics/claude-code/issues/24067)
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/chris/2_project-files/proj"),
+            "-home-chris-2-project-files-proj"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_non_ascii() {
+        // Non-ASCII characters are each replaced with '-' (https://github.com/anthropics/claude-code/issues/40946)
+        // '/home/user/' + '外' + '主' + '/app' -> '-home-user' + '-' + '-' + '-' + '-' + 'app'
+        assert_eq!(
+            ClaudeProvider::encode_project_path("/home/user/\u{5916}\u{4e3b}/app"),
+            "-home-user----app"
+        );
+    }
+
+    #[test]
+    fn test_encode_project_path_windows() {
+        // Windows backslashes are also replaced with '-'
+        assert_eq!(
+            ClaudeProvider::encode_project_path(r"C:\Users\foo\bar"),
+            "C:-Users-foo-bar"
+        );
+    }
+
+    #[test]
     fn test_match_project_filter() {
         let encoded = ClaudeProvider::encode_project_path("/Users/foo/Sites/rtk");
         assert!(encoded.contains("rtk"));
         assert!(encoded.contains("Sites"));
+    }
+
+    #[test]
+    fn test_discover_sessions_missing_projects_dir_returns_empty() {
+        let temp_home = tempfile::tempdir().unwrap();
+        let missing_projects_dir = temp_home.path().join(CLAUDE_DIR).join("projects");
+
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            &missing_projects_dir,
+            None,
+            Some(30),
+        )
+        .unwrap();
+
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_discover_sessions_applies_project_filter() {
+        let projects_dir = tempfile::tempdir().unwrap();
+        let matching_project = projects_dir.path().join("-Users-test-rtk");
+        let other_project = projects_dir.path().join("-Users-test-other");
+        std::fs::create_dir_all(&matching_project).unwrap();
+        std::fs::create_dir_all(&other_project).unwrap();
+        std::fs::write(matching_project.join("matching.jsonl"), "").unwrap();
+        std::fs::write(other_project.join("other.jsonl"), "").unwrap();
+
+        let sessions = ClaudeProvider::discover_sessions_in_projects_dir(
+            projects_dir.path(),
+            Some("rtk"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            sessions[0].file_name().and_then(|name| name.to_str()),
+            Some("matching.jsonl")
+        );
+    }
+
+    #[test]
+    fn test_discover_sessions_existing_non_directory_returns_error() {
+        let projects_file = tempfile::NamedTempFile::new().unwrap();
+
+        let err =
+            ClaudeProvider::discover_sessions_in_projects_dir(projects_file.path(), None, None)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("failed to read"));
     }
 
     #[test]

@@ -5,8 +5,11 @@
 //! Uses `ruby_exec("rake")` to auto-detect `bundle exec`.
 
 use crate::core::runner;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{ruby_exec, strip_ansi};
 use anyhow::Result;
+
+const MAX_RAKE_FAILURES: usize = CAP_WARNINGS;
 
 /// Decide whether to use `rake test` or `rails test` based on args.
 ///
@@ -15,7 +18,7 @@ use anyhow::Result;
 /// `rails test` which handles single files, multiple files, and line-number
 /// syntax (`file.rb:15`) natively.
 fn select_runner(args: &[String]) -> (&'static str, Vec<String>) {
-    let has_test_subcommand = args.first().map_or(false, |a| a == "test");
+    let has_test_subcommand = args.first().is_some_and(|a| a == "test");
     if !has_test_subcommand {
         return ("rake", args.to_vec());
     }
@@ -198,7 +201,7 @@ fn build_minitest_summary(summary: &str, failures: &[String]) -> String {
 
     result.push('\n');
 
-    for (i, failure) in failures.iter().take(10).enumerate() {
+    for (i, failure) in failures.iter().take(MAX_RAKE_FAILURES).enumerate() {
         let lines: Vec<&str> = failure.lines().collect();
         // First line is like "  1) Failure:" or "  1) Error:"
         if let Some(header) = lines.first() {
@@ -214,13 +217,16 @@ fn build_minitest_summary(summary: &str, failures: &[String]) -> String {
                 ));
             }
         }
-        if i < failures.len().min(10) - 1 {
+        if i < failures.len().min(MAX_RAKE_FAILURES) - 1 {
             result.push('\n');
         }
     }
 
-    if failures.len() > 10 {
-        result.push_str(&format!("\n... +{} more failures\n", failures.len() - 10));
+    if failures.len() > MAX_RAKE_FAILURES {
+        result.push_str(&format!(
+            "\n... +{} more failures\n",
+            failures.len() - MAX_RAKE_FAILURES
+        ));
     }
 
     result.trim().to_string()

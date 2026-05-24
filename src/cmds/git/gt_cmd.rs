@@ -1,9 +1,9 @@
 //! Filters Graphite (gt) CLI output for stacking workflows.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{
-    exit_code_from_output, ok_confirmation, resolved_command, strip_ansi, truncate,
-};
+use crate::core::truncate::{reduced, CAP_LIST};
+use crate::core::utils::{ok_confirmation, resolved_command, strip_ansi, truncate};
 use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -43,34 +43,30 @@ fn run_gt_filtered(
         eprintln!("Running: gt {} {}", subcmd_str, args.join(" "));
     }
 
-    let cmd_output = cmd.output().with_context(|| {
+    let cmd_output = exec_capture(&mut cmd).with_context(|| {
         format!(
             "Failed to run gt {}. Is gt (Graphite) installed?",
             subcmd_str
         )
     })?;
 
-    let stdout = String::from_utf8_lossy(&cmd_output.stdout);
-    let stderr = String::from_utf8_lossy(&cmd_output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", cmd_output.stdout, cmd_output.stderr);
 
-    let exit_code = exit_code_from_output(&cmd_output, "gt");
-
-    let clean = strip_ansi(stdout.trim());
+    let clean = strip_ansi(cmd_output.stdout.trim());
     let output = if verbose > 0 {
         clean.clone()
     } else {
         filter_fn(&clean)
     };
 
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, tee_label, exit_code) {
+    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, tee_label, cmd_output.exit_code) {
         println!("{}\n{}", output, hint);
     } else {
         println!("{}", output);
     }
 
-    if !stderr.trim().is_empty() {
-        eprintln!("{}", stderr.trim());
+    if !cmd_output.stderr.trim().is_empty() {
+        eprintln!("{}", cmd_output.stderr.trim());
     }
 
     let label = if args.is_empty() {
@@ -81,7 +77,7 @@ fn run_gt_filtered(
     let rtk_label = format!("rtk {}", label);
     timer.track(&label, &rtk_label, &raw, &output);
 
-    Ok(exit_code)
+    Ok(cmd_output.exit_code)
 }
 
 fn filter_identity(input: &str) -> String {
@@ -173,7 +169,8 @@ fn passthrough_gt(subcommand: &str, args: &[String], verbose: u8) -> Result<i32>
     crate::core::runner::run_passthrough("gt", &os_args, verbose)
 }
 
-const MAX_LOG_ENTRIES: usize = 15;
+// gt log entries are multi-line — trim the list cap to keep token savings above 60%.
+const MAX_LOG_ENTRIES: usize = reduced(CAP_LIST, 5);
 
 fn filter_gt_log_entries(input: &str) -> String {
     let trimmed = input.trim();

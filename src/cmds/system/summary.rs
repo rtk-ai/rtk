@@ -1,10 +1,15 @@
 //! Runs a command and produces a heuristic summary of its output.
 
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::truncate;
 use anyhow::{Context, Result};
 use regex::Regex;
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+const MAX_SUMMARY_LIST: usize = CAP_WARNINGS;
+const MAX_SUMMARY_KEYS: usize = CAP_WARNINGS;
 
 /// Run a command and provide a heuristic summary
 pub fn run(command: &str, verbose: u8) -> Result<i32> {
@@ -14,31 +19,23 @@ pub fn run(command: &str, verbose: u8) -> Result<i32> {
         eprintln!("Running and summarizing: {}", command);
     }
 
-    let output = if cfg!(target_os = "windows") {
-        Command::new("cmd")
-            .args(["/C", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", command]);
+        c
     } else {
-        Command::new("sh")
-            .args(["-c", command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-    }
-    .context("Failed to execute command")?;
+        let mut c = Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
+    let result = exec_capture(&mut cmd).context("Failed to execute command")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
-    let exit_code = crate::core::utils::exit_code_from_output(&output, command);
-
-    let summary = summarize_output(&raw, command, output.status.success());
+    let summary = summarize_output(&raw, command, result.success());
     println!("{}", summary);
     timer.track(command, "rtk summary", &raw, &summary);
-    Ok(exit_code)
+    Ok(result.exit_code)
 }
 
 fn summarize_output(output: &str, command: &str, success: bool) -> String {
@@ -236,11 +233,11 @@ fn summarize_list(output: &str, result: &mut Vec<String>) {
     let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
     result.push(format!("List ({} items):", lines.len()));
 
-    for line in lines.iter().take(10) {
+    for line in lines.iter().take(MAX_SUMMARY_LIST) {
         result.push(format!("   • {}", truncate(line, 70)));
     }
-    if lines.len() > 10 {
-        result.push(format!("   ... +{} more", lines.len() - 10));
+    if lines.len() > MAX_SUMMARY_LIST {
+        result.push(format!("   ... +{} more", lines.len() - MAX_SUMMARY_LIST));
     }
 }
 
@@ -255,11 +252,11 @@ fn summarize_json(output: &str, result: &mut Vec<String>) {
             }
             serde_json::Value::Object(obj) => {
                 result.push(format!("   Object with {} keys:", obj.len()));
-                for key in obj.keys().take(10) {
+                for key in obj.keys().take(MAX_SUMMARY_KEYS) {
                     result.push(format!("   • {}", key));
                 }
-                if obj.len() > 10 {
-                    result.push(format!("   ... +{} more keys", obj.len() - 10));
+                if obj.len() > MAX_SUMMARY_KEYS {
+                    result.push(format!("   ... +{} more keys", obj.len() - MAX_SUMMARY_KEYS));
                 }
             }
             _ => {

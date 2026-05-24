@@ -2,10 +2,48 @@
 
 use crate::core::config;
 use crate::core::runner;
+use crate::core::stream::exec_capture;
+use crate::core::truncate::CAP_WARNINGS;
 use crate::core::utils::{resolved_command, truncate};
 use anyhow::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::ffi::OsString;
+
+const GOLANGCI_SUBCOMMANDS: &[&str] = &[
+    "cache",
+    "completion",
+    "config",
+    "custom",
+    "fmt",
+    "formatters",
+    "help",
+    "linters",
+    "migrate",
+    "run",
+    "version",
+];
+
+const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
+    "-c",
+    "--color",
+    "--config",
+    "--cpu-profile-path",
+    "--mem-profile-path",
+    "--trace-path",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+struct RunInvocation {
+    global_args: Vec<String>,
+    run_args: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    FilteredRun(RunInvocation),
+    Passthrough,
+}
 
 #[derive(Debug, Deserialize)]
 struct Position {
@@ -63,16 +101,15 @@ pub(crate) fn parse_major_version(version_output: &str) -> u32 {
 /// Run `golangci-lint --version` and return the major version number.
 /// Returns 1 on any failure.
 pub(crate) fn detect_major_version() -> u32 {
-    let output = resolved_command("golangci-lint").arg("--version").output();
+    let mut cmd = resolved_command("golangci-lint");
+    cmd.arg("--version");
 
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let version_text = if stdout.trim().is_empty() {
-                &*stderr
+    match exec_capture(&mut cmd) {
+        Ok(r) => {
+            let version_text = if r.stdout.trim().is_empty() {
+                &r.stderr
             } else {
-                &*stdout
+                &r.stdout
             };
             parse_major_version(version_text)
         }
@@ -81,44 +118,31 @@ pub(crate) fn detect_major_version() -> u32 {
 }
 
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+    match classify_invocation(args) {
+        Invocation::FilteredRun(invocation) => run_filtered(args, &invocation, verbose),
+        Invocation::Passthrough => run_passthrough(args, verbose),
+    }
+}
+
+fn run_filtered(original_args: &[String], invocation: &RunInvocation, verbose: u8) -> Result<i32> {
     let version = detect_major_version();
 
     let mut cmd = resolved_command("golangci-lint");
-
-    // Force JSON output (only if user hasn't specified it)
-    let has_format = args.iter().any(|a| {
-        a == "--out-format"
-            || a.starts_with("--out-format=")
-            || a == "--output.json.path"
-            || a.starts_with("--output.json.path=")
-    });
-
-    if !has_format {
-        if version >= 2 {
-            cmd.arg("run").arg("--output.json.path").arg("stdout");
-        } else {
-            cmd.arg("run").arg("--out-format=json");
-        }
-    } else {
-        cmd.arg("run");
-    }
-
-    for arg in args {
+    for arg in build_filtered_args(invocation, version) {
         cmd.arg(arg);
     }
 
     if verbose > 0 {
-        if version >= 2 {
-            eprintln!("Running: golangci-lint run --output.json.path stdout");
-        } else {
-            eprintln!("Running: golangci-lint run --out-format=json");
-        }
+        eprintln!(
+            "Running: {}",
+            format_command("golangci-lint", &build_filtered_args(invocation, version))
+        );
     }
 
     let exit_code = runner::run_filtered(
         cmd,
         "golangci-lint",
-        &args.join(" "),
+        &original_args.join(" "),
         |stdout| {
             // v2 outputs JSON on first line + trailing text; v1 outputs just JSON
             let json_output = if version >= 2 {
@@ -134,6 +158,107 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     // golangci-lint: exit 0 = clean, exit 1 = lint issues found (not an error),
     // exit 2+ = config/build error, None = killed by signal (OOM, SIGKILL)
     Ok(if exit_code == 1 { 0 } else { exit_code })
+}
+
+fn run_passthrough(args: &[String], verbose: u8) -> Result<i32> {
+    let os_args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    runner::run_passthrough("golangci-lint", &os_args, verbose)
+}
+
+fn classify_invocation(args: &[String]) -> Invocation {
+    match find_subcommand_index(args) {
+        Some(idx) if args[idx] == "run" => Invocation::FilteredRun(RunInvocation {
+            global_args: args[..idx].to_vec(),
+            run_args: args[idx + 1..].to_vec(),
+        }),
+        _ => Invocation::Passthrough,
+    }
+}
+
+fn find_subcommand_index(args: &[String]) -> Option<usize> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+
+        if arg == "--" {
+            return None;
+        }
+
+        if !arg.starts_with('-') {
+            if GOLANGCI_SUBCOMMANDS.contains(&arg) {
+                return Some(i);
+            }
+            return None;
+        }
+
+        if let Some(flag) = split_flag_name(arg) {
+            if golangci_flag_takes_separate_value(arg, flag) {
+                i += 1;
+            }
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+fn split_flag_name(arg: &str) -> Option<&str> {
+    if arg.starts_with("--") {
+        return Some(arg.split_once('=').map(|(flag, _)| flag).unwrap_or(arg));
+    }
+
+    if arg.starts_with('-') {
+        return Some(arg);
+    }
+
+    None
+}
+
+fn golangci_flag_takes_separate_value(arg: &str, flag: &str) -> bool {
+    if !GLOBAL_FLAGS_WITH_VALUE.contains(&flag) {
+        return false;
+    }
+
+    if arg.starts_with("--") && arg.contains('=') {
+        return false;
+    }
+
+    true
+}
+
+fn build_filtered_args(invocation: &RunInvocation, version: u32) -> Vec<String> {
+    let mut args = invocation.global_args.clone();
+    args.push("run".to_string());
+
+    if !has_output_flag(&invocation.run_args) {
+        if version >= 2 {
+            args.push("--output.json.path".to_string());
+            args.push("stdout".to_string());
+        } else {
+            args.push("--out-format=json".to_string());
+        }
+    }
+
+    args.extend(invocation.run_args.clone());
+    args
+}
+
+fn has_output_flag(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "--out-format"
+            || a.starts_with("--out-format=")
+            || a == "--output.json.path"
+            || a.starts_with("--output.json.path=")
+    })
+}
+
+fn format_command(base: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        base.to_string()
+    } else {
+        format!("{} {}", base, args.join(" "))
+    }
 }
 
 /// Filter golangci-lint JSON output - group by linter and file
@@ -200,8 +325,9 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
     }
 
     // Show top files
+    const MAX_GOLANGCI_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file, count) in file_counts.iter().take(10) {
+    for (file, count) in file_counts.iter().take(MAX_GOLANGCI_FILES) {
         let short_path = compact_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
@@ -215,7 +341,7 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
         }
 
         let mut file_linter_counts: Vec<_> = file_linters.iter().collect();
-        file_linter_counts.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        file_linter_counts.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
         for (linter, linter_issues) in file_linter_counts.iter().take(3) {
             result.push_str(&format!("    {} ({})\n", linter, linter_issues.len()));
@@ -236,8 +362,11 @@ pub(crate) fn filter_golangci_json(output: &str, version: u32) -> String {
         }
     }
 
-    if file_counts.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", file_counts.len() - 10));
+    if file_counts.len() > MAX_GOLANGCI_FILES {
+        result.push_str(&format!(
+            "\n... +{} more files\n",
+            file_counts.len() - MAX_GOLANGCI_FILES
+        ));
     }
 
     result.trim().to_string()
@@ -341,6 +470,100 @@ mod tests {
     #[test]
     fn test_parse_version_malformed_returns_1() {
         assert_eq!(parse_major_version("not a version string"), 1);
+    }
+
+    #[test]
+    fn test_classify_invocation_run_uses_filtered_path() {
+        assert_eq!(
+            classify_invocation(&["run".into(), "./...".into()]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec![],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_with_global_flag_value_uses_filtered_path() {
+        assert_eq!(
+            classify_invocation(&[
+                "--color".into(),
+                "never".into(),
+                "run".into(),
+                "./...".into(),
+            ]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec!["--color".into(), "never".into()],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_with_short_global_flag_uses_filtered_path() {
+        assert_eq!(
+            classify_invocation(&["-v".into(), "run".into(), "./...".into()]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec!["-v".into()],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_with_inline_value_flag_uses_filtered_path() {
+        assert_eq!(
+            classify_invocation(&["--color=never".into(), "run".into(), "./...".into()]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec!["--color=never".into()],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_with_inline_config_flag_uses_filtered_path() {
+        assert_eq!(
+            classify_invocation(&["--config=foo.yml".into(), "run".into(), "./...".into()]),
+            Invocation::FilteredRun(RunInvocation {
+                global_args: vec!["--config=foo.yml".into()],
+                run_args: vec!["./...".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_bare_command_is_passthrough() {
+        assert_eq!(classify_invocation(&[]), Invocation::Passthrough);
+    }
+
+    #[test]
+    fn test_classify_invocation_version_flag_is_passthrough() {
+        assert_eq!(
+            classify_invocation(&["--version".into()]),
+            Invocation::Passthrough
+        );
+    }
+
+    #[test]
+    fn test_classify_invocation_version_subcommand_is_passthrough() {
+        assert_eq!(
+            classify_invocation(&["version".into()]),
+            Invocation::Passthrough
+        );
+    }
+
+    #[test]
+    fn test_build_filtered_args_does_not_duplicate_run() {
+        let invocation = RunInvocation {
+            global_args: vec![],
+            run_args: vec!["./...".into()],
+        };
+
+        assert_eq!(
+            build_filtered_args(&invocation, 2),
+            vec!["run", "--output.json.path", "stdout", "./..."]
+        );
     }
 
     #[test]

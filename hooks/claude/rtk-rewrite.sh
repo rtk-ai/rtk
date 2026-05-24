@@ -25,19 +25,27 @@ fi
 
 # Version guard: rtk rewrite was added in 0.23.0.
 # Older binaries: warn once and exit cleanly (no silent failure).
-RTK_VERSION=$(rtk --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-if [ -n "$RTK_VERSION" ]; then
-  MAJOR=$(echo "$RTK_VERSION" | cut -d. -f1)
-  MINOR=$(echo "$RTK_VERSION" | cut -d. -f2)
-  # Require >= 0.23.0
-  if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 23 ]; then
-    echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.23.0). Upgrade: cargo install rtk" >&2
-    exit 0
+# Cache the version check to avoid spawning multiple processes on every hook call.
+CACHE_DIR=${XDG_CACHE_HOME:-$HOME/.cache}
+CACHE_FILE="$CACHE_DIR/rtk-hook-version-ok"
+if [ ! -f "$CACHE_FILE" ]; then
+  RTK_VERSION_RAW=$(rtk --version 2>/dev/null)
+  RTK_VERSION=${RTK_VERSION_RAW#rtk }
+  RTK_VERSION=${RTK_VERSION%% *}
+  if [ -n "$RTK_VERSION" ]; then
+    IFS=. read -r MAJOR MINOR PATCH <<<"$RTK_VERSION"
+    # Require >= 0.23.0
+    if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 23 ]; then
+      echo "[rtk] WARNING: rtk $RTK_VERSION is too old (need >= 0.23.0). Upgrade: cargo install rtk" >&2
+      exit 0
+    fi
   fi
+  mkdir -p "$CACHE_DIR" 2>/dev/null
+  touch "$CACHE_FILE" 2>/dev/null
 fi
 
 INPUT=$(cat)
-CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+CMD=$(jq -r '.tool_input.command // empty' <<<"$INPUT")
 
 if [ -z "$CMD" ]; then
   exit 0
@@ -70,29 +78,24 @@ case $EXIT_CODE in
     ;;
 esac
 
-ORIGINAL_INPUT=$(echo "$INPUT" | jq -c '.tool_input')
-UPDATED_INPUT=$(echo "$ORIGINAL_INPUT" | jq --arg cmd "$REWRITTEN" '.command = $cmd')
-
 if [ "$EXIT_CODE" -eq 3 ]; then
   # Ask: rewrite the command, omit permissionDecision so Claude Code prompts.
-  jq -n \
-    --argjson updated "$UPDATED_INPUT" \
-    '{
+  jq -c --arg cmd "$REWRITTEN" \
+    '.tool_input.command = $cmd | {
       "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "updatedInput": $updated
+        "updatedInput": .tool_input
       }
-    }'
+    }' <<<"$INPUT"
 else
   # Allow: rewrite the command and auto-allow.
-  jq -n \
-    --argjson updated "$UPDATED_INPUT" \
-    '{
+  jq -c --arg cmd "$REWRITTEN" \
+    '.tool_input.command = $cmd | {
       "hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
         "permissionDecisionReason": "RTK auto-rewrite",
-        "updatedInput": $updated
+        "updatedInput": .tool_input
       }
-    }'
+    }' <<<"$INPUT"
 fi

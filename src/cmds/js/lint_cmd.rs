@@ -1,7 +1,9 @@
 //! Filters ESLint and Biome linter output, grouping violations by rule.
 
 use crate::core::config;
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
+use crate::core::truncate::{CAP_ERRORS, CAP_WARNINGS};
 use crate::core::utils::{package_manager_exec, resolved_command, truncate};
 use crate::mypy_cmd;
 use crate::ruff_cmd;
@@ -106,17 +108,13 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "eslint" => {
             cmd.arg("-f").arg("json");
         }
-        "ruff" => {
-            // Force JSON output for ruff check
-            if !effective_args.contains(&"--output-format".to_string()) {
-                cmd.arg("check").arg("--output-format=json");
-            }
+        // Force JSON output for ruff check
+        "ruff" if !effective_args.contains(&"--output-format".to_string()) => {
+            cmd.arg("check").arg("--output-format=json");
         }
-        "pylint" => {
-            // Force JSON2 output for pylint
-            if !effective_args.contains(&"--output-format".to_string()) {
-                cmd.arg("--output-format=json2");
-            }
+        // Force JSON2 output for pylint
+        "pylint" if !effective_args.contains(&"--output-format".to_string()) => {
+            cmd.arg("--output-format=json2");
         }
         "mypy" => {
             // mypy uses default text output (no special flags)
@@ -166,49 +164,42 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         eprintln!("Running: {} with structured output", linter);
     }
 
-    let output = cmd.output().context(format!(
+    let result = exec_capture(&mut cmd).context(format!(
         "Failed to run {}. Is it installed? Try: pip install {} (or npm/pnpm for JS linters)",
         linter, linter
     ))?;
 
     // Check if process was killed by signal (SIGABRT, SIGKILL, etc.)
-    if !output.status.success() && output.status.code().is_none() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !result.success() && result.exit_code > 128 {
         eprintln!("[warn] Linter process terminated abnormally (possibly out of memory)");
-        if !stderr.is_empty() {
+        if !result.stderr.is_empty() {
             eprintln!(
                 "stderr: {}",
-                stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+                result.stderr.lines().take(5).collect::<Vec<_>>().join("\n")
             );
         }
-        return Ok(crate::core::utils::exit_code_from_output(&output, "eslint"));
+        return Ok(result.exit_code);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let raw = format!("{}\n{}", stdout, stderr);
+    let raw = format!("{}\n{}", result.stdout, result.stderr);
 
     // Dispatch to appropriate filter based on linter
     let filtered = match linter {
-        "eslint" => filter_eslint_json(&stdout),
+        "eslint" => filter_eslint_json(&result.stdout),
         "ruff" => {
             // Reuse ruff_cmd's JSON parser
-            if !stdout.trim().is_empty() {
-                ruff_cmd::filter_ruff_check_json(&stdout)
+            if !result.stdout.trim().is_empty() {
+                ruff_cmd::filter_ruff_check_json(&result.stdout)
             } else {
                 "Ruff: No issues found".to_string()
             }
         }
-        "pylint" => filter_pylint_json(&stdout),
+        "pylint" => filter_pylint_json(&result.stdout),
         "mypy" => mypy_cmd::filter_mypy_output(&raw),
         _ => filter_generic_lint(&raw),
     };
 
-    let exit_code = output
-        .status
-        .code()
-        .unwrap_or(if output.status.success() { 0 } else { 1 });
-    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", exit_code) {
+    if let Some(hint) = crate::core::tee::tee_and_hint(&raw, "lint", result.exit_code) {
         println!("{}\n{}", filtered, hint);
     } else {
         println!("{}", filtered);
@@ -221,8 +212,8 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         &filtered,
     );
 
-    if !output.status.success() {
-        return Ok(crate::core::utils::exit_code_from_output(&output, "eslint"));
+    if !result.success() {
+        return Ok(result.exit_code);
     }
 
     Ok(0)
@@ -269,7 +260,7 @@ fn filter_eslint_json(output: &str) -> String {
         .filter(|r| !r.messages.is_empty())
         .map(|r| (r, r.messages.len()))
         .collect();
-    by_file.sort_by(|a, b| b.1.cmp(&a.1));
+    by_file.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     // Build output
     let mut result = String::new();
@@ -291,30 +282,38 @@ fn filter_eslint_json(output: &str) -> String {
         result.push('\n');
     }
 
-    // Show top files with most issues
+    // Show top files with most issues, plus the top rules in each
+    const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file_result, count) in by_file.iter().take(10) {
+    for (file_result, count) in by_file.iter().take(MAX_FILES) {
         let short_path = compact_path(&file_result.file_path);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
-        // Show top 3 rules in this file
         let mut file_rules: HashMap<String, usize> = HashMap::new();
         for msg in &file_result.messages {
             if let Some(rule) = &msg.rule_id {
                 *file_rules.entry(rule.clone()).or_insert(0) += 1;
             }
         }
-
         let mut file_rule_counts: Vec<_> = file_rules.iter().collect();
         file_rule_counts.sort_by(|a, b| b.1.cmp(a.1));
-
         for (rule, count) in file_rule_counts.iter().take(3) {
             result.push_str(&format!("    {} ({})\n", rule, count));
         }
     }
 
-    if by_file.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", by_file.len() - 10));
+    if by_file.len() > MAX_FILES {
+        result.push_str(&format!("\n… +{} more files\n", by_file.len() - MAX_FILES));
+        let all_file_lines = by_file
+            .iter()
+            .map(|(r, count)| format!("{} ({} issues)", compact_path(&r.file_path), count))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_file_lines, "eslint-files", MAX_FILES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -410,8 +409,9 @@ fn filter_pylint_json(output: &str) -> String {
     }
 
     // Show top files
+    const MAX_FILES: usize = CAP_WARNINGS;
     result.push_str("Top files:\n");
-    for (file, count) in file_counts.iter().take(10) {
+    for (file, count) in file_counts.iter().take(MAX_FILES) {
         let short_path = compact_path(file);
         result.push_str(&format!("  {} ({} issues)\n", short_path, count));
 
@@ -430,8 +430,18 @@ fn filter_pylint_json(output: &str) -> String {
         }
     }
 
-    if file_counts.len() > 10 {
-        result.push_str(&format!("\n... +{} more files\n", file_counts.len() - 10));
+    if file_counts.len() > MAX_FILES {
+        result.push_str(&format!("\n… +{} more files\n", file_counts.len() - MAX_FILES));
+        let all_file_lines = file_counts
+            .iter()
+            .map(|(file, count)| format!("{} ({} issues)", compact_path(file), count))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_file_lines, "pylint-files", MAX_FILES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()
@@ -463,12 +473,19 @@ fn filter_generic_lint(output: &str) -> String {
     result.push_str(&format!("Lint: {} errors, {} warnings\n", errors, warnings));
     result.push_str("═══════════════════════════════════════\n");
 
-    for issue in issues.iter().take(20) {
+    const MAX_ISSUES: usize = CAP_ERRORS;
+    for issue in issues.iter().take(MAX_ISSUES) {
         result.push_str(&format!("{}\n", truncate(issue, 100)));
     }
 
-    if issues.len() > 20 {
-        result.push_str(&format!("\n... +{} more issues\n", issues.len() - 20));
+    if issues.len() > MAX_ISSUES {
+        result.push_str(&format!("\n… +{} more issues\n", issues.len() - MAX_ISSUES));
+        let all_issues = issues.join("\n");
+        if let Some(hint) =
+            crate::core::tee::force_tee_tail_hint(&all_issues, "lint-issues", MAX_ISSUES + 1)
+        {
+            result.push_str(&format!("  {}\n", hint));
+        }
     }
 
     result.trim().to_string()

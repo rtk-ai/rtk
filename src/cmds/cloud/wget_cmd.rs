@@ -1,5 +1,6 @@
+use crate::core::stream::exec_capture;
 use crate::core::tracking;
-use crate::core::utils::{exit_code_from_output, resolved_command};
+use crate::core::utils::resolved_command;
 use anyhow::{Context, Result};
 
 /// Compact wget - strips progress bars, shows only result
@@ -19,18 +20,14 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<i32> {
     }
     cmd_args.push(url);
 
-    let output = resolved_command("wget")
-        .args(&cmd_args)
-        .output()
-        .context("Failed to run wget")?;
+    let mut cmd = resolved_command("wget");
+    cmd.args(&cmd_args);
+    let result = exec_capture(&mut cmd).context("Failed to run wget")?;
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw_output = format!("{}\n{}", result.stderr, result.stdout);
 
-    let raw_output = format!("{}\n{}", stderr, stdout);
-
-    if output.status.success() {
-        let filename = extract_filename_from_output(&stderr, url, args);
+    if result.success() {
+        let filename = extract_filename_from_output(&result.stderr, url, args);
         let size = get_file_size(&filename);
         let msg = format!(
             "{} ok | {} | {}",
@@ -41,11 +38,11 @@ pub fn run(url: &str, args: &[String], verbose: u8) -> Result<i32> {
         println!("{}", msg);
         timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
     } else {
-        let error = parse_error(&stderr, &stdout);
+        let error = parse_error(&result.stderr, &result.stdout);
         let msg = format!("{} FAILED: {}", compact_url(url), error);
         println!("{}", msg);
         timer.track(&format!("wget {}", url), "rtk wget", &raw_output, &msg);
-        return Ok(exit_code_from_output(&output, "wget"));
+        return Ok(result.exit_code);
     }
 
     Ok(0)
@@ -65,16 +62,13 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
     }
     cmd_args.push(url);
 
-    let output = resolved_command("wget")
-        .args(&cmd_args)
-        .output()
-        .context("Failed to run wget")?;
+    let mut cmd = resolved_command("wget");
+    cmd.args(&cmd_args);
+    let result = exec_capture(&mut cmd).context("Failed to run wget")?;
 
-    if output.status.success() {
-        let content = String::from_utf8_lossy(&output.stdout);
-        let lines: Vec<&str> = content.lines().collect();
+    if result.success() {
+        let lines: Vec<&str> = result.stdout.lines().collect();
         let total = lines.len();
-        let raw_output = content.to_string();
 
         let mut rtk_output = String::new();
         if total > 20 {
@@ -82,7 +76,7 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
                 "{} ok | {} lines | {}\n",
                 compact_url(url),
                 total,
-                format_size(output.stdout.len() as u64)
+                format_size(result.stdout.len() as u64)
             ));
             rtk_output.push_str("--- first 10 lines ---\n");
             for line in lines.iter().take(10) {
@@ -99,16 +93,15 @@ pub fn run_stdout(url: &str, args: &[String], verbose: u8) -> Result<i32> {
         timer.track(
             &format!("wget -O - {}", url),
             "rtk wget -o",
-            &raw_output,
+            &result.stdout,
             &rtk_output,
         );
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let error = parse_error(&stderr, "");
+        let error = parse_error(&result.stderr, "");
         let msg = format!("{} FAILED: {}", compact_url(url), error);
         println!("{}", msg);
-        timer.track(&format!("wget -O - {}", url), "rtk wget -o", &stderr, &msg);
-        return Ok(exit_code_from_output(&output, "wget"));
+        timer.track(&format!("wget -O - {}", url), "rtk wget -o", &result.stderr, &msg);
+        return Ok(result.exit_code);
     }
 
     Ok(0)

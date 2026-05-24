@@ -4,6 +4,7 @@
 //! Focuses on extracting essential information from JSON outputs.
 
 use crate::core::runner::{self, RunOptions};
+use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ok_confirmation, resolved_command, truncate};
 use crate::git;
 use anyhow::Result;
@@ -207,7 +208,7 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
         "list" => list_prs(&args[1..], verbose, ultra_compact),
         "view" => view_pr(&args[1..], verbose, ultra_compact),
         "checks" => pr_checks(&args[1..], verbose, ultra_compact),
-        "status" => pr_status(verbose, ultra_compact),
+        "status" => pr_status(&args[1..], verbose, ultra_compact),
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
@@ -236,31 +237,40 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
         Some(prs) => prs,
         None => return String::new(),
     };
+    if prs.is_empty() {
+        return if ultra_compact {
+            "No PRs\n".to_string()
+        } else {
+            "No Pull Requests\n".to_string()
+        };
+    }
     let mut out = String::new();
     out.push_str(if ultra_compact {
         "PRs\n"
     } else {
         "Pull Requests\n"
     });
-    for pr in prs.iter().take(20) {
-        let number = pr["number"].as_i64().unwrap_or(0);
-        let title = pr["title"].as_str().unwrap_or("???");
-        let state = pr["state"].as_str().unwrap_or("???");
-        let author = pr["author"]["login"].as_str().unwrap_or("???");
-        let icon = state_icon(state, ultra_compact);
-        out.push_str(&format!(
-            "  {} #{} {} ({})\n",
-            icon,
-            number,
-            truncate(title, 60),
-            author
-        ));
+    let all_lines: Vec<String> = prs
+        .iter()
+        .map(|pr| {
+            let number = pr["number"].as_i64().unwrap_or(0);
+            let title = pr["title"].as_str().unwrap_or("???");
+            let state = pr["state"].as_str().unwrap_or("???");
+            let author = pr["author"]["login"].as_str().unwrap_or("???");
+            let icon = state_icon(state, ultra_compact);
+            format!("  {} #{} {} ({})", icon, number, truncate(title, 60), author)
+        })
+        .collect();
+    const MAX_LIST: usize = CAP_LIST;
+    for line in all_lines.iter().take(MAX_LIST) {
+        out.push_str(&format!("{}\n", line));
     }
-    if prs.len() > 20 {
-        out.push_str(&format!(
-            "  ... {} more (use gh pr list for all)\n",
-            prs.len() - 20
-        ));
+    if all_lines.len() > MAX_LIST {
+        out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-prs", MAX_LIST + 1) {
+            out.push_str(&format!("  {}\n", hint));
+        }
     }
     out
 }
@@ -293,6 +303,19 @@ fn should_passthrough_issue_view(extra_args: &[String]) -> bool {
     extra_args
         .iter()
         .any(|a| a == "--json" || a == "--jq" || a == "--web" || a == "--comments")
+}
+
+fn should_passthrough_pr_status(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--help" | "-h" | "--web" | "--jq" | "--template"
+        )
+    })
+}
+
+fn pr_status_json_fields() -> &'static str {
+    "number,title,reviewDecision,statusCheckRollup"
 }
 
 fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
@@ -457,33 +480,82 @@ fn format_pr_checks(stdout: &str) -> String {
     out
 }
 
-fn pr_status(_verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn pr_status(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+    if should_passthrough_pr_status(args) {
+        let mut passthrough_args = Vec::with_capacity(args.len() + 1);
+        passthrough_args.push("status".to_string());
+        passthrough_args.extend(args.iter().cloned());
+        return run_passthrough("gh", "pr", &passthrough_args);
+    }
+
     let mut cmd = resolved_command("gh");
-    cmd.args([
-        "pr",
-        "status",
-        "--json",
-        "currentBranch,createdBy,reviewDecision,statusCheckRollup",
-    ]);
+    cmd.args(["pr", "status", "--json", pr_status_json_fields()]);
+    for arg in args {
+        cmd.arg(arg);
+    }
     run_gh_json(cmd, "pr status", format_pr_status)
 }
 
 fn format_pr_status(json: &Value) -> String {
     let mut out = String::new();
+
+    if !json["currentBranch"].is_null() {
+        let current_branch = format_pr_status_entry(&json["currentBranch"]);
+        if !current_branch.is_empty() {
+            out.push_str("Current Branch\n");
+            out.push_str(&current_branch);
+            out.push('\n');
+        }
+    }
+
     if let Some(created_by) = json["createdBy"].as_array() {
         out.push_str(&format!("Your PRs ({}):\n", created_by.len()));
         for pr in created_by.iter().take(5) {
-            let number = pr["number"].as_i64().unwrap_or(0);
-            let title = pr["title"].as_str().unwrap_or("???");
-            let reviews = pr["reviewDecision"].as_str().unwrap_or("PENDING");
-            out.push_str(&format!(
-                "  #{} {} [{}]\n",
-                number,
-                truncate(title, 50),
-                reviews
-            ));
+            let entry = format_pr_status_entry(pr);
+            if !entry.is_empty() {
+                out.push_str(&entry);
+            }
         }
     }
+    out
+}
+
+fn format_pr_status_entry(pr: &Value) -> String {
+    if pr.is_null() {
+        return String::new();
+    }
+
+    let number = pr["number"].as_i64().unwrap_or(0);
+    let title = pr["title"].as_str().unwrap_or("???");
+    let reviews = pr["reviewDecision"].as_str().unwrap_or("PENDING");
+    let mut out = format!("  #{} {} [{}]", number, truncate(title, 50), reviews);
+
+    if let Some(checks) = pr["statusCheckRollup"].as_array() {
+        let total = checks.len();
+        if total > 0 {
+            let passed = checks
+                .iter()
+                .filter(|c| {
+                    c["conclusion"].as_str() == Some("SUCCESS")
+                        || c["state"].as_str() == Some("SUCCESS")
+                })
+                .count();
+            let failed = checks
+                .iter()
+                .filter(|c| {
+                    c["conclusion"].as_str() == Some("FAILURE")
+                        || c["state"].as_str() == Some("FAILURE")
+                })
+                .count();
+
+            out.push_str(&format!(" checks {}/{}", passed, total));
+            if failed > 0 {
+                out.push_str(&format!(" fail {}", failed));
+            }
+        }
+    }
+
+    out.push('\n');
     out
 }
 
@@ -515,27 +587,37 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
         Some(issues) => issues,
         None => return String::new(),
     };
+    if issues.is_empty() {
+        return "No Issues\n".to_string();
+    }
     let mut out = String::new();
     out.push_str("Issues\n");
-    for issue in issues.iter().take(20) {
-        let number = issue["number"].as_i64().unwrap_or(0);
-        let title = issue["title"].as_str().unwrap_or("???");
-        let state = issue["state"].as_str().unwrap_or("???");
-        let icon = if ultra_compact {
-            if state == "OPEN" {
-                "O"
+    let all_lines: Vec<String> = issues
+        .iter()
+        .map(|issue| {
+            let number = issue["number"].as_i64().unwrap_or(0);
+            let title = issue["title"].as_str().unwrap_or("???");
+            let state = issue["state"].as_str().unwrap_or("???");
+            let icon = if ultra_compact {
+                if state == "OPEN" { "O" } else { "C" }
+            } else if state == "OPEN" {
+                "[open]"
             } else {
-                "C"
-            }
-        } else if state == "OPEN" {
-            "[open]"
-        } else {
-            "[closed]"
-        };
-        out.push_str(&format!("  {} #{} {}\n", icon, number, truncate(title, 60)));
+                "[closed]"
+            };
+            format!("  {} #{} {}", icon, number, truncate(title, 60))
+        })
+        .collect();
+    const MAX_LIST: usize = CAP_LIST;
+    for line in all_lines.iter().take(MAX_LIST) {
+        out.push_str(&format!("{}\n", line));
     }
-    if issues.len() > 20 {
-        out.push_str(&format!("  ... {} more\n", issues.len() - 20));
+    if all_lines.len() > MAX_LIST {
+        out.push_str(&format!("  … +{} more\n", all_lines.len() - MAX_LIST));
+        let all_text = all_lines.join("\n");
+        if let Some(hint) = crate::core::tee::force_tee_tail_hint(&all_text, "gh-issues", MAX_LIST + 1) {
+            out.push_str(&format!("  {}\n", hint));
+        }
     }
     out
 }
@@ -1100,6 +1182,67 @@ mod tests {
     #[test]
     fn test_should_passthrough_pr_view_comments() {
         assert!(should_passthrough_pr_view(&["--comments".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_status_help() {
+        assert!(should_passthrough_pr_status(&["--help".into()]));
+        assert!(should_passthrough_pr_status(&["-h".into()]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_status_output_transform_flags() {
+        assert!(should_passthrough_pr_status(&["--web".into()]));
+        assert!(should_passthrough_pr_status(&[
+            "--jq".into(),
+            ".currentBranch".into()
+        ]));
+        assert!(should_passthrough_pr_status(&[
+            "--template".into(),
+            "{{.currentBranch.title}}".into()
+        ]));
+    }
+
+    #[test]
+    fn test_should_passthrough_pr_status_repo_flag_stays_filtered() {
+        assert!(!should_passthrough_pr_status(&[
+            "-R".into(),
+            "owner/repo".into()
+        ]));
+    }
+
+    #[test]
+    fn test_pr_status_json_fields_excludes_current_branch() {
+        let fields = pr_status_json_fields();
+        assert!(!fields.contains("currentBranch"));
+        assert!(fields.contains("number"));
+        assert!(fields.contains("title"));
+        assert!(fields.contains("reviewDecision"));
+        assert!(fields.contains("statusCheckRollup"));
+    }
+
+    #[test]
+    fn test_format_pr_status_includes_current_branch_summary() {
+        let json = serde_json::json!({
+            "currentBranch": {
+                "number": 934,
+                "title": "fix wrappers for standardization and exit codes",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "statusCheckRollup": [
+                    {"conclusion": "SUCCESS"},
+                    {"state": "SUCCESS"},
+                    {"conclusion": "FAILURE"}
+                ]
+            },
+            "createdBy": []
+        });
+
+        let result = format_pr_status(&json);
+        assert!(result.contains("Current Branch"));
+        assert!(result.contains("#934"));
+        assert!(result.contains("CHANGES_REQUESTED"));
+        assert!(result.contains("checks 2/3"));
+        assert!(result.contains("fail 1"));
     }
 
     // --- should_passthrough_issue_view tests ---

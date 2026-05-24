@@ -102,6 +102,10 @@ struct TomlFilterDef {
     tail_lines: Option<usize>,
     max_lines: Option<usize>,
     on_empty: Option<String>,
+    /// When true, stderr is captured and merged with stdout before filtering.
+    /// Use for tools like liquibase that emit banners/logs to stderr.
+    #[serde(default)]
+    filter_stderr: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +149,8 @@ pub struct CompiledFilter {
     tail_lines: Option<usize>,
     pub max_lines: Option<usize>,
     on_empty: Option<String>,
+    /// When true, the runner should capture stderr and merge it with stdout.
+    pub filter_stderr: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +397,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         tail_lines: def.tail_lines,
         max_lines: def.max_lines,
         on_empty: def.on_empty,
+        filter_stderr: def.filter_stderr,
     })
 }
 
@@ -1601,6 +1608,7 @@ match_command = "^make\\b"
             "hadolint",
             "helm",
             "iptables",
+            "liquibase",
             "make",
             "markdownlint",
             "mix-compile",

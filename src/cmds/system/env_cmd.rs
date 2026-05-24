@@ -1,9 +1,11 @@
 //! Filters environment variables, hiding secrets and noise.
 
 use crate::core::tracking;
+use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::env;
+use std::fmt::Write;
 
 /// Show filtered environment variables (hide sensitive data)
 pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
@@ -70,11 +72,12 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
                 // Split PATH for readability
                 let paths: Vec<&str> = v.split(':').collect();
                 println!("  PATH ({} entries):", paths.len());
-                for p in paths.iter().take(5) {
+                const MAX_PATH_ENTRIES: usize = CAP_WARNINGS;
+                for p in paths.iter().take(MAX_PATH_ENTRIES) {
                     println!("    {}", p);
                 }
-                if paths.len() > 5 {
-                    println!("    ... +{} more", paths.len() - 5);
+                if paths.len() > MAX_PATH_ENTRIES {
+                    println!("    ... +{} more", paths.len() - MAX_PATH_ENTRIES);
                 }
             } else {
                 println!("  {}={}", k, v);
@@ -104,12 +107,13 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
     }
 
     if !other_vars.is_empty() {
+        const MAX_OTHER_VARS: usize = CAP_LIST;
         println!("\nOther:");
-        for (k, v) in other_vars.iter().take(20) {
+        for (k, v) in other_vars.iter().take(MAX_OTHER_VARS) {
             println!("  {}={}", k, v);
         }
-        if other_vars.len() > 20 {
-            println!("  ... +{} more", other_vars.len() - 20);
+        if other_vars.len() > MAX_OTHER_VARS {
+            println!("  ... +{} more", other_vars.len() - MAX_OTHER_VARS);
         }
     }
 
@@ -123,7 +127,10 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         println!("\nTotal: {} vars (showing {} relevant)", total, shown);
     }
 
-    let raw: String = vars.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
+    let raw: String = vars.iter().fold(String::new(), |mut output, (k, v)| {
+        let _ = writeln!(output, "{}={}", k, v);
+        output
+    });
     let rtk = format!("{} vars -> {} shown", total, shown);
     timer.track("env", "rtk env", &raw, &rtk);
     Ok(())

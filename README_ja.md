@@ -121,10 +121,11 @@ rtk git push                    # -> "ok main"
 
 ### テスト
 ```bash
-rtk test cargo test             # 失敗のみ表示（-90%）
-rtk vitest run                  # Vitest コンパクト
+rtk jest                        # Jest コンパクト
+rtk vitest                      # Vitest コンパクト
 rtk pytest                      # Python テスト（-90%）
 rtk go test                     # Go テスト（-90%）
+rtk test <cmd>                  # 失敗のみ表示（-90%）
 ```
 
 ### ビルド & リント
