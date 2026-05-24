@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$PLUGIN_ROOT/hooks/run-rtk-codex-hook.sh\"",
+            "statusMessage": "RTK is rewriting a Bash command for token-optimized output",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
