@@ -10,8 +10,7 @@ The source package lives at [`rtk-codex/`](rtk-codex/):
 
 - `.codex-plugin/plugin.json` -- Codex plugin metadata, skill path, and hook path
 - `skills/rtk/SKILL.md` -- RTK usage, rewrite, opt-out, and validation guidance for Codex
-- `hooks/hooks.json` -- `PreToolUse` hook for Bash tool calls
-- `hooks/run-rtk-codex-hook.sh` -- thin launcher that delegates stdin to `rtk hook codex`
+- `hooks/hooks.json` -- `PreToolUse` hook for Bash tool calls that invokes `rtk hook codex`
 
 ## Install Paths
 
@@ -22,7 +21,9 @@ Uninstall removes only the RTK plugin package, its marketplace entry, and legacy
 
 ## Hook Behavior
 
-The hook launcher resolves `RTK_EXE` first, falls back to `rtk` on `PATH`, forwards the original Codex hook payload to `rtk hook codex`, and fails open when RTK is unavailable.
+The hook config invokes the native RTK hook processor directly. On Linux and macOS it uses `rtk hook codex`; on native Windows it uses `commandWindows` with `rtk.exe hook codex`, so Windows does not need Bash, a `.sh` launcher, POSIX executable bits, or POSIX environment expansion.
+
+If `RTK_EXE` is set when `rtk init --codex` runs, RTK writes that executable into the installed hook command. Otherwise, the installed hook resolves `rtk` or `rtk.exe` from `PATH`. Without the old shell launcher, RTK cannot emit a pre-launch advisory if the configured executable is missing, so users should rerun `rtk init --codex` after moving the RTK binary or changing `RTK_EXE`.
 
 `rtk hook codex` rewrites only `PreToolUse` payloads for `tool_name = "Bash"` with a string `tool_input.command`. Empty input, malformed JSON, unsupported tools, missing commands, unsupported commands, already-RTK commands, and heredocs exit successfully without hook output.
 

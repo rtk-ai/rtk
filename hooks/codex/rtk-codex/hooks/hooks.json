@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$PLUGIN_ROOT/hooks/run-rtk-codex-hook.sh\"",
+            "command": "rtk hook codex",
+            "commandWindows": "rtk.exe hook codex",
             "statusMessage": "RTK is rewriting a Bash command for token-optimized output",
             "timeout": 30
           }
