@@ -16,23 +16,29 @@ pub fn run_prek(args: &[String], verbose: u8) -> Result<i32> {
 }
 
 fn run_with_tool(tool: &str, args: &[String], verbose: u8) -> Result<i32> {
-    let mut cmd = resolved_command(tool);
-
-    for arg in args {
-        cmd.arg(arg);
-    }
+    let display = args.join(" ");
 
     if verbose > 0 {
-        eprintln!("Running: {} {}", tool, args.join(" "));
+        eprintln!("Running: {} {}", tool, display);
     }
 
-    runner::run_filtered(
-        cmd,
-        tool,
-        &args.join(" "),
-        filter_pre_commit_output,
-        runner::RunOptions::stdout_only().tee(tool),
-    )
+    // Only apply the hook filter for `run` subcommand (install, autoupdate, etc. passthrough)
+    if args.first().map(|a| a == "run").unwrap_or(false) {
+        let mut cmd = resolved_command(tool);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        runner::run_filtered(
+            cmd,
+            tool,
+            &display,
+            filter_pre_commit_output,
+            runner::RunOptions::stdout_only().tee(tool),
+        )
+    } else {
+        let os_args: Vec<std::ffi::OsString> = args.iter().map(std::ffi::OsString::from).collect();
+        runner::run_passthrough(tool, &os_args, verbose)
+    }
 }
 
 pub(crate) fn filter_pre_commit_output(output: &str) -> String {
