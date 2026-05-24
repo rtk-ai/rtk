@@ -8,15 +8,17 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 use crate::hooks::constants::{
+    CODEBUDDY_DIR, CODEBUDDY_PLUGIN_ENABLED_KEY, CODEBUDDY_PLUGIN_MANIFEST_DIR,
+    CODEBUDDY_PLUGIN_MANIFEST_FILE, CODEBUDDY_PLUGIN_MARKETPLACE, CODEBUDDY_PLUGIN_NAME,
     CONFIG_DIR, CURSOR_DIR, GEMINI_DIR, OPENCODE_PLUGIN_FILE, OPENCODE_SUBDIR, PLUGIN_SUBDIR,
 };
 
 use super::constants::{
-    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEX_DIR, CURSOR_HOOK_COMMAND,
-    GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
-    HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
-    PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    BEFORE_TOOL_KEY, CLAUDE_DIR, CLAUDE_HOOK_COMMAND, CODEBUDDY_HOOK_COMMAND, CODEX_DIR,
+    CURSOR_HOOK_COMMAND, GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR,
+    HERMES_PLUGIN_INIT_FILE, HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON,
+    HOOKS_SUBDIR, PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR,
+    PI_PLUGIN_FILE, PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
 };
 use super::integrity;
 
@@ -1052,6 +1054,14 @@ fn clean_double_blanks(content: &str) -> String {
 /// Deep-merge RTK hook entry into settings.json
 /// Creates hooks.PreToolUse structure if missing, preserves existing hooks
 fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result<()> {
+    insert_hook_entry_with_matcher(root, hook_command, "Bash")
+}
+
+fn insert_hook_entry_with_matcher(
+    root: &mut serde_json::Value,
+    hook_command: &str,
+    matcher: &str,
+) -> Result<()> {
     let root_obj = match root.as_object_mut() {
         Some(obj) => obj,
         None => {
@@ -1073,7 +1083,7 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
         .context("PreToolUse value is not an array")?;
 
     pre_tool_use.push(serde_json::json!({
-        "matcher": "Bash",
+        "matcher": matcher,
         "hooks": [{
             "type": "command",
             "command": hook_command
@@ -1102,6 +1112,622 @@ fn hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
         .any(|cmd| {
             cmd == hook_command || cmd == CLAUDE_HOOK_COMMAND || cmd.contains(REWRITE_HOOK_FILE)
         })
+}
+
+const LEGACY_CODEBUDDY_HOOK_COMMAND: &str = "rtk-tx hook codebuddy";
+const LEGACY_CODEBUDDY_PLUGIN_NAME: &str = "rtk-tx";
+const LEGACY_CODEBUDDY_PLUGIN_ENABLED_KEY: &str = "rtk-tx@codebuddy-plugins-official";
+
+/// Initialize CodeBuddy settings and global App/IDE plugin artifacts.
+pub fn run_codebuddy(global: bool, patch_mode: PatchMode, ctx: InitContext) -> Result<()> {
+    let settings_path = resolve_codebuddy_settings_path(global)?;
+    let patch_result = patch_codebuddy_settings_json_with_mode(&settings_path, patch_mode, ctx)?;
+    let manual_settings_required =
+        matches!(patch_result, PatchResult::Declined | PatchResult::Skipped);
+
+    let plugin_dir = if global {
+        let codebuddy_dir = settings_path
+            .parent()
+            .context("CodeBuddy settings path has no parent directory")?;
+        let plugin_dir = codebuddy_plugin_dir(codebuddy_dir);
+        let plugin_result = install_codebuddy_plugin_at(&plugin_dir, ctx)?;
+        let enable_result = match patch_result {
+            PatchResult::Declined | PatchResult::Skipped => PatchResult::Skipped,
+            PatchResult::Patched | PatchResult::AlreadyPresent | PatchResult::WouldPatch => {
+                enable_codebuddy_plugin(&settings_path, ctx)?
+            }
+        };
+        match plugin_result {
+            PatchResult::Patched => println!("  plugin: CodeBuddy App/IDE plugin installed"),
+            PatchResult::AlreadyPresent => {
+                println!("  plugin: CodeBuddy App/IDE plugin already installed")
+            }
+            PatchResult::WouldPatch | PatchResult::Declined | PatchResult::Skipped => {}
+        }
+        match enable_result {
+            PatchResult::Patched => println!(
+                "  settings.json: plugin {} enabled",
+                CODEBUDDY_PLUGIN_ENABLED_KEY
+            ),
+            PatchResult::AlreadyPresent => println!(
+                "  settings.json: plugin {} already enabled",
+                CODEBUDDY_PLUGIN_ENABLED_KEY
+            ),
+            PatchResult::WouldPatch | PatchResult::Declined | PatchResult::Skipped => {}
+        }
+        Some(plugin_dir)
+    } else {
+        None
+    };
+
+    match patch_result {
+        PatchResult::Patched => println!("\n  settings.json: CodeBuddy hook added"),
+        PatchResult::AlreadyPresent => {
+            println!("\n  settings.json: CodeBuddy hook already present")
+        }
+        PatchResult::Skipped | PatchResult::Declined | PatchResult::WouldPatch => {}
+    }
+
+    if manual_settings_required {
+        print_codebuddy_manual_instructions(&settings_path, global);
+        return Ok(());
+    }
+
+    println!("  CodeBuddy settings: {}", settings_path.display());
+    if let Some(plugin_dir) = plugin_dir {
+        println!("  CodeBuddy plugin:   {}", plugin_dir.display());
+        if ctx.dry_run {
+            print_dry_run_footer();
+            return Ok(());
+        }
+        println!("  Restart CodeBuddy Code (CLI or App). Test with: git status\n");
+    } else {
+        if ctx.dry_run {
+            print_dry_run_footer();
+            return Ok(());
+        }
+        println!(
+            "  Restart CodeBuddy Code CLI. For App/IDE plugin setup, run: rtk init -g --agent codebuddy\n"
+        );
+    }
+
+    Ok(())
+}
+
+/// Remove CodeBuddy settings hooks and global App/IDE plugin artifacts.
+pub fn uninstall_codebuddy(global: bool, ctx: InitContext) -> Result<()> {
+    let settings_path = resolve_codebuddy_settings_path(global)?;
+    let plugin_dirs = if global {
+        let codebuddy_dir = settings_path
+            .parent()
+            .context("CodeBuddy settings path has no parent directory")?;
+        vec![
+            codebuddy_plugin_dir(codebuddy_dir),
+            codebuddy_plugin_dir_with_name(codebuddy_dir, LEGACY_CODEBUDDY_PLUGIN_NAME),
+        ]
+    } else {
+        Vec::new()
+    };
+
+    let removed = uninstall_codebuddy_at(&settings_path, &plugin_dirs, ctx)?;
+    if !removed.is_empty() {
+        let header = if ctx.dry_run {
+            "[dry-run] would uninstall RTK (CodeBuddy):"
+        } else {
+            "RTK uninstalled (CodeBuddy):"
+        };
+        println!("{}", header);
+        for item in &removed {
+            println!("  - {}", item);
+        }
+        if !ctx.dry_run {
+            println!("\nRestart CodeBuddy Code to apply changes.");
+        }
+    } else {
+        println!("RTK CodeBuddy support was not installed (nothing to remove)");
+    }
+
+    if ctx.dry_run {
+        print_dry_run_footer();
+    }
+
+    Ok(())
+}
+
+fn resolve_codebuddy_settings_path(global: bool) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("Failed to determine current working directory")?;
+    codebuddy_settings_path_from(global, dirs::home_dir(), &cwd)
+}
+
+fn codebuddy_settings_path_from(
+    global: bool,
+    home_dir: Option<PathBuf>,
+    cwd: &Path,
+) -> Result<PathBuf> {
+    let codebuddy_dir = if global {
+        home_dir
+            .map(|home| home.join(CODEBUDDY_DIR))
+            .context("Cannot determine home directory. Is $HOME set?")?
+    } else {
+        cwd.join(CODEBUDDY_DIR)
+    };
+
+    Ok(codebuddy_dir.join(SETTINGS_JSON))
+}
+
+fn codebuddy_plugin_dir(codebuddy_dir: &Path) -> PathBuf {
+    codebuddy_plugin_dir_with_name(codebuddy_dir, CODEBUDDY_PLUGIN_NAME)
+}
+
+fn codebuddy_plugin_dir_with_name(codebuddy_dir: &Path, plugin_name: &str) -> PathBuf {
+    codebuddy_dir
+        .join(PLUGIN_SUBDIR)
+        .join("marketplaces")
+        .join(CODEBUDDY_PLUGIN_MARKETPLACE)
+        .join(PLUGIN_SUBDIR)
+        .join(plugin_name)
+}
+
+fn codebuddy_manual_settings_json(enable_plugin: bool) -> String {
+    let mut root = serde_json::json!({
+        "hooks": {
+            PRE_TOOL_USE_KEY: [{
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": CODEBUDDY_HOOK_COMMAND
+                }]
+            }]
+        }
+    });
+
+    if enable_plugin {
+        root["enabledPlugins"] = serde_json::json!({
+            CODEBUDDY_PLUGIN_ENABLED_KEY: true
+        });
+    }
+
+    serde_json::to_string_pretty(&root).expect("CodeBuddy manual settings JSON is serializable")
+}
+
+fn print_codebuddy_manual_instructions(settings_path: &Path, enable_plugin: bool) {
+    println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
+    for line in codebuddy_manual_settings_json(enable_plugin).lines() {
+        println!("  {line}");
+    }
+    if enable_plugin {
+        println!(
+            "\n  The CodeBuddy App/IDE plugin files are installed, but settings.json was not patched."
+        );
+        println!("  Add the hook and enabledPlugins entry above, then restart CodeBuddy Code.");
+        println!("  Test with: git status\n");
+    } else {
+        println!("\n  Then restart CodeBuddy Code CLI. Test with: git status\n");
+    }
+}
+
+#[cfg(test)]
+fn patch_codebuddy_settings_json(path: &Path, ctx: InitContext) -> Result<PatchResult> {
+    patch_codebuddy_settings_json_with_mode(path, PatchMode::Auto, ctx)
+}
+
+fn patch_codebuddy_settings_json_with_mode(
+    path: &Path,
+    mode: PatchMode,
+    ctx: InitContext,
+) -> Result<PatchResult> {
+    let mut root = read_settings_json_or_empty(path)?;
+
+    let already_present = exact_command_hook_already_present(&root, CODEBUDDY_HOOK_COMMAND);
+    let removed_legacy = remove_exact_command_hooks(&mut root, LEGACY_CODEBUDDY_HOOK_COMMAND);
+    let deduped = dedupe_exact_command_hooks(&mut root, CODEBUDDY_HOOK_COMMAND);
+
+    if already_present && !deduped && !removed_legacy {
+        if ctx.verbose > 0 {
+            eprintln!("CodeBuddy settings.json: hook already present");
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    match mode {
+        PatchMode::Skip => return Ok(PatchResult::Skipped),
+        PatchMode::Ask => {
+            if ctx.dry_run {
+                println!("[dry-run] would prompt before patching {}", path.display());
+            } else if !prompt_user_consent(path)? {
+                return Ok(PatchResult::Declined);
+            }
+        }
+        PatchMode::Auto => {}
+    }
+
+    if !already_present {
+        insert_hook_entry_with_matcher(&mut root, CODEBUDDY_HOOK_COMMAND, "Bash")?;
+    }
+
+    let serialized = serde_json::to_string_pretty(&root)
+        .context("Failed to serialize CodeBuddy settings.json")?;
+
+    if ctx.dry_run {
+        println!(
+            "[dry-run] would patch CodeBuddy settings: {}",
+            path.display()
+        );
+        if ctx.verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(PatchResult::WouldPatch);
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    atomic_write(path, &serialized)?;
+
+    Ok(PatchResult::Patched)
+}
+
+fn install_codebuddy_plugin_at(plugin_dir: &Path, ctx: InitContext) -> Result<PatchResult> {
+    let manifest_dir = plugin_dir.join(CODEBUDDY_PLUGIN_MANIFEST_DIR);
+    let manifest_path = manifest_dir.join(CODEBUDDY_PLUGIN_MANIFEST_FILE);
+    let hooks_dir = plugin_dir.join(HOOKS_SUBDIR);
+    let hooks_path = hooks_dir.join(HOOKS_JSON);
+
+    if !ctx.dry_run {
+        fs::create_dir_all(&manifest_dir).with_context(|| {
+            format!(
+                "Failed to create CodeBuddy plugin manifest directory: {}",
+                manifest_dir.display()
+            )
+        })?;
+        fs::create_dir_all(&hooks_dir).with_context(|| {
+            format!(
+                "Failed to create CodeBuddy plugin hooks directory: {}",
+                hooks_dir.display()
+            )
+        })?;
+    }
+
+    let plugin_json = serde_json::json!({
+        "name": CODEBUDDY_PLUGIN_NAME,
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": "Token saver: rewrites Bash commands through RTK to reduce token usage",
+        "author": {
+            "name": "RTK Contributors",
+            "email": "contact@rtk-ai.app"
+        },
+        "homepage": "https://github.com/rtk-ai/rtk",
+        "license": "Apache-2.0",
+        "hooks": "./hooks/hooks.json"
+    });
+    let plugin_json_str =
+        serde_json::to_string_pretty(&plugin_json).context("Failed to serialize plugin.json")?;
+    let manifest_changed = write_if_changed(
+        &manifest_path,
+        &plugin_json_str,
+        "CodeBuddy plugin manifest",
+        ctx,
+    )?;
+
+    let hooks_json = serde_json::json!({
+        "description": "RTK PreToolUse hook - rewrites Bash commands to save tokens",
+        "hooks": {
+            PRE_TOOL_USE_KEY: [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": CODEBUDDY_HOOK_COMMAND,
+                            "timeout": 60
+                        }
+                    ]
+                }
+            ]
+        }
+    });
+    let hooks_json_str =
+        serde_json::to_string_pretty(&hooks_json).context("Failed to serialize hooks.json")?;
+    let hooks_changed =
+        write_if_changed(&hooks_path, &hooks_json_str, "CodeBuddy plugin hooks", ctx)?;
+
+    if ctx.dry_run && (manifest_changed || hooks_changed) {
+        Ok(PatchResult::WouldPatch)
+    } else if manifest_changed || hooks_changed {
+        Ok(PatchResult::Patched)
+    } else {
+        Ok(PatchResult::AlreadyPresent)
+    }
+}
+
+fn enable_codebuddy_plugin(settings_path: &Path, ctx: InitContext) -> Result<PatchResult> {
+    let mut root = read_settings_json_or_empty(settings_path)?;
+
+    let already_enabled = root
+        .get("enabledPlugins")
+        .and_then(|ep| ep.get(CODEBUDDY_PLUGIN_ENABLED_KEY))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let removed_legacy = remove_enabled_plugin_key(&mut root, LEGACY_CODEBUDDY_PLUGIN_ENABLED_KEY);
+
+    if already_enabled && !removed_legacy {
+        if ctx.verbose > 0 {
+            eprintln!(
+                "CodeBuddy plugin {} already enabled",
+                CODEBUDDY_PLUGIN_ENABLED_KEY
+            );
+        }
+        return Ok(PatchResult::AlreadyPresent);
+    }
+
+    if !already_enabled {
+        let enabled = root
+            .as_object_mut()
+            .context("settings.json root is not an object")?
+            .entry("enabledPlugins")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .context("enabledPlugins is not an object")?;
+
+        enabled.insert(
+            CODEBUDDY_PLUGIN_ENABLED_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(&root).context("Failed to serialize settings.json")?;
+
+    if ctx.dry_run {
+        println!(
+            "[dry-run] would enable CodeBuddy plugin in settings.json: {}",
+            settings_path.display()
+        );
+        if ctx.verbose > 0 {
+            println!("[dry-run] content:\n{}", serialized);
+        }
+        return Ok(PatchResult::WouldPatch);
+    }
+
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    atomic_write(settings_path, &serialized)?;
+
+    Ok(PatchResult::Patched)
+}
+
+fn uninstall_codebuddy_at(
+    settings_path: &Path,
+    plugin_dirs: &[PathBuf],
+    ctx: InitContext,
+) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+
+    if settings_path.exists() {
+        let mut root = read_settings_json_or_empty(settings_path)?;
+        let removed_hook = remove_exact_command_hooks(&mut root, CODEBUDDY_HOOK_COMMAND)
+            | remove_exact_command_hooks(&mut root, LEGACY_CODEBUDDY_HOOK_COMMAND);
+        let removed_enabled_plugin =
+            remove_enabled_plugin_key(&mut root, CODEBUDDY_PLUGIN_ENABLED_KEY)
+                | remove_enabled_plugin_key(&mut root, LEGACY_CODEBUDDY_PLUGIN_ENABLED_KEY);
+        let pruned_empty_sections = prune_empty_codebuddy_settings_sections(&mut root);
+
+        if removed_hook || removed_enabled_plugin || pruned_empty_sections {
+            let serialized = serde_json::to_string_pretty(&root)
+                .context("Failed to serialize CodeBuddy settings.json")?;
+            if ctx.dry_run {
+                println!(
+                    "[dry-run] would update CodeBuddy settings: {}",
+                    settings_path.display()
+                );
+                if ctx.verbose > 0 {
+                    println!("[dry-run] content:\n{}", serialized);
+                }
+            } else {
+                atomic_write(settings_path, &serialized)?;
+            }
+
+            if removed_hook {
+                removed.push("CodeBuddy settings.json: removed RTK hook entry".to_string());
+            }
+            if removed_enabled_plugin {
+                removed.push(format!(
+                    "CodeBuddy settings.json: disabled {}",
+                    CODEBUDDY_PLUGIN_ENABLED_KEY
+                ));
+            }
+            if pruned_empty_sections && !removed_hook && !removed_enabled_plugin {
+                removed.push("CodeBuddy settings.json: pruned empty RTK sections".to_string());
+            }
+        }
+    }
+
+    for plugin_dir in plugin_dirs {
+        if plugin_dir.exists() {
+            if ctx.dry_run {
+                println!(
+                    "[dry-run] would remove CodeBuddy plugin directory: {}",
+                    plugin_dir.display()
+                );
+            } else {
+                // nosemgrep: filesystem-deletion -- uninstall intentionally removes only RTK's CodeBuddy plugin directory.
+                fs::remove_dir_all(plugin_dir).with_context(|| {
+                    format!(
+                        "Failed to remove CodeBuddy plugin directory: {}",
+                        plugin_dir.display()
+                    )
+                })?;
+            }
+            removed.push(format!("CodeBuddy plugin: {}", plugin_dir.display()));
+        }
+    }
+
+    Ok(removed)
+}
+
+fn read_settings_json_or_empty(path: &Path) -> Result<serde_json::Value> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+
+    serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {} as JSON", path.display()))
+}
+
+fn exact_command_hook_already_present(root: &serde_json::Value, hook_command: &str) -> bool {
+    root.get("hooks")
+        .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|hook| hook.get("command")?.as_str())
+        .any(|cmd| cmd == hook_command)
+}
+
+fn remove_exact_command_hooks(root: &mut serde_json::Value, hook_command: &str) -> bool {
+    let pre_tool_use_array = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let mut changed = false;
+    let mut index = 0;
+    while index < pre_tool_use_array.len() {
+        let Some(hooks_array) = pre_tool_use_array[index]
+            .get_mut("hooks")
+            .and_then(|h| h.as_array_mut())
+        else {
+            index += 1;
+            continue;
+        };
+        let before = hooks_array.len();
+        hooks_array
+            .retain(|hook| hook.get("command").and_then(|c| c.as_str()) != Some(hook_command));
+        let removed_from_entry = hooks_array.len() != before;
+        changed |= removed_from_entry;
+        if removed_from_entry && hooks_array.is_empty() {
+            pre_tool_use_array.remove(index);
+            continue;
+        }
+        index += 1;
+    }
+
+    changed
+}
+
+fn remove_enabled_plugin_key(root: &mut serde_json::Value, key: &str) -> bool {
+    root.get_mut("enabledPlugins")
+        .and_then(|v| v.as_object_mut())
+        .and_then(|plugins| plugins.remove(key))
+        .is_some()
+}
+
+fn prune_empty_codebuddy_settings_sections(root: &mut serde_json::Value) -> bool {
+    let Some(root_obj) = root.as_object_mut() else {
+        return false;
+    };
+
+    let mut changed = false;
+    if root_obj
+        .get("enabledPlugins")
+        .and_then(|v| v.as_object())
+        .is_some_and(|plugins| plugins.is_empty())
+    {
+        root_obj.remove("enabledPlugins");
+        changed = true;
+    }
+
+    if let Some(hooks_obj) = root_obj.get_mut("hooks").and_then(|v| v.as_object_mut()) {
+        if let Some(pre_tool_use) = hooks_obj
+            .get_mut(PRE_TOOL_USE_KEY)
+            .and_then(|v| v.as_array_mut())
+        {
+            let before = pre_tool_use.len();
+            pre_tool_use.retain(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(|v| v.as_array())
+                    .is_none_or(|hooks| !hooks.is_empty())
+            });
+            changed |= pre_tool_use.len() != before;
+        }
+
+        if hooks_obj
+            .get(PRE_TOOL_USE_KEY)
+            .and_then(|v| v.as_array())
+            .is_some_and(|hooks| hooks.is_empty())
+        {
+            hooks_obj.remove(PRE_TOOL_USE_KEY);
+            changed = true;
+        }
+    }
+
+    if root_obj
+        .get("hooks")
+        .and_then(|v| v.as_object())
+        .is_some_and(|hooks| hooks.is_empty())
+    {
+        root_obj.remove("hooks");
+        changed = true;
+    }
+
+    changed
+}
+
+fn dedupe_exact_command_hooks(root: &mut serde_json::Value, hook_command: &str) -> bool {
+    let pre_tool_use_array = match root
+        .get_mut("hooks")
+        .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
+        .and_then(|p| p.as_array_mut())
+    {
+        Some(arr) => arr,
+        None => return false,
+    };
+
+    let mut seen = false;
+    let mut changed = false;
+
+    for entry in pre_tool_use_array {
+        let Some(hooks_array) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) else {
+            continue;
+        };
+
+        hooks_array.retain(|hook| {
+            let is_match = hook
+                .get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|cmd| cmd == hook_command);
+
+            if !is_match {
+                return true;
+            }
+
+            if seen {
+                changed = true;
+                false
+            } else {
+                seen = true;
+                true
+            }
+        });
+    }
+
+    changed
 }
 
 /// Default mode: hook + slim RTK.md + @RTK.md reference
@@ -4030,6 +4656,492 @@ mod tests {
         assert!(plugin_path.exists());
         fs::remove_file(&plugin_path).unwrap();
         assert!(!plugin_path.exists());
+    }
+
+    fn count_exact_command_hooks(root: &serde_json::Value, hook_command: &str) -> usize {
+        root.get("hooks")
+            .and_then(|h| h.get(PRE_TOOL_USE_KEY))
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("hooks")?.as_array())
+            .flatten()
+            .filter_map(|hook| hook.get("command")?.as_str())
+            .filter(|cmd| *cmd == hook_command)
+            .count()
+    }
+
+    #[test]
+    fn test_codebuddy_settings_path_project_and_global() {
+        let project = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+
+        let project_path =
+            codebuddy_settings_path_from(false, Some(home.path().to_path_buf()), project.path())
+                .unwrap();
+        assert_eq!(
+            project_path,
+            project.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON)
+        );
+
+        let global_path =
+            codebuddy_settings_path_from(true, Some(home.path().to_path_buf()), project.path())
+                .unwrap();
+        assert_eq!(
+            global_path,
+            home.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON)
+        );
+    }
+
+    #[test]
+    fn test_codebuddy_patch_creates_settings_only_and_preserves_local_settings() {
+        let temp = TempDir::new().unwrap();
+        let codebuddy_dir = temp.path().join(CODEBUDDY_DIR);
+        fs::create_dir_all(&codebuddy_dir).unwrap();
+
+        let settings = codebuddy_dir.join(SETTINGS_JSON);
+        let local_settings = codebuddy_dir.join(crate::hooks::constants::SETTINGS_LOCAL_JSON);
+        let local_original = r#"{"doNotTouch": true}"#;
+        fs::write(&local_settings, local_original).unwrap();
+
+        patch_codebuddy_settings_json(&settings, InitContext::default()).unwrap();
+
+        assert!(settings.exists());
+        assert_eq!(fs::read_to_string(&local_settings).unwrap(), local_original);
+        assert!(!temp.path().join(CLAUDE_DIR).join(SETTINGS_JSON).exists());
+        assert!(!temp.path().join(CLAUDE_MD).exists());
+        assert!(!temp.path().join(RTK_MD).exists());
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        let entry = &root["hooks"][PRE_TOOL_USE_KEY][0];
+        assert_eq!(entry["matcher"], "Bash");
+        assert_eq!(entry["hooks"][0]["type"], "command");
+        assert_eq!(entry["hooks"][0]["command"], CODEBUDDY_HOOK_COMMAND);
+    }
+
+    #[test]
+    fn test_codebuddy_patch_preserves_settings_and_uses_bash_matcher() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "model": "preserve-me",
+                "hooks": {
+                    "PostToolUse": [{
+                        "matcher": "Write",
+                        "hooks": [{"type": "command", "command": "after"}]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        patch_codebuddy_settings_json(&settings, InitContext::default()).unwrap();
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(root["model"], "preserve-me");
+        assert_eq!(
+            root["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+            "after"
+        );
+        let entry = &root["hooks"][PRE_TOOL_USE_KEY][0];
+        assert_eq!(entry["matcher"], "Bash");
+        assert_eq!(entry["hooks"][0]["type"], "command");
+        assert_eq!(entry["hooks"][0]["command"], CODEBUDDY_HOOK_COMMAND);
+    }
+
+    #[test]
+    fn test_codebuddy_patch_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+
+        patch_codebuddy_settings_json(&settings, InitContext::default()).unwrap();
+        patch_codebuddy_settings_json(&settings, InitContext::default()).unwrap();
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(count_exact_command_hooks(&root, CODEBUDDY_HOOK_COMMAND), 1);
+    }
+
+    #[test]
+    fn test_codebuddy_patch_migrates_legacy_rtk_tx_hook() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": LEGACY_CODEBUDDY_HOOK_COMMAND}]
+                        }
+                    ]
+                },
+                "model": "preserve-me"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        patch_codebuddy_settings_json(&settings, InitContext::default()).unwrap();
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(root["model"], "preserve-me");
+        assert_eq!(
+            count_exact_command_hooks(&root, LEGACY_CODEBUDDY_HOOK_COMMAND),
+            0
+        );
+        assert_eq!(count_exact_command_hooks(&root, CODEBUDDY_HOOK_COMMAND), 1);
+    }
+
+    #[test]
+    fn test_codebuddy_patch_existing_settings_does_not_create_backup() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, r#"{"env":{"KEEP":"yes"}}"#).unwrap();
+
+        patch_codebuddy_settings_json(&settings, InitContext::default()).unwrap();
+
+        assert!(settings.exists());
+        assert!(
+            !settings.with_extension("json.bak").exists(),
+            "CodeBuddy init must not create settings.json.bak"
+        );
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(root["env"]["KEEP"], "yes");
+        assert_eq!(count_exact_command_hooks(&root, CODEBUDDY_HOOK_COMMAND), 1);
+    }
+
+    #[test]
+    fn test_codebuddy_patch_malformed_json_preserves_original_bytes() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let original = b"{ malformed json\n";
+        fs::write(&settings, original).unwrap();
+
+        let err = patch_codebuddy_settings_json(&settings, InitContext::default()).unwrap_err();
+        assert!(err.to_string().contains("Failed to parse"));
+        assert_eq!(fs::read(&settings).unwrap(), original);
+    }
+
+    #[test]
+    fn test_codebuddy_patch_dedupes_codebuddy_only() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": CODEBUDDY_HOOK_COMMAND}]
+                        },
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": CODEBUDDY_HOOK_COMMAND}]
+                        },
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": CLAUDE_HOOK_COMMAND}]
+                        },
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "/tmp/rtk-rewrite.sh"}]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        patch_codebuddy_settings_json(&settings, InitContext::default()).unwrap();
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(count_exact_command_hooks(&root, CODEBUDDY_HOOK_COMMAND), 1);
+        assert_eq!(count_exact_command_hooks(&root, CLAUDE_HOOK_COMMAND), 1);
+        assert_eq!(count_exact_command_hooks(&root, "/tmp/rtk-rewrite.sh"), 1);
+    }
+
+    #[test]
+    fn test_codebuddy_patch_no_patch_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+
+        let result = patch_codebuddy_settings_json_with_mode(
+            &settings,
+            PatchMode::Skip,
+            InitContext::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result, PatchResult::Skipped);
+        assert!(!settings.exists());
+    }
+
+    #[test]
+    fn test_codebuddy_patch_ask_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        let ctx = InitContext {
+            dry_run: true,
+            ..InitContext::default()
+        };
+
+        let result =
+            patch_codebuddy_settings_json_with_mode(&settings, PatchMode::Ask, ctx).unwrap();
+
+        assert_eq!(result, PatchResult::WouldPatch);
+        assert!(!settings.exists());
+    }
+
+    #[test]
+    fn test_codebuddy_plugin_install_writes_manifest_and_hooks() {
+        let temp = TempDir::new().unwrap();
+        let plugin_dir = temp.path().join(CODEBUDDY_PLUGIN_NAME);
+
+        let result = install_codebuddy_plugin_at(&plugin_dir, InitContext::default()).unwrap();
+        assert_eq!(result, PatchResult::Patched);
+
+        let manifest_path = plugin_dir
+            .join(CODEBUDDY_PLUGIN_MANIFEST_DIR)
+            .join(CODEBUDDY_PLUGIN_MANIFEST_FILE);
+        let hooks_path = plugin_dir.join(HOOKS_SUBDIR).join(HOOKS_JSON);
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["name"], CODEBUDDY_PLUGIN_NAME);
+        assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest["homepage"], "https://github.com/rtk-ai/rtk");
+        assert_eq!(manifest["license"], "Apache-2.0");
+        assert_eq!(manifest["hooks"], "./hooks/hooks.json");
+
+        let hooks: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        assert_eq!(hooks["hooks"][PRE_TOOL_USE_KEY][0]["matcher"], "Bash");
+        assert_eq!(
+            hooks["hooks"][PRE_TOOL_USE_KEY][0]["hooks"][0]["command"],
+            CODEBUDDY_HOOK_COMMAND
+        );
+        assert_eq!(
+            hooks["hooks"][PRE_TOOL_USE_KEY][0]["hooks"][0]["timeout"],
+            60
+        );
+
+        let result = install_codebuddy_plugin_at(&plugin_dir, InitContext::default()).unwrap();
+        assert_eq!(result, PatchResult::AlreadyPresent);
+    }
+
+    #[test]
+    fn test_codebuddy_plugin_enable_preserves_settings() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "enabledPlugins": {
+                    "docx@codebuddy-plugins-official": true
+                },
+                "model": "preserve-me"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = enable_codebuddy_plugin(&settings, InitContext::default()).unwrap();
+        assert_eq!(result, PatchResult::Patched);
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(root["model"], "preserve-me");
+        assert_eq!(
+            root["enabledPlugins"]["docx@codebuddy-plugins-official"],
+            true
+        );
+        assert_eq!(root["enabledPlugins"][CODEBUDDY_PLUGIN_ENABLED_KEY], true);
+    }
+
+    #[test]
+    fn test_codebuddy_plugin_enable_migrates_legacy_rtk_tx_plugin_key() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "enabledPlugins": {
+                    LEGACY_CODEBUDDY_PLUGIN_ENABLED_KEY: true,
+                    "docx@codebuddy-plugins-official": true
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = enable_codebuddy_plugin(&settings, InitContext::default()).unwrap();
+        assert_eq!(result, PatchResult::Patched);
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(root["enabledPlugins"]
+            .get(LEGACY_CODEBUDDY_PLUGIN_ENABLED_KEY)
+            .is_none());
+        assert_eq!(root["enabledPlugins"][CODEBUDDY_PLUGIN_ENABLED_KEY], true);
+        assert_eq!(
+            root["enabledPlugins"]["docx@codebuddy-plugins-official"],
+            true
+        );
+    }
+
+    #[test]
+    fn test_codebuddy_manual_settings_json_includes_plugin_enable_for_global() {
+        let manual = codebuddy_manual_settings_json(true);
+        let root: serde_json::Value = serde_json::from_str(&manual).unwrap();
+
+        assert_eq!(
+            root["hooks"][PRE_TOOL_USE_KEY][0]["hooks"][0]["command"],
+            CODEBUDDY_HOOK_COMMAND
+        );
+        assert_eq!(root["enabledPlugins"][CODEBUDDY_PLUGIN_ENABLED_KEY], true);
+    }
+
+    #[test]
+    fn test_codebuddy_manual_settings_json_omits_plugin_enable_for_project() {
+        let manual = codebuddy_manual_settings_json(false);
+        let root: serde_json::Value = serde_json::from_str(&manual).unwrap();
+
+        assert_eq!(
+            root["hooks"][PRE_TOOL_USE_KEY][0]["hooks"][0]["command"],
+            CODEBUDDY_HOOK_COMMAND
+        );
+        assert!(root.get("enabledPlugins").is_none());
+    }
+
+    #[test]
+    fn test_codebuddy_uninstall_removes_hook_plugin_and_enabled_plugin() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        let plugin_dir = temp.path().join("plugins").join(CODEBUDDY_PLUGIN_NAME);
+        let legacy_plugin_dir = temp
+            .path()
+            .join("plugins")
+            .join(LEGACY_CODEBUDDY_PLUGIN_NAME);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::create_dir_all(&legacy_plugin_dir).unwrap();
+        fs::write(plugin_dir.join("marker"), "plugin").unwrap();
+        fs::write(legacy_plugin_dir.join("marker"), "legacy plugin").unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "enabledPlugins": {
+                    CODEBUDDY_PLUGIN_ENABLED_KEY: true,
+                    LEGACY_CODEBUDDY_PLUGIN_ENABLED_KEY: true,
+                    "docx@codebuddy-plugins-official": true
+                },
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": CODEBUDDY_HOOK_COMMAND}]
+                        },
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": LEGACY_CODEBUDDY_HOOK_COMMAND}]
+                        },
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "other-tool hook"}]
+                        }
+                    ]
+                },
+                "model": "preserve-me"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let removed = uninstall_codebuddy_at(
+            &settings,
+            &[plugin_dir.clone(), legacy_plugin_dir.clone()],
+            InitContext::default(),
+        )
+        .unwrap();
+
+        assert_eq!(removed.len(), 4);
+        assert!(!plugin_dir.exists());
+        assert!(!legacy_plugin_dir.exists());
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(root["model"], "preserve-me");
+        assert_eq!(
+            root["enabledPlugins"]["docx@codebuddy-plugins-official"],
+            true
+        );
+        assert!(root["enabledPlugins"]
+            .get(CODEBUDDY_PLUGIN_ENABLED_KEY)
+            .is_none());
+        assert!(root["enabledPlugins"]
+            .get(LEGACY_CODEBUDDY_PLUGIN_ENABLED_KEY)
+            .is_none());
+        assert_eq!(count_exact_command_hooks(&root, CODEBUDDY_HOOK_COMMAND), 0);
+        assert_eq!(
+            count_exact_command_hooks(&root, LEGACY_CODEBUDDY_HOOK_COMMAND),
+            0
+        );
+        assert_eq!(count_exact_command_hooks(&root, "other-tool hook"), 1);
+    }
+
+    #[test]
+    fn test_codebuddy_uninstall_prunes_empty_settings_sections() {
+        let temp = TempDir::new().unwrap();
+        let settings = temp.path().join(CODEBUDDY_DIR).join(SETTINGS_JSON);
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "enabledPlugins": {
+                    CODEBUDDY_PLUGIN_ENABLED_KEY: true
+                },
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": []
+                        },
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": CODEBUDDY_HOOK_COMMAND}]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let removed = uninstall_codebuddy_at(&settings, &[], InitContext::default()).unwrap();
+        assert_eq!(removed.len(), 2);
+
+        let root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(root.get("hooks").is_none());
+        assert!(root.get("enabledPlugins").is_none());
     }
 
     #[test]

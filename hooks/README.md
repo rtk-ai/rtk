@@ -4,7 +4,7 @@
 
 **Deployed hook artifacts** — the actual files installed on user machines by `rtk init`. These are shell scripts, TypeScript plugins, and rules files that run outside the Rust binary. They are **thin delegates**: parse agent-specific JSON, call `rtk rewrite` as a subprocess, format agent-specific response. Zero filtering logic lives here.
 
-Owns: per-agent hook scripts and configuration files for 9 supported agents (Claude Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi).
+Owns: per-agent hook scripts and configuration files for supported agents (Claude Code, CodeBuddy Code, Copilot, Cursor, Cline, Windsurf, Codex, OpenCode, Hermes, Pi).
 
 Does **not** own: hook installation/uninstallation (that's `src/hooks/init.rs`), the rewrite pattern registry (that's `discover/registry`), or integrity verification (that's `src/hooks/integrity.rs`).
 
@@ -48,6 +48,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | Agent | Mechanism | Hook Type | Can Modify Command? |
 |-------|-----------|-----------|---------------------|
 | Claude Code | Shell hook (`PreToolUse`) | Transparent rewrite | Yes (`updatedInput`) |
+| CodeBuddy Code | Rust binary (`rtk hook codebuddy`) | Transparent rewrite | Yes (`updatedInput`, `modifiedInput`) |
 | VS Code Copilot Chat | Rust binary (`rtk hook copilot`) | Transparent rewrite | Yes (`updatedInput`) |
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Transparent rewrite | Yes (`updated_input`) |
@@ -81,6 +82,29 @@ Each agent subdirectory has its own README with hook-specific details:
     "permissionDecision": "allow",
     "permissionDecisionReason": "RTK auto-rewrite",
     "updatedInput": { "command": "rtk git status" }
+  }
+}
+```
+
+### CodeBuddy Code (Rust Binary)
+
+CodeBuddy uses a Claude-compatible `PreToolUse` payload and RTK responds with both `updatedInput` and `modifiedInput` for compatibility with CodeBuddy's CLI and App/IDE plugin paths. Project installs write `.codebuddy/settings.json`; global installs also write and enable the CodeBuddy marketplace plugin under `~/.codebuddy/plugins/marketplaces/codebuddy-plugins-official/plugins/rtk/`.
+
+**Command**:
+
+```bash
+rtk hook codebuddy
+```
+
+**Output** (stdout, when rewritten):
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecisionReason": "RTK auto-rewrite",
+    "updatedInput": { "command": "rtk git status" },
+    "modifiedInput": { "command": "rtk git status" }
   }
 }
 ```
