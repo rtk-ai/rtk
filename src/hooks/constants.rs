@@ -32,6 +32,7 @@ pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 pub const ANTIGRAVITY_DIR: &str = ".agents";
 
 /// Config subdirectory for the Antigravity CLI (agy) under ~/.gemini/
+#[allow(dead_code)]
 pub const AGY_CLI_SUBDIR: &str = "antigravity-cli";
 
 pub const HERMES_DIR: &str = ".hermes";

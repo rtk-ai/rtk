@@ -637,10 +637,11 @@ fn process_agy_simple(v: &Value, tool_name: &str) -> PayloadAction {
         }
     };
 
+    // agy PreToolHookResult: use "overwrite" to replace the tool call.
     let output = json!({
-        "decision": "allow",
-        "hookSpecificOutput": {
-            "tool_input": { field: rewritten.clone() }
+        "overwrite": {
+            "name": tool_name,
+            "args": { field: rewritten.clone() }
         }
     });
 
@@ -705,9 +706,14 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
         args
     };
 
+    // agy PreToolHookResult: use "overwrite" (HookToolCall) to replace the call.
+    // Mirror the tool name and all args so extra fields (Cwd, WaitMsBeforeAsync, …)
+    // are preserved.
     let output = json!({
-        "decision": "allow",
-        "toolCall": { "args": updated_args }
+        "overwrite": {
+            "name": tool_name,
+            "args": updated_args
+        }
     });
 
     PayloadAction::Rewrite {
@@ -1247,22 +1253,16 @@ mod tests {
     fn test_agy_simple_bash_rewrite() {
         let out = run_antigravity_inner(&agy_simple_bash("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["decision"], "allow");
-        assert_eq!(
-            v["hookSpecificOutput"]["tool_input"]["command"],
-            "rtk git status"
-        );
+        assert_eq!(v["overwrite"]["name"], "Bash");
+        assert_eq!(v["overwrite"]["args"]["command"], "rtk git status");
     }
 
     #[test]
     fn test_agy_simple_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_simple_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["decision"], "allow");
-        assert_eq!(
-            v["hookSpecificOutput"]["tool_input"]["CommandLine"],
-            "rtk git status"
-        );
+        assert_eq!(v["overwrite"]["name"], "run_command");
+        assert_eq!(v["overwrite"]["args"]["CommandLine"], "rtk git status");
     }
 
     #[test]
@@ -1291,16 +1291,16 @@ mod tests {
     fn test_agy_rich_run_command_rewrite() {
         let out = run_antigravity_inner(&agy_rich_run_command("git status")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["decision"], "allow");
-        assert_eq!(v["toolCall"]["args"]["CommandLine"], "rtk git status");
+        assert_eq!(v["overwrite"]["name"], "run_command");
+        assert_eq!(v["overwrite"]["args"]["CommandLine"], "rtk git status");
     }
 
     #[test]
     fn test_agy_rich_bash_rewrite() {
         let out = run_antigravity_inner(&agy_rich_bash("cargo test")).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["decision"], "allow");
-        assert_eq!(v["toolCall"]["args"]["command"], "rtk cargo test");
+        assert_eq!(v["overwrite"]["name"], "Bash");
+        assert_eq!(v["overwrite"]["args"]["command"], "rtk cargo test");
     }
 
     #[test]
@@ -1314,9 +1314,10 @@ mod tests {
         .to_string();
         let out = run_antigravity_inner(&input).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["toolCall"]["args"]["Cwd"], "/tmp");
-        assert_eq!(v["toolCall"]["args"]["WaitMsBeforeAsync"], 2000);
-        assert_eq!(v["toolCall"]["args"]["CommandLine"], "rtk git status");
+        assert_eq!(v["overwrite"]["name"], "run_command");
+        assert_eq!(v["overwrite"]["args"]["Cwd"], "/tmp");
+        assert_eq!(v["overwrite"]["args"]["WaitMsBeforeAsync"], 2000);
+        assert_eq!(v["overwrite"]["args"]["CommandLine"], "rtk git status");
     }
 
     #[test]
