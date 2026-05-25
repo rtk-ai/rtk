@@ -837,6 +837,18 @@ fn rewrite_segment_inner(
         }
     }
 
+    // #664: RTK `find` supports only a small subset of native `find` semantics.
+    // Outside that subset, `rtk find` either errors loudly (-not/-exec/-delete)
+    // or silently returns wrong results (multiple start paths, duplicate
+    // predicates, -mindepth/-path, -type l, ...). Default-deny: only rewrite
+    // invocations that fit RTK's compact-find grammar. Otherwise let native
+    // `find` run unchanged. This is a hook-layer transparency guard, not a
+    // safety sandbox — destructive actions the user typed (-exec rm, -delete)
+    // still execute via native find.
+    if rule.rtk_cmd == "rtk find" && !is_supported_simple_find(cmd_part) {
+        return None;
+    }
+
     // Try each rewrite prefix (longest first) with word-boundary check
     for &prefix in rule.rewrite_prefixes {
         if let Some(rest) = strip_word_prefix(cmd_part, prefix) {
@@ -850,6 +862,177 @@ fn rewrite_segment_inner(
     }
 
     None
+}
+
+fn contains_glob_metachar(s: &str) -> bool {
+    s.contains('*') || s.contains('?') || s.contains('[')
+}
+
+// #664: RTK `find` only reproduces a narrow slice of native `find` semantics.
+// Outside that slice it either errors loudly (-not/-exec/-delete/...) or
+// silently returns wrong output (multiple start paths, duplicate predicates,
+// -mindepth/-path, -type l, -maxdepth alone, file/missing start paths, ...).
+// See `find_cmd::parse_native_find_args` for the divergences this guard
+// prevents and the plan in PR #664-fix for the full taxonomy.
+fn is_supported_simple_find(cmd_part: &str) -> bool {
+    use crate::discover::lexer::shell_split;
+
+    let Some(rest) = strip_word_prefix(cmd_part, "find") else {
+        return false;
+    };
+    let args = shell_split(rest);
+    if args.is_empty() {
+        return false;
+    }
+
+    // Disambiguate by glob in args[0]:
+    //   glob → Shape B (RTK alias `find PATTERN [PATH] [-m N] [-t f|d]`)
+    //   else → Shape A (native simple `find [PATH] (FLAG VALUE)+`)
+    if contains_glob_metachar(&args[0]) {
+        is_supported_rtk_alias(&args)
+    } else {
+        is_supported_native_simple(&args)
+    }
+}
+
+fn is_supported_native_simple(args: &[String]) -> bool {
+    use std::path::Path;
+
+    let mut i = 0;
+
+    // Optional single start path (non-flag, non-grouping).
+    // Must be an existing directory at rewrite time — file roots, missing
+    // paths, and unexpanded `~`/`$VAR` are declined to prevent silent-wrong
+    // outputs (rtk strips the file root to empty; missing path → "0 for ...").
+    if !args[i].starts_with('-') {
+        if matches!(args[i].as_str(), "!" | "(" | ")") {
+            return false;
+        }
+        if !Path::new(&args[i]).is_dir() {
+            return false;
+        }
+        i += 1;
+    }
+
+    let mut seen_name_or_iname = false;
+    let mut seen_type = false;
+    let mut seen_maxdepth = false;
+    // -name/-iname/-type only. -maxdepth alone is NOT a selector because
+    // FindArgs::default() pins file_type="f" — rtk would drop directories
+    // while native `find . -maxdepth 2` returns files AND directories.
+    let mut seen_selector = false;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "-name" | "-iname" => {
+                if seen_name_or_iname {
+                    return false;
+                }
+                let Some(v) = args.get(i + 1) else {
+                    return false;
+                };
+                if v.starts_with('-') {
+                    return false;
+                }
+                seen_name_or_iname = true;
+                seen_selector = true;
+                i += 2;
+            }
+            "-type" => {
+                if seen_type {
+                    return false;
+                }
+                let Some(v) = args.get(i + 1) else {
+                    return false;
+                };
+                if !matches!(v.as_str(), "f" | "d") {
+                    return false;
+                }
+                seen_type = true;
+                seen_selector = true;
+                i += 2;
+            }
+            "-maxdepth" => {
+                if seen_maxdepth {
+                    return false;
+                }
+                let Some(v) = args.get(i + 1) else {
+                    return false;
+                };
+                match v.parse::<usize>() {
+                    // Native `-maxdepth 0` prints the start path; rtk strips
+                    // the search-root prefix to empty and skips it → "0 for *".
+                    Ok(0) => return false,
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+                seen_maxdepth = true;
+                i += 2;
+            }
+            // Anything else (-not/-exec/-delete/-path/-mindepth/-printf/-ls,
+            // future flags, extra positional args, `!`/`(`/`)`, `-o`/`-a`)
+            // disqualifies.
+            _ => return false,
+        }
+    }
+
+    seen_selector
+}
+
+fn is_supported_rtk_alias(args: &[String]) -> bool {
+    use std::path::Path;
+
+    // args[0] is a glob pattern (checked by caller).
+    let mut i = 1;
+
+    // Optional second positional path: must be non-glob, non-grouping, and
+    // resolve to an existing directory (same is_dir guard as Shape A).
+    if i < args.len() && !args[i].starts_with('-') {
+        if matches!(args[i].as_str(), "!" | "(" | ")") || contains_glob_metachar(&args[i]) {
+            return false;
+        }
+        if !Path::new(&args[i]).is_dir() {
+            return false;
+        }
+        i += 1;
+    }
+
+    let mut seen_max = false;
+    let mut seen_type = false;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "-m" | "--max" => {
+                if seen_max {
+                    return false;
+                }
+                let Some(v) = args.get(i + 1) else {
+                    return false;
+                };
+                if v.parse::<usize>().is_err() {
+                    return false;
+                }
+                seen_max = true;
+                i += 2;
+            }
+            "-t" | "--file-type" => {
+                if seen_type {
+                    return false;
+                }
+                let Some(v) = args.get(i + 1) else {
+                    return false;
+                };
+                if !matches!(v.as_str(), "f" | "d") {
+                    return false;
+                }
+                seen_type = true;
+                i += 2;
+            }
+            _ => return false,
+        }
+    }
+
+    true
 }
 
 /// Strip a command prefix with word-boundary check.
@@ -3186,6 +3369,292 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs' -type f", &[]),
             Some("rtk find . -name '*.rs' -type f".into())
+        );
+    }
+
+    // --- #664: rewrite-layer guard for non-compact find invocations ---
+    //
+    // Default-deny: only rewrite when the invocation fits one of two strict
+    // shapes that match RTK's existing compact-find semantics exactly.
+    // See `is_supported_simple_find` in this file for the grammar.
+
+    // Supported shapes (must still rewrite).
+
+    #[test]
+    fn rewrite_find_keeps_native_simple_name() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
+            Some("rtk find . -name '*.rs'".into())
+        );
+    }
+
+    #[test]
+    fn rewrite_find_keeps_native_type_and_maxdepth() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find src -type f -maxdepth 2 -name '*.rs'", &[]),
+            Some("rtk find src -type f -maxdepth 2 -name '*.rs'".into())
+        );
+    }
+
+    #[test]
+    fn rewrite_find_keeps_rtk_alias_glob_path_max() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find '*.rs' src -m 5", &[]),
+            Some("rtk find '*.rs' src -m 5".into())
+        );
+    }
+
+    #[test]
+    fn rewrite_find_keeps_iname_alone() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -iname '*.RS'", &[]),
+            Some("rtk find . -iname '*.RS'".into())
+        );
+    }
+
+    #[test]
+    fn rewrite_find_keeps_no_explicit_path() {
+        // `find -name '*.rs'` with no path — both native and rtk default to cwd.
+        assert_eq!(
+            rewrite_command_no_prefixes("find -name '*.rs'", &[]),
+            Some("rtk find -name '*.rs'".into())
+        );
+    }
+
+    // Loud-fail set: rtk find errors out, breaking `&&` chains.
+
+    #[test]
+    fn rewrite_find_skips_exec() {
+        // #664 reproduction case.
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -type f -exec ls -lh {} \\;", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_not() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.md' -not -path './node_modules/*'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_delete() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.tmp' -delete", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_or_predicate() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' -o -name '*.md'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_bang_predicate() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . ! -name '*.test.rs'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_paren_grouping() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . \\( -name '*.rs' -o -name '*.md' \\)", &[]),
+            None
+        );
+    }
+
+    // Silent-fail set: rtk find returns wrong results with exit 0.
+
+    #[test]
+    fn rewrite_find_skips_mindepth() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -mindepth 2 -name '*.rs'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_path_predicate() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -path '*/src/*' -name '*.rs'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_printf_action() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' -printf '%p\\n'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_multiple_start_paths() {
+        // rtk find silently drops 'tests', returns only matches under 'src'.
+        assert_eq!(
+            rewrite_command_no_prefixes("find src tests -name '*.rs'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_extra_bare_arg_after_expression() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name foo bar", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_bare_path_only() {
+        // `find src` natively = "all under src/"; rtk parser would treat
+        // 'src' as PATTERN. Decline because no selector predicate present.
+        assert_eq!(rewrite_command_no_prefixes("find src", &[]), None);
+    }
+
+    #[test]
+    fn rewrite_find_skips_bare_dot_only() {
+        // Same ambiguity — decline.
+        assert_eq!(rewrite_command_no_prefixes("find .", &[]), None);
+    }
+
+    #[test]
+    fn rewrite_find_skips_duplicate_name_predicates() {
+        // Native: implicit AND (impossible match). RTK: last wins ('*.md' only).
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' -name '*.md'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_name_and_iname_combo() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*.rs' -iname '*.MD'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_duplicate_type() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -type f -type d", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_unsupported_type_value_l() {
+        // -type l (symlink) — RTK only distinguishes "d" vs everything else,
+        // so it returns files + symlinks indiscriminately. Decline.
+        assert_eq!(rewrite_command_no_prefixes("find . -type l", &[]), None);
+    }
+
+    #[test]
+    fn rewrite_find_skips_type_with_compound_value() {
+        // GNU find allows `-type f,d` (comma-list). RTK has no equivalent.
+        assert_eq!(rewrite_command_no_prefixes("find . -type f,d", &[]), None);
+    }
+
+    #[test]
+    fn rewrite_find_skips_maxdepth_only() {
+        // FindArgs::default() pins file_type="f" → rtk drops dirs while native
+        // returns files AND directories. `-maxdepth` alone is not a selector.
+        assert_eq!(rewrite_command_no_prefixes("find . -maxdepth 2", &[]), None);
+    }
+
+    #[test]
+    fn rewrite_find_skips_maxdepth_zero() {
+        // Native prints the start path; rtk strips it to empty and skips.
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -maxdepth 0 -name foo", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_file_start_path() {
+        // `find Cargo.toml -type f` — file root gets stripped to empty in rtk;
+        // native prints it. Cargo.toml exists at the crate root during tests.
+        assert_eq!(
+            rewrite_command_no_prefixes("find Cargo.toml -type f", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_missing_start_path() {
+        // Native errors non-zero; rtk returns "0 for ..." with success.
+        assert_eq!(
+            rewrite_command_no_prefixes("find /this/does/not/exist/rtk-test -name '*.rs'", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn rewrite_find_skips_unexpanded_tilde() {
+        // Shell hasn't expanded `~` at hook time. Path::new("~").is_dir()
+        // is false → decline. Native runs after shell expands → correct via
+        // passthrough.
+        assert_eq!(
+            rewrite_command_no_prefixes("find ~ -name '*.rs'", &[]),
+            None
+        );
+    }
+
+    // Quoting + edge cases.
+
+    #[test]
+    fn rewrite_find_quoted_dash_in_pattern_is_not_a_flag() {
+        // Quoted glob containing a dash must not be misread as an unknown flag.
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -name '*-not-a-flag*'", &[]),
+            Some("rtk find . -name '*-not-a-flag*'".into())
+        );
+    }
+
+    #[test]
+    fn rewrite_find_dangling_flag_value_skips() {
+        assert_eq!(rewrite_command_no_prefixes("find . -name", &[]), None);
+    }
+
+    #[test]
+    fn rewrite_find_skips_maxdepth_non_integer() {
+        assert_eq!(
+            rewrite_command_no_prefixes("find . -maxdepth abc -name '*.rs'", &[]),
+            None
+        );
+    }
+
+    // Compound command — other segments must still rewrite even when find
+    // segment is declined.
+
+    #[test]
+    fn rewrite_find_unsupported_in_compound_leaves_segment_raw_but_rewrites_others() {
+        let out =
+            rewrite_command_no_prefixes("find . -type f -exec ls -lh {} \\; && git status", &[]);
+        assert!(
+            out.is_some(),
+            "compound rewrite should still produce output if any segment changed"
+        );
+        let s = out.unwrap();
+        assert!(
+            s.contains("find . -type f -exec ls -lh {} \\;"),
+            "find segment must be raw; got: {s}"
+        );
+        assert!(
+            s.contains("rtk git status"),
+            "git status segment must be rewritten; got: {s}"
         );
     }
 
