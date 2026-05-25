@@ -726,12 +726,15 @@ fn process_agy_rich(v: &Value, tool_name: &str) -> PayloadAction {
 /// Run the Google Antigravity (agy) CLI PreToolUse hook.
 ///
 /// Reads a JSON payload from stdin, rewrites shell commands through RTK,
-/// and outputs the modified tool call.  Non-shell tools and commands that
-/// don't match any RTK filter produce no output so the tool runs unchanged.
+/// and outputs the result as a PreToolHookResult protojson.
+///
+/// IMPORTANT: agy interprets empty stdout as "deny" — always output at
+/// least `{}` (allow, no modification) so non-shell tools are not blocked.
 pub fn run_antigravity() -> Result<()> {
     let input = read_stdin_limited()?;
     let input = input.trim();
     if input.is_empty() {
+        // No payload — nothing to process, nothing to allow.
         return Ok(());
     }
 
@@ -739,6 +742,8 @@ pub fn run_antigravity() -> Result<()> {
         Ok(v) => v,
         Err(e) => {
             let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            // Still output allow so a parse error doesn't block the tool.
+            let _ = writeln!(io::stdout(), "{{}}");
             return Ok(());
         }
     };
@@ -754,10 +759,12 @@ pub fn run_antigravity() -> Result<()> {
         }
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
-            // No stdout output — the Antigravity CLI runs the tool unchanged.
+            // No rewrite needed — allow unchanged.
+            let _ = writeln!(io::stdout(), "{{}}");
         }
         PayloadAction::Ignore => {
-            // Non-shell tool — no output, let it pass through natively.
+            // Non-shell tool — allow unchanged.
+            let _ = writeln!(io::stdout(), "{{}}");
         }
     }
 
