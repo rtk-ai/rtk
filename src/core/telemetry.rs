@@ -353,10 +353,13 @@ fn detect_hook_type() -> String {
         None => return "unknown".to_string(),
     };
 
+    let claude_dir =
+        crate::hooks::init::resolve_claude_dir().unwrap_or_else(|_| home.join(".claude"));
+
     // Check in order of popularity
     let checks = [
-        (home.join(".claude/hooks/rtk-rewrite.sh"), "claude"),
-        (home.join(".claude/hooks/rtk-rewrite.json"), "claude"),
+        (claude_dir.join("hooks/rtk-rewrite.sh"), "claude"),
+        (claude_dir.join("hooks/rtk-rewrite.json"), "claude"),
         (home.join(".gemini/hooks/rtk-hook.sh"), "gemini"),
         (home.join(".codex/AGENTS.md"), "codex"),
         (home.join(".cursor/hooks/rtk-rewrite.json"), "cursor"),
