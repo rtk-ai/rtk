@@ -33,7 +33,10 @@ pub fn run(
     // Without this, rg returns 0 matches for files in .gitignore, causing
     // false negatives that make AI agents draw wrong conclusions.
     // Using --no-ignore-vcs (not --no-ignore) so .ignore/.rgignore are still respected.
-    rg_cmd.args(["-n", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
+    // -H: always emit the filename.
+    // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
+    // content containing `:digits:` patterns (issue #1436).
+    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs", &rg_pattern, path]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -50,8 +53,8 @@ pub fn run(
     let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
-            //When we fall back to grep,include all args, not just -rn.
-            grep_cmd.args(["-rn", pattern, path]).args(extra_args);
+            // When we fall back to grep, include all args, not just -rnHZ.
+            grep_cmd.args(["-rnHZ", pattern, path]).args(extra_args);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
@@ -108,18 +111,9 @@ pub fn run(
 
     let mut by_file: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for line in result.stdout.lines() {
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-
-        let (file, line_num, content) = if parts.len() == 3 {
-            let ln = parts[1].parse().unwrap_or(0);
-            (parts[0].to_string(), ln, parts[2])
-        } else if parts.len() == 2 {
-            let ln = parts[0].parse().unwrap_or(0);
-            (path.to_string(), ln, parts[1])
-        } else {
+        let Some((file, line_num, content)) = parse_match_line(line) else {
             continue;
         };
-
         let cleaned = clean_line(content, max_line_len, context_re.as_ref(), pattern);
         by_file.entry(file).or_default().push((line_num, cleaned));
     }
@@ -164,6 +158,28 @@ pub fn run(
     );
 
     Ok(exit_code)
+}
+
+/// Parses a single rg/grep match line of the form `file\0line_number:content`.
+///
+/// Requires the underlying command to be invoked with `-0` (rg) or `-Z` (grep)
+/// so the filename is NUL-separated from `line:content`. NUL cannot appear in
+/// file paths, so the parser is unambiguous regardless of:
+///   - content with `:` or `::` (e.g. `ClassRegistry::init(...)`, issue #1436);
+///   - paths with embedded `:` (Windows drive letters, weird filenames like
+///     `badly_named:52:file.txt`).
+///
+/// Returns `None` for lines that do not match the expected shape (e.g. rg
+/// `-A`/`-B` context lines that use `-` as separator).
+fn parse_match_line(line: &str) -> Option<(String, usize, &str)> {
+    lazy_static::lazy_static! {
+        static ref MATCH_LINE_RE: Regex = Regex::new(r"^([^\x00]+)\x00(\d+):(.*)$").unwrap();
+    }
+    MATCH_LINE_RE.captures(line).and_then(|caps| {
+        let (_, [file, line_num, content]) = caps.extract();
+        let line_num: usize = line_num.parse().ok()?;
+        Some((file.to_string(), line_num, content))
+    })
 }
 
 fn has_format_flag(extra_args: &[String]) -> bool {
@@ -389,6 +405,87 @@ mod tests {
             );
         }
         // If rg is not installed, skip gracefully (test still passes)
+    }
+
+    // --- issue #1436: parse_match_line robustness ---
+    // Input shape is `file\0line:content` (rg --null / grep -Z).
+
+    #[test]
+    fn test_parse_match_line_simple() {
+        let line = "file.php\x0010:use Foo\\Bar;";
+        let (file, line_num, content) = parse_match_line(line).unwrap();
+        assert_eq!(file, "file.php");
+        assert_eq!(line_num, 10);
+        assert_eq!(content, "use Foo\\Bar;");
+    }
+
+    // Issue #1436 reproducer: content with `::` must not split into a phantom
+    // file bucket. With NUL separation between file and line:content, content
+    // colons are irrelevant to the parser.
+    #[test]
+    fn test_parse_match_line_content_with_double_colon() {
+        let line = "externalImportShell.class.php\x0081:        $this->queueProcessModel = ClassRegistry::init('Collections.QueueProcess');";
+        let (file, line_num, content) = parse_match_line(line).unwrap();
+        assert_eq!(file, "externalImportShell.class.php");
+        assert_eq!(line_num, 81);
+        assert_eq!(
+            content,
+            "        $this->queueProcessModel = ClassRegistry::init('Collections.QueueProcess');"
+        );
+    }
+
+    // Windows abs-path safety: drive letter + backslashes must not break the
+    // parser. The NUL separator makes the file portion unambiguous.
+    #[test]
+    fn test_parse_match_line_windows_path() {
+        let line = "C:\\src\\file.rs\x0042:fn main() {}";
+        let (file, line_num, content) = parse_match_line(line).unwrap();
+        assert_eq!(file, r"C:\src\file.rs");
+        assert_eq!(line_num, 42);
+        assert_eq!(content, "fn main() {}");
+    }
+
+    // Filenames containing `:digits:` (which would fool a greedy `:` parser)
+    // must still parse correctly under NUL separation.
+    #[test]
+    fn test_parse_match_line_filename_with_colons() {
+        let line = "badly_named:52:file.txt\x001:xxx";
+        let (file, line_num, content) = parse_match_line(line).unwrap();
+        assert_eq!(file, "badly_named:52:file.txt");
+        assert_eq!(line_num, 1);
+        assert_eq!(content, "xxx");
+    }
+
+    // Content that itself contains `:digits:` (e.g. log lines, port numbers,
+    // line-number-like substrings) must not confuse the parser.
+    #[test]
+    fn test_parse_match_line_content_with_digit_colons() {
+        let line = "log.txt\x007:debug: counter is :42: now";
+        let (file, line_num, content) = parse_match_line(line).unwrap();
+        assert_eq!(file, "log.txt");
+        assert_eq!(line_num, 7);
+        assert_eq!(content, "debug: counter is :42: now");
+    }
+
+    #[test]
+    fn test_parse_match_line_malformed_returns_none() {
+        // No NUL separator (e.g. rg/grep invoked without --null/-Z, or a
+        // context line written with `-`).
+        assert!(parse_match_line("file.rs:1:content").is_none());
+        assert!(parse_match_line("not a match line").is_none());
+        // Missing line number after NUL
+        assert!(parse_match_line("file.rs\x00fn foo()").is_none());
+        // Empty
+        assert!(parse_match_line("").is_none());
+    }
+
+    #[test]
+    fn test_parse_match_line_empty_content() {
+        let line = "file.rs\x007:";
+        let (file, line_num, content) = parse_match_line(line).unwrap();
+        assert_eq!(file, "file.rs");
+        assert_eq!(line_num, 7);
+        assert_eq!(content, "");
     }
 
     #[test]
