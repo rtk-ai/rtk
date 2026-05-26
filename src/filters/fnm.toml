@@ -1,0 +1,169 @@
+[filters.fnm]
+description = "Compact fnm (Fast Node Manager) output — strip download/extract progress, keep version lines and errors. Excludes `fnm env` and `fnm exec` so shell evals and wrapped child commands stay untouched."
+match_command = "^fnm\\s+(list-remote|use|install|uninstall|list|ls|current|default)(\\s|$)"
+strip_ansi = true
+filter_stderr = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Downloading\\s",
+  "^Extracting\\s",
+]
+truncate_lines_at = 200
+max_lines = 50
+on_empty = "fnm: ok"
+
+[[tests.fnm]]
+name = "use success line passes through"
+input = "Using Node v20.20.2"
+expected = "Using Node v20.20.2"
+
+[[tests.fnm]]
+name = "install success line passes through"
+input = "Installing Node v20.20.2 (arm64)"
+expected = "Installing Node v20.20.2 (arm64)"
+
+[[tests.fnm]]
+name = "missing version error preserved verbatim"
+input = "error: Requested version v99.x.x is not currently installed"
+expected = "error: Requested version v99.x.x is not currently installed"
+
+[[tests.fnm]]
+name = "list output preserved"
+input = "* v20.20.2 default\n* v22.22.3\n* system"
+expected = "* v20.20.2 default\n* v22.22.3\n* system"
+
+[[tests.fnm]]
+name = "current output preserved"
+input = "v20.20.2"
+expected = "v20.20.2"
+
+[[tests.fnm]]
+name = "install with download progress strips noise"
+input = "Downloading https://nodejs.org/dist/v22.22.3/node-v22.22.3-darwin-arm64.tar.xz\nExtracting node-v22.22.3-darwin-arm64.tar.xz\nInstalling Node v22.22.3 (arm64)"
+expected = "Installing Node v22.22.3 (arm64)"
+
+[[tests.fnm]]
+name = "empty after stripping falls back to on_empty"
+input = "\nDownloading foo\nExtracting foo\n"
+expected = "fnm: ok"
+
+[[tests.fnm]]
+name = "uninstall error preserved"
+input = "error: Can't find a matching version"
+expected = "error: Can't find a matching version"
+
+[[tests.fnm]]
+name = "list-remote truncates at max_lines with recovery hint"
+input = """v0.1.14
+v0.1.15
+v0.1.16
+v0.1.17
+v0.1.18
+v0.1.19
+v0.1.20
+v0.1.21
+v0.1.22
+v0.1.23
+v0.1.24
+v0.1.25
+v0.1.26
+v0.1.27
+v0.1.28
+v0.1.29
+v0.1.30
+v0.1.31
+v0.1.32
+v0.1.33
+v0.1.100
+v0.10.0
+v0.10.1
+v0.10.2
+v0.10.3
+v0.10.4
+v0.10.5
+v0.10.6
+v0.10.7
+v0.10.8
+v0.10.9
+v0.10.10
+v0.10.11
+v0.10.12
+v0.10.13
+v0.10.14
+v0.10.15
+v0.10.16
+v0.10.17
+v0.10.18
+v0.10.19
+v0.10.20
+v0.10.21
+v0.10.22
+v0.10.23
+v0.10.24
+v0.10.25
+v0.10.26
+v0.10.27
+v0.10.28
+v0.10.29
+v0.10.30
+v0.10.31
+v0.10.32
+v0.10.33
+v0.10.34"""
+expected = """v0.1.14
+v0.1.15
+v0.1.16
+v0.1.17
+v0.1.18
+v0.1.19
+v0.1.20
+v0.1.21
+v0.1.22
+v0.1.23
+v0.1.24
+v0.1.25
+v0.1.26
+v0.1.27
+v0.1.28
+v0.1.29
+v0.1.30
+v0.1.31
+v0.1.32
+v0.1.33
+v0.1.100
+v0.10.0
+v0.10.1
+v0.10.2
+v0.10.3
+v0.10.4
+v0.10.5
+v0.10.6
+v0.10.7
+v0.10.8
+v0.10.9
+v0.10.10
+v0.10.11
+v0.10.12
+v0.10.13
+v0.10.14
+v0.10.15
+v0.10.16
+v0.10.17
+v0.10.18
+v0.10.19
+v0.10.20
+v0.10.21
+v0.10.22
+v0.10.23
+v0.10.24
+v0.10.25
+v0.10.26
+v0.10.27
+v0.10.28
+v0.10.29
+... (6 lines truncated)"""
+
+[[tests.fnm]]
+name = "ANSI color codes stripped from list output"
+input = "\u001b[32m* v20.20.2 default\u001b[0m\n\u001b[32m* v22.22.3\u001b[0m\n* system"
+expected = "* v20.20.2 default\n* v22.22.3\n* system"

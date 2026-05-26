@@ -207,6 +207,7 @@ rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
 rtk prisma generate             # Schema generation (no ASCII art)
+rtk fnm use 20                  # Node version switch (ANSI/progress stripped)
 ```
 
 ### AWS
