@@ -581,6 +581,20 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // PHP interpreter (artisan, scripts, -v, etc.). This is intentionally
+    // passthrough-only: there is no built-in PHP TOML/Rust filter, but routing
+    // through `rtk php` lets the hook preserve RTK history/tracking for #1892.
+    // Pattern uses a word boundary so it matches `php` and `php ...`, but never
+    // adjacent PHP tools like `phpunit`, `phpcs`, or `phpstan`.
+    RtkRule {
+        pattern: r"^(php)(?:\s|$)",
+        rtk_cmd: "rtk php",
+        rewrite_prefixes: &["php"],
+        category: "Build",
+        savings_pct: 0.0,
+        subcmd_savings: &[],
+        subcmd_status: &[("php", RtkStatus::Passthrough)],
+    },
     RtkRule {
         pattern: r"^df(\s|$)",
         rtk_cmd: "rtk df",
