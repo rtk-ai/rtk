@@ -191,20 +191,22 @@ fn run_diff(
 
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git diff")?;
 
-    let mut final_output = result.stdout.clone();
+    // Split RTK-side compression (real savings) from user --max-lines
+    // truncation (display-only, no savings — issue #1561).
+    let mut tracked_output = result.stdout.clone();
     if !diff_result.stdout.is_empty() {
+        let (displayed, tracked) = prepare_diff_section(&diff_result.stdout, max_lines);
         println!("\nChanges:");
-        let compacted = compact_diff(&diff_result.stdout, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str("\nChanges:\n");
-        final_output.push_str(&compacted);
+        println!("{}", displayed);
+        tracked_output.push_str("\nChanges:\n");
+        tracked_output.push_str(&tracked);
     }
 
     timer.track(
         &format!("git diff {}", args.join(" ")),
         &format!("rtk git diff {}", args.join(" ")),
         &format!("{}\n{}", result.stdout, diff_result.stdout),
-        &final_output,
+        &tracked_output,
     );
 
     Ok(0)
@@ -302,21 +304,23 @@ fn run_show(
     let diff_result = exec_capture(&mut diff_cmd).context("Failed to run git show (diff)")?;
     let diff_text = diff_result.stdout.trim();
 
-    let mut final_output = summary_result.stdout.clone();
+    // Same split as `run_diff`: track RTK compression as savings, treat
+    // user `--max-lines` as display-only truncation (issue #1561).
+    let mut tracked_output = summary_result.stdout.clone();
     if !diff_text.is_empty() {
         if verbose > 0 {
             println!("\nChanges:");
         }
-        let compacted = compact_diff(diff_text, max_lines.unwrap_or(500));
-        println!("{}", compacted);
-        final_output.push_str(&format!("\n{}", compacted));
+        let (displayed, tracked) = prepare_diff_section(diff_text, max_lines);
+        println!("{}", displayed);
+        tracked_output.push_str(&format!("\n{}", tracked));
     }
 
     timer.track(
         &format!("git show {}", args.join(" ")),
         &format!("rtk git show {}", args.join(" ")),
         &raw_output,
-        &final_output,
+        &tracked_output,
     );
 
     Ok(0)
@@ -325,6 +329,70 @@ fn run_show(
 fn is_blob_show_arg(arg: &str) -> bool {
     // Detect `rev:path` style arguments while ignoring flags like `--pretty=format:...`.
     !arg.starts_with('-') && arg.contains(':')
+}
+
+/// RTK's standard line budget for compact diff output, used for both
+/// `rtk git diff` and `rtk git show`. Anything beyond this is real RTK
+/// compression (and counts as token savings). A user-supplied
+/// `--max-lines` is applied separately as display-only truncation via
+/// [`truncate_to_lines`] so it is not counted as savings. Issue #1561.
+///
+/// Note: `gh_cmd.rs::gh pr diff` (a hardcoded `500`) is intentionally
+/// the same budget but kept as a literal to avoid a cross-module
+/// coupling for a one-off callsite. `git stash show` uses a tighter
+/// budget of `100` on purpose (stashes are short by convention).
+pub(crate) const RTK_DIFF_BUDGET: usize = 500;
+
+/// Apply a user-supplied line cap on top of already-compacted diff text.
+///
+/// Kept separate from `compact_diff` so RTK-side compression (real token
+/// savings — `raw → RTK_DIFF_BUDGET`) does not get conflated with
+/// user-requested truncation (`RTK_DIFF_BUDGET → N`, no savings). Callers
+/// track against the pre-truncation slice. Issue #1561.
+///
+/// The hint follows the same terse style as `compact_diff`'s own
+/// "[full diff: rtk git diff --no-compact]" trailer; we deliberately
+/// don't repeat the `--no-compact` recovery here because `compact_diff`
+/// already prints it when its budget fires.
+///
+/// `max_lines == 0` is panic-safe: the entire body collapses to a single
+/// hint line (no leading blank line, no source content leaks).
+fn truncate_to_lines(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max_lines {
+        return text.to_string();
+    }
+    let dropped = lines.len() - max_lines;
+    let hint = format!("... ({} lines hidden by --max-lines)", dropped);
+    if max_lines == 0 {
+        return hint;
+    }
+    let mut out = lines[..max_lines].join("\n");
+    out.push('\n');
+    out.push_str(&hint);
+    out
+}
+
+/// Build the (displayed, tracked) pair for a compacted diff section.
+///
+/// `tracked` is always `compact_diff(raw, RTK_DIFF_BUDGET)` — what
+/// `timer.track` should see, so RTK's compression savings are computed
+/// against a budget that is independent of the user's `--max-lines`.
+/// Conceptually: `tracked` is "the output RTK would have produced
+/// absent the user's display knob" — so it correctly represents the
+/// compression work RTK actually did. `displayed` applies the user cap
+/// on top via [`truncate_to_lines`] and is what we print to the
+/// terminal. Issue #1561.
+pub(crate) fn prepare_diff_section(
+    raw_diff: &str,
+    user_max_lines: Option<usize>,
+) -> (String, String) {
+    let tracked = compact_diff(raw_diff, RTK_DIFF_BUDGET);
+    let displayed = match user_max_lines {
+        Some(n) => truncate_to_lines(&tracked, n),
+        None => tracked.clone(),
+    };
+    (displayed, tracked)
 }
 
 pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
@@ -1942,6 +2010,159 @@ mod tests {
             "25 lines should not be truncated with max_hunk_lines=30"
         );
         assert!(result.contains("+line25"));
+    }
+
+    // ----- truncate_to_lines + budget split (issue #1561) -----
+
+    #[test]
+    fn test_truncate_to_lines_passes_through_when_under_cap() {
+        let text = "a\nb\nc";
+        assert_eq!(truncate_to_lines(text, 5), text);
+        assert_eq!(truncate_to_lines(text, 3), text);
+    }
+
+    #[test]
+    fn test_truncate_to_lines_chops_with_terse_hint() {
+        // Hint mirrors `compact_diff`'s "[full diff: ...]" terseness — no
+        // duplicated `--no-compact` recovery (compact_diff already prints it
+        // when its own budget fires; doubling it would be noise).
+        let text = "a\nb\nc\nd\ne";
+        let out = truncate_to_lines(text, 2);
+        assert!(
+            out.starts_with("a\nb"),
+            "kept lines should be the head: {}",
+            out
+        );
+        assert!(
+            out.contains("3 lines hidden by --max-lines"),
+            "expected terse hint with hidden count: {}",
+            out
+        );
+        assert!(
+            !out.contains("--no-compact"),
+            "no-compact recovery is compact_diff's job, not ours: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_truncate_to_lines_zero_cap_keeps_only_hint() {
+        // Defensive — passing 0 shouldn't panic, produce content lines, or
+        // leak a leading blank line (the obvious off-by-one when the
+        // "kept lines" join is empty but a `\n` is appended before the hint).
+        let text = "alpha\nbeta\ngamma";
+        let out = truncate_to_lines(text, 0);
+        assert!(!out.contains("alpha"), "no content line should leak: {}", out);
+        assert!(!out.contains("beta"), "no content line should leak: {}", out);
+        assert!(!out.contains("gamma"), "no content line should leak: {}", out);
+        assert!(out.contains("3 lines hidden"), "hint missing: {}", out);
+        assert!(
+            !out.starts_with('\n'),
+            "no leading blank line at zero-cap: {:?}",
+            out
+        );
+        assert_eq!(
+            out.lines().count(),
+            1,
+            "zero-cap output should be exactly one line: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_rtk_diff_budget_value() {
+        // Lock the constant so an accidental edit (e.g. dropping to 50)
+        // doesn't silently shrink RTK's compression savings.
+        assert_eq!(RTK_DIFF_BUDGET, 500);
+    }
+
+    #[test]
+    fn test_prepare_diff_section_tracks_against_rtk_budget_not_user_cap() {
+        // Locks the central #1561 invariant: regardless of user --max-lines,
+        // `tracked` is always `compact_diff(raw, RTK_DIFF_BUDGET)`. An
+        // inlining refactor that re-introduces the bug (tracking against
+        // user-capped output) will fail this assert.
+        let mut diff = String::new();
+        for f in 1..=3 {
+            diff.push_str(&format!(
+                "diff --git a/f{f}.rs b/f{f}.rs\n--- a/f{f}.rs\n+++ b/f{f}.rs\n@@ -1,10 +1,10 @@\n"
+            ));
+            for i in 1..=10 {
+                diff.push_str(&format!("+line{f}_{i}\n"));
+            }
+        }
+        let expected_tracked = compact_diff(&diff, RTK_DIFF_BUDGET);
+        for user_cap in [None, Some(1000), Some(500), Some(50), Some(5)] {
+            let (displayed, tracked) = prepare_diff_section(&diff, user_cap);
+            assert_eq!(
+                tracked, expected_tracked,
+                "tracked must be RTK-budget compaction, user_cap={:?}",
+                user_cap
+            );
+            match user_cap {
+                Some(n) if n < tracked.lines().count() => {
+                    // Stronger than a count check: the displayed head MUST be a
+                    // literal prefix of the tracked output. A buggy impl that
+                    // recomputed `compact_diff(raw, n)` plus a hand-rolled hint
+                    // would slip past a count-only assertion — this one catches it.
+                    let expected_head: String = tracked
+                        .lines()
+                        .take(n)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(
+                        displayed.starts_with(&expected_head),
+                        "displayed must be tracked's first {} lines + hint; cap={}, displayed=\n{}\nexpected head=\n{}",
+                        n,
+                        n,
+                        displayed,
+                        expected_head
+                    );
+                    assert!(
+                        displayed.contains("lines hidden by --max-lines"),
+                        "user cap should add hint: {}",
+                        displayed
+                    );
+                }
+                _ => assert_eq!(displayed, tracked, "no cap → displayed == tracked"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_compact_diff_uses_rtk_budget_independent_of_user_max_lines() {
+        // The fix's core invariant: regardless of any later display cap a
+        // caller applies, the tracked compression is computed against
+        // RTK_DIFF_BUDGET. Two short flushes (each well below 500) should
+        // produce the same compacted output, proving compact_diff itself
+        // never sees the user's --max-lines.
+        let mut diff = String::new();
+        for f in 1..=3 {
+            diff.push_str(&format!(
+                "diff --git a/f{f}.rs b/f{f}.rs\n--- a/f{f}.rs\n+++ b/f{f}.rs\n@@ -1,10 +1,10 @@\n"
+            ));
+            for i in 1..=10 {
+                diff.push_str(&format!("+line{f}_{i}\n"));
+            }
+        }
+        let compacted = compact_diff(&diff, RTK_DIFF_BUDGET);
+        // None of the file totals should be missing — the test data fits
+        // comfortably within RTK_DIFF_BUDGET.
+        assert!(
+            !compacted.contains("more changes truncated"),
+            "3 files × 10 lines should not hit RTK_DIFF_BUDGET=500"
+        );
+        // Apply a tight user cap on top — display shrinks but the same
+        // `compacted` is what would be tracked.
+        let displayed = truncate_to_lines(&compacted, 5);
+        assert!(
+            displayed.lines().count() < compacted.lines().count(),
+            "user --max-lines=5 should produce shorter display"
+        );
+        assert!(
+            displayed.contains("lines hidden by --max-lines"),
+            "user-cap truncation should be labelled differently from RTK compression"
+        );
     }
 
     #[test]
