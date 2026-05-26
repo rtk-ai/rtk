@@ -49,6 +49,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// CodeBuddy Code
+    Codebuddy,
 }
 
 #[derive(Parser)]
@@ -775,6 +777,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process CodeBuddy Code PreToolUse hook (reads JSON from stdin)
+    Codebuddy,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1377,14 +1381,16 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard:
+        FnOnce(bool, bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        let codebuddy = agent == Some(AgentTarget::Codebuddy);
+        uninstall_standard(global, gemini, codex, cursor, pi, codebuddy, ctx)
     }
 }
 
@@ -1404,7 +1410,8 @@ fn run_cli() -> Result<i32> {
 
     // Warn if installed hook is outdated/missing (1/day, non-blocking).
     // Skip for Gain — it shows its own inline hook warning.
-    if !matches!(cli.command, Commands::Gain { .. }) {
+    // Skip hook processors because they must emit protocol JSON on stdout only.
+    if !matches!(cli.command, Commands::Gain { .. } | Commands::Hook { .. }) {
         hooks::hook_check::maybe_warn();
     }
 
@@ -1858,6 +1865,15 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Codebuddy) {
+                let patch_mode = if auto_patch {
+                    hooks::init::PatchMode::Auto
+                } else if no_patch {
+                    hooks::init::PatchMode::Skip
+                } else {
+                    hooks::init::PatchMode::Ask
+                };
+                hooks::init::run_codebuddy_mode(global, patch_mode, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2189,6 +2205,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Codebuddy => {
+                hooks::hook_cmd::run_codebuddy()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2689,6 +2709,32 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_codebuddy() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "codebuddy"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Codebuddy));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_codebuddy_uninstall() {
+        let cli =
+            Cli::try_parse_from(["rtk", "init", "--agent", "codebuddy", "--uninstall"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                agent, uninstall, ..
+            } => {
+                assert_eq!(agent, Some(AgentTarget::Codebuddy));
+                assert!(uninstall);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_init_uninstall_dispatch_routes_hermes_to_hermes_cleanup() {
         let hermes_called = Cell::new(false);
         let standard_called = Cell::new(false);
@@ -2709,7 +2755,7 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _, _, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
@@ -2836,6 +2882,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_codebuddy_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "codebuddy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Codebuddy
             }
         ));
     }
