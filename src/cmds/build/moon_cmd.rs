@@ -9,18 +9,33 @@ use anyhow::Result;
 use crate::core::runner::{self, RunOptions};
 use crate::core::utils::resolved_command;
 
-/// Subcommands that should bypass filtering — they emit structured output
-/// (JSON / DOT) typically piped into other tooling.
+/// Subcommands that should bypass filtering — structured output (DOT graphs,
+/// JSON), info / setup commands, or long-running servers where filtering
+/// would corrupt the stream. Verified against `moon --help` for moon 2.0.4.
 const PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
-    "query",
-    "graph",
-    "dep-graph",
-    "ext",
-    "completions",
-    "init",
-    "upgrade",
+    "action-graph",
     "bin",
+    "completions",
     "docker",
+    "ext",
+    "extension",
+    "hash",
+    "init",
+    "mcp",
+    "migrate",
+    "project",
+    "project-graph",
+    "projects",
+    "query",
+    "setup",
+    "task",
+    "task-graph",
+    "tasks",
+    "teardown",
+    "template",
+    "templates",
+    "toolchain",
+    "upgrade",
 ];
 
 /// Entry point for `rtk moon <args>`.
