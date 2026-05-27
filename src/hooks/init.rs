@@ -3770,12 +3770,16 @@ fn patch_gemini_settings(
 
 /// Remove Gemini artifacts during uninstall
 fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
-    let InitContext { verbose, dry_run } = ctx;
-    let mut removed = Vec::new();
     let gemini_dir = match resolve_gemini_dir() {
         Ok(d) => d,
-        Err(_) => return Ok(removed),
+        Err(_) => return Ok(Vec::new()),
     };
+    uninstall_gemini_at(&gemini_dir, ctx)
+}
+
+fn uninstall_gemini_at(gemini_dir: &Path, ctx: InitContext) -> Result<Vec<String>> {
+    let InitContext { verbose, dry_run } = ctx;
+    let mut removed = Vec::new();
 
     // Remove hook
     let hook_path = gemini_dir.join(HOOKS_SUBDIR).join(GEMINI_HOOK_FILE);
@@ -3790,6 +3794,16 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
                 .with_context(|| format!("Failed to remove {}", hook_path.display()))?;
         }
         removed.push(format!("Gemini hook: {}", hook_path.display()));
+    }
+
+    // Remove integrity hash sidecar (mirrors uninstall_claude cleanup)
+    if dry_run {
+        if integrity::hash_path_for(&hook_path).exists() {
+            println!("[dry-run] would remove integrity hash sidecar");
+            removed.push("Integrity hash: removed".to_string());
+        }
+    } else if integrity::remove_hash(&hook_path)? {
+        removed.push("Integrity hash: removed".to_string());
     }
 
     // Remove GEMINI.md
@@ -4827,6 +4841,93 @@ mod tests {
         let content = fs::read_to_string(&agents_md).unwrap();
         assert!(!content.contains("@RTK.md"));
         assert!(content.contains("# Team rules"));
+    }
+
+    #[test]
+    fn test_uninstall_gemini_at_removes_integrity_hash_and_preserves_user_settings() {
+        let temp = TempDir::new().unwrap();
+        let gemini_dir = temp.path();
+        let hooks_dir = gemini_dir.join(HOOKS_SUBDIR);
+        let hook_path = hooks_dir.join(GEMINI_HOOK_FILE);
+        let hash_path = integrity::hash_path_for(&hook_path);
+        let gemini_md = gemini_dir.join(GEMINI_MD);
+        let settings_path = gemini_dir.join(SETTINGS_JSON);
+
+        // Mirror what install_gemini lays down: hook + integrity sidecar +
+        // GEMINI.md + settings.json with an RTK hook entry alongside a user key.
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::write(&hook_path, "#!/bin/sh\necho rtk\n").unwrap();
+        integrity::store_hash(&hook_path).unwrap();
+        fs::write(&gemini_md, "# rtk gemini notes\n").unwrap();
+        fs::write(
+            &settings_path,
+            r#"{
+  "theme": "dark",
+  "hooks": {
+    "BeforeTool": [
+      { "hooks": [{ "command": "rtk hook gemini" }] },
+      { "hooks": [{ "command": "user-script" }] }
+    ]
+  }
+}"#,
+        )
+        .unwrap();
+
+        assert!(hash_path.exists(), "precondition: hash sidecar present");
+
+        let removed_first = uninstall_gemini_at(gemini_dir, InitContext::default()).unwrap();
+        let removed_second = uninstall_gemini_at(gemini_dir, InitContext::default()).unwrap();
+
+        // First pass clears hook + hash + GEMINI.md + RTK settings entry.
+        assert_eq!(removed_first.len(), 4);
+        // Second pass is a no-op (idempotency).
+        assert!(removed_second.is_empty());
+
+        // Regression: integrity sidecar must be gone (was the bug in #1787).
+        assert!(!hook_path.exists());
+        assert!(!hash_path.exists(), "integrity hash sidecar leaked");
+        assert!(!gemini_md.exists());
+
+        let settings_after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let hooks = settings_after["hooks"]["BeforeTool"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1, "RTK hook entry should be removed");
+        assert_eq!(
+            hooks[0]["hooks"][0]["command"].as_str(),
+            Some("user-script"),
+            "user hook entry must be preserved"
+        );
+        assert_eq!(
+            settings_after["theme"].as_str(),
+            Some("dark"),
+            "non-hooks user settings must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_uninstall_gemini_at_cleans_orphaned_integrity_hash() {
+        // The exact #1787 scenario: a user who hit the bug on an older
+        // version is left with an orphaned `.rtk-hook.sha256` after the
+        // hook file is already gone. A re-run of uninstall must still
+        // clean the sidecar.
+        let temp = TempDir::new().unwrap();
+        let gemini_dir = temp.path();
+        let hooks_dir = gemini_dir.join(HOOKS_SUBDIR);
+        let hook_path = hooks_dir.join(GEMINI_HOOK_FILE);
+        let hash_path = integrity::hash_path_for(&hook_path);
+
+        fs::create_dir_all(&hooks_dir).unwrap();
+        fs::write(&hook_path, "#!/bin/sh\necho rtk\n").unwrap();
+        integrity::store_hash(&hook_path).unwrap();
+        fs::remove_file(&hook_path).unwrap(); // simulate prior-version uninstall
+
+        assert!(!hook_path.exists());
+        assert!(hash_path.exists(), "precondition: orphaned sidecar");
+
+        let removed = uninstall_gemini_at(gemini_dir, InitContext::default()).unwrap();
+
+        assert_eq!(removed, vec!["Integrity hash: removed".to_string()]);
+        assert!(!hash_path.exists());
     }
 
     #[test]
