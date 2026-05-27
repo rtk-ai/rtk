@@ -681,6 +681,15 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
+        pattern: r"^moon\s+(run|ci|check)\b",
+        rtk_cmd: "rtk moon",
+        rewrite_prefixes: &["moon"],
+        category: "Build",
+        savings_pct: 60.0, // conservative estimate; revisit after Task 6 measures real savings
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
         pattern: r"^mix\s+(compile|format)(\s|$)",
         rtk_cmd: "rtk mix",
         rewrite_prefixes: &["mix"],
