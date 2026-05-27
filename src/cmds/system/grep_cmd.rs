@@ -42,9 +42,17 @@ pub fn run(
         rg_cmd.arg("--type").arg(ft);
     }
 
-    for arg in extra_args {
+    let mut iter = extra_args.iter();
+    while let Some(arg) = iter.next() {
         // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
         if arg == "-r" || arg == "--recursive" {
+            continue;
+        }
+        // Fix: translate GNU grep --include/--exclude globs to rg --glob. ripgrep
+        // has no --include/--exclude; passing them through makes rg reject the flag
+        // and the whole search silently breaks (symptom: "rtk eats --include").
+        if let Some(glob) = translate_include_exclude(arg, &mut iter) {
+            rg_cmd.arg("--glob").arg(glob);
             continue;
         }
         rg_cmd.arg(arg);
@@ -158,6 +166,40 @@ pub fn run(
     );
 
     Ok(exit_code)
+}
+
+/// Translates a GNU grep `--include`/`--exclude` flag into the rg `--glob`
+/// value. ripgrep has no `--include`/`--exclude`; without this translation the
+/// flag reaches rg unrecognized and the search breaks.
+///
+/// Handles both `--include=GLOB` and `--include GLOB` (the space form consumes
+/// the next arg from `iter`). Exclude globs are returned with a leading `!`,
+/// which is rg's negation syntax. Returns `None` when `arg` is not an
+/// include/exclude flag, in which case the caller passes it through unchanged.
+///
+/// Out of scope: `--include-dir`/`--exclude-dir` (rg has no directory-only
+/// glob); those fall through to `None` and are passed through as before.
+fn translate_include_exclude<'a, I>(arg: &str, iter: &mut I) -> Option<String>
+where
+    I: Iterator<Item = &'a String>,
+{
+    for (flag, exclude) in [("--include", false), ("--exclude", true)] {
+        let Some(rest) = arg.strip_prefix(flag) else {
+            continue;
+        };
+        let glob = if let Some(val) = rest.strip_prefix('=') {
+            // --include=GLOB
+            val.to_string()
+        } else if rest.is_empty() {
+            // --include GLOB (value is the next arg)
+            iter.next()?.clone()
+        } else {
+            // e.g. --include-dir: not the flag we handle
+            continue;
+        };
+        return Some(if exclude { format!("!{glob}") } else { glob });
+    }
+    None
 }
 
 /// Parses a single rg/grep match line of the form `file\0line_number:content`.
@@ -324,6 +366,51 @@ mod tests {
             .collect();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0], "-i");
+    }
+
+    // --- Fix: GNU grep --include/--exclude translated to rg --glob ---
+
+    #[test]
+    fn test_translate_include_equals_form() {
+        let args: Vec<String> = vec![];
+        let mut iter = args.iter();
+        assert_eq!(
+            translate_include_exclude("--include=*.kt", &mut iter),
+            Some("*.kt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_translate_include_space_form_consumes_value() {
+        let args: Vec<String> = vec!["*.rs".to_string()];
+        let mut iter = args.iter();
+        assert_eq!(
+            translate_include_exclude("--include", &mut iter),
+            Some("*.rs".to_string())
+        );
+        assert!(iter.next().is_none(), "value arg should be consumed");
+    }
+
+    #[test]
+    fn test_translate_exclude_prefixes_bang() {
+        let args: Vec<String> = vec![];
+        let mut iter = args.iter();
+        assert_eq!(
+            translate_include_exclude("--exclude=*.min.js", &mut iter),
+            Some("!*.min.js".to_string())
+        );
+    }
+
+    #[test]
+    fn test_translate_passes_through_other_flags() {
+        let args: Vec<String> = vec![];
+        let mut iter = args.iter();
+        assert!(translate_include_exclude("-i", &mut iter).is_none());
+        let mut iter = args.iter();
+        assert!(translate_include_exclude("--glob", &mut iter).is_none());
+        // --include-dir is out of scope and must not be misparsed as --include
+        let mut iter = args.iter();
+        assert!(translate_include_exclude("--include-dir=foo", &mut iter).is_none());
     }
 
     // --- truncation accuracy ---
