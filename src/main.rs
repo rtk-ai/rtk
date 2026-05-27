@@ -22,8 +22,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    deps, env_cmd, find_cmd, format_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls, patch,
-    pipe_cmd, read, summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, gci_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls,
+    patch, pipe_cmd, read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
@@ -288,6 +288,37 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// PowerShell-like Get-ChildItem (subset) with compact output
+    Gci {
+        /// Root path
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Recurse into subdirectories
+        #[arg(long)]
+        recurse: bool,
+        /// Include hidden files/directories
+        #[arg(long)]
+        force: bool,
+        /// Files only
+        #[arg(long, conflicts_with = "directory")]
+        file: bool,
+        /// Directories only
+        #[arg(long)]
+        directory: bool,
+        /// Name filter (glob, e.g. "*.cpp" or "API_win.obj")
+        #[arg(long)]
+        filter: Option<String>,
+        /// Include patterns (comma-separated globs)
+        #[arg(long)]
+        include: Option<String>,
+        /// Max results to show
+        #[arg(long, default_value = "50")]
+        max: usize,
+        /// Select properties (comma-separated: FullName,LastWriteTime,Length)
+        #[arg(long)]
+        select: Option<String>,
+    },
+
     /// Ultra-condensed diff (only changed lines)
     Diff {
         /// First file or - for stdin (unified diff)
@@ -300,6 +331,12 @@ enum Commands {
     Log {
         /// Log file (omit for stdin)
         file: Option<PathBuf>,
+        /// Show last N matching events (deduped)
+        #[arg(long, default_value = "0")]
+        events: usize,
+        /// Additional keywords to treat as events (can be repeated)
+        #[arg(long = "keyword", action = clap::ArgAction::Append)]
+        keyword: Vec<String>,
     },
 
     /// .NET commands with compact output (build/test/restore/format)
@@ -2011,6 +2048,44 @@ fn run_cli() -> Result<i32> {
             0
         }
 
+        Commands::Gci {
+            path,
+            recurse,
+            force,
+            file,
+            directory,
+            filter,
+            include,
+            max,
+            select,
+        } => {
+            let mut parsed = gci_cmd::GciArgs {
+                path,
+                recurse,
+                force,
+                max,
+                filter,
+                ..Default::default()
+            };
+            if file {
+                parsed.kind = gci_cmd::GciKind::File;
+            } else if directory {
+                parsed.kind = gci_cmd::GciKind::Directory;
+            }
+            if let Some(spec) = include {
+                parsed.include = spec
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            if let Some(sel) = select.as_deref() {
+                gci_cmd::parse_select_list(sel, &mut parsed);
+            }
+            gci_cmd::run(&parsed, cli.verbose)?;
+            0
+        }
+
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
                 diff_cmd::run(&file1, &f2, cli.verbose)?
@@ -2020,11 +2095,15 @@ fn run_cli() -> Result<i32> {
             }
         }
 
-        Commands::Log { file } => {
+        Commands::Log {
+            file,
+            events,
+            keyword,
+        } => {
             if let Some(f) = file {
-                log_cmd::run_file(&f, cli.verbose)?;
+                log_cmd::run_file(&f, events, &keyword, cli.verbose)?;
             } else {
-                log_cmd::run_stdin(cli.verbose)?;
+                log_cmd::run_stdin(events, &keyword, cli.verbose)?;
             }
             0
         }

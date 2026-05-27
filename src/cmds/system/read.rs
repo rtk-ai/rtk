@@ -244,9 +244,123 @@ fn read_file_text(
 ) -> Result<(String, text_encoding::UsedEncoding, bool)> {
     let bytes = fs::read(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
+
+    // Avoid dumping binary-ish content as Latin1 garbage in --encoding auto mode.
+    // This is intentionally conservative and only triggers for obvious cases.
+    if encoding == TextEncoding::Auto && looks_binary_bytes(&bytes) {
+        let preview = hex_preview(&bytes, 64);
+        let nul = bytes.iter().take(8192).filter(|b| **b == 0).count();
+        let msg = format!(
+            "rtk read: file appears binary ({} bytes, nul={} in first 8192)\n\
+binary preview (first {} bytes): {}\n\
+hint: use `rtk read --encoding latin1 <file>` to force raw bytes-as-text\n",
+            bytes.len(),
+            nul,
+            preview.len,
+            preview.hex
+        );
+        return Ok((msg, text_encoding::UsedEncoding::Utf8, false));
+    }
+
     let decoded = text_encoding::decode_bytes(&bytes, encoding)
         .with_context(|| format!("Failed to decode file: {}", path.display()))?;
     Ok((decoded.text, decoded.used, decoded.used_fallback))
+}
+
+struct HexPreview {
+    hex: String,
+    len: usize,
+}
+
+fn hex_preview(bytes: &[u8], max: usize) -> HexPreview {
+    let n = std::cmp::min(bytes.len(), max);
+    let mut out = String::new();
+    for (i, b) in bytes.iter().take(n).enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{:02X}", b));
+    }
+    HexPreview { hex: out, len: n }
+}
+
+fn looks_binary_bytes(bytes: &[u8]) -> bool {
+    if bytes.len() >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF)) {
+        return false;
+    }
+    let len = std::cmp::min(bytes.len(), 8192);
+    let sample = &bytes[..len];
+    if sample.is_empty() {
+        return false;
+    }
+
+    // UTF-16 without BOM can contain many NULs; don't treat it as binary.
+    if looks_utf16_no_bom(sample) {
+        return false;
+    }
+
+    // A single NUL byte is a strong signal for binary in this tool's context.
+    if sample.contains(&0) {
+        return true;
+    }
+
+    // If a large fraction of bytes are control chars (excluding \t,\n,\r), treat as binary-ish.
+    let mut control = 0usize;
+    for b in sample {
+        if *b < 0x09 || (*b > 0x0D && *b < 0x20) {
+            control += 1;
+        }
+    }
+    (control as f64 / sample.len() as f64) > 0.30
+}
+
+fn looks_utf16_no_bom(sample: &[u8]) -> bool {
+    #[allow(clippy::manual_is_multiple_of)]
+    if sample.len() < 4 || sample.len() % 2 != 0 {
+        return false;
+    }
+    let mut zeros_even = 0usize;
+    let mut zeros_odd = 0usize;
+    let mut pairs = 0usize;
+    for chunk in sample.chunks_exact(2).take(4096) {
+        pairs += 1;
+        if chunk[0] == 0 {
+            zeros_even += 1;
+        }
+        if chunk[1] == 0 {
+            zeros_odd += 1;
+        }
+    }
+    if pairs == 0 {
+        return false;
+    }
+    let even_ratio = zeros_even as f64 / pairs as f64;
+    let odd_ratio = zeros_odd as f64 / pairs as f64;
+
+    fn ascii_lane_ratio(sample: &[u8], lane: usize) -> f64 {
+        let mut total = 0usize;
+        let mut ascii = 0usize;
+        for chunk in sample.chunks_exact(2).take(4096) {
+            let b = chunk[lane];
+            if b == 0 {
+                continue;
+            }
+            total += 1;
+            let is_ascii =
+                b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7E).contains(&b);
+            if is_ascii {
+                ascii += 1;
+            }
+        }
+        if total == 0 {
+            0.0
+        } else {
+            ascii as f64 / total as f64
+        }
+    }
+
+    (odd_ratio >= 0.60 && even_ratio < 0.10 && ascii_lane_ratio(sample, 0) >= 0.85)
+        || (even_ratio >= 0.60 && odd_ratio < 0.10 && ascii_lane_ratio(sample, 1) >= 0.85)
 }
 
 fn format_with_line_numbers(content: &str) -> String {
@@ -364,11 +478,75 @@ fn main() {{
     }
 
     #[test]
+    fn test_read_auto_utf16_le_no_bom() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        // "Hi\n" in UTF-16 LE without BOM
+        file.write_all(&[0x48, 0x00, 0x69, 0x00, 0x0A, 0x00])?;
+        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
+        assert!(used_fallback);
+        assert_eq!(used, text_encoding::UsedEncoding::Utf16Le);
+        assert!(txt.contains("Hi"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_auto_utf16_le_bom() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        // BOM + "Hi\n" in UTF-16 LE
+        file.write_all(&[0xFF, 0xFE, 0x48, 0x00, 0x69, 0x00, 0x0A, 0x00])?;
+        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
+        assert!(!used_fallback);
+        assert_eq!(used, text_encoding::UsedEncoding::Utf16Le);
+        assert!(txt.contains("Hi"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_auto_windows_1252() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        // "Hé" in windows-1252: 0x48 0xE9 (invalid UTF-8)
+        file.write_all(&[0x48, 0xE9])?;
+        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
+        assert!(used_fallback);
+        assert_eq!(used, text_encoding::UsedEncoding::Windows1252);
+        assert!(txt.contains('é'));
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_auto_binary_preview() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        file.write_all(&[0x00, 0x01, 0x02, 0x03, 0x00, 0xFF])?;
+        let (txt, used, used_fallback) = read_file_text(file.path(), TextEncoding::Auto)?;
+        assert!(!used_fallback);
+        assert_eq!(used, text_encoding::UsedEncoding::Utf8);
+        assert!(txt.contains("file appears binary"));
+        assert!(txt.contains("binary preview"));
+        Ok(())
+    }
+
+    #[test]
     fn test_apply_line_window_range() {
         let lang = Language::Unknown;
         let s = "a\nb\nc\nd\n";
         let out = apply_line_window(s, None, None, Some((2, 3)), &lang);
         assert_eq!(out, "b\nc\n");
+    }
+
+    #[test]
+    fn test_apply_line_window_invalid_range_empty() {
+        let lang = Language::Unknown;
+        let s = "a\nb\nc\n";
+        assert_eq!(apply_line_window(s, None, None, Some((0, 2)), &lang), "");
+        assert_eq!(apply_line_window(s, None, None, Some((3, 2)), &lang), "");
+    }
+
+    #[test]
+    fn test_format_with_line_numbers_offset() {
+        let s = "b\nc\n";
+        let out = format_with_line_numbers_offset(s, 2);
+        assert!(out.contains("2 │ b"));
+        assert!(out.contains("3 │ c"));
     }
 
     #[test]
