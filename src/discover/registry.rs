@@ -1101,10 +1101,47 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_cargo_nextest() {
+        assert_eq!(
+            classify_command("cargo nextest run"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cargo_nextest() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo nextest run", &[]),
+            Some("rtk cargo nextest run".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_cargo_nextest_with_args() {
+        assert_eq!(
+            classify_command("cargo nextest run --no-fail-fast --release"),
+            Classification::Supported {
+                rtk_equivalent: "rtk cargo",
+                category: "Cargo",
+                estimated_savings_pct: 90.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
     fn test_registry_covers_all_cargo_subcommands() {
-        // Verify that every CargoCommand variant (Build, Test, Clippy, Check, Fmt)
-        // except Other has a matching pattern in the registry
-        for subcmd in ["build", "test", "clippy", "check", "fmt"] {
+        // Verify every cargo subcommand registered in the rule (filter-backed
+        // CargoCommand variants Build/Test/Clippy/Check/Install/Nextest plus
+        // the `fmt` passthrough) classifies as Supported.
+        for subcmd in [
+            "build", "test", "clippy", "check", "fmt", "install", "nextest",
+        ] {
             let cmd = format!("cargo {subcmd}");
             match classify_command(&cmd) {
                 Classification::Supported { .. } => {}
