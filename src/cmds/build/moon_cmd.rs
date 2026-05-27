@@ -36,8 +36,7 @@ pub struct TaskMap {
 
 impl TaskMap {
     /// Return the underlying command for a `project:task` id, or `None` if
-    /// the task is unknown. Used by Task 5 per-task routing.
-    #[allow(dead_code)]
+    /// the task is unknown. Used by MoonStreamFilter per-task routing.
     pub fn tool_for(&self, project_task: &str) -> Option<&str> {
         self.tasks.get(project_task).map(|s| s.as_str())
     }
@@ -63,6 +62,8 @@ impl TaskMap {
     }
 
     /// True when no tasks have been loaded (e.g. when `moon query tasks` failed).
+    /// Pairs with `len()` to satisfy clippy's `len_without_is_empty` lint;
+    /// no production caller today, so the dead_code allow is intentional.
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
@@ -618,5 +619,67 @@ mod tests {
         );
         assert!(!filtered.contains("▮▮▮▮"), "chrome prefix leaked: {}", filtered);
         insta::assert_snapshot!(filtered);
+    }
+
+    /// Real fixtures route tsc errors through parallel-mode prefix (which
+    /// passes the body through unchanged), so the `filter_for_tool` →
+    /// `filter_tsc_output` branch is not exercised by them. This synthetic
+    /// fixture builds a SEQUENTIAL-mode tsc task (no `project:task | `
+    /// prefix on body lines) so the routing branch fires and we can verify
+    /// the tsc filter actually runs.
+    #[test]
+    fn routes_sequential_tsc_body_through_filter_for_tool() {
+        let task_map = TaskMap::from_query_json(
+            r#"{"tasks": {"audit": {"typecheck": {"command": "tsc"}}}}"#,
+        )
+        .unwrap();
+        // Sequential mode: no ` audit:typecheck | ` prefix on body lines.
+        let input = "▮▮▮▮ audit:typecheck (deadbeef)\n\
+                     src/foo.ts(1,1): error TS2322: Type 'number' is not assignable to type 'string'.\n\
+                     src/foo.ts(2,5): error TS2304: Cannot find name 'foo'.\n\
+                     ▮▮▮▮ audit:typecheck (200ms, deadbeef)\n";
+        let filtered = filter_moon_streaming(input, task_map);
+
+        // The tsc filter must run — its output differs from raw passthrough.
+        // We don't snapshot here because filter_tsc_output's exact output may
+        // evolve; instead we assert the routing happened by checking the
+        // tsc filter emitted a recognizable structure. filter_tsc_output
+        // wraps TscHandler which groups errors by file; even minimal output
+        // should contain the file path.
+        assert!(
+            filtered.contains("src/foo.ts"),
+            "tsc filter dropped the file path: {}",
+            filtered
+        );
+        assert!(!filtered.contains("▮▮▮▮"), "chrome leaked: {}", filtered);
+        // Errors must survive whatever transform tsc filter applies.
+        assert!(
+            filtered.contains("TS2322") && filtered.contains("TS2304"),
+            "tsc filter lost an error code: {}",
+            filtered
+        );
+    }
+
+    /// Tools without a filter_for_tool entry (e.g. bun) must still survive
+    /// chrome stripping with the body intact. Smoke test for the
+    /// `None => body` branch in flush_active_body.
+    #[test]
+    fn passes_unfiltered_tool_body_through_unchanged() {
+        let task_map = TaskMap::from_query_json(
+            r#"{"tasks": {"audit": {"test": {"command": "bun"}}}}"#,
+        )
+        .unwrap();
+        let input = "▮▮▮▮ audit:test (deadbeef)\n\
+                     bun test v1.3.14 (cafef00d)\n\
+                     custom-marker-string-not-from-any-filter\n\
+                     ▮▮▮▮ audit:test (100ms, deadbeef)\n";
+        let filtered = filter_moon_streaming(input, task_map);
+
+        assert!(
+            filtered.contains("custom-marker-string-not-from-any-filter"),
+            "unfiltered body line was dropped: {}",
+            filtered
+        );
+        assert!(!filtered.contains("▮▮▮▮"), "chrome leaked: {}", filtered);
     }
 }

@@ -681,7 +681,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^moon\s+(run|ci|check)\b",
+        pattern: r"^moon\s+(run|ci|check|exec)\b",
         rtk_cmd: "rtk moon",
         rewrite_prefixes: &["moon"],
         category: "Build",
