@@ -17,6 +17,7 @@ lazy_static! {
     static ref MSBUILD_LNK_RE: Regex = Regex::new(r": error LNK\d+").unwrap();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     file: &Path,
     level: FilterLevel,
