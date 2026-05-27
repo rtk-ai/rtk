@@ -48,3 +48,8 @@ claudedocs
 
 # icm 
 .fastembed_cache/
+
+# Build output
+dist/
+openclaw/node_modules/
+openclaw/package-lock.json

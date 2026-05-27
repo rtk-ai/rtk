@@ -2,7 +2,8 @@
   "name": "@rtk-ai/rtk-rewrite",
   "version": "1.0.0",
   "description": "RTK plugin for OpenClaw — rewrites shell commands for 60-90% LLM token savings",
-  "main": "index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -18,12 +19,24 @@
     "llm",
     "cli-proxy"
   ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
   "files": [
-    "index.ts",
+    "dist",
     "openclaw.plugin.json",
     "README.md"
   ],
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^5.4.0"
+  },
   "peerDependencies": {
     "rtk": ">=0.28.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

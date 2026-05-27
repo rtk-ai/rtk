@@ -24,20 +24,31 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 
 ### Install the plugin
 
+**Option A: Build from source**
+
 ```bash
-# Copy the plugin to OpenClaw's extensions directory
+cd openclaw
+npm install
+npm run build
+
+# Copy to OpenClaw's extensions directory
 mkdir -p ~/.openclaw/extensions/rtk-rewrite
-cp openclaw/index.ts openclaw/openclaw.plugin.json ~/.openclaw/extensions/rtk-rewrite/
+cp dist/index.js openclaw.plugin.json ~/.openclaw/extensions/rtk-rewrite/
 
 # Restart the gateway
 openclaw gateway restart
 ```
 
-### Or install via OpenClaw CLI
+**Option B: Install via OpenClaw CLI**
 
 ```bash
-openclaw plugins install ./openclaw
+cd openclaw
+npm install
+npm run build
+openclaw plugins install .
 ```
+
+> **Note:** OpenClaw 2026.5.4+ requires compiled JavaScript for plugins. The TypeScript source must be built before installation.
 
 ## Configuration
 
@@ -80,6 +91,15 @@ Handled by `rtk rewrite` guards:
 | `git status` | 66% |
 | `grep` (single file) | 52% |
 | `find -name` | 48% |
+
+## Development
+
+```bash
+cd openclaw
+npm install
+npm run build    # Compile TypeScript
+npm run clean    # Remove build artifacts
+```
 
 ## License
 
