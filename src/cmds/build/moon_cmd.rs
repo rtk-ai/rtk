@@ -559,4 +559,83 @@ mod tests {
 
         assert_snapshot!(output);
     }
+
+    #[test]
+    fn savings_chrome_only_test_failure_fixture() {
+        let json = include_str!("../../../tests/fixtures/moon/query_tasks.json");
+        let task_map = TaskMap::from_query_json(json).unwrap();
+        let raw = include_str!("../../../tests/fixtures/moon/run_test_failure.txt");
+        let filtered = filter_moon_streaming(raw, task_map);
+        let s = savings_pct(raw, &filtered);
+        // bun test has no rtk filter — chrome-only savings. Realistic baseline.
+        assert!(
+            s >= 15.0,
+            "expected >=15% savings on test-failure fixture (chrome-only because bun test has no rtk filter), got {:.1}%",
+            s
+        );
+    }
+
+    #[test]
+    fn savings_full_pipeline_tsc_failure_fixture() {
+        let json = include_str!("../../../tests/fixtures/moon/query_tasks.json");
+        let task_map = TaskMap::from_query_json(json).unwrap();
+        let raw = include_str!("../../../tests/fixtures/moon/run_tsc_failure.txt");
+        let filtered = filter_moon_streaming(raw, task_map);
+        let s = savings_pct(raw, &filtered);
+        // tsc errors come in parallel-mode prefix in moon (` audit:typecheck | ...`),
+        // so the tsc filter is bypassed in this fixture by design (parallel passthrough).
+        // Chrome stripping + upgrade banner removal nets a meaningful but modest win.
+        assert!(
+            s >= 25.0,
+            "expected >=25% savings on tsc-failure fixture, got {:.1}%",
+            s
+        );
+    }
+
+    #[test]
+    fn savings_summary_detailed_with_taskmap() {
+        let json = include_str!("../../../tests/fixtures/moon/query_tasks.json");
+        let task_map = TaskMap::from_query_json(json).unwrap();
+        let raw = include_str!("../../../tests/fixtures/moon/run_summary_detailed.txt");
+        let filtered = filter_moon_streaming(raw, task_map);
+        let s = savings_pct(raw, &filtered);
+        // The fixture's 24-line "changed files" list and the SUMMARY section are all
+        // non-chrome body lines that pass through unchanged. Chrome lines are only 3 of
+        // 50 total, so savings are modest (~9%). Measured: 9.3%.
+        assert!(
+            s >= 8.0,
+            "expected >=8% savings on summary-detailed fixture, got {:.1}%",
+            s
+        );
+    }
+
+    #[test]
+    fn savings_full_typecheck_success_with_taskmap() {
+        let json = include_str!("../../../tests/fixtures/moon/query_tasks.json");
+        let task_map = TaskMap::from_query_json(json).unwrap();
+        let raw = include_str!("../../../tests/fixtures/moon/run_typecheck_success.txt");
+        let filtered = filter_moon_streaming(raw, task_map);
+        let s = savings_pct(raw, &filtered);
+        assert!(
+            s >= 20.0,
+            "expected >=20% savings on success fixture, got {:.1}%",
+            s
+        );
+    }
+
+    #[test]
+    fn strips_chrome_from_tsc_failure() {
+        let json = include_str!("../../../tests/fixtures/moon/query_tasks.json");
+        let task_map = TaskMap::from_query_json(json).unwrap();
+        let raw = include_str!("../../../tests/fixtures/moon/run_tsc_failure.txt");
+        let filtered = filter_moon_streaming(raw, task_map);
+        // All 4 TS errors must still be visible after filtering.
+        assert!(
+            filtered.matches("error TS").count() >= 4,
+            "lost some tsc errors during filtering: {}",
+            filtered
+        );
+        assert!(!filtered.contains("▮▮▮▮"), "chrome prefix leaked: {}", filtered);
+        insta::assert_snapshot!(filtered);
+    }
 }

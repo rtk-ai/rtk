@@ -11,6 +11,7 @@ Ground truth for the `rtk moon` filter's snapshot tests (Tasks 3, 5, 6).
 | `run_cache_hit.txt` | 7 lines — single cached task (`audit:format`) |
 | `run_test_failure.txt` | 32 lines — `audit:test` failure with `bun test` output |
 | `run_summary_detailed.txt` | 50 lines — `MOON_SUMMARY=detailed` with `audit:format` (cached) |
+| `run_tsc_failure.txt` | 19 lines — `audit:typecheck` failure with 4 TypeScript errors (parallel-mode body) |
 | `query_tasks.json` | 5844 lines — full `moon query tasks` output for 16 projects |
 
 ---
@@ -210,6 +211,14 @@ Ran 7 tests across 3 files. [874.00ms]
 **Task 5 implication:** rtk does NOT currently have a dedicated `bun test` filter. The closest existing filter is `cmds/js/vitest_cmd.rs`, but it parses JSON output from `--reporter json` — bun test emits plain text, so the vitest filter won't apply. Task 5 must either (a) add a small `filter_bun_test_output()` helper inside `moon_cmd.rs` that compresses bun test plain-text output, or (b) leave `bun` unmapped in `filter_for_tool` so bun test bodies pass through unchanged (chrome stripping still applies, but the underlying test output is verbatim). If (b) is chosen, the Task 6 ≥60% savings assertion on this fixture may need to use a different (failing) fixture from a tool with a real rtk filter (e.g. eslint).
 
 The `bun test` failure body is NOT prefixed with `[project:task]` — it is streamed raw between the chrome start line and chrome complete line.
+
+---
+
+## `run_tsc_failure.txt`
+
+Captured by injecting 4 TypeScript errors into `packages/audit/src/index.ts` then running `moon run audit:typecheck --force`. Errors include type-mismatch (TS2322), missing return (TS2355), and unknown identifier (TS2304). Reverted after capture.
+
+The fixture's task body appears in **parallel-mode prefix** (` audit:typecheck | <line>`) because moon runs dependencies (core, config, db) in parallel with the target. This means the per-task tool filter routing (Task 5) does NOT compress this fixture's body — it's a chrome-only savings case. A future PR adding per-task buffering in parallel mode would unlock the tsc filter's compression for this shape.
 
 ---
 

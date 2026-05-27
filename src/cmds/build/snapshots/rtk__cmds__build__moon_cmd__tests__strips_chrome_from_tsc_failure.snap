@@ -1,0 +1,21 @@
+---
+source: src/cmds/build/moon_cmd.rs
+assertion_line: 639
+expression: filtered
+---
+core:typecheck
+core:typecheck (178ms)
+config:typecheck
+config:typecheck (90ms)
+db:typecheck
+db:typecheck (88ms)
+audit:typecheck
+src/index.ts(6,7): error TS2322: Type 'number' is not assignable to type 'string'.
+src/index.ts(7,7): error TS2322: Type 'string' is not assignable to type 'number'.
+src/index.ts(8,22): error TS2355: A function whose declared type is neither 'undefined', 'void', nor 'any' must return a value.
+src/index.ts(9,11): error TS2304: Cannot find name 'nonexistentVariable'.
+audit:typecheck (669ms)
+Error: task_runner::run_failed
+
+  × Task audit:typecheck failed to run.
+  ╰─▶ Process tsc failed: exit code 1

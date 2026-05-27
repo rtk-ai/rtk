@@ -1,0 +1,20 @@
+▮▮▮▮ core:typecheck (72cd98e9)
+▮▮▮▮ core:typecheck (178ms, 72cd98e9)
+▮▮▮▮ config:typecheck (ad11875d)
+▮▮▮▮ config:typecheck (90ms, ad11875d)
+▮▮▮▮ db:typecheck (dc976c99)
+▮▮▮▮ db:typecheck (88ms, dc976c99)
+▮▮▮▮ audit:typecheck (a928ca9f)
+▮▮▮▮ There's a new version of moon available, 2.2.5 (currently on 2.0.4)!
+▮▮▮▮ Daemon, AI skill, async experiments, and more!
+▮▮▮▮ Run moon upgrade or install from https://moonrepo.dev/docs/install
+audit:typecheck | src/index.ts(6,7): error TS2322: Type 'number' is not assignable to type 'string'.
+audit:typecheck | src/index.ts(7,7): error TS2322: Type 'string' is not assignable to type 'number'.
+audit:typecheck | src/index.ts(8,22): error TS2355: A function whose declared type is neither 'undefined', 'void', nor 'any' must return a value.
+audit:typecheck | src/index.ts(9,11): error TS2304: Cannot find name 'nonexistentVariable'.
+▮▮▮▮ audit:typecheck (669ms, a928ca9f)
+Error: task_runner::run_failed
+
+  × Task audit:typecheck failed to run.
+  ╰─▶ Process tsc failed: exit code 1
+

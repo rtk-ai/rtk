@@ -685,7 +685,7 @@ pub const RULES: &[RtkRule] = &[
         rtk_cmd: "rtk moon",
         rewrite_prefixes: &["moon"],
         category: "Build",
-        savings_pct: 60.0, // conservative estimate; revisit after Task 6 measures real savings
+        savings_pct: 35.0, // measured avg across 5 fixtures (typecheck_success=60%, cache_hit=36%, test_failure=27%, tsc_failure=41%, summary_detailed=9%); was 60.0 placeholder
         subcmd_savings: &[],
         subcmd_status: &[],
     },
