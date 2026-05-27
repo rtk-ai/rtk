@@ -14,35 +14,6 @@ use crate::core::runner::{self, RunOptions};
 use crate::core::stream::StreamFilter;
 use crate::core::utils::resolved_command;
 
-/// Subcommands that should bypass filtering — structured output (DOT graphs,
-/// JSON), info / setup commands, or long-running servers where filtering
-/// would corrupt the stream. Verified against `moon --help` for moon 2.0.4.
-const PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
-    "action-graph",
-    "bin",
-    "completions",
-    "docker",
-    "ext",
-    "extension",
-    "hash",
-    "init",
-    "mcp",
-    "migrate",
-    "project",
-    "project-graph",
-    "projects",
-    "query",
-    "setup",
-    "task",
-    "task-graph",
-    "tasks",
-    "teardown",
-    "template",
-    "templates",
-    "toolchain",
-    "upgrade",
-];
-
 /// Serde helper: root of `moon query tasks` JSON output.
 #[derive(Debug, Deserialize)]
 struct QueryTasksRoot {
@@ -409,16 +380,26 @@ pub fn filter_moon_output(input: &str, _task_map: &TaskMap) -> String {
         .join("\n")
 }
 
+/// Subcommands where rtk's chrome stripping + tool routing adds value. Other
+/// subcommands (--version, --help, query, graph, info commands, etc.) skip
+/// the StreamFilter path so we don't pay for `moon query tasks` (~150ms on
+/// large workspaces) when there's nothing to filter.
+const FILTERED_SUBCOMMANDS: &[&str] = &["run", "ci", "check", "exec"];
+
 /// Entry point for `rtk moon <args>`.
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
-    // Subcommand check: if the first arg is one of the passthrough subcommands,
-    // execute moon without filtering. Track usage but apply no transform.
-    if let Some(first) = args.first() {
-        if PASSTHROUGH_SUBCOMMANDS.contains(&first.as_str()) {
-            let os_args: Vec<std::ffi::OsString> =
-                args.iter().map(std::ffi::OsString::from).collect();
-            return runner::run_passthrough("moon", &os_args, verbose);
-        }
+    // Filter only when the first arg is a known filterable subcommand. For
+    // everything else (--version, --help, info commands, passthrough list)
+    // exec moon raw — chrome only appears in run/ci/check/exec output.
+    let should_filter = args
+        .first()
+        .map(|first| FILTERED_SUBCOMMANDS.contains(&first.as_str()))
+        .unwrap_or(false);
+
+    if !should_filter {
+        let os_args: Vec<std::ffi::OsString> =
+            args.iter().map(std::ffi::OsString::from).collect();
+        return runner::run_passthrough("moon", &os_args, verbose);
     }
 
     let mut cmd = resolved_command("moon");
