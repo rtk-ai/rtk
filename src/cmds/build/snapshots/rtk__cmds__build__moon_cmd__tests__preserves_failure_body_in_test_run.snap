@@ -1,9 +1,10 @@
 ---
 source: src/cmds/build/moon_cmd.rs
+assertion_line: 191
 expression: output
 ---
 audit:test
-bun test v1.3.14
+bun test v1.3.14 (0d9b296a)
 
 test/action-extractor.test.ts:
 16 | }

@@ -70,9 +70,12 @@ lazy_static! {
     static ref HASH_SUFFIX_RE: Regex =
         Regex::new(r",\s*[0-9a-f]{8}\)$").unwrap();
 
-    /// Task-start lines have only a bare hash in parens — drop the whole paren.
+    /// Task-start lines after chrome-prefix stripping look like
+    /// `<project>:<task> (<8-hex-hash>)`. Capture the identifier (group 1) so we
+    /// can drop just the hash without nuking unrelated lines that happen to end
+    /// in `(<hex>)` (e.g. `bun test v1.3.14 (0d9b296a)` — bun's version hash).
     static ref BARE_HASH_RE: Regex =
-        Regex::new(r"\s*\([0-9a-f]{8}\)$").unwrap();
+        Regex::new(r"^([a-z0-9_\-]+:[a-z0-9_\-]+)\s*\([0-9a-f]{8}\)$").unwrap();
 
     /// Footer line (single-task runs only).
     static ref FOOTER_RE: Regex =
@@ -110,8 +113,9 @@ pub fn filter_moon_output(input: &str, _task_map: &TaskMap) -> String {
             let stripped = CHROME_PREFIX_RE.replace(line, "");
             // Strip task-completion hash suffix `, <hash>)` → keep duration/cached.
             let stripped = HASH_SUFFIX_RE.replace(&stripped, ")");
-            // Strip task-start bare-hash suffix `(<hash>)` entirely.
-            let stripped = BARE_HASH_RE.replace(&stripped, "");
+            // Strip task-start bare-hash suffix `(<hash>)` from `project:task (hash)` lines,
+            // preserving the identifier.
+            let stripped = BARE_HASH_RE.replace(&stripped, "$1");
             Some(stripped.into_owned())
         })
         .collect::<Vec<_>>()
