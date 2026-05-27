@@ -1,0 +1,5844 @@
+{
+  "tasks": {
+    "audit": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          "packages/audit/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "audit:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "packages/audit/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          "packages/audit/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "audit:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/bun-test.yml": {},
+          "packages/audit/package.json": {},
+          "packages/audit/tsconfig.json": {}
+        },
+        "inputGlobs": {
+          "packages/audit/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/audit/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "audit:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "db:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "config:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "packages/audit/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/audit/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/audit/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "audit:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "bus": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          "packages/bus/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "bus:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "packages/bus/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          "packages/bus/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "bus:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test",
+          "--preload",
+          "./test/otel-test-setup.ts",
+          "src"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/bus/tsconfig.json": {},
+          "packages/bus/package.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "packages/bus/src/**/*": {
+            "cache": true
+          },
+          "packages/bus/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "bus:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test-int": {
+        "command": "bun",
+        "args": [
+          "test",
+          "test/integration"
+        ],
+        "id": "test-int",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/bus/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true
+        },
+        "target": "bus:test-int",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "db:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "config:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/bus/tsconfig.json": {},
+          "tsconfig.options.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          "packages/bus/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/bus/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "bus:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "config": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          "packages/config/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "config:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/config/eslint.config.mjs": {},
+          ".moon/tasks/eslint.yml": {}
+        },
+        "inputGlobs": {
+          "packages/config/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "config:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test",
+          "--timeout",
+          "15000",
+          "src",
+          "test"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/config/package.json": {},
+          "packages/config/tsconfig.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "packages/config/src/**/*": {
+            "cache": true
+          },
+          "packages/config/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "config:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "packages/config/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          "packages/config/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/config/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "config:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "core": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/core/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "core:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/core/eslint.config.mjs": {},
+          ".moon/tasks/eslint.yml": {}
+        },
+        "inputGlobs": {
+          "packages/core/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "core:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/core/package.json": {},
+          "packages/core/tsconfig.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "packages/core/src/**/*": {
+            "cache": true
+          },
+          "packages/core/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "core:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/core/tsconfig.json": {},
+          "tsconfig.options.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/core/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/core/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "core:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "db": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          "packages/db/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "db:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "packages/db/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          "packages/db/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "db:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/bun-test.yml": {},
+          "packages/db/package.json": {},
+          "packages/db/tsconfig.json": {}
+        },
+        "inputGlobs": {
+          "packages/db/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/db/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "db:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "packages/db/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/db/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/db/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "db:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "discord": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "plugins/discord/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "discord:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "plugins/discord/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "plugins/discord/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "discord:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test",
+          "src"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "plugins/discord/package.json": {},
+          "plugins/discord/tsconfig.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "plugins/discord/src/**/*": {
+            "cache": true
+          },
+          "plugins/discord/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "discord:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test-int": {
+        "command": "bun",
+        "args": [
+          "test",
+          "test/integration"
+        ],
+        "id": "test-int",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          "plugins/discord/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true
+        },
+        "target": "discord:test-int",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "bus:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "http:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "plugin-sdk:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "db:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "policy:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "audit:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "config:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "plugins/discord/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "plugins/discord/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "plugins/discord/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "discord:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "e2e": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/__e2e__/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "e2e:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          "apps/__e2e__/eslint.config.mjs": {},
+          ".moon/tasks/eslint.yml": {}
+        },
+        "inputGlobs": {
+          "apps/__e2e__/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "e2e:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "smoke": {
+        "command": "bun",
+        "args": [
+          "scripts/smoke.ts"
+        ],
+        "id": "smoke",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/__e2e__/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": false,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true,
+          "setRunInCi": true
+        },
+        "target": "e2e:smoke",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "echo",
+        "args": [
+          "\"no unit tests in @ops/e2e (smoke-only)\""
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "apps/__e2e__/package.json": {},
+          "apps/__e2e__/tsconfig.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "apps/__e2e__/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/__e2e__/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "e2e:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--noEmit"
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "scripts/**/*.ts",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "apps/__e2e__/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          "apps/__e2e__/scripts/**/*.ts": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/__e2e__/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "replace",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "e2e:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      }
+    },
+    "frontend": {
+      "build": {
+        "command": "pnpm",
+        "args": [
+          "exec",
+          "vite",
+          "build"
+        ],
+        "id": "build",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          "apps/frontend/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "replace",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": "dist"
+          }
+        ],
+        "outputFiles": {
+          "apps/frontend/dist": {
+            "optional": false
+          }
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true
+        },
+        "target": "frontend:build",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      },
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          "apps/frontend/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "frontend:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "apps/frontend/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          "apps/frontend/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "frontend:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "start-dev": {
+        "command": "pnpm",
+        "args": [
+          "exec",
+          "vite"
+        ],
+        "id": "start-dev",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          "apps/frontend/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": true,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": false,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true,
+          "setRunInCi": true
+        },
+        "target": "frontend:start-dev",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "run"
+      },
+      "test": {
+        "command": "pnpm",
+        "args": [
+          "exec",
+          "vitest",
+          "run"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "apps/frontend/package.json": {},
+          "apps/frontend/tsconfig.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "apps/frontend/src/**/*": {
+            "cache": true
+          },
+          "apps/frontend/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "frontend:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test-e2e": {
+        "command": "pnpm",
+        "args": [
+          "exec",
+          "playwright",
+          "test"
+        ],
+        "id": "test-e2e",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          "apps/frontend/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": false,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true,
+          "setRunInCi": true
+        },
+        "target": "frontend:test-e2e",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--noEmit"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "discord:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "ui-kit:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "sample:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "apps/frontend/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          "apps/frontend/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "replace",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "frontend:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      }
+    },
+    "gateway": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          "apps/gateway/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "gateway:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "apps/gateway/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/gateway/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "gateway:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "start-dev": {
+        "command": "nest",
+        "args": [
+          "start",
+          "--watch"
+        ],
+        "id": "start-dev",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          "apps/gateway/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": true,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": false,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true,
+          "setRunInCi": true
+        },
+        "target": "gateway:start-dev",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "run"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test",
+          "test/unit"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "apps/gateway/tsconfig.json": {},
+          "apps/gateway/package.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "apps/gateway/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/gateway/test/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "gateway:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test-e2e": {
+        "command": "bun",
+        "args": [
+          "test",
+          "--timeout",
+          "60000",
+          "test/integration"
+        ],
+        "id": "test-e2e",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          "apps/gateway/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true
+        },
+        "target": "gateway:test-e2e",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "discord:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "http:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "plugin-sdk:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "db:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "policy:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "audit:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "config:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "sample:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "gateway:typecheck-test"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "apps/gateway/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/gateway/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "apps/gateway/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "gateway:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      },
+      "typecheck-test": {
+        "command": "tsc",
+        "args": [
+          "--project",
+          "tsconfig.test.json"
+        ],
+        "id": "typecheck-test",
+        "inputs": [
+          {
+            "glob": "test/integration/**/*.ts",
+            "cache": true
+          },
+          {
+            "file": "tsconfig.test.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputFiles": {
+          "apps/gateway/tsconfig.test.json": {},
+          "tsconfig.options.json": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/gateway/test/integration/**/*.ts": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "gateway:typecheck-test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      }
+    },
+    "http": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/http/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "http:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "packages/http/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/http/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "http:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/http/tsconfig.json": {},
+          "packages/http/package.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "packages/http/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/http/test/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "http:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "db:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "policy:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "audit:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "config:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "packages/http/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/http/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/http/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "http:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "plugin-sdk": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/plugin-sdk/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "plugin-sdk:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/plugin-sdk/eslint.config.mjs": {},
+          ".moon/tasks/eslint.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/plugin-sdk/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "plugin-sdk:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/plugin-sdk/package.json": {},
+          "packages/plugin-sdk/tsconfig.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/plugin-sdk/src/**/*": {
+            "cache": true
+          },
+          "packages/plugin-sdk/test/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "plugin-sdk:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "db:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/plugin-sdk/tsconfig.json": {},
+          "tsconfig.options.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/plugin-sdk/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/plugin-sdk/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "plugin-sdk:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "policy": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          "packages/policy/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "policy:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "packages/policy/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          "packages/policy/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "policy:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/bun-test.yml": {},
+          "packages/policy/package.json": {},
+          "packages/policy/tsconfig.json": {}
+        },
+        "inputGlobs": {
+          "packages/policy/src/**/*": {
+            "cache": true
+          },
+          "packages/policy/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "policy:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "packages/policy/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          "packages/policy/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/policy/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "policy:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "sample": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "plugins/sample/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "sample:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          "plugins/sample/eslint.config.mjs": {},
+          ".moon/tasks/eslint.yml": {}
+        },
+        "inputGlobs": {
+          "plugins/sample/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "sample:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "plugins/sample/package.json": {},
+          "plugins/sample/tsconfig.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "plugins/sample/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "plugins/sample/test/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "sample:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "bus:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "http:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "plugin-sdk:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "db:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "audit:typecheck"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "plugins/sample/tsconfig.json": {},
+          "tsconfig.options.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "plugins/sample/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "plugins/sample/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "sample:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "ui-kit": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "packages/ui-kit/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "ui-kit:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "packages/ui-kit/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          "packages/ui-kit/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "ui-kit:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test": {
+        "command": "pnpm",
+        "args": [
+          "exec",
+          "vitest",
+          "run"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "packages/ui-kit/tsconfig.json": {},
+          "packages/ui-kit/package.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "packages/ui-kit/src/**/*": {
+            "cache": true
+          },
+          "packages/ui-kit/test/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "ui-kit:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "packages/ui-kit/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          "packages/ui-kit/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "packages/ui-kit/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "ui-kit:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      }
+    },
+    "worker-py": {
+      "format": {
+        "command": "uv",
+        "args": [
+          "run",
+          "ruff",
+          "format",
+          "--check",
+          "."
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "src/**/*.py",
+            "cache": true
+          },
+          {
+            "glob": "tests/**/*.py",
+            "cache": true
+          },
+          {
+            "file": "pyproject.toml"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          "apps/worker-py/pyproject.toml": {}
+        },
+        "inputGlobs": {
+          "apps/worker-py/src/**/*.py": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-py/tests/**/*.py": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-py:format",
+        "toolchains": [
+          "system"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "uv",
+        "args": [
+          "run",
+          "ruff",
+          "check",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.py",
+            "cache": true
+          },
+          {
+            "glob": "tests/**/*.py",
+            "cache": true
+          },
+          {
+            "file": "pyproject.toml"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "apps/worker-py/pyproject.toml": {}
+        },
+        "inputGlobs": {
+          "apps/worker-py/src/**/*.py": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-py/tests/**/*.py": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-py:lint",
+        "toolchains": [
+          "system"
+        ],
+        "type": "test"
+      },
+      "start-dev": {
+        "command": "uv",
+        "args": [
+          "run",
+          "python",
+          "-m",
+          "worker_py.main"
+        ],
+        "id": "start-dev",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-py/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": true,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": false,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true,
+          "setRunInCi": true
+        },
+        "target": "worker-py:start-dev",
+        "toolchains": [
+          "system"
+        ],
+        "type": "run"
+      },
+      "test": {
+        "command": "uv",
+        "args": [
+          "run",
+          "pytest",
+          "tests",
+          "--ignore=tests/integration"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*.py",
+            "cache": true
+          },
+          {
+            "glob": "tests/**/*.py",
+            "cache": true
+          },
+          {
+            "file": "pyproject.toml"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "apps/worker-py/pyproject.toml": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "apps/worker-py/src/**/*.py": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-py/tests/**/*.py": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-py:test",
+        "toolchains": [
+          "system"
+        ],
+        "type": "test"
+      },
+      "test-int": {
+        "command": "uv",
+        "args": [
+          "run",
+          "pytest",
+          "tests/integration"
+        ],
+        "id": "test-int",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-py/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true
+        },
+        "target": "worker-py:test-int",
+        "toolchains": [
+          "system"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "uv",
+        "args": [
+          "run",
+          "mypy"
+        ],
+        "id": "typecheck",
+        "inputs": [
+          {
+            "glob": "src/**/*.py",
+            "cache": true
+          },
+          {
+            "glob": "tests/**/*.py",
+            "cache": true
+          },
+          {
+            "file": "pyproject.toml"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "apps/worker-py/pyproject.toml": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          "apps/worker-py/src/**/*.py": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-py/tests/**/*.py": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "replace",
+          "mergeOutputs": "replace",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-py:typecheck",
+        "toolchains": [
+          "system"
+        ],
+        "type": "test"
+      }
+    },
+    "worker-ts": {
+      "format": {
+        "command": "prettier",
+        "args": [
+          "--check",
+          ".",
+          "--ignore-path",
+          "/Users/alex/Work/yulii/ops-platform/.prettierignore"
+        ],
+        "id": "format",
+        "inputs": [
+          {
+            "glob": "**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}",
+            "cache": true
+          },
+          {
+            "file": "/.prettierrc"
+          },
+          {
+            "file": "/.prettierignore"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/prettier.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/prettier.yml": {},
+          ".prettierignore": {},
+          ".prettierrc": {}
+        },
+        "inputGlobs": {
+          "apps/worker-ts/**/*.{ts,tsx,js,jsx,mts,json,md,yml,yaml}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-ts:format",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "lint": {
+        "command": "eslint",
+        "args": [
+          "--fix",
+          "."
+        ],
+        "id": "lint",
+        "inputs": [
+          {
+            "glob": "src/**/*.{ts,tsx,mts,cts}",
+            "cache": true
+          },
+          {
+            "file": "eslint.config.mjs"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/eslint.yml"
+          }
+        ],
+        "inputFiles": {
+          ".moon/tasks/eslint.yml": {},
+          "apps/worker-ts/eslint.config.mjs": {}
+        },
+        "inputGlobs": {
+          "apps/worker-ts/src/**/*.{ts,tsx,mts,cts}": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-ts:lint",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "start-dev": {
+        "command": "bun",
+        "args": [
+          "--watch",
+          "src/main.ts"
+        ],
+        "id": "start-dev",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-ts/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": true,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": false,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true,
+          "setRunInCi": true
+        },
+        "target": "worker-ts:start-dev",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "run"
+      },
+      "test": {
+        "command": "bun",
+        "args": [
+          "test",
+          "src"
+        ],
+        "id": "test",
+        "inputs": [
+          {
+            "glob": "src/**/*",
+            "cache": true
+          },
+          {
+            "glob": "test/**/*",
+            "cache": true
+          },
+          {
+            "file": "package.json"
+          },
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/bun-test.yml"
+          }
+        ],
+        "inputFiles": {
+          "apps/worker-ts/package.json": {},
+          "apps/worker-ts/tsconfig.json": {},
+          ".moon/tasks/bun-test.yml": {}
+        },
+        "inputGlobs": {
+          "apps/worker-ts/src/**/*": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-ts/test/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-ts:test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "test-int": {
+        "command": "bun",
+        "args": [
+          "test",
+          "test/integration"
+        ],
+        "id": "test-int",
+        "inputs": [
+          {
+            "glob": "**/*",
+            "cache": true
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-ts/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "replace",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "defaultInputs": true,
+          "expanded": true
+        },
+        "target": "worker-ts:test-int",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      },
+      "typecheck": {
+        "command": "tsc",
+        "args": [
+          "--build"
+        ],
+        "deps": [
+          {
+            "args": [],
+            "env": {},
+            "target": "discord:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "bus:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "plugin-sdk:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "core:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "db:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "policy:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "audit:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "config:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "sample:typecheck"
+          },
+          {
+            "args": [],
+            "env": {},
+            "target": "worker-ts:typecheck-test"
+          }
+        ],
+        "id": "typecheck",
+        "inputs": [
+          "@globs(sources)",
+          {
+            "file": "tsconfig.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          },
+          {
+            "file": "/.moon/tasks/typescript.yml"
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "apps/worker-ts/tsconfig.json": {},
+          ".moon/tasks/typescript.yml": {}
+        },
+        "inputGlobs": {
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          },
+          "apps/worker-ts/src/**/*": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": false,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "mutex": "tsc-solution-build",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "outputs": [
+          {
+            "file": ".tsbuild"
+          }
+        ],
+        "outputFiles": {
+          "apps/worker-ts/.tsbuild": {
+            "optional": false
+          }
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-ts:typecheck",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "build"
+      },
+      "typecheck-test": {
+        "command": "tsc",
+        "args": [
+          "--project",
+          "tsconfig.test.json"
+        ],
+        "id": "typecheck-test",
+        "inputs": [
+          {
+            "glob": "test/**/*.ts",
+            "cache": true
+          },
+          {
+            "file": "tsconfig.test.json"
+          },
+          {
+            "file": "/tsconfig.options.json"
+          },
+          {
+            "glob": "/.moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}",
+            "cache": true
+          }
+        ],
+        "inputFiles": {
+          "tsconfig.options.json": {},
+          "apps/worker-ts/tsconfig.test.json": {}
+        },
+        "inputGlobs": {
+          "apps/worker-ts/test/**/*.ts": {
+            "cache": true
+          },
+          ".moon/*.{yml,yaml,jsonc,json,pkl,hcl,toml}": {
+            "cache": true
+          }
+        },
+        "options": {
+          "allowFailure": false,
+          "cache": true,
+          "inferInputs": false,
+          "internal": false,
+          "interactive": false,
+          "mergeArgs": "append",
+          "mergeDeps": "append",
+          "mergeEnv": "append",
+          "mergeInputs": "append",
+          "mergeOutputs": "append",
+          "mergeToolchains": "append",
+          "persistent": false,
+          "priority": "normal",
+          "retryCount": 0,
+          "runDepsInParallel": true,
+          "runInCI": true,
+          "runFromWorkspaceRoot": false,
+          "shell": true,
+          "unixShell": "bash",
+          "windowsShell": "pwsh"
+        },
+        "state": {
+          "expanded": true
+        },
+        "target": "worker-ts:typecheck-test",
+        "toolchains": [
+          "typescript"
+        ],
+        "type": "test"
+      }
+    }
+  },
+  "options": {
+    "affected": null,
+    "query": null,
+    "id": null,
+    "command": null,
+    "project": null,
+    "script": null,
+    "toolchain": null,
+    "type": null
+  }
+}

@@ -1,0 +1,7 @@
+audit:format | Checking formatting...
+audit:format | All matched files use Prettier code style!
+▮▮▮▮ audit:format (cached, 7b3060c4)
+
+Tasks: 1 completed (1 cached)
+ Time: 43ms ❯❯❯❯ to the moon
+

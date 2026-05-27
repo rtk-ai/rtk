@@ -1,0 +1,44 @@
+▮▮▮▮ e2e:typecheck (bd958ad9)
+▮▮▮▮ gateway:typecheck-test (c2b8007b)
+▮▮▮▮ worker-ts:typecheck-test (13238ff2)
+▮▮▮▮ There's a new version of moon available, 2.2.5 (currently on 2.0.4)!
+▮▮▮▮ Daemon, AI skill, async experiments, and more!
+▮▮▮▮ Run moon upgrade or install from https://moonrepo.dev/docs/install
+▮▮▮▮ e2e:typecheck (404ms, bd958ad9)
+▮▮▮▮ core:typecheck (0ca944f4)
+▮▮▮▮ gateway:typecheck-test (429ms, c2b8007b)
+▮▮▮▮ worker-ts:typecheck-test (451ms, 13238ff2)
+▮▮▮▮ core:typecheck (108ms, 0ca944f4)
+▮▮▮▮ ui-kit:typecheck (501faabf)
+▮▮▮▮ ui-kit:typecheck (87ms, 501faabf)
+▮▮▮▮ worker-py:typecheck (abc9f551)
+ worker-py:typecheck | Success: no issues found in 16 source files
+▮▮▮▮ worker-py:typecheck (464ms, abc9f551)
+▮▮▮▮ db:typecheck (307b45f7)
+▮▮▮▮ db:typecheck (100ms, 307b45f7)
+▮▮▮▮ policy:typecheck (7ff37bbe)
+▮▮▮▮ policy:typecheck (107ms, 7ff37bbe)
+▮▮▮▮ config:typecheck (a6f1add1)
+▮▮▮▮ config:typecheck (101ms, a6f1add1)
+▮▮▮▮ plugin-sdk:typecheck (3e0076aa)
+▮▮▮▮ plugin-sdk:typecheck (95ms, 3e0076aa)
+▮▮▮▮ audit:typecheck (026e289c)
+▮▮▮▮ audit:typecheck (104ms, 026e289c)
+▮▮▮▮ bus:typecheck (0b491e9f)
+▮▮▮▮ bus:typecheck (102ms, 0b491e9f)
+▮▮▮▮ http:typecheck (6f11c855)
+▮▮▮▮ http:typecheck (106ms, 6f11c855)
+▮▮▮▮ sample:typecheck (e2a3f641)
+▮▮▮▮ sample:typecheck (112ms, e2a3f641)
+▮▮▮▮ discord:typecheck (ab58dbd0)
+▮▮▮▮ discord:typecheck (115ms, ab58dbd0)
+▮▮▮▮ worker-ts:typecheck (9ec2d8cf)
+▮▮▮▮ worker-ts:typecheck (127ms, 9ec2d8cf)
+▮▮▮▮ gateway:typecheck (adcd02dd)
+▮▮▮▮ gateway:typecheck (125ms, adcd02dd)
+▮▮▮▮ frontend:typecheck (6485fd0b)
+▮▮▮▮ frontend:typecheck (850ms, 6485fd0b)
+
+Tasks: 18 completed
+ Time: 3s 283ms
+
