@@ -204,6 +204,18 @@ fn extract_failures_regex(output: &str) -> Vec<TestFailure> {
     failures
 }
 
+/// Offline filter entry point — used by `cmds::build::moon_cmd` to compress
+/// the body of a `bun test`/`vitest`/`jest` task when run via `moon run`.
+/// Wraps `VitestParser::parse` + `TokenFormatter::format(FormatMode::Compact)`.
+pub fn filter_vitest_output(input: &str) -> String {
+    match VitestParser::parse(input) {
+        ParseResult::Full(result) | ParseResult::Degraded(result, _) => {
+            result.format(FormatMode::Compact)
+        }
+        ParseResult::Passthrough(s) => s,
+    }
+}
+
 pub fn run_test(command: &Commands, args: &[String], verbose: u8) -> Result<i32> {
     let timer = tracking::TimedExecution::start();
 

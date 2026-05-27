@@ -491,6 +491,18 @@ fn filter_generic_lint(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Offline filter entry point — used by `cmds::build::moon_cmd` to compress
+/// the body of an eslint/biome/lint task when run via `moon run`. Routes
+/// JSON inputs to `filter_eslint_json`, text inputs to `filter_generic_lint`.
+pub fn filter_lint_output(input: &str) -> String {
+    let trimmed = input.trim_start();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        filter_eslint_json(input)
+    } else {
+        filter_generic_lint(input)
+    }
+}
+
 /// Compact file path (remove common prefixes)
 fn compact_path(path: &str) -> String {
     // Remove common prefixes like /Users/..., /home/..., C:\
