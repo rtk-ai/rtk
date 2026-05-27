@@ -101,7 +101,8 @@ pub fn decode_bytes(bytes: &[u8], requested: TextEncoding) -> Result<DecodedText
             })
         }
         TextEncoding::Utf8 => Ok(DecodedText {
-            text: String::from_utf8(payload.to_vec()).context("stream did not contain valid UTF-8")?,
+            text: String::from_utf8(payload.to_vec())
+                .context("stream did not contain valid UTF-8")?,
             used: UsedEncoding::Utf8,
             used_fallback: false,
         }),
