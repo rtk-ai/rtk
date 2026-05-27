@@ -297,25 +297,17 @@ impl StreamFilter for MoonStreamFilter {
             return Some(format!("{}\n", cleaned));
         }
 
-        // 3. Parallel-mode body line: ` project:task | body` — route this
-        //    single body line through the task's filter if known and emit.
-        //    (Per-line filtering of parallel output is imperfect for tools
-        //    like vitest that need batch JSON — but those don't typically run
-        //    in parallel-prefix mode anyway. Prettier and similar emit
-        //    one-liners that pass through fine.)
-        if let Some((task_id, body)) = Self::parse_parallel_body(line) {
-            let task_id = task_id.to_string();
-            let filtered_line = match self.task_map.tool_for(&task_id) {
-                Some(cmd) => match filter_for_tool(cmd) {
-                    Some(f) => f(body),
-                    None => body.to_string(),
-                },
-                None => body.to_string(),
-            };
-            if filtered_line.trim().is_empty() {
-                return None;
-            }
-            return Some(format!("{}\n", filtered_line));
+        // 3. Parallel-mode body line: ` project:task | body` — pass body
+        //    through unchanged. Per-line filtering would be wrong for tools
+        //    that need batch context (prettier collapses "Checking..." +
+        //    "All matched files use Prettier code style!" into a canonical
+        //    summary; called per-line it would emit the summary repeatedly
+        //    instead of once). A follow-up could buffer parallel bodies
+        //    per-task and apply the filter once on completion — for now,
+        //    only sequential-mode tasks (the common verbose case: failures,
+        //    --force, :test runs) get tool-filter routing.
+        if let Some((_task_id, body)) = Self::parse_parallel_body(line) {
+            return Some(format!("{}\n", body));
         }
 
         // 4. Chrome task line: start or completion.
