@@ -207,7 +207,9 @@ Received: "customers:read"
 Ran 7 tests across 3 files. [874.00ms]
 ```
 
-**Task 5 implication:** `rtk` already has a `bun test` filter. The per-task body routing in Task 5 should route `audit:test` (and any `bun test` task) through that existing filter. The `bun test` failure body is NOT prefixed with `[project:task]` — it is streamed raw between the chrome start line and chrome complete line.
+**Task 5 implication:** rtk does NOT currently have a dedicated `bun test` filter. The closest existing filter is `cmds/js/vitest_cmd.rs`, but it parses JSON output from `--reporter json` — bun test emits plain text, so the vitest filter won't apply. Task 5 must either (a) add a small `filter_bun_test_output()` helper inside `moon_cmd.rs` that compresses bun test plain-text output, or (b) leave `bun` unmapped in `filter_for_tool` so bun test bodies pass through unchanged (chrome stripping still applies, but the underlying test output is verbatim). If (b) is chosen, the Task 6 ≥60% savings assertion on this fixture may need to use a different (failing) fixture from a tool with a real rtk filter (e.g. eslint).
+
+The `bun test` failure body is NOT prefixed with `[project:task]` — it is streamed raw between the chrome start line and chrome complete line.
 
 ---
 
