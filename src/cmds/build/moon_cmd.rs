@@ -4,9 +4,10 @@
 //! task's stdout/stderr through the matching rtk filter for its underlying
 //! command. See issue #1877.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
+use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::core::runner::{self, RunOptions};
@@ -41,21 +42,58 @@ const PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "upgrade",
 ];
 
+/// Serde helper: root of `moon query tasks` JSON output.
+#[derive(Debug, Deserialize)]
+struct QueryTasksRoot {
+    tasks: HashMap<String, HashMap<String, QueryTask>>,
+}
+
+/// Serde helper: minimal task fields we care about (other fields are ignored).
+#[derive(Debug, Deserialize)]
+struct QueryTask {
+    command: String,
+}
+
 /// Maps a `project:task` identifier to the underlying tool's command name
 /// (e.g. `"audit:format" -> "prettier"`). Built from `moon query tasks` in
 /// Task 4; defaulted to empty for chrome-only mode in Task 3.
 #[derive(Debug, Default, Clone)]
 pub struct TaskMap {
-    #[allow(dead_code)]
     tasks: HashMap<String, String>,
 }
 
 impl TaskMap {
     /// Return the underlying command for a `project:task` id, or `None` if
-    /// the task is unknown.
+    /// the task is unknown. Used by Task 5 per-task routing.
     #[allow(dead_code)]
     pub fn tool_for(&self, project_task: &str) -> Option<&str> {
         self.tasks.get(project_task).map(|s| s.as_str())
+    }
+
+    /// Parse the output of `moon query tasks`. The JSON has shape
+    /// `{"tasks": {"<project>": {"<task>": {"command": "...", ...}}}, "options": {...}}`.
+    /// Unknown fields (like `options` at the root, `args` inside task) are ignored.
+    pub fn from_query_json(json: &str) -> anyhow::Result<Self> {
+        let root: QueryTasksRoot = serde_json::from_str(json)
+            .context("Failed to parse moon query tasks JSON")?;
+        let mut tasks = HashMap::with_capacity(root.tasks.len() * 4);
+        for (project, project_tasks) in root.tasks {
+            for (task_name, task) in project_tasks {
+                tasks.insert(format!("{}:{}", project, task_name), task.command);
+            }
+        }
+        Ok(Self { tasks })
+    }
+
+    /// Number of `project:task` entries in the map.
+    pub fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// True when no tasks have been loaded (e.g. when `moon query tasks` failed).
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
     }
 }
 
@@ -87,6 +125,52 @@ lazy_static! {
         Regex::new(r"Daemon, AI skill, async experiments").unwrap(),
         Regex::new(r"Run moon upgrade or install").unwrap(),
     ];
+}
+
+/// Run `moon query tasks` to build the task->tool map. Returns an empty
+/// map (not Err) on failure so the filter still falls back to chrome-only
+/// stripping rather than blocking the user.
+fn build_task_map(verbose: u8) -> TaskMap {
+    let output = resolved_command("moon")
+        .arg("query")
+        .arg("tasks")
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let json = String::from_utf8_lossy(&out.stdout);
+            match TaskMap::from_query_json(&json) {
+                Ok(map) => map,
+                Err(e) => {
+                    if verbose > 0 {
+                        eprintln!(
+                            "rtk moon: failed to parse moon query tasks ({}); chrome-only filtering",
+                            e
+                        );
+                    }
+                    TaskMap::default()
+                }
+            }
+        }
+        Ok(out) => {
+            if verbose > 0 {
+                eprintln!(
+                    "rtk moon: `moon query tasks` exited {}; chrome-only filtering",
+                    out.status.code().unwrap_or(-1)
+                );
+            }
+            TaskMap::default()
+        }
+        Err(e) => {
+            if verbose > 0 {
+                eprintln!(
+                    "rtk moon: could not execute `moon query tasks` ({}); chrome-only filtering",
+                    e
+                );
+            }
+            TaskMap::default()
+        }
+    }
 }
 
 /// Apply chrome stripping to moon output. When `task_map` is non-empty, Task 5
@@ -139,7 +223,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         cmd.arg(arg);
     }
 
-    let task_map = TaskMap::default();
+    let task_map = build_task_map(verbose);
+    if verbose > 0 {
+        eprintln!("rtk moon: detected {} tasks in workspace", task_map.len());
+    }
     runner::run_filtered(
         cmd,
         "moon",
@@ -225,5 +312,25 @@ mod tests {
             "expected >=15% savings on cache-hit fixture, got {:.1}%",
             s
         );
+    }
+
+    #[test]
+    fn builds_taskmap_from_real_query_json() {
+        let json = include_str!("../../../tests/fixtures/moon/query_tasks.json");
+        let map = TaskMap::from_query_json(json).expect("parses query JSON");
+        // The fixture is from yulii/ops-platform which has audit:format -> prettier.
+        assert_eq!(map.tool_for("audit:format"), Some("prettier"));
+    }
+
+    #[test]
+    fn taskmap_from_malformed_json_returns_err() {
+        let result = TaskMap::from_query_json("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn taskmap_from_empty_json_is_empty() {
+        let map = TaskMap::from_query_json(r#"{"tasks": {}}"#).expect("parses");
+        assert_eq!(map.tool_for("anything:anything"), None);
     }
 }
