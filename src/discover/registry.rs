@@ -2463,6 +2463,58 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_go_tool_golangci_lint_run() {
+        assert_eq!(
+            rewrite_command_no_prefixes("go tool golangci-lint run ./...", &[]),
+            Some("rtk go tool golangci-lint run ./...".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_go_tool_golangci_lint_bare() {
+        // `go tool golangci-lint` with no subcommand
+        assert_eq!(
+            rewrite_command_no_prefixes("go tool golangci-lint", &[]),
+            Some("rtk go tool golangci-lint".into())
+        );
+    }
+
+    #[test]
+    fn test_classify_go_tool_any_tool() {
+        // `go tool <x>` should be classified as supported for ANY tool name,
+        // not just golangci-lint.  RTK passes unknown tools through transparently
+        // while still tracking usage.
+        assert!(matches!(
+            classify_command("go tool staticcheck ./..."),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_command("go tool pprof cpu.prof"),
+            Classification::Supported {
+                rtk_equivalent: "rtk go",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_go_tool_any_tool() {
+        // Non-golangci-lint tools are rewritten to `rtk go tool <x>` so usage
+        // is tracked even when RTK cannot filter the output.
+        assert_eq!(
+            rewrite_command_no_prefixes("go tool staticcheck ./...", &[]),
+            Some("rtk go tool staticcheck ./...".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("go tool pprof cpu.prof", &[]),
+            Some("rtk go tool pprof cpu.prof".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_golangci_lint() {
         assert_eq!(
             rewrite_command_no_prefixes("golangci-lint run ./...", &[]),

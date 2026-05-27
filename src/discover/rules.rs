@@ -462,7 +462,7 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^go\s+(test|build|vet)",
+        pattern: r"^go\s+(test|build|vet|tool\s+\S+)",
         rtk_cmd: "rtk go",
         rewrite_prefixes: &["go"],
         category: "Go",

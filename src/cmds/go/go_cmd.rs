@@ -127,11 +127,12 @@ pub fn run_other(args: &[OsString], verbose: u8) -> Result<i32> {
         anyhow::bail!("go: no subcommand specified");
     }
 
-    // Intercept: `go tool <known>` invocations for filtered output
-    if let Some((tool, tool_args)) = match_go_tool(args) {
-        match tool {
-            GoTool::GolangciLint => return run_go_tool_golangci_lint(tool_args, verbose),
-        }
+    // Intercept: `go tool <name>` — filter known tools, passthrough+track the rest
+    if let Some((tool_name, tool_args)) = match_go_tool(args) {
+        return match tool_name.as_str() {
+            "golangci-lint" => run_go_tool_golangci_lint(tool_args, verbose),
+            _ => run_go_tool_passthrough(&tool_name, tool_args, verbose),
+        };
     }
 
     let timer = tracking::TimedExecution::start();
@@ -203,31 +204,92 @@ fn has_golangci_format_flag(args: &[OsString]) -> bool {
     })
 }
 
-/// Known `go tool` subcommands that RTK provides filtered output for.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum GoTool {
-    GolangciLint,
+/// Match `go tool <name> [args...]` for ANY tool name.
+///
+/// Returns `(tool_name, remaining_args)` when the first two args are
+/// `["tool", "<name>"]`. Returns `None` if the subcommand is not `tool`
+/// or no tool name follows.
+fn match_go_tool(args: &[OsString]) -> Option<(String, &[OsString])> {
+    if args.first()? != "tool" {
+        return None;
+    }
+    let tool_name = args.get(1)?;
+    if tool_name.is_empty() {
+        return None;
+    }
+    Some((tool_name.to_string_lossy().into_owned(), &args[2..]))
 }
 
-impl GoTool {
-    fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "golangci-lint" => Some(Self::GolangciLint),
-            _ => None,
-        }
+/// Run `go tool <name>` for any tool RTK doesn't know how to filter.
+///
+/// Executes the command transparently (no output filtering) but tracks it in
+/// the SQLite usage database so it appears in `rtk gain --history`.
+fn run_go_tool_passthrough(tool: &str, args: &[OsString], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = resolved_command("go");
+    cmd.arg("tool").arg(tool);
+    for arg in args {
+        cmd.arg(arg);
     }
+
+    if verbose > 0 {
+        eprintln!("Running: go tool {} ...", tool);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to run go tool {}", tool))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = format!("{}\n{}", stdout, stderr);
+
+    print!("{}", stdout);
+    eprint!("{}", stderr);
+
+    timer.track(
+        &format!("go tool {}", tool),
+        &format!("rtk go tool {}", tool),
+        &raw,
+        &raw, // No filtering — passthrough only
+    );
+
+    Ok(exit_code_from_output(
+        &output,
+        &format!("go tool {}", tool),
+    ))
 }
 
-/// If the first arg is `tool` identify if it is a tool we already handle.
-fn match_go_tool(args: &[OsString]) -> Option<(GoTool, &[OsString])> {
-    if args.first().map(|a| a == "tool").unwrap_or(false) {
-        if let Some(tool_arg) = args.get(1) {
-            if let Some(tool) = GoTool::from_name(&tool_arg.to_string_lossy()) {
-                return Some((tool, &args[2..]));
-            }
+/// Build the golangci-lint arguments for `go tool golangci-lint`.
+///
+/// Strips a leading `"run"` from `args` (we always inject `"run"` ourselves),
+/// then prepends the JSON output flag unless the caller already specified one.
+/// This handles both forms:
+///   - `rtk go tool golangci-lint run ./...`  (explicit "run" in args)
+///   - `rtk go tool golangci-lint ./...`       (no "run" prefix)
+fn build_go_tool_golangci_args(args: &[OsString], version: u32) -> Vec<OsString> {
+    // Strip a leading "run" — we always inject "run" ourselves to avoid duplication
+    let run_args = if args.first().map(|a| a == "run").unwrap_or(false) {
+        &args[1..]
+    } else {
+        args
+    };
+
+    let mut result: Vec<OsString> = Vec::new();
+    result.push("run".into());
+
+    if !has_golangci_format_flag(run_args) {
+        if version >= 2 {
+            result.push("--output.json.path".into());
+            result.push("stdout".into());
+        } else {
+            result.push("--out-format=json".into());
         }
     }
-    None
+
+    result.extend_from_slice(run_args);
+    result
 }
 
 /// Run `go tool golangci-lint` and filter its output via the golangci JSON filter.
@@ -240,19 +302,7 @@ fn run_go_tool_golangci_lint(args: &[OsString], verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("go");
     cmd.arg("tool").arg("golangci-lint");
 
-    let has_format = has_golangci_format_flag(args);
-
-    if !has_format {
-        if version >= 2 {
-            cmd.arg("run").arg("--output.json.path").arg("stdout");
-        } else {
-            cmd.arg("run").arg("--out-format=json");
-        }
-    } else {
-        cmd.arg("run");
-    }
-
-    for arg in args {
+    for arg in build_go_tool_golangci_args(args, version) {
         cmd.arg(arg);
     }
 
@@ -1025,7 +1075,7 @@ utils.go:15:5: unreachable code"#;
     fn test_match_go_tool_golangci_lint() {
         let args = os(&["tool", "golangci-lint", "run", "./..."]);
         let (tool, rest) = match_go_tool(&args).expect("should match");
-        assert_eq!(tool, GoTool::GolangciLint);
+        assert_eq!(tool, "golangci-lint");
         assert_eq!(rest.len(), 2); // ["run", "./..."]
     }
 
@@ -1033,13 +1083,33 @@ utils.go:15:5: unreachable code"#;
     fn test_match_go_tool_bare() {
         let args = os(&["tool", "golangci-lint"]);
         let (tool, rest) = match_go_tool(&args).expect("should match");
-        assert_eq!(tool, GoTool::GolangciLint);
+        assert_eq!(tool, "golangci-lint");
         assert!(rest.is_empty());
     }
 
     #[test]
-    fn test_match_go_tool_rejects_unknown() {
-        assert!(match_go_tool(&os(&["tool", "pprof"])).is_none());
+    fn test_match_go_tool_matches_any_known_tool() {
+        // Any `go tool <name>` should match — not just golangci-lint
+        let args = os(&["tool", "pprof", "cpu.prof"]);
+        let (tool, rest) = match_go_tool(&args).expect("pprof should match");
+        assert_eq!(tool, "pprof");
+        assert_eq!(rest.len(), 1);
+
+        let args = os(&["tool", "staticcheck", "./..."]);
+        let (tool, rest) = match_go_tool(&args).expect("staticcheck should match");
+        assert_eq!(tool, "staticcheck");
+        assert_eq!(rest.len(), 1);
+
+        // Also matches with no trailing args
+        let args = os(&["tool", "pprof"]);
+        let (tool, rest) = match_go_tool(&args).expect("bare pprof should match");
+        assert_eq!(tool, "pprof");
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn test_match_go_tool_requires_tool_name() {
+        // `go tool` with no name after it — nothing to dispatch to
         assert!(match_go_tool(&os(&["tool"])).is_none());
         assert!(match_go_tool(&os(&["test", "./..."])).is_none());
         assert!(match_go_tool(&os(&[])).is_none());
@@ -1071,5 +1141,55 @@ utils.go:15:5: unreachable code"#;
         assert!(!has_golangci_format_flag(&os(&["run", "./..."])));
         assert!(!has_golangci_format_flag(&os(&[])));
         assert!(!has_golangci_format_flag(&os(&["--fix"])));
+    }
+
+    // --- build_go_tool_golangci_args tests ---
+
+    #[test]
+    fn test_build_go_tool_args_explicit_run_not_doubled_v2() {
+        // Bug: `rtk go tool golangci-lint run ./...` was producing
+        // `go tool golangci-lint run --output.json.path stdout run ./...`
+        let args = os(&["run", "./..."]);
+        let result = build_go_tool_golangci_args(&args, 2);
+        assert_eq!(
+            result,
+            os(&["run", "--output.json.path", "stdout", "./..."]),
+            "leading 'run' must be stripped to avoid duplication"
+        );
+    }
+
+    #[test]
+    fn test_build_go_tool_args_no_run_prefix_v2() {
+        // `rtk go tool golangci-lint ./...` (bare, no explicit "run")
+        let args = os(&["./..."]);
+        let result = build_go_tool_golangci_args(&args, 2);
+        assert_eq!(result, os(&["run", "--output.json.path", "stdout", "./..."]));
+    }
+
+    #[test]
+    fn test_build_go_tool_args_explicit_run_not_doubled_v1() {
+        let args = os(&["run", "./..."]);
+        let result = build_go_tool_golangci_args(&args, 1);
+        assert_eq!(
+            result,
+            os(&["run", "--out-format=json", "./..."]),
+            "v1: leading 'run' must be stripped to avoid duplication"
+        );
+    }
+
+    #[test]
+    fn test_build_go_tool_args_preserves_explicit_format_flag_v1() {
+        // User already passed --out-format — don't inject a second one
+        let args = os(&["run", "--out-format=json", "./..."]);
+        let result = build_go_tool_golangci_args(&args, 1);
+        assert_eq!(result, os(&["run", "--out-format=json", "./..."]));
+    }
+
+    #[test]
+    fn test_build_go_tool_args_bare_invocation() {
+        // `rtk go tool golangci-lint` with no extra args
+        let args = os(&[]);
+        let result = build_go_tool_golangci_args(&args, 2);
+        assert_eq!(result, os(&["run", "--output.json.path", "stdout"]));
     }
 }
