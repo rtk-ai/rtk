@@ -1,0 +1,20 @@
+Microsoft (R) Build Engine version 17.8.5+b5c6332e2 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Build started 1/15/2026 9:06:00 AM.
+Project "C:\src\MyProject.sln" on node 1 (Build target(s)).
+Project "C:\src\MyProject\MyProject.vcxproj" on node 1 (default target(s)).
+PrepareForBuild:
+  Creating directory "obj\Debug\".
+PostBuildEvent:
+  copy /Y "C:\path with spaces\out.dll" "C:\dest\bin\"
+C:\src\MyProject\MyProject.vcxproj(123,5): error MSB3073: The command "copy /Y \"C:\\path with spaces\\out.dll\" \"C:\\dest\\bin\\\"" exited with code 1. [C:\src\MyProject\MyProject.vcxproj]
+Done Building Project "C:\src\MyProject\MyProject.vcxproj" (default targets) -- FAILED.
+Done Building Project "C:\src\MyProject.sln" (default targets) -- FAILED.
+
+Build FAILED.
+
+    0 Warning(s)
+    1 Error(s)
+
+Time Elapsed 00:00:02.00

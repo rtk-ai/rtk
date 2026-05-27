@@ -78,13 +78,21 @@ lazy_static! {
     static ref TAIL_LINES_EQ: Regex = Regex::new(r"^tail\s+--lines=(\d+)\s+(\S+)$").unwrap();
     static ref TAIL_LINES_SPACE: Regex = Regex::new(r"^tail\s+--lines\s+(\d+)\s+(\S+)$").unwrap();
 
-    // PowerShell: Select-String → rtk grep (handles both -Path/-Pattern orderings).
+    // PowerShell: Select-String → rtk grep (limited, safety-first).
+    //
+    // We only rewrite when we can prove equivalence. Most importantly:
+    // - Select-String is case-insensitive by default; rg/grep are not.
+    // - Pipelines ($_.FullName) and multi-pattern arrays are not safely rewritable here.
     static ref SELECT_STRING_PATH_FIRST: Regex = Regex::new(
-        r#"(?i)^Select-String\s+.*?-Path\s+(\S+).*?-Pattern\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)"#
+        r#"(?i)^Select-String\s+.*?-Path\s+(\S+).*?-Pattern\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)(?:\s|$)"#
     ).unwrap();
     static ref SELECT_STRING_PATTERN_FIRST: Regex = Regex::new(
-        r#"(?i)^Select-String\s+.*?-Pattern\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+).*?-Path\s+(\S+)"#
+        r#"(?i)^Select-String\s+.*?-Pattern\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+).*?-Path\s+(\S+)(?:\s|$)"#
     ).unwrap();
+    static ref SELECT_STRING_CASE_SENSITIVE_RE: Regex = Regex::new(r"(?i)\s-CaseSensitive(?:\s|$)").unwrap();
+    static ref SELECT_STRING_SIMPLE_MATCH_RE: Regex = Regex::new(r"(?i)\s-SimpleMatch(?:\s|$)").unwrap();
+    static ref SELECT_STRING_CONTEXT_RE: Regex = Regex::new(r"(?i)\s-Context\s+(\d+)\s*,\s*(\d+)(?:\s|$)").unwrap();
+    static ref SELECT_STRING_RECURSE_RE: Regex = Regex::new(r"(?i)\s-Recurse(?:\s|$)").unwrap();
 
     // PowerShell: Get-Content / GC → rtk read
     static ref GET_CONTENT_RE: Regex =
@@ -663,6 +671,26 @@ fn rewrite_compound(
             }
             TokenKind::Pipe => {
                 let seg = cmd[seg_start..tok.offset].trim();
+                let pipe_group_end = tokens.iter().find(|t| {
+                    t.offset > tok.offset
+                        && (t.kind == TokenKind::Operator
+                            || (t.kind == TokenKind::Shellism && t.value == "&"))
+                });
+                let pipe_end = pipe_group_end.map(|t| t.offset).unwrap_or(cmd.len());
+                let pipe_group = cmd[tok.offset..pipe_end].trim();
+
+                if let Some(rewritten) = try_rewrite_powershell_pipe_group(seg, pipe_group) {
+                    if rewritten != seg {
+                        any_changed = true;
+                    }
+                    result.push_str(&rewritten);
+                    seg_start = pipe_end;
+                    if pipe_group_end.is_none() {
+                        return if any_changed { Some(result) } else { None };
+                    }
+                    continue;
+                }
+
                 let is_pipe_incompatible = seg.starts_with("find ")
                     || seg == "find"
                     || seg.starts_with("fd ")
@@ -677,12 +705,6 @@ fn rewrite_compound(
                     any_changed = true;
                 }
                 result.push_str(&rewritten);
-
-                let pipe_group_end = tokens.iter().find(|t| {
-                    t.offset > tok.offset
-                        && (t.kind == TokenKind::Operator
-                            || (t.kind == TokenKind::Shellism && t.value == "&"))
-                });
 
                 match pipe_group_end {
                     Some(next_op) => {
@@ -840,7 +862,59 @@ fn try_powershell_rewrite(cmd: &str) -> Option<String> {
         } else {
             (caps.get(1)?.as_str(), caps.get(2)?.as_str())
         };
-        return Some(format!("rtk grep {} {}", pattern, path));
+
+        // Safety: do not rewrite pipeline placeholders or obvious variables.
+        // Those depend on runtime values (e.g. $_.FullName) that rtk rewrite cannot evaluate.
+        if path.contains("$_") || path.starts_with('$') {
+            return None;
+        }
+        // Safety: multi-pattern arrays ("x","y") are not representable in a single rtk grep pattern arg.
+        if pattern.contains(',') {
+            return None;
+        }
+        // Safety: Select-String -Recurse with wildcard paths relies on PowerShell expansion semantics.
+        // rtk grep is recursive by default but cannot reliably reproduce PS globbing here.
+        if SELECT_STRING_RECURSE_RE.is_match(cmd) && (path.contains('*') || path.contains('?')) {
+            return None;
+        }
+
+        let mut out = String::new();
+        out.push_str("rtk grep ");
+
+        if SELECT_STRING_SIMPLE_MATCH_RE.is_match(cmd) {
+            out.push_str("--fixed ");
+        }
+
+        out.push_str(pattern);
+        out.push(' ');
+        out.push_str(path);
+
+        // Select-String is case-insensitive by default.
+        if !SELECT_STRING_CASE_SENSITIVE_RE.is_match(cmd) {
+            out.push_str(" -- -i");
+        }
+
+        // Context window: -Context before,after
+        if let Some(ctx) = SELECT_STRING_CONTEXT_RE.captures(cmd) {
+            let before = ctx.get(1)?.as_str();
+            let after = ctx.get(2)?.as_str();
+            out.push_str(&format!(" -B {} -A {}", before, after));
+        }
+
+        return Some(out);
+    }
+
+    // PowerShell: Get-ChildItem / gci / dir → rtk gci (subset)
+    {
+        let lower = cmd.trim_start().to_ascii_lowercase();
+        if lower.starts_with("get-childitem")
+            || lower.starts_with("gci")
+            || lower.starts_with("dir")
+        {
+            if let Some(rewritten) = try_rewrite_powershell_get_child_item(cmd) {
+                return Some(rewritten);
+            }
+        }
     }
 
     if let Some(caps) = GET_CONTENT_RE.captures(cmd) {
@@ -857,6 +931,187 @@ fn try_powershell_rewrite(cmd: &str) -> Option<String> {
     }
 
     None
+}
+
+fn try_rewrite_powershell_pipe_group(left: &str, pipe_group: &str) -> Option<String> {
+    // Only supports: Get-ChildItem ... | Select-Object FullName,LastWriteTime,Length
+    // Rewrites the whole pipe group into: rtk gci ... --select ...
+    let lower_left = left.trim_start().to_ascii_lowercase();
+    if !(lower_left.starts_with("get-childitem")
+        || lower_left.starts_with("gci")
+        || lower_left.starts_with("dir"))
+    {
+        return None;
+    }
+
+    let pg = pipe_group.trim();
+    let pg_lower = pg.to_ascii_lowercase();
+    if !pg_lower.starts_with("| select-object") {
+        return None;
+    }
+
+    // Very small, safety-first parser: do not attempt to evaluate variables.
+    if left.contains("$_") || left.contains('$') {
+        return None;
+    }
+
+    // Extract the property list after Select-Object.
+    let props = pg.split_once(char::is_whitespace)?.1.trim(); // "Select-Object ..."
+    let props = props
+        .strip_prefix("Select-Object")
+        .or_else(|| props.strip_prefix("select-object"))?
+        .trim();
+    if props.is_empty() {
+        return None;
+    }
+
+    let rewritten_left = try_rewrite_powershell_get_child_item(left)?;
+    Some(format!("{} --select {}", rewritten_left, props))
+}
+
+fn try_rewrite_powershell_get_child_item(cmd: &str) -> Option<String> {
+    // Supports a small subset of PowerShell Get-ChildItem/gci/dir flags and rewrites
+    // to `rtk gci` with equivalent-ish behavior.
+    //
+    // Safety: no variables, no pipeline placeholders.
+    if cmd.contains("$_") || cmd.contains('$') {
+        return None;
+    }
+
+    let mut tokens: Vec<String> = split_powershell_args_quote_aware(cmd)?;
+    if tokens.is_empty() {
+        return None;
+    }
+
+    // Drop the leading command word (Get-ChildItem/gci/dir)
+    tokens.remove(0);
+
+    let mut path: Option<String> = None;
+    let mut recurse = false;
+    let mut force = false;
+    let mut kind_file = false;
+    let mut kind_dir = false;
+    let mut filter: Option<String> = None;
+    let mut include: Option<String> = None;
+
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = tokens[i].as_str();
+        let lower = t.to_ascii_lowercase();
+        if !t.starts_with('-') && path.is_none() {
+            path = Some(tokens[i].clone());
+            i += 1;
+            continue;
+        }
+        match lower.as_str() {
+            "-recurse" => {
+                recurse = true;
+                i += 1;
+            }
+            "-force" => {
+                force = true;
+                i += 1;
+            }
+            "-file" => {
+                kind_file = true;
+                i += 1;
+            }
+            "-directory" => {
+                kind_dir = true;
+                i += 1;
+            }
+            "-filter" => {
+                filter = tokens.get(i + 1).cloned();
+                i += 2;
+            }
+            "-include" => {
+                include = tokens.get(i + 1).cloned();
+                i += 2;
+            }
+            _ => {
+                // Unknown flag → do not rewrite (safety).
+                return None;
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("rtk gci ");
+    out.push_str(path.as_deref().unwrap_or("."));
+    if recurse {
+        out.push_str(" --recurse");
+    }
+    if force {
+        out.push_str(" --force");
+    }
+    if kind_file {
+        out.push_str(" --file");
+    } else if kind_dir {
+        out.push_str(" --directory");
+    }
+    if let Some(f) = filter {
+        out.push_str(" --filter ");
+        out.push_str(&f);
+    }
+    if let Some(inc) = include {
+        out.push_str(" --include ");
+        out.push_str(&inc);
+    }
+    Some(out)
+}
+
+fn split_powershell_args_quote_aware(cmd: &str) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut escape = false;
+
+    for ch in cmd.chars() {
+        if escape {
+            cur.push(ch);
+            escape = false;
+            continue;
+        }
+
+        if quote == Some('"') && ch == '\\' {
+            // Treat backslash-escaped chars inside double quotes as literal.
+            escape = true;
+            cur.push(ch);
+            continue;
+        }
+
+        if let Some(q) = quote {
+            cur.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            cur.push(ch);
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            if !cur.is_empty() {
+                out.push(cur.clone());
+                cur.clear();
+            }
+            continue;
+        }
+
+        cur.push(ch);
+    }
+
+    if quote.is_some() {
+        return None;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    Some(out)
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
@@ -1434,6 +1689,86 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git log -10", &[]),
             Some("rtk git log -10".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_select_string_default_case_insensitive() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Select-String -Path f -Pattern p", &[]),
+            Some("rtk grep p f -- -i".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_select_string_case_sensitive() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Select-String -Path f -Pattern p -CaseSensitive", &[]),
+            Some("rtk grep p f".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_select_string_simple_match_and_context() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "Select-String -Path f -Pattern p -SimpleMatch -Context 2,3",
+                &[]
+            ),
+            Some("rtk grep --fixed p f -- -i -B 2 -A 3".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_select_string_skips_variable_path() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Select-String -Path $p -Pattern p", &[]),
+            None
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("Select-String -Path $_.FullName -Pattern p", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_get_child_item_simple() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-ChildItem . -Recurse -File -Filter API_win.obj", &[]),
+            Some("rtk gci . --recurse --file --filter API_win.obj".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_get_child_item_quoted_path_and_filter() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "Get-ChildItem \"C:\\My Path\" -Recurse -File -Filter \"API win.obj\"",
+                &[]
+            ),
+            Some("rtk gci \"C:\\My Path\" --recurse --file --filter \"API win.obj\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_get_child_item_quoted_glob_filter() {
+        assert_eq!(
+            rewrite_command_no_prefixes("Get-ChildItem . -Filter \"*.CPP\"", &[]),
+            Some("rtk gci . --filter \"*.CPP\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_powershell_get_child_item_pipe_select_object_absorbed() {
+        assert_eq!(
+            rewrite_command_no_prefixes(
+                "Get-ChildItem . -Recurse -Force -File -Filter API_win.obj | Select-Object FullName,LastWriteTime,Length",
+                &[]
+            ),
+            Some(
+                "rtk gci . --recurse --force --file --filter API_win.obj --select FullName,LastWriteTime,Length"
+                    .into()
+            )
         );
     }
 

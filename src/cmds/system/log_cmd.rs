@@ -1,6 +1,5 @@
 //! Deduplicates repeated log lines and shows counts instead.
 
-use crate::core::guard::never_worse;
 use crate::core::tracking;
 use crate::core::truncate::{reduced, CAP_WARNINGS};
 use anyhow::Result;
@@ -23,7 +22,7 @@ lazy_static! {
 }
 
 /// Filter and deduplicate log output
-pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
+pub fn run_file(file: &Path, recent_events: usize, keywords: &[String], verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     if verbose > 0 {
@@ -31,20 +30,19 @@ pub fn run_file(file: &Path, verbose: u8) -> Result<()> {
     }
 
     let content = fs::read_to_string(file)?;
-    let result = analyze_logs(&content);
-    let shown = never_worse(&content, &result);
-    println!("{}", shown);
+    let result = analyze_logs_with_options(&content, recent_events, keywords);
+    println!("{}", result);
     timer.track(
         &format!("cat {}", file.display()),
         "rtk log",
         &content,
-        shown,
+        &result,
     );
     Ok(())
 }
 
 /// Filter logs from stdin
-pub fn run_stdin(_verbose: u8) -> Result<()> {
+pub fn run_stdin(recent_events: usize, keywords: &[String], _verbose: u8) -> Result<()> {
     let timer = tracking::TimedExecution::start();
 
     let mut content = String::new();
@@ -54,11 +52,10 @@ pub fn run_stdin(_verbose: u8) -> Result<()> {
         content.push('\n');
     }
 
-    let result = analyze_logs(&content);
-    let shown = never_worse(&content, &result);
-    println!("{}", shown);
+    let result = analyze_logs_with_options(&content, recent_events, keywords);
+    println!("{}", result);
 
-    timer.track("log (stdin)", "rtk log (stdin)", &content, shown);
+    timer.track("log (stdin)", "rtk log (stdin)", &content, &result);
 
     Ok(())
 }
@@ -219,6 +216,75 @@ fn analyze_logs(content: &str) -> String {
     result.join("\n")
 }
 
+fn analyze_logs_with_options(content: &str, recent_events: usize, keywords: &[String]) -> String {
+    let mut base = analyze_logs(content);
+    if recent_events == 0 {
+        return base;
+    }
+
+    let keys: Vec<String> = if keywords.is_empty() {
+        vec![
+            "assert",
+            "error",
+            "failed",
+            "fail",
+            "exception",
+            "crash",
+            "load",
+            "oninitialize",
+            "onpostinitialize",
+            "streamread",
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
+    } else {
+        keywords.iter().map(|s| s.to_ascii_lowercase()).collect()
+    };
+
+    let mut picked: Vec<(usize, String)> = Vec::new();
+    let mut seen_norm: Vec<String> = Vec::new();
+
+    let lines: Vec<&str> = content.lines().collect();
+    for idx0 in (0..lines.len()).rev() {
+        let l = lines[idx0].trim_end();
+        if l.is_empty() {
+            continue;
+        }
+        let lower = l.to_ascii_lowercase();
+        if !keys.iter().any(|k| lower.contains(k)) {
+            continue;
+        }
+
+        let norm = normalize_log_line(l, &TIMESTAMP_RE, &UUID_RE, &HEX_RE, &NUM_RE, &PATH_RE);
+        if seen_norm.contains(&norm) {
+            continue;
+        }
+        seen_norm.push(norm);
+        picked.push((idx0 + 1, l.to_string()));
+        if picked.len() >= recent_events {
+            break;
+        }
+    }
+
+    picked.reverse();
+
+    if !picked.is_empty() {
+        base.push_str("\n\n[RECENT_EVENTS]\n");
+        for (ln, msg) in picked {
+            let truncated = if msg.len() > 200 {
+                let t: String = msg.chars().take(197).collect();
+                format!("{}...", t)
+            } else {
+                msg
+            };
+            base.push_str(&format!("  {}: {}\n", ln, truncated));
+        }
+    }
+
+    base.trim_end().to_string()
+}
+
 fn normalize_log_line(
     line: &str,
     timestamp_re: &Regex,
@@ -276,5 +342,20 @@ mod tests {
         let result = analyze_logs(&logs);
         // Should not panic even with very long multi-byte messages
         assert!(result.contains("ERRORS"));
+    }
+
+    #[test]
+    fn test_recent_events_tail_dedup() {
+        let logs = "INFO: startup\n\
+                    ERROR: Load failed\n\
+                    ERROR: Load failed\n\
+                    OnInitialize: begin\n\
+                    ASSERT failed: x\n";
+        let out = analyze_logs_with_options(logs, 3, &[]);
+        assert!(out.contains("[RECENT_EVENTS]"));
+        assert!(out.contains("ERROR: Load failed"));
+        assert!(out.contains("ASSERT failed"));
+        // Dedup identical ERROR line in recent events
+        assert_eq!(out.matches("ERROR: Load failed").count(), 2); // one in summary, one in recent events
     }
 }

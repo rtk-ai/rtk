@@ -65,6 +65,19 @@ pub fn decode_bytes(bytes: &[u8], requested: TextEncoding) -> Result<DecodedText
 
     match requested {
         TextEncoding::Auto => {
+            // Heuristic: UTF-16 without BOM (common for some Windows logs / legacy tools).
+            // Check this BEFORE accepting UTF-8 when NUL bytes are present, because UTF-16
+            // payloads like "H\0i\0" are valid UTF-8 but produce unreadable output.
+            if payload.contains(&0) {
+                if let Some(utf16) = detect_utf16_no_bom(payload) {
+                    return Ok(DecodedText {
+                        text: utf16.text,
+                        used: utf16.used,
+                        used_fallback: true,
+                    });
+                }
+            }
+
             if let Ok(s) = std::str::from_utf8(payload) {
                 return Ok(DecodedText {
                     text: s.to_string(),
@@ -136,6 +149,76 @@ pub fn decode_bytes(bytes: &[u8], requested: TextEncoding) -> Result<DecodedText
                 used_fallback: false,
             })
         }
+    }
+}
+
+struct Utf16Guess {
+    text: String,
+    used: UsedEncoding,
+}
+
+fn detect_utf16_no_bom(payload: &[u8]) -> Option<Utf16Guess> {
+    #[allow(clippy::manual_is_multiple_of)]
+    if payload.len() < 4 || payload.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut zeros_even = 0usize;
+    let mut zeros_odd = 0usize;
+    let mut pairs = 0usize;
+    for chunk in payload.chunks_exact(2).take(4096) {
+        pairs += 1;
+        if chunk[0] == 0 {
+            zeros_even += 1;
+        }
+        if chunk[1] == 0 {
+            zeros_odd += 1;
+        }
+    }
+    if pairs == 0 {
+        return None;
+    }
+
+    let even_ratio = zeros_even as f64 / pairs as f64;
+    let odd_ratio = zeros_odd as f64 / pairs as f64;
+
+    // For ASCII-ish UTF-16, every other byte is often 0x00 AND the other lane is
+    // mostly printable ASCII.
+    const THRESH: f64 = 0.60;
+    if odd_ratio >= THRESH && even_ratio < 0.10 && ascii_lane_ratio(payload, 0) >= 0.85 {
+        return Some(Utf16Guess {
+            text: decode_utf16(payload, true),
+            used: UsedEncoding::Utf16Le,
+        });
+    }
+    if even_ratio >= THRESH && odd_ratio < 0.10 && ascii_lane_ratio(payload, 1) >= 0.85 {
+        return Some(Utf16Guess {
+            text: decode_utf16(payload, false),
+            used: UsedEncoding::Utf16Be,
+        });
+    }
+
+    None
+}
+
+fn ascii_lane_ratio(payload: &[u8], lane: usize) -> f64 {
+    let mut total = 0usize;
+    let mut ascii = 0usize;
+    for chunk in payload.chunks_exact(2).take(4096) {
+        let b = chunk[lane];
+        if b == 0 {
+            continue;
+        }
+        total += 1;
+        let is_ascii = b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7E).contains(&b);
+        if is_ascii {
+            ascii += 1;
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        ascii as f64 / total as f64
     }
 }
 

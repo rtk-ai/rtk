@@ -147,6 +147,7 @@ Four strategies applied per command type:
 rtk ls .                        # Token-optimized directory tree
 rtk read file.rs                # Smart file reading
 rtk read file.rs -l aggressive  # Signatures only (strips bodies)
+rtk read file.rs --lines 430:540 # Inclusive line range (1-based)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
 rtk grep "pattern" .            # Grouped search results
@@ -226,6 +227,7 @@ rtk codegraph index <path>      # Summary only, no per-file progress (-90%)
 Select-String -Path f -Pattern p   # auto-rewritten -> rtk grep
 Get-Content <file>                  # auto-rewritten -> rtk read
 GC <file>                           # auto-rewritten -> rtk read
+rtk read <file> --lines 430:540     # Prefer over Get-Content line-range loops
 Remove-Item <path> -Force           # -> ok <basename>
 ```
 
@@ -270,6 +272,7 @@ rtk json config.json            # Structure without values
 rtk deps                        # Dependencies summary
 rtk env -f AWS                  # Filtered env vars
 rtk log app.log                 # Deduplicated logs
+rtk log ERRORLOG.TXT --events 20 # Tail key error/assert events (deduped)
 rtk curl <url>                  # Truncate + save full output
 rtk wget <url>                  # Download, strip progress bars
 rtk summary <long command>      # Heuristic summary
