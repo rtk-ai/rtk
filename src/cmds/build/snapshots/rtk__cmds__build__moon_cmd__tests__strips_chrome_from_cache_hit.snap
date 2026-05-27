@@ -1,0 +1,10 @@
+---
+source: src/cmds/build/moon_cmd.rs
+expression: output
+---
+audit:format | Checking formatting...
+audit:format | All matched files use Prettier code style!
+audit:format (cached)
+
+Tasks: 1 completed (1 cached)
+ Time: 43ms
