@@ -16,6 +16,19 @@ enum ParseState {
     Summary,
 }
 
+/// True for `--version`, which makes pytest print its banner and exit without a
+/// test session. The filter then finds no summary and collapses the banner to a
+/// misleading "No tests collected" (issue #2096), so this invocation must bypass
+/// the filter.
+///
+/// Deliberately narrow: `rtk pytest --help`/`-h` print rtk's own wrapper help and
+/// never reach this function, and pytest's short/count version forms are version-
+/// dependent — pytest 9's bare `-V` actually runs a session, so treating it as
+/// informational would dump a raw, unfiltered test run.
+fn is_informational_flag(arg: &str) -> bool {
+    arg == "--version"
+}
+
 pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tool_exists("pytest") {
         resolved_command("pytest")
@@ -24,6 +37,25 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         c.arg("-m").arg("pytest");
         c
     };
+
+    // Informational invocations (--version/--help) produce no test session for the
+    // filter to parse. Forward them verbatim and pass the output through unchanged
+    // so the real banner/usage reaches the caller instead of "No tests collected".
+    if args.iter().any(|a| is_informational_flag(a)) {
+        for arg in args {
+            cmd.arg(arg);
+        }
+        if verbose > 0 {
+            eprintln!("Running: pytest {}", args.join(" "));
+        }
+        return runner::run_filtered(
+            cmd,
+            "pytest",
+            &args.join(" "),
+            |s| s.to_string(),
+            runner::RunOptions::stdout_only(),
+        );
+    }
 
     let has_tb_flag = args.iter().any(|a| a.starts_with("--tb"));
     let has_quiet_flag = args.iter().any(|a| a == "-q" || a == "--quiet");
@@ -320,6 +352,41 @@ fn parse_summary_line(summary: &str) -> PytestCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_version_banner_swallowed_by_filter() {
+        // Bug #2096: `pytest --version` prints a banner and exits without a test
+        // session, so the summary parser finds no count and the filter collapses
+        // the real output to a misleading "No tests collected". This is the reason
+        // run() must route informational flags around the filter entirely.
+        let result = filter_pytest_output("pytest 8.3.0");
+        assert_eq!(result, "Pytest: No tests collected");
+    }
+
+    #[test]
+    fn test_is_informational_flag() {
+        // Only --version: reaches the wrapper and reliably prints-and-exits.
+        assert!(is_informational_flag("--version"));
+        // Must NOT match: -V runs a session in pytest 9; -VV is count-dependent;
+        // --help/-h are intercepted by clap; -v/--verbose are verbosity, not version.
+        assert!(!is_informational_flag("-V"));
+        assert!(!is_informational_flag("-VV"));
+        assert!(!is_informational_flag("--help"));
+        assert!(!is_informational_flag("-h"));
+        assert!(!is_informational_flag("-v"));
+        assert!(!is_informational_flag("--verbose"));
+        assert!(!is_informational_flag("--collect-only"));
+        assert!(!is_informational_flag("tests/test_foo.py"));
+    }
+
+    #[test]
+    fn test_version_detected_anywhere_in_args() {
+        // run() triggers passthrough when --version appears alongside other args.
+        let with_version = ["--version".to_string(), "tests/".to_string()];
+        assert!(with_version.iter().any(|a| is_informational_flag(a)));
+        let without = ["tests/".to_string(), "-q".to_string()];
+        assert!(!without.iter().any(|a| is_informational_flag(a)));
+    }
 
     #[test]
     fn test_filter_pytest_all_pass() {
