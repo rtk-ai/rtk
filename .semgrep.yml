@@ -101,6 +101,9 @@ rules:
       - pattern: fs::remove_dir_all(...)
       - pattern: std::fs::remove_file(...)
       - pattern: std::fs::remove_dir_all(...)
+    paths:
+      exclude:
+        - src/hooks/
     message: >
       File/directory deletion detected. Expected in hooks/init cleanup,
       surprising in a filter module. Verify intent.
