@@ -228,18 +228,22 @@ fn is_structured_operation(args: &[String]) -> bool {
 /// summarize or schema-compress — the output has to stay byte-faithful so that
 /// downstream `jq` / `json.load` parsing keeps working.
 fn explicit_lossless_format(args: &[String]) -> bool {
+    // Scan all args (last --output wins, matching aws CLI semantics for repeats).
+    let mut last: Option<bool> = None;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        let fmt = if arg == "--output" {
-            iter.next().map(|s| s.as_str())
-        } else {
-            arg.strip_prefix("--output=")
-        };
-        if let Some(fmt) = fmt {
-            return matches!(fmt, "json" | "yaml" | "yaml-stream");
+        if arg == "--output" {
+            // A dangling --output (no value) is malformed and aws will reject it;
+            // don't silently apply lossy compression to it.
+            last = Some(match iter.next() {
+                Some(fmt) => matches!(fmt.as_str(), "json" | "yaml" | "yaml-stream"),
+                None => true,
+            });
+        } else if let Some(fmt) = arg.strip_prefix("--output=") {
+            last = Some(matches!(fmt, "json" | "yaml" | "yaml-stream"));
         }
     }
-    false
+    last.unwrap_or(false)
 }
 
 /// Execute an aws command without filtering, preserving output byte-for-byte.
@@ -269,6 +273,8 @@ fn run_passthrough(subcommand: &str, args: &[String], verbose: u8, full_sub: &st
         return Ok(exit_code_from_output(&output, "aws"));
     }
 
+    // No tee hint: output is already byte-faithful, so there is no truncated
+    // data to recover — teeing would just duplicate stdout.
     print!("{}", stdout);
     if !stderr.is_empty() {
         eprint!("{}", stderr);
@@ -286,7 +292,7 @@ fn run_generic(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -
 
     let mut has_output_flag = false;
     for arg in args {
-        if arg == "--output" {
+        if arg == "--output" || arg.starts_with("--output=") {
             has_output_flag = true;
         }
         cmd.arg(arg);
@@ -1625,6 +1631,15 @@ mod tests {
         assert!(!explicit_lossless_format(&s(&["get-function", "--output", "table"])));
         assert!(!explicit_lossless_format(&s(&["get-function", "--output", "text"])));
         assert!(!explicit_lossless_format(&s(&["list-functions"])));
+        // Repeated --output: last wins (matches aws CLI)
+        assert!(explicit_lossless_format(&s(&[
+            "--output", "table", "--output", "json"
+        ])));
+        assert!(!explicit_lossless_format(&s(&[
+            "--output", "json", "--output", "table"
+        ])));
+        // Dangling --output (malformed) → don't apply lossy compression
+        assert!(explicit_lossless_format(&s(&["get-function", "--output"])));
     }
 
     #[test]
