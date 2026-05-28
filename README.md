@@ -119,6 +119,36 @@ git status  # Automatically rewritten to rtk git status
 
 Hook-based agents rewrite Bash commands (e.g., `git status` -> `rtk git status`) before execution. Plugin-based agents, including Hermes, use their plugin API to rewrite commands before execution. The agent receives compact output without needing to call `rtk` explicitly.
 
+## Grep (agent-friendly)
+
+```bash
+rtk grep "Foo" . --files-only
+rtk grep "Foo" . --count-by-file
+rtk grep "Foo" . --top-files 10
+rtk grep "Foo" . --agent-safe
+rtk grep "Foo" . --agent-safe --max-per-file 30
+rtk grep "Foo" . --json
+rtk grep "Foo" . --agent-safe --json
+rtk grep "Foo" . --all --full-lines
+
+# Opt-in preset for agents (grep only in this slice):
+RTK_AGENT_SAFE=1 rtk grep "Foo" .
+```
+
+Notes:
+- `--files-only`: locator mode (paths only)
+- `--count-by-file`: counts per file
+- `--top-files N`: ranked file summary (top N files)
+- `--agent-safe`: caps match spam + adds summary/hints (flags override env/config)
+- `--json`: machine-readable JSON only (no human text)
+- `--all`: disables match caps
+- `--full-lines`: disables line clipping
+
+PowerShell:
+```powershell
+$env:RTK_AGENT_SAFE="1"; rtk grep "Foo" src
+```
+
 **Important:** the hook only runs on Bash tool calls. Claude Code built-in tools like `Read`, `Grep`, and `Glob` do not pass through the Bash hook, so they are not auto-rewritten. To get RTK's compact output for those workflows, use shell commands (`cat`/`head`/`tail`, `rg`/`grep`, `find`) or call `rtk read`, `rtk grep`, or `rtk find` directly.
 
 ## How It Works
@@ -149,7 +179,12 @@ rtk read file.rs -l aggressive  # Signatures only (strips bodies)
 rtk read file.rs --lines 430:540 # Inclusive line range (1-based)
 rtk smart file.rs               # 2-line heuristic code summary
 rtk find "*.rs" .               # Compact find results
-rtk grep "pattern" .            # Grouped search results
+rtk grep "pattern" .            # Grouped search results (legacy defaults)
+rtk grep "Foo" . --files-only   # Unique matching file paths
+rtk grep "Foo" . --count-by-file # Counts per file
+rtk grep "Foo" . --agent-safe   # Token-safe preset (caps + clipping + summary)
+rtk grep "Foo" . --agent-safe --max-per-file 30
+rtk grep "Foo" . --all --full-lines # Legacy full output (uncapped + unclipped)
 rtk diff file1 file2            # Condensed diff
 ```
 
