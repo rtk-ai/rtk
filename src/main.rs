@@ -47,6 +47,8 @@ pub enum AgentTarget {
     Antigravity,
     /// Pi coding agent
     Pi,
+    /// CodeBuddy Code (CLI and App/IDE plugin)
+    Codebuddy,
     /// Hermes CLI
     Hermes,
 }
@@ -775,6 +777,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process CodeBuddy PreToolUse hook (reads JSON from stdin)
+    Codebuddy,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1366,25 +1370,33 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+struct UninstallDispatchHandlers<UninstallHermes, UninstallCodebuddy, UninstallStandard> {
+    hermes: UninstallHermes,
+    codebuddy: UninstallCodebuddy,
+    standard: UninstallStandard,
+}
+
+fn uninstall_init_dispatch<UninstallHermes, UninstallCodebuddy, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
-    uninstall_hermes: UninstallHermes,
-    uninstall_standard: UninstallStandard,
+    handlers: UninstallDispatchHandlers<UninstallHermes, UninstallCodebuddy, UninstallStandard>,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
+    UninstallCodebuddy: FnOnce(bool, hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
-        uninstall_hermes(ctx)
+        (handlers.hermes)(ctx)
+    } else if agent == Some(AgentTarget::Codebuddy) {
+        (handlers.codebuddy)(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
-        uninstall_standard(global, gemini, codex, cursor, pi, ctx)
+        (handlers.standard)(global, gemini, codex, cursor, pi, ctx)
     }
 }
 
@@ -1828,8 +1840,11 @@ fn run_cli() -> Result<i32> {
                     gemini,
                     codex,
                     ctx,
-                    hooks::init::uninstall_hermes,
-                    hooks::init::uninstall,
+                    UninstallDispatchHandlers {
+                        hermes: hooks::init::uninstall_hermes,
+                        codebuddy: hooks::init::uninstall_codebuddy,
+                        standard: hooks::init::uninstall,
+                    },
                 )?;
             } else if gemini {
                 let patch_mode = if auto_patch {
@@ -1842,6 +1857,15 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
                 hooks::init::run_copilot(ctx)?;
+            } else if agent == Some(AgentTarget::Codebuddy) {
+                let patch_mode = if auto_patch {
+                    hooks::init::PatchMode::Auto
+                } else if no_patch {
+                    hooks::init::PatchMode::Skip
+                } else {
+                    hooks::init::PatchMode::Ask
+                };
+                hooks::init::run_codebuddy(global, patch_mode, ctx)?;
             } else if agent == Some(AgentTarget::Pi) {
                 hooks::init::run_pi_mode(global, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
@@ -2189,6 +2213,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Codebuddy => {
+                hooks::hook_cmd::run_codebuddy()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2663,6 +2691,17 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_codebuddy() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "codebuddy"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Codebuddy));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -2689,8 +2728,24 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_codebuddy_uninstall() {
+        let cli =
+            Cli::try_parse_from(["rtk", "init", "--agent", "codebuddy", "--uninstall"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                agent, uninstall, ..
+            } => {
+                assert_eq!(agent, Some(AgentTarget::Codebuddy));
+                assert!(uninstall);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_init_uninstall_dispatch_routes_hermes_to_hermes_cleanup() {
         let hermes_called = Cell::new(false);
+        let codebuddy_called = Cell::new(false);
         let standard_called = Cell::new(false);
         let ctx = hooks::init::InitContext {
             verbose: 2,
@@ -2703,20 +2758,68 @@ mod tests {
             false,
             false,
             ctx,
-            |ctx| {
-                hermes_called.set(true);
-                assert_eq!(ctx.verbose, 2);
-                assert!(ctx.dry_run);
-                Ok(())
-            },
-            |_, _, _, _, _, _| {
-                standard_called.set(true);
-                Ok(())
+            UninstallDispatchHandlers {
+                hermes: |ctx: hooks::init::InitContext| {
+                    hermes_called.set(true);
+                    assert_eq!(ctx.verbose, 2);
+                    assert!(ctx.dry_run);
+                    Ok(())
+                },
+                codebuddy: |_: bool, _: hooks::init::InitContext| {
+                    codebuddy_called.set(true);
+                    Ok(())
+                },
+                standard: |_, _, _, _, _, _| {
+                    standard_called.set(true);
+                    Ok(())
+                },
             },
         );
 
         assert!(result.is_ok());
         assert!(hermes_called.get());
+        assert!(!codebuddy_called.get());
+        assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_codebuddy_to_codebuddy_cleanup() {
+        let hermes_called = Cell::new(false);
+        let codebuddy_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 1,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Codebuddy),
+            true,
+            false,
+            false,
+            ctx,
+            UninstallDispatchHandlers {
+                hermes: |_: hooks::init::InitContext| {
+                    hermes_called.set(true);
+                    Ok(())
+                },
+                codebuddy: |global: bool, ctx: hooks::init::InitContext| {
+                    codebuddy_called.set(true);
+                    assert!(global);
+                    assert_eq!(ctx.verbose, 1);
+                    assert!(ctx.dry_run);
+                    Ok(())
+                },
+                standard: |_, _, _, _, _, _| {
+                    standard_called.set(true);
+                    Ok(())
+                },
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(!hermes_called.get());
+        assert!(codebuddy_called.get());
         assert!(!standard_called.get());
     }
 
@@ -2836,6 +2939,17 @@ mod tests {
             cli.command,
             Commands::Hook {
                 command: HookCommands::Claude
+            }
+        ));
+    }
+
+    #[test]
+    fn test_hook_codebuddy_parses() {
+        let cli = Cli::try_parse_from(["rtk", "hook", "codebuddy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Hook {
+                command: HookCommands::Codebuddy
             }
         ));
     }

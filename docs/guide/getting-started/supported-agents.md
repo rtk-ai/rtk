@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity
+description: How to integrate RTK with Claude Code, Cursor, Copilot, CodeBuddy Code, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity
 sidebar:
   order: 3
 ---
@@ -33,6 +33,7 @@ Agent runs "cargo test"
 | GitHub Copilot CLI | Shell hook (deny-with-suggestion) | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Yes |
 | Gemini CLI | Rust binary (`BeforeTool`) | Yes |
+| CodeBuddy Code | Shell hook (`PreToolUse`) + App/IDE marketplace plugin | Yes |
 | OpenCode | TypeScript plugin (`tool.execute.before`) | Yes |
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
@@ -77,6 +78,27 @@ rtk init --global --copilot
 ```bash
 rtk init --global --gemini
 ```
+
+### CodeBuddy Code
+
+```bash
+# Project-local CLI hook
+rtk init --agent codebuddy
+
+# Global CLI hook + App/IDE marketplace plugin
+rtk init -g --agent codebuddy
+```
+
+The project-local install writes `.codebuddy/settings.json` with a `PreToolUse` hook that delegates Bash commands to `rtk hook codebuddy`. The global install writes `~/.codebuddy/settings.json`, installs the RTK plugin under `~/.codebuddy/plugins/marketplaces/codebuddy-plugins-official/plugins/rtk/`, and enables `rtk@codebuddy-plugins-official` in `enabledPlugins` so the CodeBuddy App/IDE path is active too.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent codebuddy
+rtk init --uninstall -g --agent codebuddy
+```
+
+Uninstall removes the CodeBuddy hook entries, the global RTK plugin directory, and the plugin enable flag. It also cleans up legacy `rtk-tx` CodeBuddy hook and plugin entries when present.
 
 ### OpenCode
 
@@ -173,7 +195,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini, CodeBuddy Code CLI) are guaranteed because the command is rewritten before the agent sees it. Plugin integrations (CodeBuddy App/IDE, OpenCode, Pi) use in-place mutation through the agent's plugin or extension API.
 
 ## Windows support
 
