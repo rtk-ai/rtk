@@ -191,6 +191,10 @@ impl TomlFilterRegistry {
         // Priority 1: project-local .rtk/filters.toml (trust-gated)
         let project_filter_path = std::path::Path::new(".rtk/filters.toml");
         if project_filter_path.exists() {
+            let project_has_filters = std::fs::read_to_string(project_filter_path)
+                .ok()
+                .and_then(|content| toml::from_str::<TomlFilterFile>(&content).ok())
+                .is_some_and(|file| !file.filters.is_empty());
             let trust_status = crate::hooks::trust::check_trust(project_filter_path)
                 .unwrap_or(crate::hooks::trust::TrustStatus::Untrusted);
 
@@ -205,12 +209,18 @@ impl TomlFilterRegistry {
                     }
                 }
                 crate::hooks::trust::TrustStatus::Untrusted => {
-                    eprintln!("[rtk] WARNING: untrusted project filters (.rtk/filters.toml)");
-                    eprintln!("[rtk] Filters NOT applied. Run `rtk trust` to review and enable.");
+                    if project_has_filters {
+                        eprintln!("[rtk] WARNING: untrusted project filters (.rtk/filters.toml)");
+                        eprintln!(
+                            "[rtk] Filters NOT applied. Run `rtk trust` to review and enable."
+                        );
+                    }
                 }
                 crate::hooks::trust::TrustStatus::ContentChanged { .. } => {
-                    eprintln!("[rtk] WARNING: .rtk/filters.toml changed since trusted.");
-                    eprintln!("[rtk] Filters NOT applied. Run `rtk trust` to re-review.");
+                    if project_has_filters {
+                        eprintln!("[rtk] WARNING: .rtk/filters.toml changed since trusted.");
+                        eprintln!("[rtk] Filters NOT applied. Run `rtk trust` to re-review.");
+                    }
                 }
             }
         }

@@ -8,6 +8,8 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::parser::{
     emit_degradation_warning, emit_passthrough_warning, truncate_passthrough, Dependency,
@@ -536,6 +538,88 @@ fn filter_pnpm_install(output: &str) -> String {
     }
 }
 
+/// Resolves the workspace root directory by traversing upwards from the starting directory.
+pub fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
+    let mut dir = start_dir.to_path_buf();
+    loop {
+        if dir.join("pnpm-workspace.yaml").exists() || dir.join("pnpm-lock.yaml").exists() {
+            return Some(dir);
+        }
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Resolves the workspace sub-directory for a given pnpm filter.
+pub fn resolve_pnpm_filter_dir(filter: &str) -> Option<PathBuf> {
+    let current_dir = std::env::current_dir().ok()?;
+    let workspace_root = find_workspace_root(&current_dir).unwrap_or(current_dir);
+
+    let stripped = filter.strip_prefix("./").unwrap_or(filter);
+
+    // Fast Path: check if it's a direct subdirectory/path under the workspace root
+    let direct_path = workspace_root.join(stripped);
+    if direct_path.exists() && direct_path.is_dir() {
+        return Some(direct_path);
+    }
+
+    // Slow Path: Recursive traversal up to depth 4
+    let mut matching_dirs = Vec::new();
+    scan_for_packages(&workspace_root, 0, stripped, &mut matching_dirs);
+    matching_dirs.into_iter().next()
+}
+
+fn scan_for_packages(
+    dir: &Path,
+    depth: usize,
+    filter: &str,
+    matches: &mut Vec<PathBuf>,
+) {
+    if depth > 4 {
+        return;
+    }
+
+    let package_json_path = dir.join("package.json");
+    if package_json_path.exists() {
+        if let Ok(content) = fs::read_to_string(&package_json_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(name) = json.get("name").and_then(|v| v.as_str()) {
+                    let folder_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    let unscoped_name = name.split('/').next_back().unwrap_or(name);
+
+                    if name == filter || unscoped_name == filter || folder_name == filter {
+                        matches.push(dir.to_path_buf());
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if name == "node_modules"
+                    || name == "target"
+                    || name == ".git"
+                    || name == "dist"
+                    || name == "build"
+                {
+                    continue;
+                }
+                scan_for_packages(&path, depth + 1, filter, matches);
+            }
+        }
+    }
+}
+
 pub fn run_passthrough(args: &[OsString], verbose: u8) -> Result<i32> {
     crate::core::runner::run_passthrough("pnpm", args, verbose)
 }
@@ -668,5 +752,47 @@ mod tests {
         let eslint = state.dependencies.iter().find(|d| d.name == "eslint").unwrap();
         assert!(!react.dev_dependency, "react should be prod");
         assert!(eslint.dev_dependency, "eslint should be dev");
+    }
+
+    #[test]
+    fn test_resolve_pnpm_filter_dir_matches() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        // Write workspace config
+        fs::write(root.join("pnpm-workspace.yaml"), "packages:\n  - 'packages/*'\n").unwrap();
+
+        // Create package directories
+        let app1_dir = root.join("packages/app1");
+        fs::create_dir_all(&app1_dir).unwrap();
+        fs::write(
+            app1_dir.join("package.json"),
+            r#"{"name": "@org/app1"}"#,
+        ).unwrap();
+
+        let app2_dir = root.join("packages/my-custom-folder");
+        fs::create_dir_all(&app2_dir).unwrap();
+        fs::write(
+            app2_dir.join("package.json"),
+            r#"{"name": "app2"}"#,
+        ).unwrap();
+
+        // 1. Exact match
+        let mut matches = Vec::new();
+        scan_for_packages(root, 0, "@org/app1", &mut matches);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], app1_dir);
+
+        // 2. Unscoped match
+        let mut matches = Vec::new();
+        scan_for_packages(root, 0, "app1", &mut matches);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], app1_dir);
+
+        // 3. Folder name match
+        let mut matches = Vec::new();
+        scan_for_packages(root, 0, "my-custom-folder", &mut matches);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], app2_dir);
     }
 }

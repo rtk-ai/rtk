@@ -144,11 +144,44 @@ fn compute_diff(lines1: &[&str], lines2: &[&str]) -> DiffResult {
 }
 
 fn similarity(a: &str, b: &str) -> f64 {
+    if a.is_ascii() && b.is_ascii() {
+        return ascii_similarity(a.as_bytes(), b.as_bytes());
+    }
+
     let a_chars: std::collections::HashSet<char> = a.chars().collect();
     let b_chars: std::collections::HashSet<char> = b.chars().collect();
 
     let intersection = a_chars.intersection(&b_chars).count();
     let union = a_chars.union(&b_chars).count();
+
+    if union == 0 {
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+fn ascii_similarity(a: &[u8], b: &[u8]) -> f64 {
+    let mut seen_a = [false; 128];
+    let mut seen_b = [false; 128];
+
+    for &byte in a {
+        seen_a[byte as usize] = true;
+    }
+    for &byte in b {
+        seen_b[byte as usize] = true;
+    }
+
+    let mut intersection = 0;
+    let mut union = 0;
+    for i in 0..seen_a.len() {
+        if seen_a[i] || seen_b[i] {
+            union += 1;
+            if seen_a[i] && seen_b[i] {
+                intersection += 1;
+            }
+        }
+    }
 
     if union == 0 {
         1.0
@@ -163,22 +196,20 @@ fn condense_unified_diff(diff: &str) -> String {
     let mut added = 0;
     let mut removed = 0;
     let mut changes = Vec::new();
+    let mut was_truncated = false;
+    const MAX_CHANGES_PER_FILE: usize = 10;
 
-    // Never truncate diff content — users make decisions based on this data.
-    // Only strip diff metadata (headers, @@ hunks); all +/- lines shown in full.
     for line in diff.lines() {
         if line.starts_with("diff --git") || line.starts_with("--- ") || line.starts_with("+++ ") {
             if line.starts_with("+++ ") {
-                if !current_file.is_empty() && (added > 0 || removed > 0) {
-                    result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-                    for c in &changes {
-                        result.push(format!("  {}", c));
-                    }
-                    let total = added + removed;
-                    if total > 10 {
-                        result.push(format!("  ... +{} more", total - 10));
-                    }
-                }
+                flush_unified_file(
+                    &mut result,
+                    &current_file,
+                    added,
+                    removed,
+                    &changes,
+                    &mut was_truncated,
+                );
                 current_file = line
                     .trim_start_matches("+++ ")
                     .trim_start_matches("b/")
@@ -189,26 +220,54 @@ fn condense_unified_diff(diff: &str) -> String {
             }
         } else if line.starts_with('+') && !line.starts_with("+++") {
             added += 1;
-            changes.push(line.to_string());
+            if changes.len() < MAX_CHANGES_PER_FILE {
+                changes.push(line.to_string());
+            }
         } else if line.starts_with('-') && !line.starts_with("---") {
             removed += 1;
-            changes.push(line.to_string());
+            if changes.len() < MAX_CHANGES_PER_FILE {
+                changes.push(line.to_string());
+            }
         }
     }
 
-    // Last file
-    if !current_file.is_empty() && (added > 0 || removed > 0) {
-        result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
-        for c in &changes {
-            result.push(format!("  {}", c));
-        }
-        let total = added + removed;
-        if total > 10 {
-            result.push(format!("  ... +{} more", total - 10));
-        }
+    flush_unified_file(
+        &mut result,
+        &current_file,
+        added,
+        removed,
+        &changes,
+        &mut was_truncated,
+    );
+
+    if was_truncated {
+        result.push("[full diff: pipe raw diff without rtk diff]".to_string());
     }
 
     result.join("\n")
+}
+
+fn flush_unified_file(
+    result: &mut Vec<String>,
+    current_file: &str,
+    added: usize,
+    removed: usize,
+    changes: &[String],
+    was_truncated: &mut bool,
+) {
+    if current_file.is_empty() || (added == 0 && removed == 0) {
+        return;
+    }
+
+    result.push(format!("[file] {} (+{} -{})", current_file, added, removed));
+    for change in changes {
+        result.push(format!("  {}", change));
+    }
+    let total = added + removed;
+    if total > changes.len() {
+        *was_truncated = true;
+        result.push(format!("  ... +{} more", total - changes.len()));
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +441,19 @@ diff --git a/b.rs b/b.rs
             !result.contains("+5 more"),
             "Bug still present: showing '+5 more' instead of true overflow"
         );
+    }
+
+    #[test]
+    fn test_condense_unified_diff_large_diff_token_savings() {
+        let diff = make_large_unified_diff(120, 120);
+        let result = condense_unified_diff(&diff);
+
+        let input_tokens = diff.split_whitespace().count();
+        let output_tokens = result.split_whitespace().count();
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(savings >= 70.0, "got {:.1}%", savings);
+        assert!(result.contains("[full diff: pipe raw diff without rtk diff]"));
     }
 
     #[test]

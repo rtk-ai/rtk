@@ -1308,7 +1308,7 @@ fn remove_legacy_settings_entries(ctx: InitContext) -> Result<()> {
 /// Returns true if any entries were removed.
 /// Does NOT remove `rtk hook claude` entries — those are the new format.
 fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
-    let pre_tool_use_array = match root
+    let pre_tool_use = match root
         .get_mut("hooks")
         .and_then(|h| h.get_mut(PRE_TOOL_USE_KEY))
         .and_then(|p| p.as_array_mut())
@@ -1317,23 +1317,21 @@ fn remove_legacy_hook_entries_from_json(root: &mut serde_json::Value) -> bool {
         None => return false,
     };
 
-    let original_len = pre_tool_use_array.len();
-    pre_tool_use_array.retain(|entry| {
-        let dominated_by_legacy = entry
+    let original_len = pre_tool_use.len();
+    pre_tool_use.retain(|entry| !contains_legacy_rewrite_hook(entry));
+
+    pre_tool_use.len() < original_len
+}
+
+fn contains_legacy_rewrite_hook(entry: &serde_json::Value) -> bool {
+    entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
+        || entry
             .get("hooks")
             .and_then(|h| h.as_array())
-            .map(|hooks| {
-                hooks.iter().all(|hook| {
-                    hook.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
-                })
-            })
-            .unwrap_or(false);
-        !dominated_by_legacy
-    });
-
-    pre_tool_use_array.len() < original_len
+            .is_some_and(|hooks| hooks.iter().any(contains_legacy_rewrite_hook))
 }
 
 /// Generate .rtk/filters.toml template in the current directory if not present.
@@ -3172,14 +3170,20 @@ fn remove_legacy_cursor_hook_entries_from_json(root: &mut serde_json::Value) -> 
     };
 
     let original_len = pre_tool_use.len();
-    pre_tool_use.retain(|entry| {
-        !entry
-            .get("command")
-            .and_then(|c| c.as_str())
-            .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
-    });
+    pre_tool_use.retain(|entry| !contains_legacy_cursor_rewrite_hook(entry));
 
     pre_tool_use.len() < original_len
+}
+
+fn contains_legacy_cursor_rewrite_hook(entry: &serde_json::Value) -> bool {
+    entry
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|cmd| cmd.contains(REWRITE_HOOK_FILE))
+        || entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|hooks| hooks.iter().any(contains_legacy_cursor_rewrite_hook))
 }
 
 /// Remove Cursor RTK artifacts: hook script + hooks.json entry
@@ -3845,19 +3849,29 @@ fn uninstall_gemini(ctx: InitContext) -> Result<Vec<String>> {
 
 // ── Copilot integration ─────────────────────────────────────
 
-const COPILOT_HOOK_JSON: &str = r#"{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "type": "command",
-        "command": "rtk hook copilot",
-        "cwd": ".",
-        "timeout": 5
-      }
-    ]
-  }
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
-"#;
+
+fn copilot_hook_json() -> Result<String> {
+    let rtk_path = std::env::current_exe()
+        .context("Failed to resolve current rtk executable")?
+        .display()
+        .to_string();
+    let value = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "type": "command",
+                    "command": format!("{} hook copilot", shell_quote(&rtk_path)),
+                    "cwd": ".",
+                    "timeout": 5
+                }
+            ]
+        }
+    });
+    serde_json::to_string_pretty(&value).context("Failed to serialize hook JSON")
+}
 
 const COPILOT_INSTRUCTIONS: &str = r#"<!-- rtk-instructions v2 -->
 # RTK — Token-Optimized CLI
@@ -3923,7 +3937,8 @@ fn run_copilot_at(base: &Path, ctx: InitContext) -> Result<()> {
 
     // 2. Write hook config (only reached if the upsert above succeeded).
     let hook_path = hooks_dir.join("rtk-rewrite.json");
-    write_if_changed(&hook_path, COPILOT_HOOK_JSON, "Copilot hook config", ctx)?;
+    let hook_json = copilot_hook_json()?;
+    write_if_changed(&hook_path, &hook_json, "Copilot hook config", ctx)?;
 
     if dry_run {
         print_dry_run_footer();
@@ -4247,7 +4262,7 @@ mod tests {
         fs::write(
             &agents_md,
             format!(
-                "# Team rules\n\n{} v2 -->\nold\n{}\n",
+                "# Team rules\n\n{} v2 -->\nold\n{}\n\nMore content",
                 RTK_BLOCK_START, RTK_BLOCK_END
             ),
         )
@@ -4837,7 +4852,7 @@ mod tests {
         let rtk_md = codex_dir.join("RTK.md");
         let absolute_ref = codex_rtk_md_ref(codex_dir);
 
-        fs::write(&agents_md, format!("# Team rules\n\n{}\n", absolute_ref)).unwrap();
+        fs::write(&agents_md, format!("# Team rules\n\n{}", absolute_ref)).unwrap();
         fs::write(&rtk_md, "codex config").unwrap();
 
         let removed = uninstall_codex_at(codex_dir, InitContext::default()).unwrap();

@@ -3,9 +3,9 @@ set -e
 
 # Use local release build if available, otherwise fall back to installed rtk
 if [ -f "./target/release/rtk" ]; then
-  RTK="$(cd "$(dirname ./target/release/rtk)" && pwd)/$(basename ./target/release/rtk)"
+  RTK="\"$(cd "$(dirname ./target/release/rtk)" && pwd)/$(basename ./target/release/rtk)\""
 elif command -v rtk &> /dev/null; then
-  RTK="$(command -v rtk)"
+  RTK="\"$(command -v rtk)\""
 else
   echo "Error: rtk not found. Run 'cargo build --release' or install rtk."
   exit 1
@@ -14,7 +14,7 @@ BENCH_DIR="$(pwd)/scripts/benchmark"
 RTK_ROOT="$(pwd)"
 
 if [ -z "$CI" ]; then
-  rm -rf "$BENCH_DIR"
+  rm -rf "$BENCH_DIR/unix" "$BENCH_DIR/rtk" "$BENCH_DIR/diff"
   mkdir -p "$BENCH_DIR/unix" "$BENCH_DIR/rtk" "$BENCH_DIR/diff"
 fi
 

@@ -17,9 +17,13 @@ pub const CONFIG_DIR: &str = ".config";
 pub const OPENCODE_SUBDIR: &str = "opencode";
 pub const PLUGIN_SUBDIR: &str = "plugins";
 pub const OPENCODE_PLUGIN_FILE: &str = "rtk.ts";
-
+#[allow(dead_code)]
+pub const OPENCODE_PLUGIN_PATH: &str = ".config/opencode/plugins/rtk.ts";
+#[allow(dead_code)]
 pub const CURSOR_DIR: &str = ".cursor";
+#[allow(dead_code)]
 pub const CODEX_DIR: &str = ".codex";
+#[allow(dead_code)]
 pub const GEMINI_DIR: &str = ".gemini";
 
 pub const PI_DIR: &str = ".pi/agent";

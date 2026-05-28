@@ -12,7 +12,7 @@ keywords = ["cli", "llm", "token", "filter", "productivity"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage"] }
 anyhow = "1.0"
 ignore = "0.4"
 walkdir = "2"
@@ -20,7 +20,6 @@ regex = "1"
 lazy_static = "1.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-colored = "2"
 dirs = "5"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"

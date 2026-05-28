@@ -13,7 +13,7 @@ lazy_static! {
         Regex::new(r"^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$").unwrap();
 }
 
-pub fn run(args: &[String], verbose: u8) -> Result<i32> {
+pub fn run(args: &[String], verbose: u8, cwd: Option<&std::path::Path>) -> Result<i32> {
     let tsc_exists = tool_exists("tsc");
 
     let mut cmd = if tsc_exists {
@@ -23,6 +23,10 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         c.arg("tsc");
         c
     };
+
+    if let Some(path) = cwd {
+        cmd.current_dir(path);
+    }
 
     for arg in args {
         cmd.arg(arg);

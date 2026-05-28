@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::io::Read;
 
 use crate::core::stream::RAW_CAP;
-use crate::core::truncate::{CAP_LIST, CAP_WARNINGS};
 
-const MAX_PIPE_MATCHES: usize = CAP_WARNINGS;
-const MAX_PIPE_FILES: usize = CAP_WARNINGS;
-const MAX_PIPE_DIRS: usize = CAP_LIST;
+const MAX_PIPE_MATCHES: usize = 10;
+const MAX_GREP_FILES: usize = 10;
+const MAX_FIND_DIRS: usize = 10;
+const MAX_FIND_FILES: usize = 5;
 
 pub fn resolve_filter(name: &str) -> Option<fn(&str) -> String> {
     match name {
@@ -78,18 +78,51 @@ fn grep_wrapper(input: &str) -> String {
     }
 
     let mut out = format!("{} matches in {}F:\n\n", total, by_file.len());
-    let mut files: Vec<_> = by_file.iter().collect();
+    let mut files: Vec<(&str, &Vec<(&str, &str)>)> = by_file.iter().map(|(&f, m)| (f, m)).collect();
     files.sort_by_key(|(f, _)| *f);
 
-    for (file, matches) in files {
+    let total_files = files.len();
+    for &(file, matches) in files.iter().take(MAX_GREP_FILES) {
         out.push_str(&format!("[file] {} ({}):\n", file, matches.len()));
-        for (line_num, content) in matches.iter().take(MAX_PIPE_MATCHES) {
-            out.push_str(&format!("  {:>4}: {}\n", line_num, content.trim()));
+
+        let mut unique_contents = Vec::new();
+        let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
+
+        for &(line_num_str, content) in matches {
+            let trimmed = content.trim();
+            let line_num = line_num_str.parse::<usize>().unwrap_or(0);
+            if !groups.contains_key(trimmed) {
+                unique_contents.push(trimmed);
+            }
+            groups.entry(trimmed).or_default().push(line_num);
         }
-        if matches.len() > MAX_PIPE_MATCHES {
-            out.push_str(&format!("  +{}\n", matches.len() - MAX_PIPE_MATCHES));
+
+        let mut printed_matches = 0;
+        for trimmed in unique_contents.iter().take(MAX_PIPE_MATCHES) {
+            let lines = &groups[trimmed];
+            printed_matches += lines.len();
+
+            let lines_str = if lines.len() == 1 {
+                format!("L{}", lines[0])
+            } else if lines.len() <= 3 {
+                let parts: Vec<String> = lines.iter().map(|n| n.to_string()).collect();
+                format!("L{} ({}x)", parts.join(","), lines.len())
+            } else {
+                let parts: Vec<String> = lines.iter().take(3).map(|n| n.to_string()).collect();
+                format!("L{}... ({}x)", parts.join(","), lines.len())
+            };
+
+            out.push_str(&format!("  {}: {}\n", lines_str, trimmed));
+        }
+
+        if matches.len() > printed_matches {
+            out.push_str(&format!("  +{} more matches\n", matches.len() - printed_matches));
         }
         out.push('\n');
+    }
+
+    if total_files > MAX_GREP_FILES {
+        out.push_str(&format!("+{} more files\n", total_files - MAX_GREP_FILES));
     }
 
     out
@@ -122,18 +155,18 @@ fn find_wrapper(input: &str) -> String {
     let mut dirs: Vec<_> = by_dir.iter().collect();
     dirs.sort_by_key(|(d, _)| *d);
 
-    for (dir, files) in dirs.iter().take(MAX_PIPE_DIRS) {
+    for (dir, files) in dirs.iter().take(MAX_FIND_DIRS) {
         out.push_str(&format!("{}/  ({})\n", dir, files.len()));
-        for f in files.iter().take(MAX_PIPE_FILES) {
+        for f in files.iter().take(MAX_FIND_FILES) {
             out.push_str(&format!("  {}\n", f));
         }
-        if files.len() > MAX_PIPE_FILES {
-            out.push_str(&format!("  +{}\n", files.len() - MAX_PIPE_FILES));
+        if files.len() > MAX_FIND_FILES {
+            out.push_str(&format!("  +{}\n", files.len() - MAX_FIND_FILES));
         }
     }
 
-    if dirs.len() > MAX_PIPE_DIRS {
-        out.push_str(&format!("\n+{} more dirs\n", dirs.len() - MAX_PIPE_DIRS));
+    if dirs.len() > MAX_FIND_DIRS {
+        out.push_str(&format!("\n+{} more dirs\n", dirs.len() - MAX_FIND_DIRS));
     }
 
     out
@@ -510,8 +543,8 @@ mod tests {
         let output = grep_wrapper(&input);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
-            savings >= 40.0, // TODO: grep pipe filter below 60% target — improve grouping
-            "grep filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
+            savings >= 60.0,
+            "grep filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
             savings, count_tokens(&input), count_tokens(&output)
         );
     }
@@ -531,8 +564,8 @@ mod tests {
         let output = find_wrapper(&input);
         let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
         assert!(
-            savings >= 40.0, // TODO: find pipe filter below 60% target — improve grouping
-            "find filter: expected ≥40% savings, got {:.1}% (in={}, out={})",
+            savings >= 60.0,
+            "find filter: expected ≥60% savings, got {:.1}% (in={}, out={})",
             savings, count_tokens(&input), count_tokens(&output)
         );
     }

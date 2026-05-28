@@ -6,7 +6,6 @@ use crate::core::utils::format_tokens;
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
 use chrono::Local;
-use colored::Colorize;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -126,15 +125,17 @@ pub fn run(
             hook_check::HookStatus::Missing => {
                 eprintln!(
                     "{}",
-                    "[warn] No hook installed — run `rtk init -g` for automatic token savings"
-                        .yellow()
+                    ansi(
+                        "[warn] No hook installed — run `rtk init -g` for automatic token savings",
+                        "33"
+                    )
                 );
                 eprintln!();
             }
             hook_check::HookStatus::Outdated => {
                 eprintln!(
                     "{}",
-                    "[warn] Hook outdated — run `rtk init -g` to update".yellow()
+                    ansi("[warn] Hook outdated — run `rtk init -g` to update", "33")
                 );
                 eprintln!();
             }
@@ -143,7 +144,7 @@ pub fn run(
 
         // Lightweight RTK_DISABLED bypass check (best-effort, silent on failure)
         if let Some(warning) = check_rtk_disabled_bypass() {
-            eprintln!("{}", warning.yellow());
+            eprintln!("{}", ansi(&warning, "33"));
             eprintln!();
         }
 
@@ -325,7 +326,7 @@ fn styled(text: &str, strong: bool) -> String {
         return text.to_string();
     }
     if strong {
-        text.bold().green().to_string()
+        green_bold(text)
     } else {
         text.to_string()
     }
@@ -342,11 +343,11 @@ fn colorize_pct_cell(pct: f64, padded: &str) -> String {
         return padded.to_string();
     }
     if pct >= 70.0 {
-        padded.green().bold().to_string()
+        green_bold(padded)
     } else if pct >= 40.0 {
-        padded.yellow().bold().to_string()
+        yellow_bold(padded)
     } else {
-        padded.red().bold().to_string()
+        red_bold(padded)
     }
 }
 
@@ -372,7 +373,7 @@ fn style_command_cell(cmd: &str) -> String {
     if !std::io::stdout().is_terminal() {
         return cmd.to_string();
     }
-    cmd.bright_cyan().bold().to_string()
+    bright_cyan_bold(cmd)
 }
 
 /// Render a proportional bar chart segment (TTY-aware). // added
@@ -385,7 +386,7 @@ fn mini_bar(value: usize, max: usize, width: usize) -> String {
     let mut bar = "█".repeat(filled);
     bar.push_str(&"░".repeat(width - filled));
     if std::io::stdout().is_terminal() {
-        bar.cyan().to_string()
+        cyan(&bar)
     } else {
         bar
     }
@@ -399,13 +400,13 @@ fn print_efficiency_meter(pct: f64) {
     if std::io::stdout().is_terminal() {
         let pct_str = format!("{pct:.1}%");
         let colored_pct = if pct >= 70.0 {
-            pct_str.green().bold().to_string()
+            green_bold(&pct_str)
         } else if pct >= 40.0 {
-            pct_str.yellow().bold().to_string()
+            yellow_bold(&pct_str)
         } else {
-            pct_str.red().bold().to_string()
+            red_bold(&pct_str)
         };
-        println!("Efficiency meter: {} {}", meter.green(), colored_pct);
+        println!("Efficiency meter: {} {}", ansi(&meter, "32"), colored_pct);
     } else {
         println!("Efficiency meter: {} {:.1}%", meter, pct);
     }
@@ -761,4 +762,28 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+fn ansi(text: &str, code: &str) -> String {
+    format!("\x1b[{code}m{text}\x1b[0m")
+}
+
+fn green_bold(text: &str) -> String {
+    ansi(text, "1;32")
+}
+
+fn yellow_bold(text: &str) -> String {
+    ansi(text, "1;33")
+}
+
+fn red_bold(text: &str) -> String {
+    ansi(text, "1;31")
+}
+
+fn cyan(text: &str) -> String {
+    ansi(text, "36")
+}
+
+fn bright_cyan_bold(text: &str) -> String {
+    ansi(text, "1;96")
 }

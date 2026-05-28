@@ -1,6 +1,6 @@
 # Copilot Instructions for rtk
 
-**rtk (Rust Token Killer)** is a CLI proxy that filters and compresses command outputs before they reach an LLM context, saving 60-90% of tokens. It wraps common tools (`git`, `cargo`, `grep`, `pnpm`, `go`, etc.) and outputs condensed summaries instead of raw output.
+**rtk (Rust Token Killer)** is a CLI proxy that filters and compresses command outputs before they reach an LLM context, saving 60-90% of tokens. It wraps common tools (`git`, `cargo`, `grep`, `pnpm`, `go`, `docker`, `kubectl`, etc.) and outputs condensed summaries instead of raw output.
 
 ## Using rtk in this session
 
@@ -13,6 +13,8 @@ git log -10                rtk git log -10
 cargo test                 rtk cargo test
 cargo clippy --all-targets rtk cargo clippy --all-targets
 grep -r "pattern" src/     rtk grep -r "pattern" src/
+docker ps                  rtk docker ps
+kubectl get pods           rtk kubectl pods
 ```
 
 **rtk meta-commands** (always use these directly, no prefix needed):

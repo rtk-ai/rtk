@@ -173,6 +173,11 @@ fn apply_line_window(
         return filter::smart_truncate(content, max, lang);
     }
 
+    const DEFAULT_MAX_LINES: usize = 120;
+    if content.lines().count() > DEFAULT_MAX_LINES {
+        return filter::smart_truncate(content, DEFAULT_MAX_LINES, lang);
+    }
+
     content.to_string()
 }
 
@@ -217,6 +222,22 @@ fn main() {{
         let input = "a\nb\nc\nd";
         let output = apply_line_window(input, None, Some(2), &Language::Unknown);
         assert_eq!(output, "c\nd");
+    }
+
+    #[test]
+    fn test_apply_line_window_defaults_large_content() {
+        let input = (0..400)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let output = apply_line_window(&input, None, None, &Language::Data);
+        let input_tokens = input.split_whitespace().count();
+        let output_tokens = output.split_whitespace().count();
+        let savings = 100.0 - (output_tokens as f64 / input_tokens as f64 * 100.0);
+
+        assert!(savings >= 70.0, "got {:.1}%", savings);
+        assert!(output.contains("more lines"));
     }
 
     #[test]

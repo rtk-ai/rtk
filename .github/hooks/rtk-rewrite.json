@@ -3,7 +3,7 @@
     "PreToolUse": [
       {
         "type": "command",
-        "command": "rtk hook",
+        "command": "rtk hook auto",
         "cwd": ".",
         "timeout": 5
       }

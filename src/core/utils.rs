@@ -339,14 +339,13 @@ pub fn resolve_binary(name: &str) -> Result<PathBuf> {
 pub fn resolved_command(name: &str) -> Command {
     match resolve_binary(name) {
         Ok(path) => Command::new(path),
-        Err(e) => {
+        Err(_e) => {
             // On Windows, resolution failure likely means a .CMD/.BAT wrapper
             // wasn't found — always warn so users have a signal.
-            // On Unix, this is less common; only log in debug builds.
             if cfg!(any(target_os = "windows", debug_assertions)) {
                 eprintln!(
                     "rtk: Failed to resolve '{}' via PATH, falling back to direct exec: {}",
-                    name, e
+                    name, _e
                 );
             }
 

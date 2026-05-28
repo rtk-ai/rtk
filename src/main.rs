@@ -767,6 +767,8 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum HookCommands {
+    /// Auto-detect agent format and process accordingly (Claude Code, VS Code Copilot, Gemini, Copilot CLI)
+    Auto,
     /// Process Claude Code PreToolUse hook (reads JSON from stdin)
     Claude,
     /// Process Cursor Agent hook (reads JSON from stdin)
@@ -1332,27 +1334,8 @@ fn merge_pnpm_args_os(filters: &[String], args: &[OsString]) -> Vec<OsString> {
         .collect()
 }
 
-/// Validate that pnpm filters are only used in the global context, not before subcommands like tsc.
-fn validate_pnpm_filters(filters: &[String], command: &PnpmCommands) -> Option<String> {
-    // Check if this is a Build or Typecheck command with filters
-    match command {
-        PnpmCommands::Typecheck { .. } => {
-            // FIXME: if filters are present, we should find out which workspaces are selected before running rtk dedicated commands
-            if !filters.is_empty() {
-                let cmd_name = match command {
-                    PnpmCommands::Typecheck { .. } => "tsc",
-                    _ => unreachable!(),
-                };
-                let msg = format!(
-                    "[rtk] warning: --filter is not yet supported for pnpm {}, filters preceding the subcommand will be ignored",
-                    cmd_name
-                );
-                return Some(msg);
-            }
-            None
-        }
-        _ => None,
-    }
+fn validate_pnpm_filters(_filters: &[String], _command: &PnpmCommands) -> Option<String> {
+    None
 }
 
 fn main() {
@@ -1641,7 +1624,14 @@ fn run_cli() -> Result<i32> {
                     &merge_pnpm_args(&filter, &args),
                     cli.verbose,
                 )?,
-                PnpmCommands::Typecheck { args } => tsc_cmd::run(&args, cli.verbose)?,
+                PnpmCommands::Typecheck { args } => {
+                    let cwd = if !filter.is_empty() {
+                        crate::cmds::js::pnpm_cmd::resolve_pnpm_filter_dir(&filter[0])
+                    } else {
+                        None
+                    };
+                    tsc_cmd::run(&args, cli.verbose, cwd.as_deref())?
+                }
                 PnpmCommands::Other(args) => {
                     pnpm_cmd::run_passthrough(&merge_pnpm_args_os(&filter, &args), cli.verbose)?
                 }
@@ -1997,7 +1987,7 @@ fn run_cli() -> Result<i32> {
             }
         },
 
-        Commands::Tsc { args } => tsc_cmd::run(&args, cli.verbose)?,
+        Commands::Tsc { args } => tsc_cmd::run(&args, cli.verbose, None)?,
 
         Commands::Next { args } => next_cmd::run(&args, cli.verbose)?,
 
@@ -2084,7 +2074,7 @@ fn run_cli() -> Result<i32> {
 
             // Intelligent routing: delegate to specialized filters
             match args[0].as_str() {
-                "tsc" | "typescript" => tsc_cmd::run(&args[1..], cli.verbose)?,
+                "tsc" | "typescript" => tsc_cmd::run(&args[1..], cli.verbose, None)?,
                 "eslint" => lint_cmd::run(&args[1..], cli.verbose)?,
                 "prisma" => {
                     // Route to prisma_cmd based on subcommand
@@ -2175,6 +2165,10 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Hook { command } => match command {
+            HookCommands::Auto => {
+                hooks::hook_cmd::run_auto()?;
+                0
+            }
             HookCommands::Claude => {
                 hooks::hook_cmd::run_claude()?;
                 0
@@ -3144,10 +3138,10 @@ mod tests {
         .unwrap();
         match cli.command {
             Commands::Pnpm { filter, command } => {
-                let warning = validate_pnpm_filters(&filter, &command).unwrap();
+                let warning = validate_pnpm_filters(&filter, &command);
 
                 assert_eq!(filter, vec!["@app1", "@app2"]);
-                assert_eq!(warning, "[rtk] warning: --filter is not yet supported for pnpm tsc, filters preceding the subcommand will be ignored")
+                assert!(warning.is_none());
             }
             _ => panic!("Expected Pnpm Build command"),
         }
