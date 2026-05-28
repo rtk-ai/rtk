@@ -52,6 +52,14 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
         format!("{} {}", subcommand, args.join(" "))
     };
 
+    // When the user explicitly requests a structured, parseable output format
+    // (--output json/yaml), honor it losslessly. rtk's summarizers and generic
+    // schema compression would otherwise drop field values and emit non-parseable
+    // output, breaking the --output contract (issue #2139).
+    if explicit_lossless_format(args) {
+        return run_passthrough(subcommand, args, verbose, &full_sub);
+    }
+
     // Route to specialized handlers
     match subcommand {
         "sts" if !args.is_empty() && args[0] == "get-caller-identity" => run_aws_filtered(
@@ -213,6 +221,60 @@ fn is_structured_operation(args: &[String]) -> bool {
         || op == "scan"
         || op == "query"
         || op == "receive-message"
+}
+
+/// Returns true when the user explicitly requested a structured, parseable
+/// output format (`--output json` / `--output yaml`). In that case rtk must not
+/// summarize or schema-compress — the output has to stay byte-faithful so that
+/// downstream `jq` / `json.load` parsing keeps working.
+fn explicit_lossless_format(args: &[String]) -> bool {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let fmt = if arg == "--output" {
+            iter.next().map(|s| s.as_str())
+        } else {
+            arg.strip_prefix("--output=")
+        };
+        if let Some(fmt) = fmt {
+            return matches!(fmt, "json" | "yaml" | "yaml-stream");
+        }
+    }
+    false
+}
+
+/// Execute an aws command without filtering, preserving output byte-for-byte.
+/// Used when the user explicitly requested a lossless output format.
+fn run_passthrough(subcommand: &str, args: &[String], verbose: u8, full_sub: &str) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = resolved_command("aws");
+    cmd.arg(subcommand);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    if verbose > 0 {
+        eprintln!("Running: aws {}", full_sub);
+    }
+
+    let output = cmd.output().context("Failed to run aws CLI")?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let cmd_label = format!("aws {}", full_sub);
+    let rtk_label = format!("rtk aws {}", full_sub);
+
+    if !output.status.success() {
+        eprintln!("{}", stderr.trim());
+        timer.track(&cmd_label, &rtk_label, &stderr, &stderr);
+        return Ok(exit_code_from_output(&output, "aws"));
+    }
+
+    print!("{}", stdout);
+    if !stderr.is_empty() {
+        eprint!("{}", stderr);
+    }
+    timer.track(&cmd_label, &rtk_label, &stdout, &stdout);
+    Ok(0)
 }
 
 /// Generic strategy: force --output json for structured ops, compress via json_cmd compact (values preserved)
@@ -1545,6 +1607,25 @@ fn filter_secrets_get(json_str: &str) -> Option<FilterResult> {
 mod tests {
     use super::*;
     use crate::core::utils::count_tokens;
+
+    #[test]
+    fn test_explicit_lossless_format() {
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // Explicit json/yaml → lossless passthrough
+        assert!(explicit_lossless_format(&s(&[
+            "get-function",
+            "--function-name",
+            "fn",
+            "--output",
+            "json"
+        ])));
+        assert!(explicit_lossless_format(&s(&["get-function", "--output=json"])));
+        assert!(explicit_lossless_format(&s(&["describe-stacks", "--output", "yaml"])));
+        // Lossy/human formats and absent flag → keep normal filtering
+        assert!(!explicit_lossless_format(&s(&["get-function", "--output", "table"])));
+        assert!(!explicit_lossless_format(&s(&["get-function", "--output", "text"])));
+        assert!(!explicit_lossless_format(&s(&["list-functions"])));
+    }
 
     #[test]
     fn test_snapshot_sts_identity() {
