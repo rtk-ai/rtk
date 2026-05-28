@@ -32,6 +32,8 @@ LLM agent integration layer that installs, validates, and executes command-rewri
 | Cursor | `rtk init -g --agent cursor` | Cursor hook | hooks.json |
 | Pi | `rtk init --agent pi` | `.pi/extensions/rtk.ts` | -- |
 | Hermes | `rtk init --agent hermes` | Python plugin in `~/.hermes/plugins/rtk-rewrite/` | `config.yaml` `plugins.enabled` |
+| Jcode | `rtk init --agent jcode` | `.jcode/prompt-overlay.md` | -- |
+| Jcode (global) | `rtk init -g --agent jcode` | `$JCODE_HOME/prompt-overlay.md` or `~/.jcode/prompt-overlay.md` | -- |
 
 
 ## Integrity Verification

@@ -49,6 +49,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Jcode coding agent
+    Jcode,
 }
 
 #[derive(Parser)]
@@ -1366,21 +1368,25 @@ fn main() {
     std::process::exit(code);
 }
 
-fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
+fn uninstall_init_dispatch<UninstallHermes, UninstallJcode, UninstallStandard>(
     agent: Option<AgentTarget>,
     global: bool,
     gemini: bool,
     codex: bool,
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
+    uninstall_jcode: UninstallJcode,
     uninstall_standard: UninstallStandard,
 ) -> Result<()>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
-    UninstallStandard: FnOnce(bool, bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
+    UninstallJcode: FnOnce(bool, hooks::init::InitContext) -> Result<()>,
+    UninstallStandard: FnOnce(bool, bool, bool, bool, hooks::init::InitContext) -> Result<()>,
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::Jcode) {
+        uninstall_jcode(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -1820,7 +1826,7 @@ fn run_cli() -> Result<i32> {
                 dry_run,
             };
             if show {
-                hooks::init::show_config(codex)?;
+                hooks::init::show_config(codex, agent == Some(AgentTarget::Jcode))?;
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
@@ -1829,6 +1835,7 @@ fn run_cli() -> Result<i32> {
                     codex,
                     ctx,
                     hooks::init::uninstall_hermes,
+                    hooks::init::uninstall_jcode,
                     hooks::init::uninstall,
                 )?;
             } else if gemini {
@@ -1858,6 +1865,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Jcode) {
+                hooks::init::run_jcode_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2663,6 +2672,17 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_jcode() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "jcode"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Jcode));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -2709,7 +2729,8 @@ mod tests {
                 assert!(ctx.dry_run);
                 Ok(())
             },
-            |_, _, _, _, _, _| {
+            |_, _| panic!("Jcode cleanup should not be called"),
+            |_, _, _, _, _| {
                 standard_called.set(true);
                 Ok(())
             },
@@ -2717,6 +2738,40 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(hermes_called.get());
+        assert!(!standard_called.get());
+    }
+
+    #[test]
+    fn test_init_uninstall_dispatch_routes_jcode_to_jcode_cleanup() {
+        let jcode_called = Cell::new(false);
+        let standard_called = Cell::new(false);
+        let ctx = hooks::init::InitContext {
+            verbose: 1,
+            dry_run: true,
+        };
+
+        let result = uninstall_init_dispatch(
+            Some(AgentTarget::Jcode),
+            true,
+            false,
+            false,
+            ctx,
+            |_| panic!("Hermes cleanup should not be called"),
+            |global, ctx| {
+                jcode_called.set(true);
+                assert!(global);
+                assert_eq!(ctx.verbose, 1);
+                assert!(ctx.dry_run);
+                Ok(())
+            },
+            |_, _, _, _, _| {
+                standard_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(jcode_called.get());
         assert!(!standard_called.get());
     }
 

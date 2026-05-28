@@ -1,6 +1,6 @@
 ---
 title: Supported Agents
-description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, OpenCode, Hermes, Kilo Code, and Antigravity
+description: How to integrate RTK with Claude Code, Cursor, Copilot, Cline, Windsurf, Codex, Jcode, OpenCode, Hermes, Kilo Code, and Antigravity
 sidebar:
   order: 3
 ---
@@ -42,6 +42,7 @@ Agent runs "cargo test"
 | Codex CLI | AGENTS.md instructions | N/A |
 | Kilo Code | Rules file (prompt-level) | N/A |
 | Google Antigravity | Rules file (prompt-level) | N/A |
+| Jcode | Prompt overlay (prompt-level) | N/A |
 | Mistral Vibe | Planned ([#800](https://github.com/rtk-ai/rtk/issues/800)) | Pending upstream |
 
 ## Installation by agent
@@ -161,6 +162,15 @@ rtk init --agent antigravity    # creates .agents/rules/antigravity-rtk-rules.md
 
 Antigravity reads `.agents/rules/` as custom instructions. RTK adds guidance telling Antigravity to prefer `rtk <cmd>` over raw commands.
 
+### Jcode
+
+```bash
+rtk init --agent jcode       # creates .jcode/prompt-overlay.md in current project
+rtk init -g --agent jcode    # creates $JCODE_HOME/prompt-overlay.md or ~/.jcode/prompt-overlay.md
+```
+
+Jcode reads `prompt-overlay.md` as custom instructions. RTK adds guidance telling Jcode to prefer `rtk <cmd>` when using its `bash` / `shell_exec` tool. This is prompt-level guidance until Jcode exposes a before-tool hook that can mutate `command`.
+
 ### Mistral Vibe (planned)
 
 Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://github.com/mistralai/mistral-vibe/issues/531)). Tracked in [#800](https://github.com/rtk-ai/rtk/issues/800).
@@ -173,7 +183,7 @@ Support is blocked on upstream `BeforeToolCallback` ([mistral-vibe#531](https://
 | **Plugin** | TypeScript, JavaScript, or Python in agent's plugin system | Transparent, in-place mutation when the agent allows it |
 | **Rules file** | Prompt-level instructions | Guidance only — agent is told to prefer `rtk <cmd>` |
 
-Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
+Rules file integrations (Cline, Windsurf, Codex, Kilo Code, Antigravity, Jcode) rely on the model following instructions. Full hook integrations (Claude Code, Cursor, Gemini) are guaranteed — the command is rewritten before the agent sees it. Plugin integrations (OpenCode, Pi) use in-place mutation via the agent's TypeScript extension API.
 
 ## Windows support
 
