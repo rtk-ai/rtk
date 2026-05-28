@@ -21,6 +21,14 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub safe_mode: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

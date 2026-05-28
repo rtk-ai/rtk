@@ -450,10 +450,9 @@ fn dedup_diags(diags: &[MsbuildDiag]) -> Vec<MsbuildDiag> {
     let mut seen: HashSet<String> = HashSet::new();
     for d in diags {
         let key = format!("{}|{}", d.code, d.raw);
-        if seen.contains(&key) {
+        if !seen.insert(key) {
             continue;
         }
-        seen.insert(key);
         out.push(d.clone());
     }
     out

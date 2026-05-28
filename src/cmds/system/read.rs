@@ -315,8 +315,7 @@ fn looks_binary_bytes(bytes: &[u8]) -> bool {
 }
 
 fn looks_utf16_no_bom(sample: &[u8]) -> bool {
-    #[allow(clippy::manual_is_multiple_of)]
-    if sample.len() < 4 || sample.len() % 2 != 0 {
+    if sample.len() < 4 {
         return false;
     }
     let mut zeros_even = 0usize;
@@ -699,6 +698,18 @@ fn main() {{
                 .text,
             line
         );
+    }
+
+    #[test]
+    fn test_looks_utf16_no_bom_allows_odd_length_sample() {
+        // UTF-16LE-like ASCII: H i ! with a trailing odd byte.
+        let sample = vec![0x48, 0x00, 0x69, 0x00, 0x21, 0x00, 0xFF];
+        assert!(looks_utf16_no_bom(&sample));
+    }
+
+    #[test]
+    fn test_looks_utf16_no_bom_short_sample_false() {
+        assert!(!looks_utf16_no_bom(&[0x00, 0x41, 0x00]));
     }
 
     #[test]
