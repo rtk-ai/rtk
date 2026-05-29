@@ -300,3 +300,6 @@ This protects RTK's shell execution capabilities against injection attacks and s
 ---
 
 **Thank you for contributing to rtk!**
+
+## Contributors
+- Documentation improvements (2026)
