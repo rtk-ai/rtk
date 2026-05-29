@@ -37,6 +37,8 @@ pub enum AgentTarget {
     Claude,
     /// Cursor Agent (editor and CLI)
     Cursor,
+    /// Warp terminal with Oz agent
+    Warp,
     /// Windsurf IDE (Cascade)
     Windsurf,
     /// Cline / Roo Code (VS Code)
@@ -1877,6 +1879,8 @@ fn run_cli() -> Result<i32> {
                     );
                 }
                 hooks::init::run_antigravity_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Warp) {
+                hooks::init::run_warp_mode(global, ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
             } else {

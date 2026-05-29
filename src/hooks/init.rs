@@ -1746,6 +1746,78 @@ fn run_antigravity_mode_at(base_dir: &Path, ctx: InitContext) -> Result<()> {
     Ok(())
 }
 
+// ─── Warp (Oz) skill support ──────────────────────────────────
+
+const WARP_SKILL: &str = include_str!("../../warp/skills/rtk/SKILL.md");
+
+/// Install the RTK skill for Warp's Oz agent.
+///
+/// - Project-scoped (default): `.agents/skills/rtk/SKILL.md`
+/// - Global (`--global`): `~/.agents/skills/rtk/SKILL.md`
+pub fn run_warp_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let base_dir = if global {
+        let home = dirs::home_dir().context("Could not resolve home directory")?;
+        home.join(".agents")
+    } else {
+        std::env::current_dir()?.join(".agents")
+    };
+    run_warp_mode_at(&base_dir, global, ctx)
+}
+
+fn run_warp_mode_at(agents_dir: &Path, global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let skill_dir = agents_dir.join("skills/rtk");
+    let skill_path = skill_dir.join("SKILL.md");
+
+    let scope_label = if global { "global" } else { "project" };
+    let scope_hint = if global {
+        "~/.agents/skills/rtk/SKILL.md"
+    } else {
+        ".agents/skills/rtk/SKILL.md"
+    };
+
+    let existing = fs::read_to_string(&skill_path).unwrap_or_default();
+    if existing.contains("RTK") || existing.contains("rtk") {
+        if !dry_run {
+            println!("\nRTK already configured for Warp ({scope_label}).\n");
+            println!("  Skill: {scope_hint} (already present)");
+        }
+    } else {
+        if dry_run {
+            println!(
+                "[dry-run] would write {}: (and create parent dir if missing)",
+                skill_path.display()
+            );
+            if verbose > 0 {
+                println!("[dry-run] content:\n{}", WARP_SKILL);
+            }
+        } else {
+            fs::create_dir_all(&skill_dir)
+                .context("Failed to create .agents/skills/rtk directory")?;
+            fs::write(&skill_path, WARP_SKILL)
+                .context("Failed to write SKILL.md")?;
+
+            if verbose > 0 {
+                eprintln!("Wrote {}", skill_path.display());
+            }
+
+            println!("\nRTK configured for Warp ({scope_label}).\n");
+            println!("  Skill: {scope_hint} (installed)");
+        }
+    }
+    if dry_run {
+        print_dry_run_footer();
+    } else {
+        println!("  Oz agent will now use rtk commands for token savings.");
+        if !global {
+            println!("  Tip: use --global to install for all projects.");
+        }
+        println!("  Test with: rtk gain\n");
+    }
+
+    Ok(())
+}
+
 // ─── Hermes support ────────────────────────────────────────────
 
 const HERMES_PLUGIN_INIT: &str = include_str!("../../hooks/hermes/rtk-rewrite/__init__.py");
@@ -6757,6 +6829,52 @@ mod tests {
 
         let after = fs::read_to_string(&instructions_path).unwrap();
         assert_eq!(after, malformed, "File must not be modified when malformed");
+    }
+
+    #[test]
+    fn test_warp_mode_creates_skill_file() {
+        let temp = TempDir::new().unwrap();
+        run_warp_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let skill_path = temp.path().join("skills/rtk/SKILL.md");
+        assert!(skill_path.exists(), "Skill file should be created");
+        let content = fs::read_to_string(&skill_path).unwrap();
+        assert!(content.contains("rtk"), "Skill file should contain rtk");
+    }
+
+    #[test]
+    fn test_warp_mode_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        run_warp_mode_at(temp.path(), false, InitContext::default()).unwrap();
+
+        let path = temp.path().join("skills/rtk/SKILL.md");
+        let first = fs::read_to_string(&path).unwrap();
+
+        // Second run should not overwrite
+        run_warp_mode_at(temp.path(), false, InitContext::default()).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "Idempotent: content should not change");
+    }
+
+    #[test]
+    fn test_warp_mode_dry_run_writes_nothing() {
+        let temp = TempDir::new().unwrap();
+        run_warp_mode_at(
+            temp.path(),
+            false,
+            InitContext {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let skill_path = temp.path().join("skills/rtk/SKILL.md");
+        assert!(
+            !skill_path.exists(),
+            "dry-run must not create SKILL.md: {}",
+            skill_path.display()
+        );
     }
 
     #[test]
