@@ -320,7 +320,7 @@ enum PayloadAction {
     Ignore,
 }
 
-fn process_claude_payload(v: &Value) -> PayloadAction {
+fn process_claude_like_payload(v: &Value) -> PayloadAction {
     let cmd = match v
         .pointer("/tool_input/command")
         .and_then(|c| c.as_str())
@@ -376,24 +376,21 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     }
 }
 
-/// Run the Claude Code PreToolUse hook natively.
-pub fn run_claude() -> Result<()> {
-    let input = read_stdin_limited()?;
-
+fn run_claude_like_hook(input: &str) {
     let input = input.trim();
     if input.is_empty() {
-        return Ok(());
+        return;
     }
 
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
             let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
-            return Ok(());
+            return;
         }
     };
 
-    match process_claude_payload(&v) {
+    match process_claude_like_payload(&v) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -407,14 +404,35 @@ pub fn run_claude() -> Result<()> {
         }
         PayloadAction::Ignore => {}
     }
+}
 
+/// Run the Claude Code PreToolUse hook natively.
+pub fn run_claude() -> Result<()> {
+    let input = read_stdin_limited()?;
+    run_claude_like_hook(&input);
     Ok(())
 }
 
 #[cfg(test)]
 fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    match process_claude_payload(&v) {
+    match process_claude_like_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
+/// Run a Codex hook using the same payload contract as Claude-style hooks.
+pub fn run_codex() -> Result<()> {
+    let input = read_stdin_limited()?;
+    run_claude_like_hook(&input);
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_codex_inner(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_claude_like_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
@@ -913,6 +931,35 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Codex handler ---
+
+    #[test]
+    fn test_codex_rewrite_git_status() {
+        let result = run_codex_inner(&claude_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_rewrite_preserves_tool_input_fields() {
+        let input = claude_input_with_fields("cargo test", 30000, "Run tests");
+        let result = run_codex_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk cargo test");
+        assert_eq!(updated["timeout"], 30000);
+        assert_eq!(updated["description"], "Run tests");
+    }
+
+    #[test]
+    fn test_codex_passthrough_no_output() {
+        assert!(run_codex_inner(&claude_input("htop")).is_none());
     }
 
     // --- Cursor handler ---

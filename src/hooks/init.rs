@@ -2309,6 +2309,11 @@ fn run_codex_mode_with_paths(
                 agents_md_path.display()
             );
         }
+        println!("  Integration: AGENTS.md instructions (works in Codex today)");
+        println!("  Experimental hook: rtk hook codex (requires hook-capable Codex host)");
+        if cfg!(windows) {
+            println!("  Windows: prefer explicit `rtk ...` commands in PowerShell sessions");
+        }
     }
 
     Ok(())
@@ -2718,9 +2723,27 @@ fn resolve_claude_dir() -> Result<PathBuf> {
 }
 
 fn resolve_codex_dir() -> Result<PathBuf> {
-    resolve_codex_dir_from(
+    resolve_codex_dir_from_env(
         std::env::var_os("CODEX_HOME").map(PathBuf::from),
         dirs::home_dir(),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
+    )
+}
+
+fn resolve_codex_dir_from_env(
+    codex_home: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+) -> Result<PathBuf> {
+    resolve_codex_dir_from(
+        codex_home,
+        if cfg!(windows) {
+            user_profile
+                .filter(|path| !path.as_os_str().is_empty())
+                .or(home_dir)
+        } else {
+            home_dir
+        },
     )
 }
 
@@ -2734,7 +2757,11 @@ fn resolve_codex_dir_from(
 
     home_dir
         .map(|home| home.join(CODEX_DIR))
-        .context("Cannot determine Codex config directory. Set $CODEX_HOME or $HOME.")
+        .context(if cfg!(windows) {
+            "Cannot determine Codex config directory. Set %CODEX_HOME%, %USERPROFILE%, or $HOME."
+        } else {
+            "Cannot determine Codex config directory. Set $CODEX_HOME or $HOME."
+        })
 }
 
 fn resolve_hermes_home() -> Result<PathBuf> {
@@ -3514,6 +3541,8 @@ fn show_codex_config() -> Result<()> {
     let local_rtk_md = PathBuf::from(RTK_MD);
 
     println!("rtk Configuration (Codex CLI):\n");
+    println!("  Integration mode: AGENTS.md instructions");
+    println!("  Experimental hook entry: rtk hook codex (requires hook-capable Codex host)\n");
 
     if global_rtk_md.exists() {
         println!("[ok] Global RTK.md: {}", global_rtk_md.display());
@@ -4981,6 +5010,9 @@ mod tests {
             fs::read_to_string(&agents_md).unwrap(),
             format!("{}\n", codex_rtk_md_ref(temp.path()))
         );
+        let rtk_md = fs::read_to_string(temp.path().join("RTK.md")).unwrap();
+        assert!(rtk_md.contains("Get-Command rtk"));
+        assert!(rtk_md.contains("rtk read"));
     }
 
     #[test]
@@ -4997,6 +5029,18 @@ mod tests {
         assert_eq!(preferred, codex_home);
         assert_eq!(empty_falls_back, home_dir.join(".codex"));
         assert_eq!(missing_falls_back, home_dir.join(".codex"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_codex_dir_uses_userprofile_before_home_on_windows() {
+        let home_dir = PathBuf::from("C:/wrong-home");
+        let user_profile = PathBuf::from("C:/Users/example");
+
+        let resolved =
+            resolve_codex_dir_from_env(None, Some(home_dir), Some(user_profile.clone())).unwrap();
+
+        assert_eq!(resolved, user_profile.join(".codex"));
     }
 
     #[test]
