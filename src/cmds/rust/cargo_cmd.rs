@@ -56,12 +56,14 @@ fn restore_double_dash_with_raw(args: &[String], raw_args: &[String]) -> Vec<Str
         None => return args.to_vec(),
     };
 
-    // Count how many of our parsed args appeared before `--` in the original.
-    // Args before `--` are positional (e.g. test name), args after are flags.
-    let args_before_sep = raw_args[..sep_pos]
-        .iter()
-        .filter(|a| args.contains(a))
-        .count();
+    // Reconstruct the split point by matching args in order against tokens
+    // before `--`. This avoids over-counting when values repeat after `--`.
+    let mut args_before_sep = 0usize;
+    for token in &raw_args[..sep_pos] {
+        if args_before_sep < args.len() && args[args_before_sep] == *token {
+            args_before_sep += 1;
+        }
+    }
 
     let mut result = Vec::with_capacity(args.len() + 1);
     result.extend_from_slice(&args[..args_before_sep]);
@@ -1379,6 +1381,38 @@ mod tests {
         );
         // Verify only one "--" exists
         assert_eq!(result.iter().filter(|a| *a == "--").count(), 1);
+    }
+
+    #[test]
+    fn test_restore_double_dash_clippy_with_all_targets() {
+        let args: Vec<String> = vec!["--all-targets".into(), "-D".into(), "warnings".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "clippy".into(),
+            "--all-targets".into(),
+            "--".into(),
+            "-D".into(),
+            "warnings".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert_eq!(result, vec!["--all-targets", "--", "-D", "warnings"]);
+    }
+
+    #[test]
+    fn test_restore_double_dash_clippy_with_workspace() {
+        let args: Vec<String> = vec!["--workspace".into(), "-D".into(), "warnings".into()];
+        let raw = vec![
+            "rtk".into(),
+            "cargo".into(),
+            "clippy".into(),
+            "--workspace".into(),
+            "--".into(),
+            "-D".into(),
+            "warnings".into(),
+        ];
+        let result = restore_double_dash_with_raw(&args, &raw);
+        assert_eq!(result, vec!["--workspace", "--", "-D", "warnings"]);
     }
 
     #[test]
