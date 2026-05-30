@@ -1416,7 +1416,7 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(result.exit_code);
     }
 
-    let filtered = filter_branch_output(&result.stdout);
+    let filtered = format_branch_output(&result.stdout, args);
     println!("{}", filtered);
 
     timer.track(
@@ -1427,6 +1427,14 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     );
 
     Ok(0)
+}
+
+fn format_branch_output(output: &str, args: &[String]) -> String {
+    if args.iter().any(|a| a == "-a" || a == "--all") {
+        output.trim_end().to_string()
+    } else {
+        filter_branch_output(output)
+    }
 }
 
 fn filter_branch_output(output: &str) -> String {
@@ -2191,6 +2199,36 @@ mod tests {
             main_count <= 2,
             "main deduplicated across remotes (found {} occurrences): {}",
             main_count,
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_branch_output_preserves_explicit_all_remote_refs() {
+        let output =
+            "* main\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n";
+
+        for flag in ["-a", "--all"] {
+            let result = format_branch_output(output, &[flag.to_string()]);
+
+            assert!(
+                result.contains("remotes/origin/main"),
+                "explicit {} should preserve remote-tracking refs:\n{}",
+                flag,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_branch_output_keeps_default_compact_deduping() {
+        let output =
+            "* main\n  remotes/origin/HEAD -> origin/main\n  remotes/origin/main\n";
+        let result = format_branch_output(output, &[]);
+
+        assert!(
+            !result.contains("remotes/origin/main"),
+            "default compact branch output should still dedupe matching remotes:\n{}",
             result
         );
     }
