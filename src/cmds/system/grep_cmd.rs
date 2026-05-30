@@ -312,6 +312,20 @@ pub fn run(
         eprintln!("grep: '{}' in {}", pattern_display, path_display);
     }
 
+    let filt = config::filters();
+    // Skip exclusions when the user explicitly searches inside an ignored dir
+    // (e.g. `rtk grep foo node_modules/pkg`) — they asked for it on purpose.
+    // With multiple search paths, any explicit ignored-dir target disables the
+    // exclusions so a deliberately-named path never silently returns zero hits.
+    let (exclude_globs, grep_excludes) = if paths
+        .iter()
+        .any(|p| path_targets_ignored_dir(p, &filt.ignore_dirs))
+    {
+        (Vec::new(), Vec::new())
+    } else {
+        (ignore_globs(&filt), ignore_grep_excludes(&filt))
+    };
+
     let mut rg_cmd = resolved_command("rg");
     // --no-ignore-vcs: match grep -r behavior (don't skip .gitignore'd files).
     // Without this, rg returns 0 matches for files in .gitignore, causing
@@ -321,6 +335,9 @@ pub fn run(
     // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
     // content containing `:digits:` patterns (issue #1436).
     rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
+    // Re-exclude token-bomb dirs/files (node_modules, *.min.js, …) that
+    // --no-ignore-vcs would otherwise descend, causing token expansion (#2064).
+    rg_cmd.args(&exclude_globs);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
@@ -349,6 +366,9 @@ pub fn run(
             for p in &patterns {
                 grep_cmd.args(["-e", p]);
             }
+            // Mirror the rg exclusions so the (non-gitignore-aware) system grep
+            // also skips node_modules and friends (#2064).
+            grep_cmd.args(&grep_excludes);
             // --null (not -Z): on BSD/macOS grep -Z means --decompress, not the
             // NUL filename separator parse_match_line() needs (issue #2310).
             grep_cmd.args(["-rnH", "--null", "--"]);
@@ -495,6 +515,52 @@ fn parse_match_line(line: &str) -> Option<(String, usize, &str)> {
         let (_, [file, line_num, content]) = caps.extract();
         let line_num: usize = line_num.parse().ok()?;
         Some((file.to_string(), line_num, content))
+    })
+}
+
+/// Build `rg --glob '!PATTERN'` exclusion args from the configured ignore list
+/// (`config.filters.ignore_dirs` + `ignore_files`).
+///
+/// `rtk grep` passes `--no-ignore-vcs` so it still searches most .gitignore'd
+/// files (avoids false negatives, #1436-era behavior). But that also makes rg
+/// descend dependency/build dirs like `node_modules`, dumping minified vendored
+/// code and causing token *expansion* instead of reduction (#2064). These globs
+/// re-exclude only the well-known token-bomb dirs/files. rg still honors an
+/// explicitly-given path inside an excluded dir (e.g. `rtk grep foo node_modules/pkg`),
+/// so no result the user explicitly asked for is lost.
+fn ignore_globs(filt: &config::FilterConfig) -> Vec<String> {
+    filt.ignore_dirs
+        .iter()
+        .chain(filt.ignore_files.iter())
+        .flat_map(|p| ["--glob".to_string(), format!("!{p}")])
+        .collect()
+}
+
+/// Same exclusion list as [`ignore_globs`] but expressed as `grep`
+/// `--exclude-dir=` / `--exclude=` args, for the system-grep fallback path
+/// (taken when `rg` is not installed). Without this the fallback execs a
+/// non-gitignore-aware grep that descends `node_modules` (#2064).
+///
+/// Note: unlike rg's `--glob`, `grep --exclude-dir` suppresses matches even for
+/// an explicitly-given path inside the excluded dir. The caller compensates by
+/// not applying any exclusions when the search path itself targets an ignored
+/// dir (see [`path_targets_ignored_dir`]), keeping both paths consistent.
+fn ignore_grep_excludes(filt: &config::FilterConfig) -> Vec<String> {
+    filt.ignore_dirs
+        .iter()
+        .map(|d| format!("--exclude-dir={d}"))
+        .chain(filt.ignore_files.iter().map(|f| format!("--exclude={f}")))
+        .collect()
+}
+
+/// True if the search `path` explicitly points at (or into) one of the ignored
+/// dirs, e.g. `node_modules/pkg`. In that case the user clearly wants to search
+/// there, so exclusions must be skipped entirely — otherwise `grep --exclude-dir`
+/// would return zero hits for a path the user named on purpose (#2064).
+fn path_targets_ignored_dir(path: &str, ignore_dirs: &[String]) -> bool {
+    std::path::Path::new(path).components().any(|c| {
+        matches!(c, std::path::Component::Normal(name)
+            if ignore_dirs.iter().any(|d| name == d.as_str()))
     })
 }
 
@@ -1059,6 +1125,72 @@ mod tests {
     #[test]
     fn test_format_flag_detects_files() {
         assert!(has_format_flag(&["--files"]));
+    }
+
+    // --- #2064: re-exclude token-bomb dirs even with --no-ignore-vcs ---
+
+    fn has_glob_pair(globs: &[String], pat: &str) -> bool {
+        globs
+            .windows(2)
+            .any(|w| w[0] == "--glob" && w[1] == format!("!{pat}"))
+    }
+
+    #[test]
+    fn test_ignore_globs_exclude_node_modules() {
+        // BUG #2064: rtk grep -rn descends node_modules (--no-ignore-vcs), dumping
+        // minified vendored code → token expansion. The default ignore list must
+        // produce rg exclusion globs. Fails before the fix (empty), passes after.
+        let globs = ignore_globs(&config::FilterConfig::default());
+        assert!(
+            has_glob_pair(&globs, "node_modules"),
+            "node_modules must be excluded: {globs:?}"
+        );
+        assert!(
+            has_glob_pair(&globs, "*.min.js"),
+            "*.min.js must be excluded: {globs:?}"
+        );
+        assert!(
+            has_glob_pair(&globs, "target"),
+            "target must be excluded: {globs:?}"
+        );
+    }
+
+    #[test]
+    fn test_ignore_globs_empty_config_yields_nothing() {
+        let filt = config::FilterConfig {
+            ignore_dirs: vec![],
+            ignore_files: vec![],
+        };
+        assert!(ignore_globs(&filt).is_empty());
+    }
+
+    #[test]
+    fn test_path_targets_ignored_dir() {
+        let dirs = config::FilterConfig::default().ignore_dirs;
+        // Explicit searches into an ignored dir → exclusions must be skipped.
+        assert!(path_targets_ignored_dir("node_modules/pkg-a", &dirs));
+        assert!(path_targets_ignored_dir("./node_modules", &dirs));
+        assert!(path_targets_ignored_dir("a/b/vendor/c", &dirs));
+        // Normal project searches → exclusions apply.
+        assert!(!path_targets_ignored_dir(".", &dirs));
+        assert!(!path_targets_ignored_dir("src", &dirs));
+        // Substring of an ignored name must NOT trigger (component-anchored).
+        assert!(!path_targets_ignored_dir("my-node_modules-helper", &dirs));
+    }
+
+    #[test]
+    fn test_ignore_grep_excludes_for_fallback() {
+        // The system-grep fallback path must mirror the rg exclusions so rg-less
+        // machines also skip node_modules (#2064 reporter had no rg installed).
+        let excludes = ignore_grep_excludes(&config::FilterConfig::default());
+        assert!(
+            excludes.iter().any(|e| e == "--exclude-dir=node_modules"),
+            "fallback grep must exclude node_modules dir: {excludes:?}"
+        );
+        assert!(
+            excludes.iter().any(|e| e == "--exclude=*.min.js"),
+            "fallback grep must exclude *.min.js: {excludes:?}"
+        );
     }
 
     // --- truncation accuracy ---

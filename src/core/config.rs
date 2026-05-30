@@ -150,6 +150,12 @@ pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
 }
 
+/// Get filter config (ignore_dirs / ignore_files). Falls back to defaults if
+/// config can't be loaded.
+pub fn filters() -> FilterConfig {
+    Config::load().map(|c| c.filters).unwrap_or_default()
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let path = get_config_path()?;
