@@ -47,6 +47,9 @@ pub enum AgentTarget {
     Antigravity,
     /// Pi coding agent
     Pi,
+    /// oh-my-pi coding agent (binary: omp)
+    #[value(name = "omp", alias = "oh-my-pi")]
+    OhMyPi,
     /// Hermes CLI
     Hermes,
 }
@@ -1392,6 +1395,8 @@ where
 {
     if agent == Some(AgentTarget::Hermes) {
         uninstall_hermes(ctx)
+    } else if agent == Some(AgentTarget::OhMyPi) {
+        hooks::init::uninstall_omp(global, ctx)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -1865,6 +1870,8 @@ fn run_cli() -> Result<i32> {
                 }
             } else if agent == Some(AgentTarget::Pi) {
                 hooks::init::run_pi_mode(global, ctx)?
+            } else if agent == Some(AgentTarget::OhMyPi) {
+                hooks::init::run_omp_mode(global, ctx)?
             } else if agent == Some(AgentTarget::Kilocode) {
                 if global {
                     anyhow::bail!("Kilo Code is project-scoped. Use: rtk init --agent kilocode");
@@ -3267,6 +3274,55 @@ mod tests {
             } => {
                 assert!(uninstall);
                 assert_eq!(agent, Some(AgentTarget::Pi));
+                assert!(global);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_agent_omp_parses() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "omp"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(
+                    agent,
+                    Some(AgentTarget::OhMyPi),
+                    "--agent omp must set OhMyPi variant"
+                );
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_agent_oh_my_pi_alias_parses() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "oh-my-pi"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(
+                    agent,
+                    Some(AgentTarget::OhMyPi),
+                    "--agent oh-my-pi alias must set OhMyPi variant"
+                );
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_init_uninstall_agent_omp_parses() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--uninstall", "--agent", "omp", "--global"])
+            .unwrap();
+        match cli.command {
+            Commands::Init {
+                agent,
+                uninstall,
+                global,
+                ..
+            } => {
+                assert!(uninstall);
+                assert_eq!(agent, Some(AgentTarget::OhMyPi));
                 assert!(global);
             }
             _ => panic!("Expected Init command"),

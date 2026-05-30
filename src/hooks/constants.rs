@@ -34,6 +34,15 @@ pub const PI_EXTENSIONS_SUBDIR: &str = "extensions";
 pub const PI_PLUGIN_FILE: &str = "rtk.ts";
 pub const PI_CODING_AGENT_DIR_ENV: &str = "PI_CODING_AGENT_DIR";
 
+// oh-my-pi (`@oh-my-pi/pi-coding-agent`, binary `omp`).
+// Distinct from the PI_* constants above which target `@earendil-works/pi-coding-agent`.
+// Both integrations share the PI_CODING_AGENT_DIR override env (the oh-my-pi runtime
+// reads the same variable); only the default dirname differs.
+pub const OMP_DIR: &str = ".omp/agent";
+pub const OMP_LOCAL_DIR: &str = ".omp";
+pub const OMP_EXTENSIONS_SUBDIR: &str = "extensions";
+pub const OMP_PLUGIN_FILE: &str = "rtk.ts";
+
 pub const HERMES_DIR: &str = ".hermes";
 pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
