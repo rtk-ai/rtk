@@ -1314,6 +1314,38 @@ fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
 }
 
+/// Returns the first unquoted shell metacharacter in `input`, or `None`.
+///
+/// `rtk proxy` executes commands directly via `Command::spawn`, with no shell
+/// in between. Snippets that rely on shell features (`;`, `&&`, `|`, `$()`,
+/// redirects, loops, …) silently misbehave: operators get passed as positional
+/// args to the first binary, which can produce surprising filesystem effects
+/// (#2163). This helper walks the raw single-arg string with the same quote
+/// state machine as [`shell_split`], so metacharacters that appear inside
+/// `'…'` or `"…"` are intentionally ignored — those are legitimate argument
+/// payloads (e.g. `--format="%H %s"`).
+fn first_unquoted_shell_metachar(input: &str) -> Option<char> {
+    let mut chars = input.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                chars.next();
+            }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            _ if in_single || in_double => {}
+            ';' | '|' | '&' | '>' | '<' | '`' | '(' | ')' | '{' | '}' | '\n' => {
+                return Some(c);
+            }
+            '$' if chars.peek() == Some(&'(') => return Some('$'),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Merge pnpm global filters args with other ones for standard String-based commands
 fn merge_pnpm_args(filters: &[String], args: &[String]) -> Vec<String> {
     filters
@@ -2285,6 +2317,20 @@ fn run_cli() -> Result<i32> {
             // e.g. rtk proxy 'git log --format="%H %s"' → cmd=git, args=["log", "--format=%H %s"]
             let (cmd_name, cmd_args): (String, Vec<String>) = if args.len() == 1 {
                 let full = args[0].to_string_lossy();
+                // Reject shell snippets (#2163). Proxy runs commands directly via
+                // exec — operators like `;`, `&&`, `|`, `$()`, `>` would otherwise
+                // be passed as positional args to the first binary, causing silent
+                // misbehavior or filesystem garbage from token-like fragments.
+                if let Some(meta) = first_unquoted_shell_metachar(&full) {
+                    anyhow::bail!(
+                        "proxy refuses shell snippet (unquoted '{}' in: {}).\n\
+                         rtk proxy executes a single command directly without a shell.\n\
+                         For pipes, &&, $(), redirects, or loops, wrap with:\n  \
+                         rtk proxy sh -c '<your snippet>'",
+                        meta,
+                        full
+                    );
+                }
                 let parts = shell_split(&full);
                 if parts.len() > 1 {
                     (parts[0].clone(), parts[1..].to_vec())
@@ -3271,5 +3317,60 @@ mod tests {
             }
             _ => panic!("Expected Init command"),
         }
+    }
+
+    // #2163: proxy must refuse shell snippets that would otherwise have their
+    // operators silently re-interpreted as positional args to the first binary.
+    #[test]
+    fn test_proxy_metachar_detector_accepts_simple_commands() {
+        assert_eq!(first_unquoted_shell_metachar("head -50 file.php"), None);
+        assert_eq!(first_unquoted_shell_metachar("git status"), None);
+        assert_eq!(first_unquoted_shell_metachar("ls -la /tmp/foo"), None);
+    }
+
+    // Quoted operators are legitimate payloads (e.g. `--format="%H %s"`,
+    // commit messages containing `&&`) and must not trigger the rejection.
+    #[test]
+    fn test_proxy_metachar_detector_ignores_quoted_metachars() {
+        assert_eq!(
+            first_unquoted_shell_metachar(r#"git log --format="%H %s""#),
+            None
+        );
+        assert_eq!(
+            first_unquoted_shell_metachar(r#"git commit -m "fix && cleanup""#),
+            None
+        );
+        assert_eq!(first_unquoted_shell_metachar("grep -r 'a | b' ."), None);
+        assert_eq!(
+            first_unquoted_shell_metachar(r#"echo "value=$(date)""#),
+            None
+        );
+        // Backslash escapes the next char outside single quotes.
+        assert_eq!(first_unquoted_shell_metachar(r"echo a\&b"), None);
+    }
+
+    #[test]
+    fn test_proxy_metachar_detector_rejects_unquoted_operators() {
+        assert_eq!(first_unquoted_shell_metachar("a; b"), Some(';'));
+        assert_eq!(first_unquoted_shell_metachar("a | b"), Some('|'));
+        assert_eq!(first_unquoted_shell_metachar("a && b"), Some('&'));
+        assert_eq!(first_unquoted_shell_metachar("cmd > out"), Some('>'));
+        assert_eq!(first_unquoted_shell_metachar("cmd < in"), Some('<'));
+        assert_eq!(first_unquoted_shell_metachar("echo $(date)"), Some('$'));
+        assert_eq!(first_unquoted_shell_metachar("echo `date`"), Some('`'));
+        assert_eq!(first_unquoted_shell_metachar("(a)"), Some('('));
+        assert_eq!(
+            first_unquoted_shell_metachar("for i in 1 2; do echo $i; done"),
+            Some(';')
+        );
+    }
+
+    // The exact reproducer shape from #2163 — compound for-loop with command
+    // substitution, pipes, redirects, and background jobs — must be caught at
+    // the first unquoted metachar regardless of how deep the snippet runs.
+    #[test]
+    fn test_proxy_metachar_detector_rejects_issue_2163_repro() {
+        let snippet = "for i in $(seq 1 3); do echo $i | tee -a out.txt > /dev/null & done";
+        assert!(first_unquoted_shell_metachar(snippet).is_some());
     }
 }
