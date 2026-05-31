@@ -993,7 +993,7 @@ Supprime les barres de progression et le bruit.
 rtk summary <commande...>
 ```
 
-Utile pour les commandes longues dont la sortie n'a pas de filtre dedie.
+Utile pour les commandes longues don't la sortie n'a pas de filtre dedie.
 
 ---
 
