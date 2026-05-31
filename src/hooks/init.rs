@@ -384,31 +384,15 @@ fn write_if_changed(path: &Path, content: &str, name: &str, ctx: InitContext) ->
 
 /// Resolve the final write target: if `path` is a symlink, follow it so
 /// the atomic rename lands on the real file and the symlink is preserved.
-fn resolve_atomic_target(path: &Path) -> Result<PathBuf> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            let link_target = fs::read_link(path)
-                .with_context(|| format!("Failed to read symlink target: {}", path.display()))?;
-            if link_target.is_absolute() {
-                return Ok(link_target);
-            }
-            let parent = path.parent().with_context(|| {
-                format!(
-                    "Cannot resolve relative symlink for {}: no parent directory",
-                    path.display()
-                )
-            })?;
-            return Ok(parent.join(link_target));
-        }
-    }
-    Ok(path.to_path_buf())
+fn resolve_atomic_target(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Atomic write using tempfile + rename
 /// Prevents corruption on crash/interrupt
 /// Follows symlinks so the link itself is preserved.
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let target = resolve_atomic_target(path)?;
+    let target = resolve_atomic_target(path);
     let parent = target.parent().with_context(|| {
         format!(
             "Cannot write to {}: path has no parent directory",
