@@ -1,0 +1,10 @@
+Build started...
+Build succeeded.
+Using project 'C:\work\Ledger\src\Ledger.Data\Ledger.Data.csproj'.
+Using startup project 'C:\work\Ledger\src\Ledger.Web\Ledger.Web.csproj'.
+Using context 'BillingDbContext'.
+System.InvalidOperationException: Unable to create a 'DbContext' of type 'BillingDbContext'. The exception 'The ConnectionString property has not been initialized.' was thrown while attempting to create an instance.
+   at Microsoft.EntityFrameworkCore.Design.Internal.DbContextOperations.CreateContext(String contextType)
+   at Microsoft.EntityFrameworkCore.Design.Internal.MigrationsOperations.UpdateDatabase(String targetMigration, String connectionString, String contextType)
+   at Microsoft.EntityFrameworkCore.Design.OperationExecutor.UpdateDatabaseImpl(String targetMigration, String connectionString, String contextType)
+Unable to create a 'DbContext' of type 'BillingDbContext'. The exception 'The ConnectionString property has not been initialized.' was thrown while attempting to create an instance.
