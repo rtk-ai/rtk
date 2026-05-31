@@ -25,7 +25,9 @@ pub const GEMINI_DIR: &str = ".gemini";
 pub const GITHUB_DIR: &str = ".github";
 pub const COPILOT_HOOK_FILE: &str = "rtk-rewrite.json";
 pub const COPILOT_INSTRUCTIONS_FILE: &str = "copilot-instructions.md";
+#[allow(dead_code)]
 pub const COPILOT_USER_DIR: &str = ".copilot";
+#[allow(dead_code)]
 pub const COPILOT_HOME_ENV: &str = "COPILOT_HOME";
 
 pub const PI_DIR: &str = ".pi/agent";

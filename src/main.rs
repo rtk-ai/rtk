@@ -22,8 +22,8 @@ use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd, uv_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
-    ctest_cmd, deps, env_cmd, find_cmd, format_cmd, gci_cmd, grep_cmd, json_cmd, local_llm,
-    log_cmd, ls, patch, pipe_cmd, read, summary, tree, wc_cmd,
+    deps, env_cmd, find_cmd, format_cmd, gci_cmd, grep_cmd, json_cmd, local_llm, log_cmd, ls,
+    patch, pipe_cmd, read, summary, tree, wc_cmd,
 };
 
 use anyhow::{Context, Result};
