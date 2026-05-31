@@ -202,6 +202,8 @@ rtk rubocop                     # Ruby linting (JSON, -60%+)
 ### Package Managers
 ```bash
 rtk pnpm list                   # Compact dependency tree
+rtk bun run typecheck           # bun scripts (strip banner + $ echo)
+rtk bunx tsc                     # bunx with routing (tsc/eslint/prisma…)
 rtk pip list                    # Python packages (auto-detect uv)
 rtk pip outdated                # Outdated packages
 rtk bundle install              # Ruby gems (strip Using lines)
