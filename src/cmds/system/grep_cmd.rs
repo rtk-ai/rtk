@@ -37,33 +37,25 @@ pub fn run(
     // -H: always emit the filename.
     // -0: NUL-separate filename. Allows the parser to disambiguate filenames or
     // content containing `:digits:` patterns (issue #1436).
-    rg_cmd.args([
-        "-nH0",
-        "--no-heading",
-        "--no-ignore-vcs",
-        &rg_pattern,
-        &args.path,
-    ]);
+    rg_cmd.args(["-nH0", "--no-heading", "--no-ignore-vcs"]);
 
     if let Some(ft) = file_type {
         rg_cmd.arg("--type").arg(ft);
     }
 
-    for arg in &args.extra_args {
-        // Fix: skip grep-ism -r flag (rg is recursive by default; rg -r means --replace)
-        if arg == "-r" || arg == "--recursive" {
-            continue;
-        }
+    for arg in normalize_rg_extra_args(&args.extra_args) {
         rg_cmd.arg(arg);
     }
+    rg_cmd.args([&rg_pattern, &args.path]);
 
     let result = exec_capture(&mut rg_cmd)
         .or_else(|_| {
             let mut grep_cmd = resolved_command("grep");
             // When we fall back to grep, include all args, not just -rnHZ.
             grep_cmd
-                .args(["-rnHZ", &args.pattern, &args.path])
-                .args(&args.extra_args);
+                .arg("-rnHZ")
+                .args(&args.extra_args)
+                .args([&args.pattern, &args.path]);
             exec_capture(&mut grep_cmd)
         })
         .context("grep/rg failed")?;
@@ -257,6 +249,47 @@ fn search_flag_takes_value(arg: &str) -> bool {
         )
 }
 
+fn normalize_rg_extra_args(extra_args: &[String]) -> Vec<String> {
+    extra_args
+        .iter()
+        .filter_map(|arg| normalize_rg_extra_arg(arg))
+        .collect()
+}
+
+fn normalize_rg_extra_arg(arg: &str) -> Option<String> {
+    match arg {
+        "-r" | "--recursive" | "-n" | "--line-number" | "-E" | "--extended-regexp" => None,
+        _ => match normalize_short_grep_cluster(arg) {
+            Some(normalized) => normalized,
+            None => Some(arg.to_string()),
+        },
+    }
+}
+
+fn normalize_short_grep_cluster(arg: &str) -> Option<Option<String>> {
+    if !arg.starts_with('-') || arg.starts_with("--") || arg.len() <= 2 {
+        return None;
+    }
+
+    let mut kept = String::from("-");
+    let mut changed = false;
+
+    for flag in arg[1..].chars() {
+        match flag {
+            'r' | 'n' | 'E' => changed = true,
+            _ => kept.push(flag),
+        }
+    }
+
+    if !changed {
+        None
+    } else if kept == "-" {
+        Some(None)
+    } else {
+        Some(Some(kept))
+    }
+}
+
 /// Parses a single rg/grep match line of the form `file\0line_number:content`.
 ///
 /// Requires the underlying command to be invoked with `-0` (rg) or `-Z` (grep)
@@ -414,6 +447,22 @@ mod tests {
         assert_eq!(args.pattern, "needle");
         assert_eq!(args.path, "src");
         assert_eq!(args.extra_args, vec!["--fixed-strings"]);
+    }
+
+    #[test]
+    fn test_normalize_rg_extra_args_strips_grep_compat_flags() {
+        let args = normalize_rg_extra_args(&[
+            "-rn".to_string(),
+            "-rnE".to_string(),
+            "-rni".to_string(),
+            "--recursive".to_string(),
+            "--line-number".to_string(),
+            "--extended-regexp".to_string(),
+            "-A".to_string(),
+            "2".to_string(),
+        ]);
+
+        assert_eq!(args, vec!["-i", "-A", "2"]);
     }
 
     #[test]
