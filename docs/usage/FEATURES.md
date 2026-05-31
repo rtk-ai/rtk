@@ -200,9 +200,13 @@ Supporte a la fois la syntaxe RTK et la syntaxe native `find` (`-name`, `-type`,
 
 ---
 
-### `rtk grep` -- Recherche dans le contenu
+### `rtk grep` / `rtk rg` -- Recherche dans le contenu
 
-**Objectif :** Remplace `grep` et `rg` avec une sortie groupee par fichier, tronquee.
+**Objectif :** Sortie groupee par fichier, tronquee. `rtk grep` execute le `grep`
+systeme (semantique grep) ; `rtk rg` execute ripgrep (semantique rg, flags
+`--glob`/`-g`/`-P`/`--files`...). Chaque commande conserve son propre outil : pas
+de bascule de l'un vers l'autre (les flags courts comme `-r` different entre les
+deux).
 
 **Syntaxe :**
 ```bash
@@ -219,7 +223,7 @@ rtk grep <pattern> [chemin] [options]
 | `--file-type` | `-t` | tous | Filtrer par type (ts, py, rust, etc.) |
 | `--line-numbers` | `-n` | oui | Numeros de ligne (toujours actif) |
 
-Les arguments supplementaires sont transmis a `rg` (ripgrep). Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement a `rg`/`grep` sans filtrage RTK.
+Les arguments supplementaires sont transmis a l'outil sous-jacent (`grep` pour `rtk grep`, `rg` pour `rtk rg`). Les flags qui changent le format de sortie (`-c`, `-l`, `-L`, `-o`, `-Z`) passent directement a l'outil sans filtrage RTK.
 
 **Economies :** ~80%
 
@@ -1255,7 +1259,8 @@ rtk verify
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
 | `cat/head/tail <fichier>` | `rtk read <fichier>` |
-| `rg/grep <pattern>` | `rtk grep <pattern>` |
+| `grep <pattern>` | `rtk grep <pattern>` |
+| `rg <pattern>` | `rtk rg <pattern>` |
 | `ls` | `rtk ls` |
 | `tree` | `rtk tree` |
 | `wc` | `rtk wc` |

@@ -88,10 +88,23 @@ pub const RULES: &[RtkRule] = &[
         subcmd_savings: &[],
         subcmd_status: &[],
     },
+    // grep and rg are kept distinct so each runs its own backend: `grep` keeps
+    // grep semantics (system grep), `rg` keeps ripgrep semantics. Collapsing them
+    // breaks the other tool's flags (e.g. `-r` is recursive in grep but --replace
+    // in rg, `--glob`/`-P` are rg-only).
     RtkRule {
-        pattern: r"^(rg|grep)\s+",
+        pattern: r"^grep\s+",
         rtk_cmd: "rtk grep",
-        rewrite_prefixes: &["rg", "grep"],
+        rewrite_prefixes: &["grep"],
+        category: "Files",
+        savings_pct: 75.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    RtkRule {
+        pattern: r"^rg\s+",
+        rtk_cmd: "rtk rg",
+        rewrite_prefixes: &["rg"],
         category: "Files",
         savings_pct: 75.0,
         subcmd_savings: &[],
