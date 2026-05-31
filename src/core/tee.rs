@@ -169,11 +169,6 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
 }
 
 fn display_path(path: &std::path::Path) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            return format!("~/{}", relative.display());
-        }
-    }
     path.display().to_string()
 }
 
@@ -445,6 +440,30 @@ mod tests {
         assert!(hint.starts_with("[full output: "));
         assert!(hint.ends_with(']'));
         assert!(hint.contains("123_cargo_test.log"));
+    }
+
+    #[test]
+    fn test_display_path_never_emits_tilde_for_home_paths() {
+        // Hint paths are meant to be copy-pasted into a shell. `~` does not
+        // expand inside double quotes, and an unquoted `~/Library/Application
+        // Support/...` splits on the space. Render absolute paths only.
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = home.join("Library/Application Support/rtk/tee/7_curl.log");
+        let display = display_path(&path);
+        assert!(
+            !display.starts_with('~'),
+            "display_path must render absolute paths, got {display:?}"
+        );
+        assert_eq!(display, path.display().to_string());
+    }
+
+    #[test]
+    fn test_display_path_preserves_paths_with_spaces() {
+        let path = PathBuf::from("/var/folders/x y z/rtk/tee/9_test.log");
+        let display = display_path(&path);
+        assert_eq!(display, "/var/folders/x y z/rtk/tee/9_test.log");
     }
 
     #[test]
