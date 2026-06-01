@@ -622,10 +622,9 @@ pub(crate) fn filter_log_output(
     let mut out = result.join("\n").trim().to_string();
     if omitted_commits > 0 {
         out.push_str(&format!(
-            "\n[RTK: truncated — {} of {} commits shown — run `rtk proxy git log {}` for full output]",
+            "\n[RTK: truncated — {} of {} commits shown]",
             max_commits,
             commits.len(),
-            "" // args would ideally be passed through
         ));
     }
     out
