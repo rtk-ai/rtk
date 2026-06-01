@@ -30,7 +30,12 @@ pub fn truncate(s: &str, max_len: usize) -> String {
         // If max_len is too small, just return "..."
         "...".to_string()
     } else {
-        format!("{}...", s.chars().take(max_len - 3).collect::<String>())
+        format!(
+            "{}\n[RTK: truncated — {} of {} chars]",
+            s.chars().take(max_len).collect::<String>(),
+            max_len,
+            char_count,
+        )
     }
 }
 
