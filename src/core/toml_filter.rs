@@ -185,6 +185,7 @@ pub struct TomlFilterRegistry {
 impl TomlFilterRegistry {
     /// Load registry from disk + built-in. Emits warnings to stderr on parse
     /// errors but never panics — bad files are silently ignored.
+    #[allow(dead_code)]
     fn load() -> Self {
         let mut filters = Vec::new();
 
