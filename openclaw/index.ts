@@ -31,7 +31,13 @@ function tryRewrite(command: string): string | null {
       timeout: 2000,
     }).trim();
     return result && result !== command ? result : null;
-  } catch {
+  } catch (e: any) {
+    // rtk rewrite returns exit code 3 when it has a rewrite suggestion
+    // but non-zero codes cause execSync to throw — check stdout
+    if (e?.stdout) {
+      const result = String(e.stdout).trim();
+      if (result && result !== command) return result;
+    }
     return null;
   }
 }
