@@ -31,7 +31,12 @@ function tryRewrite(command: string): string | null {
       timeout: 2000,
     }).trim();
     return result && result !== command ? result : null;
-  } catch {
+  } catch (e: unknown) {
+    const error = e as { status?: number; stdout?: string };
+    if (error.stdout) {
+      const result = String(error.stdout).trim();
+      if (result && result !== command) return result;
+    }
     return null;
   }
 }
