@@ -400,7 +400,7 @@ pub const RULES: &[RtkRule] = &[
         ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^kubectl\s+(get|logs|describe|apply)",
+        pattern: r"^kubectl\s+(get|logs|describe|apply|exec)",
         rtk_cmd: "rtk kubectl",
         rewrite_prefixes: &["kubectl"],
         category: "Infra",

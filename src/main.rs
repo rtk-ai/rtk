@@ -119,7 +119,7 @@ enum Commands {
     /// Generate 2-line technical summary (heuristic-based)
     Smart {
         /// File to analyze
-        file: PathBuf,
+        file: Option<PathBuf>,
         /// Model: heuristic
         #[arg(short, long, default_value = "heuristic")]
         model: String,
@@ -1650,7 +1650,7 @@ fn run_cli() -> Result<i32> {
             model,
             force_download,
         } => {
-            local_llm::run(&file, &model, force_download, cli.verbose)?;
+            local_llm::run(file.as_deref(), &model, force_download, cli.verbose)?;
             0
         }
 
