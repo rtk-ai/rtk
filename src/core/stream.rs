@@ -541,6 +541,20 @@ pub fn exec_capture(cmd: &mut Command) -> Result<CaptureResult> {
     })
 }
 
+/// Like [`exec_capture`] but inherits the parent's stdin so the child can talk to the
+/// terminal. Required for remote git operations (fetch/pull) where SSH or a credential
+/// helper may prompt for a passphrase/password — `exec_capture` nulls stdin, which makes
+/// those auth flows fail with "Could not read from remote repository" (issue #2211).
+pub fn exec_capture_inherit_stdin(cmd: &mut Command) -> Result<CaptureResult> {
+    cmd.stdin(Stdio::inherit());
+    let output = cmd.output().context("Failed to execute command")?;
+    Ok(CaptureResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: status_to_exit_code(output.status),
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -807,6 +821,25 @@ pub(crate) mod tests {
     fn test_exec_capture_failure() {
         let mut cmd = Command::new("false");
         let result = exec_capture(&mut cmd).unwrap();
+        assert!(!result.success());
+        assert_eq!(result.exit_code, 1);
+    }
+
+    #[test]
+    fn test_exec_capture_inherit_stdin_captures_output() {
+        // Inheriting stdin must not interfere with stdout/stderr capture (issue #2211).
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello_inherit");
+        let result = exec_capture_inherit_stdin(&mut cmd).unwrap();
+        assert!(result.success());
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("hello_inherit"));
+    }
+
+    #[test]
+    fn test_exec_capture_inherit_stdin_failure() {
+        let mut cmd = Command::new("false");
+        let result = exec_capture_inherit_stdin(&mut cmd).unwrap();
         assert!(!result.success());
         assert_eq!(result.exit_code, 1);
     }

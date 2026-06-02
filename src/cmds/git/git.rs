@@ -2,7 +2,8 @@
 
 use crate::core::args_utils;
 use crate::core::stream::{
-    self, exec_capture, CaptureResult, FilterMode, LineHandler, LineStreamFilter, StdinMode,
+    self, exec_capture, exec_capture_inherit_stdin, CaptureResult, FilterMode, LineHandler,
+    LineStreamFilter, StdinMode,
 };
 use crate::core::tracking;
 use crate::core::truncate::CAP_WARNINGS;
@@ -1149,7 +1150,7 @@ fn run_pull(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32>
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git pull")?;
+    let result = exec_capture_inherit_stdin(&mut cmd).context("Failed to run git pull")?;
 
     let raw_output = format!("{}\n{}", result.stdout, result.stderr);
 
@@ -1445,7 +1446,7 @@ fn run_fetch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i32
         cmd.arg(arg);
     }
 
-    let result = exec_capture(&mut cmd).context("Failed to run git fetch")?;
+    let result = exec_capture_inherit_stdin(&mut cmd).context("Failed to run git fetch")?;
     let raw = result.combined();
 
     if !result.success() {
