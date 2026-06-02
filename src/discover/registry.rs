@@ -2961,6 +2961,26 @@ mod tests {
             "outdated",
             "run",
             "run-script",
+            "add",
+            "remove",
+            "update",
+            "build",
+            "test",
+            "typecheck",
+            "why",
+            "rebuild",
+            "prune",
+            "publish",
+            "dev",
+            "start",
+            "store",
+            "audit",
+            "dedupe",
+            "fetch",
+            "link",
+            "unlink",
+            "patch",
+            "dlx",
         ];
         for command in commands {
             assert_eq!(
@@ -2970,6 +2990,30 @@ mod tests {
                 command
             );
         }
+    }
+
+    #[test]
+    fn test_rewrite_pnpm_with_filter_flags() {
+        // --filter before subcommand
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter desktop typecheck", &[]),
+            Some("rtk pnpm --filter desktop typecheck".into()),
+        );
+        // -F shorthand
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm -F desktop typecheck", &[]),
+            Some("rtk pnpm -F desktop typecheck".into()),
+        );
+        // multiple filters
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter @app/web --filter @app/api build", &[]),
+            Some("rtk pnpm --filter @app/web --filter @app/api build".into()),
+        );
+        // --filter=value syntax
+        assert_eq!(
+            rewrite_command_no_prefixes("pnpm --filter=desktop typecheck", &[]),
+            Some("rtk pnpm --filter=desktop typecheck".into()),
+        );
     }
 
     #[test]
