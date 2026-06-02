@@ -5,6 +5,7 @@ use regex::{Regex, RegexSet};
 
 use super::lexer::{split_on_operators, tokenize, TokenKind};
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES};
+use crate::core::toml_filter;
 
 /// Result of classifying a command.
 #[derive(Debug, PartialEq)]
@@ -807,7 +808,15 @@ fn rewrite_segment_inner(
             }
             rtk_equivalent
         }
-        _ => return None,
+        Classification::Unsupported { .. } => {
+            // Check if a custom TOML filter matches this command. If so,
+            // rewrite to run through rtk so the filter pipeline applies (#2179).
+            if toml_filter::find_matching_filter(cmd_part).is_some() {
+                return Some(format!("rtk {}{}", cmd_part, redirect_suffix));
+            }
+            return None;
+        }
+        Classification::Ignored => return None,
     };
 
     // Find the matching rule (rtk_cmd values are unique across all rules)
