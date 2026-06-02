@@ -7,6 +7,7 @@
 use crate::core::stream::exec_capture;
 use crate::core::utils::{resolved_command, tool_exists};
 use anyhow::{Context, Result};
+use chrono::{Duration, Local};
 use serde::Deserialize;
 use std::process::Command;
 
@@ -53,7 +54,8 @@ struct DailyResponse {
 
 #[derive(Debug, Deserialize)]
 struct DailyEntry {
-    date: String,
+    #[serde(rename = "period", alias = "date")]
+    period: String,
     #[serde(flatten)]
     metrics: CcusageMetrics,
 }
@@ -65,7 +67,8 @@ struct WeeklyResponse {
 
 #[derive(Debug, Deserialize)]
 struct WeeklyEntry {
-    week: String, // ISO week start (Monday)
+    #[serde(rename = "period", alias = "week")]
+    period: String, // ISO week start (Monday)
     #[serde(flatten)]
     metrics: CcusageMetrics,
 }
@@ -136,10 +139,11 @@ pub fn fetch(granularity: Granularity) -> Result<Option<Vec<CcusagePeriod>>> {
         Granularity::Monthly => "monthly",
     };
 
-    cmd.arg(subcommand)
-        .arg("--json")
-        .arg("--since")
-        .arg("20250101"); // 90 days back approx
+    let since = (Local::now() - Duration::days(90))
+        .format("%Y%m%d")
+        .to_string();
+
+    cmd.arg(subcommand).arg("--json").arg("--since").arg(&since);
 
     let result = match exec_capture(&mut cmd) {
         Err(e) => {
@@ -175,7 +179,7 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
                 .daily
                 .into_iter()
                 .map(|e| CcusagePeriod {
-                    key: e.date,
+                    key: e.period,
                     metrics: e.metrics,
                 })
                 .collect())
@@ -187,7 +191,7 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
                 .weekly
                 .into_iter()
                 .map(|e| CcusagePeriod {
-                    key: e.week,
+                    key: e.period,
                     metrics: e.metrics,
                 })
                 .collect())
@@ -266,6 +270,31 @@ mod tests {
 
     #[test]
     fn test_parse_daily_valid() {
+        // ccusage ≥19.0 emits `period` instead of `date`
+        let json = r#"{
+            "daily": [
+                {
+                    "period": "2026-01-30",
+                    "inputTokens": 100,
+                    "outputTokens": 50,
+                    "cacheCreationTokens": 0,
+                    "cacheReadTokens": 0,
+                    "totalTokens": 150,
+                    "totalCost": 0.15
+                }
+            ]
+        }"#;
+
+        let result = parse_json(json, Granularity::Daily);
+        assert!(result.is_ok());
+        let periods = result.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-01-30");
+    }
+
+    #[test]
+    fn test_parse_daily_legacy_date_field() {
+        // backward compat: ccusage <19.0 used `date` — alias keeps it working
         let json = r#"{
             "daily": [
                 {
@@ -289,6 +318,31 @@ mod tests {
 
     #[test]
     fn test_parse_weekly_valid() {
+        // ccusage ≥19.0 emits `period` instead of `week`
+        let json = r#"{
+            "weekly": [
+                {
+                    "period": "2026-01-20",
+                    "inputTokens": 500,
+                    "outputTokens": 250,
+                    "cacheCreationTokens": 50,
+                    "cacheReadTokens": 100,
+                    "totalTokens": 900,
+                    "totalCost": 5.67
+                }
+            ]
+        }"#;
+
+        let result = parse_json(json, Granularity::Weekly);
+        assert!(result.is_ok());
+        let periods = result.unwrap();
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].key, "2026-01-20");
+    }
+
+    #[test]
+    fn test_parse_weekly_legacy_week_field() {
+        // backward compat: ccusage <19.0 used `week` — alias keeps it working
         let json = r#"{
             "weekly": [
                 {
