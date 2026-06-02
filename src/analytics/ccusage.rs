@@ -53,7 +53,7 @@ struct DailyResponse {
 
 #[derive(Debug, Deserialize)]
 struct DailyEntry {
-    date: String,
+    date: Option<String>,
     #[serde(flatten)]
     metrics: CcusageMetrics,
 }
@@ -65,7 +65,7 @@ struct WeeklyResponse {
 
 #[derive(Debug, Deserialize)]
 struct WeeklyEntry {
-    week: String, // ISO week start (Monday)
+    week: Option<String>, // ISO week start (Monday)
     #[serde(flatten)]
     metrics: CcusageMetrics,
 }
@@ -77,7 +77,7 @@ struct MonthlyResponse {
 
 #[derive(Debug, Deserialize)]
 struct MonthlyEntry {
-    month: String,
+    month: Option<String>,
     #[serde(flatten)]
     metrics: CcusageMetrics,
 }
@@ -173,9 +173,12 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
             Ok(resp
                 .daily
                 .into_iter()
-                .map(|e| CcusagePeriod {
-                    key: e.date,
-                    metrics: e.metrics,
+                .filter_map(|e| {
+                    let key = e.date?;
+                    Some(CcusagePeriod {
+                        key,
+                        metrics: e.metrics,
+                    })
                 })
                 .collect())
         }
@@ -185,9 +188,12 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
             Ok(resp
                 .weekly
                 .into_iter()
-                .map(|e| CcusagePeriod {
-                    key: e.week,
-                    metrics: e.metrics,
+                .filter_map(|e| {
+                    let key = e.week?;
+                    Some(CcusagePeriod {
+                        key,
+                        metrics: e.metrics,
+                    })
                 })
                 .collect())
         }
@@ -197,9 +203,12 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
             Ok(resp
                 .monthly
                 .into_iter()
-                .map(|e| CcusagePeriod {
-                    key: e.month,
-                    metrics: e.metrics,
+                .filter_map(|e| {
+                    let key = e.month?;
+                    Some(CcusagePeriod {
+                        key,
+                        metrics: e.metrics,
+                    })
                 })
                 .collect())
         }
