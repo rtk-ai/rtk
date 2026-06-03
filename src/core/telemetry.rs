@@ -23,12 +23,26 @@ pub fn maybe_ping() {
         return;
     }
 
-    // Check opt-out: env var
+    // Check opt-out: env var (cheap — before any disk I/O)
     if std::env::var("RTK_TELEMETRY_DISABLED").unwrap_or_default() == "1" {
         return;
     }
 
-    // Load config once (avoid double disk read)
+    // C-08 fix: check the day-marker BEFORE loading config.
+    // On the hot path (hook invocation), the marker is almost always fresh,
+    // so we skip the config.toml disk read entirely on 99% of calls.
+    let marker = telemetry_marker_path();
+    if let Ok(metadata) = std::fs::metadata(&marker) {
+        if let Ok(modified) = metadata.modified() {
+            if let Ok(elapsed) = modified.elapsed() {
+                if elapsed.as_secs() < PING_INTERVAL_SECS {
+                    return;
+                }
+            }
+        }
+    }
+
+    // Marker is stale (or absent) — load config to check consent before pinging.
     let cfg = match config::Config::load() {
         Ok(c) => c,
         Err(_) => return,
@@ -43,18 +57,6 @@ pub fn maybe_ping() {
     // Check opt-out: config.toml
     if !cfg.telemetry.enabled {
         return;
-    }
-
-    // Check last ping time
-    let marker = telemetry_marker_path();
-    if let Ok(metadata) = std::fs::metadata(&marker) {
-        if let Ok(modified) = metadata.modified() {
-            if let Ok(elapsed) = modified.elapsed() {
-                if elapsed.as_secs() < PING_INTERVAL_SECS {
-                    return;
-                }
-            }
-        }
     }
 
     // Touch marker file immediately (before sending) to avoid double-ping
