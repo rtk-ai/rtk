@@ -478,9 +478,16 @@ fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
 /// starts with `"foo bar "` (or strictly equals `"foo bar"`), not anything
 /// else. Matching is literal, not pattern-based: configure the exact concrete
 /// prefix you use.
+///
+/// When `included` is non-empty, **whitelist mode** is active: only commands
+/// that match one of the `included` patterns are eligible for rewriting; all
+/// others pass through unchanged. `included` and `excluded` are mutually
+/// exclusive and must not both be non-empty (the caller must enforce this via
+/// [`crate::core::config::HooksConfig::validate`]).
 pub fn rewrite_command(
     cmd: &str,
     excluded: &[String],
+    included: &[String],
     transparent_prefixes: &[String],
 ) -> Option<String> {
     // Bash line continuations (`\<NL>`, `\<CRLF>`) and the leading whitespace that
@@ -497,7 +504,8 @@ pub fn rewrite_command(
         return None;
     }
 
-    let compiled = compile_exclude_patterns(excluded);
+    let compiled_excluded = compile_exclude_patterns(excluded);
+    let compiled_included = compile_exclude_patterns(included);
     let normalized_prefixes = normalize_transparent_prefixes(transparent_prefixes);
 
     // Simple (non-compound) already-RTK command — return as-is.
@@ -512,13 +520,19 @@ pub fn rewrite_command(
         return Some(trimmed.to_string());
     }
 
-    rewrite_compound(trimmed, &compiled, &normalized_prefixes)
+    rewrite_compound(
+        trimmed,
+        &compiled_excluded,
+        &compiled_included,
+        &normalized_prefixes,
+    )
 }
 
 /// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
 fn rewrite_compound(
     cmd: &str,
     excluded: &[ExcludePattern],
+    included: &[ExcludePattern],
     transparent_prefixes: &[String],
 ) -> Option<String> {
     let tokens = tokenize(cmd);
@@ -533,7 +547,7 @@ fn rewrite_compound(
         match tok.kind {
             TokenKind::Operator => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
+                let rewritten = rewrite_segment(seg, excluded, included, transparent_prefixes)
                     .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
@@ -564,7 +578,7 @@ fn rewrite_compound(
                 let rewritten = if is_pipe_incompatible {
                     seg.to_string()
                 } else {
-                    rewrite_segment(seg, excluded, transparent_prefixes)
+                    rewrite_segment(seg, excluded, included, transparent_prefixes)
                         .unwrap_or_else(|| seg.to_string())
                 };
                 if rewritten != seg {
@@ -593,7 +607,7 @@ fn rewrite_compound(
             }
             TokenKind::Shellism if tok.value == "&" => {
                 let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
+                let rewritten = rewrite_segment(seg, excluded, included, transparent_prefixes)
                     .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
@@ -610,8 +624,8 @@ fn rewrite_compound(
     }
 
     let seg = cmd[seg_start..].trim();
-    let rewritten =
-        rewrite_segment(seg, excluded, transparent_prefixes).unwrap_or_else(|| seg.to_string());
+    let rewritten = rewrite_segment(seg, excluded, included, transparent_prefixes)
+        .unwrap_or_else(|| seg.to_string());
     if rewritten != seg {
         any_changed = true;
     }
@@ -709,9 +723,10 @@ fn normalize_transparent_prefixes(prefixes: &[String]) -> Vec<String> {
 fn rewrite_segment(
     seg: &str,
     excluded: &[ExcludePattern],
+    included: &[ExcludePattern],
     transparent_prefixes: &[String],
 ) -> Option<String> {
-    rewrite_segment_inner(seg, excluded, transparent_prefixes, 0)
+    rewrite_segment_inner(seg, excluded, included, transparent_prefixes, 0)
 }
 
 fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
@@ -724,6 +739,7 @@ fn is_excluded(cmd: &str, excluded: &[ExcludePattern]) -> bool {
 fn rewrite_segment_inner(
     seg: &str,
     excluded: &[ExcludePattern],
+    included: &[ExcludePattern],
     transparent_prefixes: &[String],
     depth: usize,
 ) -> Option<String> {
@@ -747,8 +763,13 @@ fn rewrite_segment_inner(
             );
             return None;
         }
-        let rewritten =
-            rewrite_segment_inner(rest_after_env, excluded, transparent_prefixes, depth + 1)?;
+        let rewritten = rewrite_segment_inner(
+            rest_after_env,
+            excluded,
+            included,
+            transparent_prefixes,
+            depth + 1,
+        )?;
         return Some(format!("{}{}", env_prefix, rewritten));
     }
 
@@ -757,8 +778,14 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+            return rewrite_segment_inner(
+                rest,
+                excluded,
+                included,
+                transparent_prefixes,
+                depth + 1,
+            )
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -769,8 +796,14 @@ fn rewrite_segment_inner(
             if rest.is_empty() {
                 return None;
             }
-            return rewrite_segment_inner(rest, excluded, transparent_prefixes, depth + 1)
-                .map(|rewritten| format!("{} {}", prefix, rewritten));
+            return rewrite_segment_inner(
+                rest,
+                excluded,
+                included,
+                transparent_prefixes,
+                depth + 1,
+            )
+            .map(|rewritten| format!("{} {}", prefix, rewritten));
         }
     }
 
@@ -802,7 +835,12 @@ fn rewrite_segment_inner(
         Classification::Supported { rtk_equivalent, .. } => {
             let stripped = ENV_PREFIX.replace(cmd_part, "");
             let cmd_clean = stripped.trim();
+            // Blacklist mode: skip if command matches exclude list.
             if is_excluded(cmd_clean, excluded) {
+                return None;
+            }
+            // Whitelist mode: skip if include list is set and command is NOT listed.
+            if !included.is_empty() && !is_excluded(cmd_clean, included) {
                 return None;
             }
             rtk_equivalent
@@ -873,7 +911,7 @@ mod tests {
     use super::*;
 
     fn rewrite_command_no_prefixes(cmd: &str, excluded: &[String]) -> Option<String> {
-        super::rewrite_command(cmd, excluded, &[])
+        super::rewrite_command(cmd, excluded, &[], &[])
     }
 
     #[test]
@@ -3662,7 +3700,7 @@ mod tests {
     fn test_transparent_prefix_strips_and_reprepends() {
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            super::rewrite_command("shadowenv exec -- git status", &[], &prefixes),
+            super::rewrite_command("shadowenv exec -- git status", &[], &[], &prefixes),
             Some("shadowenv exec -- rtk git status".into())
         );
     }
@@ -3671,7 +3709,7 @@ mod tests {
     fn test_transparent_prefix_with_test_runner() {
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            super::rewrite_command("shadowenv exec -- cargo test", &[], &prefixes),
+            super::rewrite_command("shadowenv exec -- cargo test", &[], &[], &prefixes),
             Some("shadowenv exec -- rtk cargo test".into())
         );
     }
@@ -3680,7 +3718,7 @@ mod tests {
     fn test_transparent_prefix_unknown_inner_returns_none() {
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            super::rewrite_command("shadowenv exec -- htop", &[], &prefixes),
+            super::rewrite_command("shadowenv exec -- htop", &[], &[], &prefixes),
             None
         );
     }
@@ -3689,7 +3727,7 @@ mod tests {
     fn test_transparent_prefix_not_matched_is_passthrough() {
         // Without the prefix configured, the wrapper breaks routing.
         assert_eq!(
-            super::rewrite_command("shadowenv exec -- git status", &[], &[]),
+            super::rewrite_command("shadowenv exec -- git status", &[], &[], &[]),
             None
         );
     }
@@ -3700,7 +3738,7 @@ mod tests {
         // user layer strips shadowenv exec --, inner `git status` routes.
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            super::rewrite_command("noglob shadowenv exec -- git status", &[], &prefixes),
+            super::rewrite_command("noglob shadowenv exec -- git status", &[], &[], &prefixes),
             Some("noglob shadowenv exec -- rtk git status".into())
         );
     }
@@ -3709,7 +3747,7 @@ mod tests {
     fn test_transparent_prefix_composed_with_env_prefix() {
         let prefixes = vec!["bundle exec".to_string()];
         assert_eq!(
-            super::rewrite_command("RAILS_ENV=test bundle exec git status", &[], &prefixes),
+            super::rewrite_command("RAILS_ENV=test bundle exec git status", &[], &[], &prefixes),
             Some("RAILS_ENV=test bundle exec rtk git status".into())
         );
     }
@@ -3726,7 +3764,7 @@ mod tests {
     fn test_transparent_prefix_multiple_configured() {
         let prefixes = vec!["shadowenv exec --".to_string(), "direnv exec .".to_string()];
         assert_eq!(
-            super::rewrite_command("direnv exec . git status", &[], &prefixes),
+            super::rewrite_command("direnv exec . git status", &[], &[], &prefixes),
             Some("direnv exec . rtk git status".into())
         );
     }
@@ -3749,7 +3787,7 @@ mod tests {
     fn test_transparent_prefix_overlapping_entries_use_longest_match() {
         let prefixes = vec!["docker".to_string(), "docker exec app".to_string()];
         assert_eq!(
-            super::rewrite_command("docker exec app git status", &[], &prefixes),
+            super::rewrite_command("docker exec app git status", &[], &[], &prefixes),
             Some("docker exec app rtk git status".into())
         );
     }
@@ -3759,7 +3797,7 @@ mod tests {
         // A prefix `"foo"` must NOT match `"foobar git status"`.
         let prefixes = vec!["foo".to_string()];
         assert_eq!(
-            super::rewrite_command("foobar git status", &[], &prefixes),
+            super::rewrite_command("foobar git status", &[], &[], &prefixes),
             None
         );
     }
@@ -3768,7 +3806,7 @@ mod tests {
     fn test_transparent_prefix_empty_rest_returns_none() {
         let prefixes = vec!["shadowenv exec --".to_string()];
         assert_eq!(
-            super::rewrite_command("shadowenv exec --", &[], &prefixes),
+            super::rewrite_command("shadowenv exec --", &[], &[], &prefixes),
             None
         );
     }
@@ -3778,7 +3816,7 @@ mod tests {
         // A blank entry in the config should not cause spurious matches or panics.
         let prefixes = vec!["".to_string(), "   ".to_string()];
         assert_eq!(
-            super::rewrite_command("git status", &[], &prefixes),
+            super::rewrite_command("git status", &[], &[], &prefixes),
             Some("rtk git status".into())
         );
     }
@@ -3790,6 +3828,7 @@ mod tests {
         assert_eq!(
             super::rewrite_command(
                 "shadowenv exec -- git status && shadowenv exec -- cargo test",
+                &[],
                 &[],
                 &prefixes
             ),
@@ -3804,7 +3843,7 @@ mod tests {
         let prefixes = vec!["shadowenv exec --".to_string()];
         let excluded = vec!["git".to_string()];
         assert_eq!(
-            super::rewrite_command("shadowenv exec -- git status", &excluded, &prefixes),
+            super::rewrite_command("shadowenv exec -- git status", &excluded, &[], &prefixes),
             None
         );
     }
@@ -3821,7 +3860,7 @@ mod tests {
         cmd.push_str("git status");
         // Doesn't matter exactly what it returns — just that it doesn't stack-
         // overflow or loop forever. Exercise the code path.
-        let _ = super::rewrite_command(&cmd, &[], &prefixes);
+        let _ = super::rewrite_command(&cmd, &[], &[], &prefixes);
     }
 
     #[test]
@@ -3971,5 +4010,93 @@ mod tests {
             collapse_line_continuations("git diff HEAD~1"),
             std::borrow::Cow::<str>::Borrowed("git diff HEAD~1"),
         );
+    }
+
+    // --- include_commands whitelist (#2231) ---
+
+    fn rewrite_command_with_included(cmd: &str, included: &[String]) -> Option<String> {
+        super::rewrite_command(cmd, &[], included, &[])
+    }
+
+    #[test]
+    fn test_include_only_listed_command_is_rewritten() {
+        let included = vec!["git status".to_string()];
+        assert_eq!(
+            rewrite_command_with_included("git status", &included),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_include_unlisted_command_passes_through() {
+        // cargo build is supported by RTK but NOT in the include list → no rewrite.
+        let included = vec!["git status".to_string()];
+        assert_eq!(
+            rewrite_command_with_included("cargo build", &included),
+            None
+        );
+    }
+
+    #[test]
+    fn test_include_empty_means_no_whitelist_restriction() {
+        // When include_commands is empty the whitelist is inactive —
+        // all supported commands should still be rewritten.
+        let included: Vec<String> = vec![];
+        assert_eq!(
+            rewrite_command_with_included("cargo test", &included),
+            Some("rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_include_multiple_entries_any_matches() {
+        let included = vec!["git status".to_string(), "cargo build".to_string()];
+        assert_eq!(
+            rewrite_command_with_included("cargo build", &included),
+            Some("rtk cargo build".into())
+        );
+        assert_eq!(
+            rewrite_command_with_included("git status", &included),
+            Some("rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_include_non_matching_supported_command_passes_through() {
+        let included = vec!["git status".to_string()];
+        // go test is supported but not included → passes through.
+        assert_eq!(
+            rewrite_command_with_included("go test ./...", &included),
+            None
+        );
+    }
+
+    #[test]
+    fn test_include_compound_only_listed_segment_rewritten() {
+        // git status is included; cargo test is not.
+        // The compound should rewrite git status but leave cargo test alone.
+        let included = vec!["git status".to_string()];
+        assert_eq!(
+            rewrite_command_with_included("git status && cargo test", &included),
+            Some("rtk git status && cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_include_prefix_pattern_matches_with_args() {
+        // "cargo build" in include_commands should match "cargo build --release"
+        // because compile_exclude_patterns appends `($|\s)` to the escaped literal.
+        let included = vec!["cargo build".to_string()];
+        assert_eq!(
+            rewrite_command_with_included("cargo build --release", &included),
+            Some("rtk cargo build --release".into())
+        );
+    }
+
+    #[test]
+    fn test_include_does_not_rewrite_unsupported_command() {
+        // htop is not in RTK's registry; even if listed it should not be rewritten.
+        let included = vec!["htop".to_string()];
+        assert_eq!(rewrite_command_with_included("htop", &included), None);
     }
 }
