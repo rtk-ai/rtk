@@ -4,6 +4,12 @@ use super::permissions::{check_command, PermissionVerdict};
 use crate::discover::registry;
 use std::io::Write;
 
+/// Returns true if the command contains pipe or subshell operators that should
+/// bypass rewrite logic and trigger passthrough behavior.
+fn needs_passthrough(cmd: &str) -> bool {
+    cmd.contains('|') || cmd.contains("$(")
+}
+
 /// Run the `rtk rewrite` command.
 ///
 /// Prints the RTK-rewritten command to stdout and exits with a code that tells
@@ -12,10 +18,17 @@ use std::io::Write;
 /// | Exit | Stdout   | Meaning                                                      |
 /// |------|----------|--------------------------------------------------------------|
 /// | 0    | rewritten| Rewrite allowed — hook may auto-allow the rewritten command. |
-/// | 1    | (none)   | No RTK equivalent — hook passes through unchanged.           |
+/// | 0    | passthrough | Command contains pipes/subshells — hook passes through unchanged. |
 /// | 2    | (none)   | Deny rule matched — hook defers to Claude Code native deny.  |
 /// | 3    | rewritten| Ask rule matched — hook rewrites but lets Claude Code prompt.|
 pub fn run(cmd: &str) -> anyhow::Result<()> {
+    // SECURITY: Pipe and subshell detection — bypass rewrite for complex commands.
+    if needs_passthrough(cmd) {
+        print!("{}", cmd);
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+
     let (excluded, transparent_prefixes) = crate::core::config::Config::load()
         .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
         .unwrap_or_default();
@@ -42,7 +55,7 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
             PermissionVerdict::Deny => unreachable!(),
         },
         None => {
-            // No RTK equivalent. Exit 1 = passthrough.
+            // No RTK equivalent. Exit 1 = no rewrite found.
             // Claude Code independently evaluates its own ask rules on the original cmd.
             std::process::exit(1);
         }
@@ -75,11 +88,41 @@ mod tests {
         );
     }
 
+    mod pipe_subshell_detection {
+        use super::*;
+
+        #[test]
+        fn test_pipe_bypasses_rewrite() {
+            assert!(needs_passthrough("git log | head -5"));
+            assert!(needs_passthrough("cargo build 2>&1 | tee build.log"));
+            assert!(needs_passthrough("ls | grep foo"));
+        }
+
+        #[test]
+        fn test_subshell_bypasses_rewrite() {
+            assert!(needs_passthrough("echo $(git rev-parse --show-toplevel)"));
+            assert!(needs_passthrough("export PATH=$(pwd)/bin:$PATH"));
+            assert!(needs_passthrough("cat $(find . -name foo)"));
+        }
+
+        #[test]
+        fn test_simple_commands_pass_through() {
+            assert!(!needs_passthrough("git status"));
+            assert!(!needs_passthrough("cargo build"));
+            assert!(!needs_passthrough("npm install"));
+            assert!(!needs_passthrough("rtk git log"));
+        }
+
+        #[test]
+        fn test_pipe_and_subshell_combined() {
+            assert!(needs_passthrough("echo $(git log --oneline -5) | cat -n"));
+        }
+    }
+
     /// SECURITY: Verify the exit code protocol for permission verdicts.
     ///
     /// The bash hook (.claude/hooks/rtk-rewrite.sh) interprets exit codes as:
-    ///   0 → auto-allow (sets permissionDecision: "allow")
-    ///   1 → passthrough (no RTK equivalent)
+    ///   0 → auto-allow / passthrough (sets permissionDecision: "allow")
     ///   2 → deny (let Claude Code handle natively)
     ///   3 → ask (rewrite but omit permissionDecision, forcing user prompt)
     ///
