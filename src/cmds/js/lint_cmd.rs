@@ -65,14 +65,23 @@ fn detect_js_linter_from_config() -> Option<&'static str> {
     let cwd = std::env::current_dir().ok()?;
 
     for candidate in &[
+        ("eslint.config.js", "eslint"),
+        ("eslint.config.mjs", "eslint"),
+        ("eslint.config.cjs", "eslint"),
+        ("eslint.config.ts", "eslint"),
+        ("eslint.config.mts", "eslint"),
+        ("eslint.config.cts", "eslint"),
         (".eslintrc.js", "eslint"),
         (".eslintrc.cjs", "eslint"),
         (".eslintrc.yaml", "eslint"),
         (".eslintrc.yml", "eslint"),
         (".eslintrc.json", "eslint"),
         (".eslintrc", "eslint"),
-        ("oxlint.json", "oxlint"),
+        (".oxlintrc.json", "oxlint"),
+        (".oxlintrc.jsonc", "oxlint"),
+        ("oxlint.config.ts", "oxlint"),
         ("biome.json", "biome"),
+        ("biome.jsonc", "biome"),
     ] {
         if Path::new(&cwd).join(candidate.0).exists() {
             return Some(candidate.1);
@@ -791,16 +800,29 @@ mod tests {
 
     #[test]
     fn test_detect_js_linter_from_config_found() {
-        // Create a temp dir with oxlint.json and verify detection
         let dir = std::env::temp_dir().join("rtk-test-oxlint-config");
         let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("oxlint.json"), "{}");
+        let _ = std::fs::write(dir.join(".oxlintrc.json"), "{}");
         let orig_cwd = std::env::current_dir().ok();
         std::env::set_current_dir(&dir).ok();
         let result = detect_js_linter_from_config();
         std::env::set_current_dir(orig_cwd.unwrap()).ok();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(result, Some("oxlint"));
+    }
+
+    #[test]
+    fn test_detect_js_linter_from_config_flat_config() {
+        // ESLint v9 flat config should be detected
+        let dir = std::env::temp_dir().join("rtk-test-eslint-flat-config");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("eslint.config.js"), "{}");
+        let orig_cwd = std::env::current_dir().ok();
+        std::env::set_current_dir(&dir).ok();
+        let result = detect_js_linter_from_config();
+        std::env::set_current_dir(orig_cwd.unwrap()).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, Some("eslint"));
     }
 
     #[test]
