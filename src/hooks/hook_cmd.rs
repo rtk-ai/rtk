@@ -9,7 +9,9 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{self, Read, Write};
 
+use crate::core::config::{Config, HookMode};
 use crate::discover::registry::{has_heredoc, rewrite_command};
+use sha2::{Digest, Sha256};
 
 const STDIN_CAP: usize = 1_048_576; // 1 MiB
 
@@ -112,17 +114,48 @@ fn get_rewritten(cmd: &str) -> Option<String> {
         return None;
     }
 
-    let (excluded, transparent_prefixes) = crate::core::config::Config::load()
-        .map(|c| (c.hooks.exclude_commands, c.hooks.transparent_prefixes))
-        .unwrap_or_default();
+    let hooks = Config::load().map(|c| c.hooks).unwrap_or_default();
 
-    let rewritten = rewrite_command(cmd, &excluded, &transparent_prefixes)?;
+    match hooks.mode {
+        HookMode::Suggest => return None,
+        HookMode::HermesSafe => {
+            if !is_hermes_safe_command(cmd, &hooks.hermes_allowlist) {
+                return None;
+            }
+        }
+        HookMode::Rewrite => {}
+    }
+
+    let rewritten = rewrite_command(cmd, &hooks.exclude_commands, &hooks.transparent_prefixes)?;
 
     if rewritten == cmd {
         return None;
     }
 
     Some(rewritten)
+}
+
+fn is_hermes_safe_command(cmd: &str, allowlist: &[String]) -> bool {
+    let normalized = cmd.trim();
+    if normalized.is_empty() || looks_sensitive_command(normalized) {
+        return false;
+    }
+    allowlist.iter().any(|prefix| command_prefix_match(normalized, prefix))
+}
+
+fn command_prefix_match(cmd: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim();
+    cmd == prefix || (cmd.starts_with(prefix) && cmd.as_bytes().get(prefix.len()) == Some(&b' '))
+}
+
+fn looks_sensitive_command(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    [
+        "secret", "token", "api_key", "apikey", "password", "passwd", "cookie",
+        "credential", "authorization", "bearer ", ".env", "id_rsa", "private_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn handle_vscode(cmd: &str) -> Result<()> {
@@ -283,6 +316,18 @@ fn sanitize_log_field(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
+fn audit_value(s: &str) -> String {
+    if std::env::var("RTK_HOOK_AUDIT_FULL").as_deref() == Ok("1") {
+        sanitize_log_field(s)
+    } else if s.is_empty() {
+        String::new()
+    } else {
+        let mut hasher = Sha256::new();
+        hasher.update(s.as_bytes());
+        format!("sha256:{:x}", hasher.finalize())
+    }
+}
+
 fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> {
     let home = dirs::home_dir()?;
     let dir = home.join(".local").join("share").join("rtk");
@@ -299,8 +344,8 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
         "{} | {} | {} | {}",
         ts,
         action,
-        sanitize_log_field(original),
-        sanitize_log_field(rewritten)
+        audit_value(original),
+        audit_value(rewritten)
     )
     .ok()
 }

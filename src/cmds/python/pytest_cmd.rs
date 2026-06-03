@@ -56,7 +56,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
         "pytest",
         &args.join(" "),
         filter_pytest_output,
-        runner::RunOptions::stdout_only().tee("pytest"),
+        runner::RunOptions::stdout_only().tee("pytest").early_exit_on_failure(),
     )
 }
 

@@ -10,8 +10,8 @@ const MIN_TEE_SIZE: usize = 500;
 /// Default max files to keep in tee directory
 const DEFAULT_MAX_FILES: usize = 20;
 
-/// Default max file size (1MB)
-const DEFAULT_MAX_FILE_SIZE: usize = 1_048_576;
+/// Default max file size (128KB, narrowed from 1MB in hermes-safe patch)
+const DEFAULT_SAFE_MAX_FILE_SIZE: usize = 131_072;
 
 /// Sanitize a command slug for use in filenames.
 /// Replaces non-alphanumeric chars (except underscore/hyphen) with underscore,
@@ -104,13 +104,40 @@ fn should_tee(
 
 /// Write raw output to a tee file in the given directory.
 /// Returns file path on success.
+fn looks_sensitive(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    [
+        "secret", "token", "api_key", "apikey", "password", "passwd", "cookie",
+        "credential", "authorization", ".env", "id_rsa", "private_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn redact_text(raw: &str) -> String {
+    raw.lines()
+        .map(|line| {
+            if looks_sensitive(line) {
+                "[REDACTED sensitive line]".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn write_tee_file(
     raw: &str,
     command_slug: &str,
     tee_dir: &std::path::Path,
     max_file_size: usize,
     max_files: usize,
+    redact: bool,
 ) -> Option<PathBuf> {
+    if looks_sensitive(command_slug) {
+        return None;
+    }
     std::fs::create_dir_all(tee_dir).ok()?;
 
     let slug = sanitize_slug(command_slug);
@@ -120,6 +147,8 @@ fn write_tee_file(
         .as_secs();
     let filename = format!("{}_{}.log", epoch, slug);
     let filepath = tee_dir.join(filename);
+
+    let raw = if redact { redact_text(raw) } else { raw.to_string() };
 
     // Truncate at max_file_size (find a safe UTF-8 char boundary)
     let content = if raw.len() > max_file_size {
@@ -165,6 +194,7 @@ pub fn tee_raw(raw: &str, command_slug: &str, exit_code: i32) -> Option<PathBuf>
         &tee_dir,
         config.tee.max_file_size,
         config.tee.max_files,
+        config.tee.redact,
     )
 }
 
@@ -212,6 +242,7 @@ fn force_tee_path(content: &str, command_slug: &str) -> Option<PathBuf> {
         &tee_dir,
         config.tee.max_file_size,
         config.tee.max_files,
+        config.tee.redact,
     )
 }
 
@@ -252,17 +283,24 @@ pub struct TeeConfig {
     pub mode: TeeMode,
     pub max_files: usize,
     pub max_file_size: usize,
+    #[serde(default = "default_true")]
+    pub redact: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<PathBuf>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for TeeConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             mode: TeeMode::default(),
             max_files: DEFAULT_MAX_FILES,
-            max_file_size: DEFAULT_MAX_FILE_SIZE,
+            max_file_size: DEFAULT_SAFE_MAX_FILE_SIZE,
+            redact: true,
             directory: None,
         }
     }
@@ -297,6 +335,7 @@ mod tests {
     #[test]
     fn test_should_tee_never_mode() {
         let config = TeeConfig {
+            enabled: true,
             mode: TeeMode::Never,
             ..TeeConfig::default()
         };
@@ -314,14 +353,20 @@ mod tests {
 
     #[test]
     fn test_should_tee_skip_success_in_failures_mode() {
-        let config = TeeConfig::default(); // mode = Failures
+        let config = TeeConfig {
+            enabled: true,
+            ..TeeConfig::default()
+        }; // mode = Failures
         let dir = PathBuf::from("/tmp/tee");
         assert!(should_tee(&config, 1000, 0, Some(dir)).is_none());
     }
 
     #[test]
     fn test_should_tee_proceed_on_failure() {
-        let config = TeeConfig::default(); // mode = Failures
+        let config = TeeConfig {
+            enabled: true,
+            ..TeeConfig::default()
+        }; // mode = Failures
         let dir = PathBuf::from("/tmp/tee");
         assert!(should_tee(&config, 1000, 1, Some(dir)).is_some());
     }
@@ -329,6 +374,7 @@ mod tests {
     #[test]
     fn test_should_tee_always_mode_success() {
         let config = TeeConfig {
+            enabled: true,
             mode: TeeMode::Always,
             ..TeeConfig::default()
         };
@@ -344,8 +390,9 @@ mod tests {
             &content,
             "cargo_test",
             tmpdir.path(),
-            DEFAULT_MAX_FILE_SIZE,
+            DEFAULT_SAFE_MAX_FILE_SIZE,
             20,
+            false,
         );
         assert!(result.is_some());
 
@@ -360,7 +407,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let big_output = "x".repeat(2000);
         // Set max_file_size to 1000 bytes
-        let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20);
+        let result = write_tee_file(&big_output, "test", tmpdir.path(), 1000, 20, false);
         assert!(result.is_some());
 
         let path = result.unwrap();
@@ -380,7 +427,7 @@ mod tests {
         assert_eq!(japanese.len(), 999);
 
         // Truncate at 998 — falls in the middle of the 333rd character
-        let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20);
+        let result = write_tee_file(&japanese, "test_utf8", tmpdir.path(), 998, 20, false);
         assert!(result.is_some());
 
         let path = result.unwrap();
@@ -398,7 +445,7 @@ mod tests {
         assert_eq!(emojis.len(), 400);
 
         // Truncate at 201 — falls mid-emoji (4-byte boundary is at 200, 204)
-        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 201, 20);
+        let result = write_tee_file(&emojis, "test_emoji", tmpdir.path(), 201, 20, false);
         assert!(result.is_some());
 
         let path = result.unwrap();
