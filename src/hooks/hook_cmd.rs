@@ -305,7 +305,7 @@ fn audit_log_inner(action: &str, original: &str, rewritten: &str) -> Option<()> 
     .ok()
 }
 
-// ── Claude Code native hook ────────────────────────────────────
+// ── Claude Code / Codex native PreToolUse hook ─────────────────
 
 enum PayloadAction {
     Rewrite {
@@ -320,13 +320,40 @@ enum PayloadAction {
     Ignore,
 }
 
-fn process_claude_payload(v: &Value) -> PayloadAction {
-    let cmd = match v
-        .pointer("/tool_input/command")
-        .and_then(|c| c.as_str())
-        .filter(|c| !c.is_empty())
-    {
-        Some(c) => c,
+#[derive(Clone, Copy)]
+enum CommandField {
+    Command,
+    Cmd,
+}
+
+impl CommandField {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Command => "command",
+            Self::Cmd => "cmd",
+        }
+    }
+
+    fn pointer(self) -> &'static str {
+        match self {
+            Self::Command => "/tool_input/command",
+            Self::Cmd => "/tool_input/cmd",
+        }
+    }
+}
+
+fn extract_command<'a>(v: &'a Value, fields: &[CommandField]) -> Option<(CommandField, &'a str)> {
+    fields.iter().find_map(|field| {
+        v.pointer(field.pointer())
+            .and_then(|c| c.as_str())
+            .filter(|c| !c.is_empty())
+            .map(|cmd| (*field, cmd))
+    })
+}
+
+fn process_pre_tool_use_payload(v: &Value, fields: &[CommandField]) -> PayloadAction {
+    let (field, cmd) = match extract_command(v, fields) {
+        Some(found) => found,
         None => return PayloadAction::Ignore,
     };
 
@@ -351,7 +378,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     let updated_input = {
         let mut ti = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
         if let Some(obj) = ti.as_object_mut() {
-            obj.insert("command".into(), Value::String(rewritten.clone()));
+            obj.insert(field.key().into(), Value::String(rewritten.clone()));
         }
         ti
     };
@@ -376,8 +403,7 @@ fn process_claude_payload(v: &Value) -> PayloadAction {
     }
 }
 
-/// Run the Claude Code PreToolUse hook natively.
-pub fn run_claude() -> Result<()> {
+fn run_pre_tool_use_hook(agent: &str, fields: &[CommandField]) -> Result<()> {
     let input = read_stdin_limited()?;
 
     let input = input.trim();
@@ -388,12 +414,15 @@ pub fn run_claude() -> Result<()> {
     let v: Value = match serde_json::from_str(input) {
         Ok(v) => v,
         Err(e) => {
-            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            let _ = writeln!(
+                io::stderr(),
+                "[rtk hook {agent}] Failed to parse JSON input: {e}"
+            );
             return Ok(());
         }
     };
 
-    match process_claude_payload(&v) {
+    match process_pre_tool_use_payload(&v, fields) {
         PayloadAction::Rewrite {
             cmd,
             rewritten,
@@ -411,13 +440,33 @@ pub fn run_claude() -> Result<()> {
     Ok(())
 }
 
+/// Run the Claude Code PreToolUse hook natively.
+pub fn run_claude() -> Result<()> {
+    run_pre_tool_use_hook("claude", &[CommandField::Command])
+}
+
+/// Run the Codex PreToolUse hook natively.
+pub fn run_codex() -> Result<()> {
+    run_pre_tool_use_hook("codex", &[CommandField::Command, CommandField::Cmd])
+}
+
 #[cfg(test)]
-fn run_claude_inner(input: &str) -> Option<String> {
+fn run_pre_tool_use_inner(input: &str, fields: &[CommandField]) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
-    match process_claude_payload(&v) {
+    match process_pre_tool_use_payload(&v, fields) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
         _ => None,
     }
+}
+
+#[cfg(test)]
+fn run_claude_inner(input: &str) -> Option<String> {
+    run_pre_tool_use_inner(input, &[CommandField::Command])
+}
+
+#[cfg(test)]
+fn run_codex_inner(input: &str) -> Option<String> {
+    run_pre_tool_use_inner(input, &[CommandField::Command, CommandField::Cmd])
 }
 
 // ── Cursor native hook ─────────────────────────────────────────
@@ -913,6 +962,111 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Codex handler ---
+
+    fn codex_input(cmd: &str) -> String {
+        json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": cmd }
+        })
+        .to_string()
+    }
+
+    fn codex_exec_command_input(cmd: &str) -> String {
+        json!({
+            "tool_name": "exec_command",
+            "tool_input": {
+                "cmd": cmd,
+                "yield_time_ms": 1000,
+                "max_output_tokens": 2000
+            }
+        })
+        .to_string()
+    }
+
+    fn codex_input_with_fields(cmd: &str, timeout: u64, description: &str) -> String {
+        json!({
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": cmd,
+                "timeout": timeout,
+                "description": description
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_codex_rewrite_git_status() {
+        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "rtk git status");
+    }
+
+    #[test]
+    fn test_codex_rewrite_exec_command_cmd_field() {
+        let result = run_codex_inner(&codex_exec_command_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["cmd"], "rtk git status");
+        assert_eq!(updated["yield_time_ms"], 1000);
+        assert_eq!(updated["max_output_tokens"], 2000);
+        assert!(updated.get("command").is_none());
+    }
+
+    #[test]
+    fn test_claude_ignores_codex_cmd_field() {
+        assert!(run_claude_inner(&codex_exec_command_input("git status")).is_none());
+    }
+
+    #[test]
+    fn test_codex_rewrite_preserves_tool_input_fields() {
+        let input = codex_input_with_fields("git status", 30000, "Check repo status");
+        let result = run_codex_inner(&input).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let updated = &v["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(updated["command"], "rtk git status");
+        assert_eq!(updated["timeout"], 30000);
+        assert_eq!(updated["description"], "Check repo status");
+    }
+
+    #[test]
+    fn test_codex_passthrough_no_output() {
+        assert!(run_codex_inner(&codex_input("htop")).is_none());
+    }
+
+    #[test]
+    fn test_codex_heredoc_passthrough() {
+        assert!(run_codex_inner(&codex_input("cat <<EOF\nhello\nEOF")).is_none());
+    }
+
+    #[test]
+    fn test_codex_env_prefix_preserved() {
+        let result = run_codex_inner(&codex_input("GIT_PAGER=cat git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let cmd = v
+            .pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|c| c.as_str())
+            .unwrap();
+        assert_eq!(cmd, "GIT_PAGER=cat rtk git status");
+    }
+
+    #[test]
+    fn test_codex_json_output_structure() {
+        let result = run_codex_inner(&codex_input("git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        let hook = &v["hookSpecificOutput"];
+
+        assert_eq!(hook["hookEventName"], PRE_TOOL_USE_KEY);
+        assert_eq!(hook["permissionDecisionReason"], "RTK auto-rewrite");
+        assert!(hook["updatedInput"].is_object());
+        assert!(hook["updatedInput"]["command"].is_string());
     }
 
     // --- Cursor handler ---
