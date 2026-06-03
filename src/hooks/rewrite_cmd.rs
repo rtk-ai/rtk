@@ -1,6 +1,7 @@
 //! Translates a raw shell command into its RTK-optimized equivalent.
 
 use super::permissions::{check_command, PermissionVerdict};
+use crate::core::toml_filter;
 use crate::discover::registry;
 use std::io::Write;
 
@@ -42,8 +43,24 @@ pub fn run(cmd: &str) -> anyhow::Result<()> {
             PermissionVerdict::Deny => unreachable!(),
         },
         None => {
-            // No RTK equivalent. Exit 1 = passthrough.
-            // Claude Code independently evaluates its own ask rules on the original cmd.
+            // Fallback: check user TOML filters (project-local and global).
+            if toml_filter::find_matching_filter(cmd).is_some() {
+                let rewritten = format!("rtk {}", cmd);
+                match verdict {
+                    PermissionVerdict::Allow => {
+                        print!("{}", rewritten);
+                        let _ = std::io::stdout().flush();
+                        return Ok(());
+                    }
+                    PermissionVerdict::Ask | PermissionVerdict::Default => {
+                        print!("{}", rewritten);
+                        let _ = std::io::stdout().flush();
+                        std::process::exit(3);
+                    }
+                    PermissionVerdict::Deny => unreachable!(),
+                }
+            }
+            // No RTK equivalent (built-in or TOML). Exit 1 = passthrough.
             std::process::exit(1);
         }
     }
@@ -73,6 +90,28 @@ mod tests {
             rewrite_command_no_prefixes("rtk git status"),
             Some("rtk git status".into())
         );
+    }
+
+    #[test]
+    fn test_toml_only_command_has_filter() {
+        // ssh has a built-in TOML filter but no Rust registry entry
+        assert!(registry::rewrite_command("ssh root@host ls", &[]).is_none());
+        assert!(toml_filter::find_matching_filter("ssh root@host ls").is_some());
+    }
+
+    #[test]
+    fn test_no_filter_anywhere() {
+        // htop has neither a Rust registry entry nor a TOML filter
+        assert!(registry::rewrite_command("htop", &[]).is_none());
+        assert!(toml_filter::find_matching_filter("htop").is_none());
+    }
+
+    #[test]
+    fn test_registry_takes_priority_over_toml() {
+        // git has both a Rust registry entry and TOML filters;
+        // registry::rewrite_command returns Some, so the TOML fallback
+        // is never reached in the run() function.
+        assert!(registry::rewrite_command("git status", &[]).is_some());
     }
 
     /// SECURITY: Verify the exit code protocol for permission verdicts.
