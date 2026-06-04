@@ -314,13 +314,14 @@ pub fn run(
     println!("{}F {}D:", total_files, dirs_count);
     println!();
 
-    // Display with proper --max limiting (count individual files)
+    // Display with --max limiting at DIRECTORY boundaries: every fully shown
+    // directory line is complete, so a reader can trust it. A directory is shown
+    // partially only when it alone exceeds the budget, and then it is explicitly
+    // marked "(+N more here)" so it is never mistaken for a complete listing.
     let mut shown = 0;
+    let mut shown_dirs = 0;
+    let mut partial_hidden = 0;
     for dir in &dirs {
-        if shown >= max_results {
-            break;
-        }
-
         let files_in_dir = &by_dir[dir];
         let dir_display = if dir.len() > 50 {
             format!("...{}", &dir[dir.len() - 47..])
@@ -328,25 +329,44 @@ pub fn run(
             dir.clone()
         };
 
-        let remaining_budget = max_results - shown;
-        if files_in_dir.len() <= remaining_budget {
+        if shown + files_in_dir.len() <= max_results {
+            // Whole directory fits within the budget.
             println!("{}/ {}", dir_display, files_in_dir.join(" "));
             shown += files_in_dir.len();
-        } else {
-            // Partial display: show only what fits in budget
-            let partial: Vec<_> = files_in_dir
-                .iter()
-                .take(remaining_budget)
-                .cloned()
-                .collect();
-            println!("{}/ {}", dir_display, partial.join(" "));
+            shown_dirs += 1;
+        } else if shown == 0 {
+            // First directory alone exceeds the budget: show what fits, but mark
+            // it explicitly so it cannot be read as a complete directory listing.
+            let partial: Vec<_> = files_in_dir.iter().take(max_results).cloned().collect();
+            partial_hidden = files_in_dir.len() - partial.len();
+            println!(
+                "{}/ {} (+{} more here)",
+                dir_display,
+                partial.join(" "),
+                partial_hidden
+            );
             shown += partial.len();
+            shown_dirs += 1;
+            break;
+        } else {
+            // Stop before partially showing this directory (never truncate mid-dir).
             break;
         }
     }
 
-    if shown < total_files {
-        println!("+{} more", total_files - shown);
+    // Report what was not shown at directory granularity, so the reader knows
+    // whole directories are missing (use `rtk proxy find ...` for the full set).
+    let hidden_dirs = dirs_count - shown_dirs;
+    let hidden_in_unshown_dirs = total_files - shown - partial_hidden;
+    if hidden_in_unshown_dirs > 0 {
+        if hidden_dirs > 0 {
+            println!(
+                "+{} more in {} more dir(s)",
+                hidden_in_unshown_dirs, hidden_dirs
+            );
+        } else {
+            println!("+{} more", hidden_in_unshown_dirs);
+        }
     }
 
     // Extension summary
