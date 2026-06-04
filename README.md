@@ -101,24 +101,50 @@ rtk gain        # Should show token savings stats
 
 ## Claude Code Setup
 
-RTK's primary integration is [Claude Code](https://claude.com/claude-code). Once the binary is installed, three steps wire it up:
+RTK's primary integration is [Claude Code](https://claude.com/claude-code). After the binary is installed (see [Installation](#installation) above), three steps wire it up.
+
+### 1. Connect it globally
+
+So Claude automatically intercepts and compresses Bash output across **all** your projects — without you editing config files by hand — run:
 
 ```bash
-# 1. Install the hook globally (all Claude Code projects)
 rtk init -g
-
-# 2. Restart Claude Code so it picks up the new PreToolUse hook
-
-# 3. Verify the hook is registered
-rtk init --show
 ```
 
-`rtk init -g` installs a `PreToolUse` hook into `~/.claude/settings.json` and a short `~/.claude/RTK.md` instruction file. After restart, Claude Code's Bash commands (e.g. `git status`) are transparently rewritten to their `rtk` equivalents (`rtk git status`) before execution — you get compact output with zero token overhead and nothing to remember.
+This installs a `PreToolUse` hook plus a short `~/.claude/RTK.md` instruction file. When it asks:
+
+```
+Patch existing ~/.claude/settings.json? [y/N]
+```
+
+type `y` and press Enter. That injects the hook into Claude Code's global config (`~/.claude/settings.json`), with a `.bak` backup written alongside it.
+
+> **Non-interactive?** Use `rtk init -g --auto-patch` (CI/CD) to skip the prompt.
+
+### 2. Restart Claude Code
+
+Start a fresh session so it picks up the new hook:
+
+```bash
+claude
+```
+
+### 3. Verify it's active
+
+Inside Claude Code, ask it to run a command, e.g. *"run git status"*. Behind the scenes the shell call is rewritten from `git status` to `rtk git status`, so the output is stripped by 60–90% before it reaches your token context — with zero token overhead and nothing for you to remember.
+
+Check live savings anytime in a separate terminal:
+
+```bash
+rtk gain          # token savings stats
+rtk init --show   # confirm the hook is registered
+```
+
+### Other init variants
 
 ```bash
 rtk init                    # Current project only (./CLAUDE.md)
 rtk init -g --hook-only     # Hook only, skip RTK.md
-rtk init -g --auto-patch    # Non-interactive (CI/CD)
 rtk init -g --uninstall     # Remove hook + RTK.md + settings.json entry
 ```
 
