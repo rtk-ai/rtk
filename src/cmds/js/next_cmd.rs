@@ -2,7 +2,7 @@
 
 use crate::core::runner;
 use crate::core::truncate::CAP_WARNINGS;
-use crate::core::utils::{resolved_command, strip_ansi, tool_exists, truncate};
+use crate::core::utils::{npx_command, resolved_command, strip_ansi, tool_exists, truncate};
 use anyhow::Result;
 use regex::Regex;
 
@@ -13,7 +13,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if next_exists {
         resolved_command("next")
     } else {
-        let mut c = resolved_command("npx");
+        let mut c = npx_command();
         c.arg("next");
         c
     };

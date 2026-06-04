@@ -2,7 +2,7 @@
 
 use crate::core::runner;
 use crate::core::stream::{BlockHandler, BlockStreamFilter};
-use crate::core::utils::{resolved_command, tool_exists, truncate};
+use crate::core::utils::{npx_command, resolved_command, tool_exists, truncate};
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -19,7 +19,7 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
     let mut cmd = if tsc_exists {
         resolved_command("tsc")
     } else {
-        let mut c = resolved_command("npx");
+        let mut c = npx_command();
         c.arg("tsc");
         c
     };
