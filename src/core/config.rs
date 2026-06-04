@@ -21,6 +21,8 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -110,6 +112,35 @@ impl Default for FilterConfig {
     }
 }
 
+/// Prompt-injection inspection for untrusted text surfaced by `gh`/`glab`
+/// (PR and issue bodies, comments). Off the hot path: the default heuristic
+/// backend is in-process and ~0ms; the external backend is opt-in.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Scan PR/issue bodies for prompt-injection signals and prepend a warning
+    /// banner when any are found. Non-destructive — the body is preserved.
+    pub inject_scan: bool,
+    /// Detection backend: `"heuristic"` (in-process regex/unicode checks, the
+    /// default) or `"external"` (shell out to `inject_scan_cmd`).
+    pub inject_scan_backend: String,
+    /// Argv for `backend = "external"`. The untrusted body is written to the
+    /// command's stdin; it must print a JSON verdict on stdout, e.g.
+    /// `{"score":2,"signals":[{"kind":"prompt_injection","excerpt":"..."}]}`.
+    /// On any failure (missing binary, non-zero exit, bad JSON) RTK falls back
+    /// to the heuristic backend and never blocks the user.
+    pub inject_scan_cmd: Vec<String>,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            inject_scan: true,
+            inject_scan_backend: "heuristic".into(),
+            inject_scan_cmd: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     pub enabled: bool,
@@ -148,6 +179,10 @@ impl Default for LimitsConfig {
 /// Get limits config. Falls back to defaults if config can't be loaded.
 pub fn limits() -> LimitsConfig {
     Config::load().map(|c| c.limits).unwrap_or_default()
+}
+
+pub fn security() -> SecurityConfig {
+    Config::load().map(|c| c.security).unwrap_or_default()
 }
 
 impl Config {
