@@ -695,6 +695,33 @@ mod tests {
     }
 
     #[test]
+    fn test_compound_allow_newline_separator() {
+        // A newline must split segments like `&&`/`;`. Regression for the
+        // permission bypass where a multi-line command was treated as a single
+        // segment and prefix-matched on its first line, auto-allowing every
+        // statement after the first newline.
+        let allow = vec!["git log".to_string(), "cat *".to_string()];
+
+        // Allowed first line, unallowed trailing line → must NOT escalate to Allow.
+        assert_eq!(
+            check_command_with_rules("git log -1\ngit push --force-with-lease", &[], &[], &allow),
+            PermissionVerdict::Default,
+            "first-line allow must not approve a newline-separated trailing command"
+        );
+        assert_eq!(
+            check_command_with_rules("cat f\nrm -rf /", &[], &[], &allow),
+            PermissionVerdict::Default,
+            "a safe first line must not launder a destructive trailing line"
+        );
+
+        // Every line allowed → Allow (legitimate multi-line case still works).
+        assert_eq!(
+            check_command_with_rules("git log -1\ncat f", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
     fn test_compound_ask_still_wins_over_partial_allow() {
         // If any segment hits an ask rule, verdict is Ask (ask > allow).
         let ask = vec!["git push".to_string()];

@@ -226,6 +226,21 @@ pub fn tokenize(input: &str) -> Vec<ParsedToken> {
                 });
                 current_start = byte_pos;
             }
+            '\n' | '\r' => {
+                // A newline terminates a command, exactly like `;`. Without this,
+                // newlines fall through to the whitespace arm below and are treated
+                // as mere argument separators, so a multi-line command collapses
+                // into a single segment — letting allow-rule prefix matching on the
+                // first line approve every statement after it.
+                flush_arg(&mut tokens, &mut current, current_start);
+                tokens.push(ParsedToken {
+                    kind: TokenKind::Operator,
+                    value: c.to_string(),
+                    offset: byte_pos,
+                });
+                byte_pos += char_len;
+                current_start = byte_pos;
+            }
             c if c.is_whitespace() => {
                 flush_arg(&mut tokens, &mut current, current_start);
                 byte_pos += c.len_utf8();
@@ -1014,6 +1029,21 @@ mod tests {
         assert_eq!(
             split_on_operators("a && b | c ; d", false),
             vec!["a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn test_split_on_operators_newline() {
+        // Newlines separate commands, exactly like `;`. A multi-line command
+        // must not collapse into a single segment, or allow-rule prefix matching
+        // on the first line would approve every later line.
+        assert_eq!(split_on_operators("a\nb\nc", false), vec!["a", "b", "c"]);
+        // Mixed with other operators.
+        assert_eq!(split_on_operators("a\nb | c", false), vec!["a", "b", "c"]);
+        // A newline inside quotes is NOT a separator.
+        assert_eq!(
+            split_on_operators("echo \"a\nb\"\ncargo test", false),
+            vec!["echo \"a\nb\"", "cargo test"]
         );
     }
 
