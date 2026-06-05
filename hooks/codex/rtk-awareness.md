@@ -15,6 +15,20 @@ rtk npm run build
 rtk pytest -q
 ```
 
+## PowerShell cmdlets
+
+PowerShell cmdlets (e.g., `Get-Content`, `Select-String`) are not standalone executables on PATH. Run them through `rtk powershell`:
+
+```powershell
+rtk powershell -NoProfile -Command "Get-Content -LiteralPath 'file.txt'"
+```
+
+Do NOT call cmdlets directly:
+
+```
+rtk Get-Content file.txt   # ✗ fails
+```
+
 ## Meta Commands
 
 ```bash
