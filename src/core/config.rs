@@ -1,7 +1,7 @@
 //! Reads user settings from config.toml.
 
 use super::constants::{CONFIG_TOML, DEFAULT_HISTORY_DAYS, RTK_DATA_DIR};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -27,8 +27,22 @@ pub struct Config {
 pub struct HooksConfig {
     /// Commands to exclude from auto-rewrite (e.g. ["curl", "playwright"]).
     /// Survives `rtk init -g` re-runs since config.toml is user-owned.
+    /// Mutually exclusive with `include_commands`.
     #[serde(default)]
     pub exclude_commands: Vec<String>,
+
+    /// Whitelist mode: only rewrite commands listed here.
+    /// When set, every command **not** in this list passes through unchanged.
+    /// Mutually exclusive with `exclude_commands` — setting both is a
+    /// configuration error (RTK will refuse to start the hook).
+    ///
+    /// Example:
+    /// ```toml
+    /// [hooks]
+    /// include_commands = ["git status", "cargo build"]
+    /// ```
+    #[serde(default)]
+    pub include_commands: Vec<String>,
 
     /// Wrapper prefixes that should be transparently stripped before routing
     /// to a filter, then re-prepended on the rewrite. For example, with
@@ -51,6 +65,20 @@ pub struct HooksConfig {
     /// not anything else.
     #[serde(default)]
     pub transparent_prefixes: Vec<String>,
+}
+
+impl HooksConfig {
+    /// Validate that `include_commands` and `exclude_commands` are not both set.
+    /// Returns an error when both contain at least one entry.
+    pub fn validate(&self) -> Result<()> {
+        if !self.include_commands.is_empty() && !self.exclude_commands.is_empty() {
+            bail!(
+                "[hooks] `include_commands` and `exclude_commands` are mutually exclusive. \
+                 Remove one of them from your config.toml."
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -157,6 +185,7 @@ impl Config {
         if path.exists() {
             let content = std::fs::read_to_string(&path)?;
             let config: Config = toml::from_str(&content)?;
+            config.hooks.validate()?;
             Ok(config)
         } else {
             Ok(Config::default())
@@ -223,6 +252,7 @@ exclude_commands = ["curl", "gh"]
     fn test_hooks_config_default_empty() {
         let config = Config::default();
         assert!(config.hooks.exclude_commands.is_empty());
+        assert!(config.hooks.include_commands.is_empty());
         assert!(config.hooks.transparent_prefixes.is_empty());
     }
 
@@ -295,5 +325,84 @@ consent_date = "2026-04-10T12:00:00Z"
             config.telemetry.consent_date.as_deref(),
             Some("2026-04-10T12:00:00Z")
         );
+    }
+
+    // --- include_commands (#2231) ---
+
+    #[test]
+    fn test_include_commands_deserialize() {
+        let toml = r#"
+[hooks]
+include_commands = ["git status", "cargo build"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(
+            config.hooks.include_commands,
+            vec!["git status", "cargo build"]
+        );
+        assert!(config.hooks.exclude_commands.is_empty());
+    }
+
+    #[test]
+    fn test_include_commands_missing_is_empty() {
+        // Older configs without include_commands must still parse.
+        let toml = r#"
+[hooks]
+exclude_commands = ["curl"]
+"#;
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert!(config.hooks.include_commands.is_empty());
+    }
+
+    #[test]
+    fn test_include_commands_only_validates_ok() {
+        let hooks = HooksConfig {
+            include_commands: vec!["git status".into()],
+            exclude_commands: vec![],
+            transparent_prefixes: vec![],
+        };
+        assert!(hooks.validate().is_ok());
+    }
+
+    #[test]
+    fn test_exclude_commands_only_validates_ok() {
+        let hooks = HooksConfig {
+            include_commands: vec![],
+            exclude_commands: vec!["curl".into()],
+            transparent_prefixes: vec![],
+        };
+        assert!(hooks.validate().is_ok());
+    }
+
+    #[test]
+    fn test_neither_configured_validates_ok() {
+        let hooks = HooksConfig::default();
+        assert!(hooks.validate().is_ok());
+    }
+
+    #[test]
+    fn test_both_configured_is_error() {
+        let hooks = HooksConfig {
+            include_commands: vec!["git status".into()],
+            exclude_commands: vec!["curl".into()],
+            transparent_prefixes: vec![],
+        };
+        let err = hooks.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "error message should mention mutual exclusion: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_both_empty_is_not_an_error() {
+        // Both fields present but empty is OK — TOML allows setting both to [].
+        let hooks = HooksConfig {
+            include_commands: vec![],
+            exclude_commands: vec![],
+            transparent_prefixes: vec![],
+        };
+        assert!(hooks.validate().is_ok());
     }
 }
