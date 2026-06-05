@@ -118,7 +118,12 @@ where
     } else if opts.no_trailing_newline {
         print!("{}", filtered);
     } else {
-        println!("{}", filtered);
+        if !filtered.trim().is_empty() {
+            println!("{}", filtered);
+        }
+        if exit_code == 0 {
+            println!("rtk: {} done", tool_name);
+        }
     }
 
     let raw_for_tracking = if opts.filter_stdout_only {
