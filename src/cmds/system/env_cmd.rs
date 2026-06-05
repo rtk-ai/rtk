@@ -24,6 +24,7 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
     let mut lang_vars = Vec::new();
     let mut cloud_vars = Vec::new();
     let mut tool_vars = Vec::new();
+    let mut sensitive_vars = Vec::new();
     let mut other_vars = Vec::new();
 
     for (key, value) in &vars {
@@ -59,6 +60,11 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
             cloud_vars.push(entry);
         } else if is_tool_var(key) {
             tool_vars.push(entry);
+        } else if is_sensitive {
+            // Never silently drop a secret-bearing var: surfacing it (masked)
+            // tells the reader it is set without leaking the value. Dropping it
+            // entirely would make `rtk env` imply the variable is unset.
+            sensitive_vars.push(entry);
         } else if filter.is_some() || is_interesting_var(key) {
             other_vars.push(entry);
         }
@@ -106,6 +112,13 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         }
     }
 
+    if !sensitive_vars.is_empty() {
+        println!("\nSensitive (masked):");
+        for (k, v) in &sensitive_vars {
+            println!("  {}={}", k, v);
+        }
+    }
+
     if !other_vars.is_empty() {
         const MAX_OTHER_VARS: usize = CAP_LIST;
         println!("\nOther:");
@@ -122,6 +135,7 @@ pub fn run(filter: Option<&str>, show_all: bool, verbose: u8) -> Result<()> {
         + lang_vars.len()
         + cloud_vars.len()
         + tool_vars.len()
+        + sensitive_vars.len()
         + other_vars.len().min(20);
     if filter.is_none() {
         println!("\nTotal: {} vars (showing {} relevant)", total, shown);

@@ -35,6 +35,7 @@ pub fn run(cmd: CargoCommand, args: &[String], verbose: u8) -> Result<i32> {
 // --- Stream handlers ---
 
 struct CargoBuildHandler {
+    subcommand: String,
     compiled: usize,
     warnings: usize,
     error_count: usize,
@@ -42,8 +43,9 @@ struct CargoBuildHandler {
 }
 
 impl CargoBuildHandler {
-    fn new() -> Self {
+    fn new(subcommand: &str) -> Self {
         Self {
+            subcommand: subcommand.to_string(),
             compiled: 0,
             warnings: 0,
             error_count: 0,
@@ -95,15 +97,15 @@ impl BlockHandler for CargoBuildHandler {
 
     fn format_summary(&self, _exit_code: i32, _raw: &str) -> Option<String> {
         if self.error_count == 0 && self.warnings == 0 {
-            let mut s = format!("cargo build ({} crates compiled)", self.compiled);
+            let mut s = format!("cargo {} ({} crates compiled)", self.subcommand, self.compiled);
             if let Some(ref finished) = self.finished_line {
                 s = format!("{}\n{}", s, finished);
             }
             Some(format!("{}\n", s))
         } else {
             Some(format!(
-                "═══════════════════════════════════════\ncargo build: {} errors, {} warnings ({} crates)\n",
-                self.error_count, self.warnings, self.compiled
+                "═══════════════════════════════════════\ncargo {}: {} errors, {} warnings ({} crates)\n",
+                self.subcommand, self.error_count, self.warnings, self.compiled
             ))
         }
     }
@@ -303,7 +305,7 @@ fn run_build(args: &[String], verbose: u8) -> Result<i32> {
         "build",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::new())),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::new("build"))),
     )
 }
 
@@ -325,7 +327,7 @@ fn run_check(args: &[String], verbose: u8) -> Result<i32> {
         "check",
         args,
         verbose,
-        Box::new(BlockStreamFilter::new(CargoBuildHandler::new())),
+        Box::new(BlockStreamFilter::new(CargoBuildHandler::new("check"))),
     )
 }
 
@@ -759,7 +761,7 @@ fn filter_cargo_nextest(output: &str) -> String {
 }
 
 fn filter_cargo_build(output: &str) -> String {
-    let mut handler = CargoBuildHandler::new();
+    let mut handler = CargoBuildHandler::new("build");
     let mut blocks: Vec<Vec<String>> = Vec::new();
     let mut current_block: Vec<String> = Vec::new();
     let mut in_block = false;
@@ -2106,7 +2108,7 @@ error: test run failed
     #[test]
     fn test_cargo_build_stream_success() {
         let input = "   Compiling libc v0.2.153\n   Compiling cfg-if v1.0.0\n   Compiling rtk v0.5.0\n    Finished dev [unoptimized + debuginfo] target(s) in 15.23s\n";
-        let mut f = BlockStreamFilter::new(CargoBuildHandler::new());
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::new("build"));
         let result = run_block_filter(&mut f, input, 0);
         assert!(result.contains("3 crates compiled"), "got: {}", result);
         assert!(result.contains("Finished"), "got: {}", result);
@@ -2124,7 +2126,7 @@ error[E0308]: mismatched types
 
 error: aborting due to 1 previous error
 "#;
-        let mut f = BlockStreamFilter::new(CargoBuildHandler::new());
+        let mut f = BlockStreamFilter::new(CargoBuildHandler::new("build"));
         let result = run_block_filter(&mut f, input, 1);
         assert!(result.contains("E0308"), "got: {}", result);
         assert!(result.contains("mismatched types"), "got: {}", result);
