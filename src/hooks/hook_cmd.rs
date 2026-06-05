@@ -313,6 +313,10 @@ enum PayloadAction {
         rewritten: String,
         output: Value,
     },
+    Block {
+        cmd: String,
+        output: Value,
+    },
     Skip {
         reason: &'static str,
         cmd: String,
@@ -402,6 +406,10 @@ pub fn run_claude() -> Result<()> {
             audit_log("rewrite", &cmd, &rewritten);
             let _ = writeln!(io::stdout(), "{output}");
         }
+        PayloadAction::Block { cmd, output } => {
+            audit_log("deny", &cmd, "");
+            let _ = writeln!(io::stdout(), "{output}");
+        }
         PayloadAction::Skip { reason, cmd } => {
             audit_log(reason, &cmd, "");
         }
@@ -416,6 +424,117 @@ fn run_claude_inner(input: &str) -> Option<String> {
     let v: Value = serde_json::from_str(input).ok()?;
     match process_claude_payload(&v) {
         PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        _ => None,
+    }
+}
+
+// ── Whale native hook ─────────────────────────────────────────
+
+fn process_whale_payload(v: &Value) -> PayloadAction {
+    process_whale_payload_for_verdict(v, permissions::check_command)
+}
+
+fn process_whale_payload_for_verdict(
+    v: &Value,
+    verdict_for_command: impl FnOnce(&str) -> PermissionVerdict,
+) -> PayloadAction {
+    let tool_name = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("");
+    if tool_name != "shell_run" {
+        return PayloadAction::Ignore;
+    }
+
+    let cmd = match v
+        .pointer("/tool_args/command")
+        .or_else(|| v.pointer("/tool_input/command"))
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) => c,
+        None => return PayloadAction::Ignore,
+    };
+
+    if verdict_for_command(cmd) == PermissionVerdict::Deny {
+        return PayloadAction::Block {
+            cmd: cmd.to_string(),
+            output: json!({
+                "decision": "block",
+                "reason": "Blocked by RTK permission rule"
+            }),
+        };
+    }
+
+    let rewritten = match get_rewritten(cmd) {
+        Some(r) => r,
+        None => {
+            return PayloadAction::Skip {
+                reason: "skip:no_match",
+                cmd: cmd.to_string(),
+            }
+        }
+    };
+
+    let mut updated_input = v.get("tool_args").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated_input.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten.clone()));
+    }
+
+    PayloadAction::Rewrite {
+        cmd: cmd.to_string(),
+        rewritten,
+        output: json!({
+            "decision": "pass",
+            "reason": "RTK auto-rewrite",
+            "updated_input": updated_input
+        }),
+    }
+}
+
+/// Run the Whale PreToolUse hook natively.
+pub fn run_whale() -> Result<()> {
+    let input = read_stdin_limited()?;
+
+    let input = strip_leading_bom(&input).trim();
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let v: Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "[rtk hook] Failed to parse JSON input: {e}");
+            return Ok(());
+        }
+    };
+
+    match process_whale_payload(&v) {
+        PayloadAction::Rewrite {
+            cmd,
+            rewritten,
+            output,
+        } => {
+            audit_log("rewrite", &cmd, &rewritten);
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Block { cmd, output } => {
+            audit_log("deny", &cmd, "");
+            let _ = writeln!(io::stdout(), "{output}");
+        }
+        PayloadAction::Skip { reason, cmd } => {
+            audit_log(reason, &cmd, "");
+        }
+        PayloadAction::Ignore => {}
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_whale_inner(input: &str) -> Option<String> {
+    let input = strip_leading_bom(input);
+    let v: Value = serde_json::from_str(input).ok()?;
+    match process_whale_payload(&v) {
+        PayloadAction::Rewrite { output, .. } => Some(output.to_string()),
+        PayloadAction::Block { output, .. } => Some(output.to_string()),
         _ => None,
     }
 }
@@ -913,6 +1032,67 @@ mod tests {
     fn test_claude_no_tool_input_passthrough() {
         let input = json!({ "tool_name": "Bash" }).to_string();
         assert!(run_claude_inner(&input).is_none());
+    }
+
+    // --- Whale handler ---
+
+    fn whale_input(tool: &str, cmd: &str) -> String {
+        json!({
+            "event": "PreToolUse",
+            "tool_name": tool,
+            "tool_args": {
+                "command": cmd,
+                "cwd": "/tmp/project"
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn test_whale_rewrite_git_status() {
+        let result = run_whale_inner(&whale_input("shell_run", "git status")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["decision"], "pass");
+        assert_eq!(v["updated_input"]["command"], "rtk git status");
+        assert_eq!(v["updated_input"]["cwd"], "/tmp/project");
+        assert!(v.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn test_whale_passthrough_non_shell_tool() {
+        assert!(run_whale_inner(&whale_input("file_read", "git status")).is_none());
+    }
+
+    #[test]
+    fn test_whale_denied_command_blocks() {
+        let input = whale_input("shell_run", "git status");
+        let v: Value = serde_json::from_str(&input).unwrap();
+        let action = process_whale_payload_for_verdict(&v, |_| PermissionVerdict::Deny);
+
+        let PayloadAction::Block { output, .. } = action else {
+            panic!("expected Whale deny to block");
+        };
+        assert_eq!(output["decision"], "block");
+        assert_eq!(output["reason"], "Blocked by RTK permission rule");
+        assert!(output.get("updated_input").is_none());
+    }
+
+    #[test]
+    fn test_whale_passthrough_already_rtk() {
+        assert!(run_whale_inner(&whale_input("shell_run", "rtk git status")).is_none());
+    }
+
+    #[test]
+    fn test_whale_passthrough_heredoc() {
+        assert!(run_whale_inner(&whale_input("shell_run", "cat <<EOF\nhello\nEOF")).is_none());
+    }
+
+    #[test]
+    fn test_whale_strips_utf8_bom() {
+        let payload = whale_input("shell_run", "cargo test");
+        let result = run_whale_inner(&format!("\u{feff}{payload}")).unwrap();
+        let v: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["updated_input"]["command"], "rtk cargo test");
     }
 
     // --- Cursor handler ---

@@ -49,6 +49,8 @@ pub enum AgentTarget {
     Pi,
     /// Hermes CLI
     Hermes,
+    /// Whale coding agent
+    Whale,
 }
 
 #[derive(Parser)]
@@ -775,6 +777,8 @@ enum HookCommands {
     Gemini,
     /// Process Copilot preToolUse hook (VS Code + Copilot CLI, reads JSON from stdin)
     Copilot,
+    /// Process Whale PreToolUse hook (reads JSON from stdin)
+    Whale,
     /// Check how a command would be rewritten by the hook engine (dry-run)
     Check {
         /// Target agent
@@ -1838,6 +1842,8 @@ fn run_cli() -> Result<i32> {
                 } else {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
+            } else if uninstall && agent == Some(AgentTarget::Whale) {
+                hooks::init::uninstall_whale(global, ctx)?;
             } else if uninstall {
                 uninstall_init_dispatch(
                     agent,
@@ -1879,6 +1885,8 @@ fn run_cli() -> Result<i32> {
                 hooks::init::run_antigravity_mode(ctx)?;
             } else if agent == Some(AgentTarget::Hermes) {
                 hooks::init::run_hermes_mode(ctx)?;
+            } else if agent == Some(AgentTarget::Whale) {
+                hooks::init::run_whale_mode(global, ctx)?;
             } else {
                 let install_opencode = opencode;
                 let install_claude = !opencode;
@@ -2210,6 +2218,10 @@ fn run_cli() -> Result<i32> {
             }
             HookCommands::Copilot => {
                 hooks::hook_cmd::run_copilot()?;
+                0
+            }
+            HookCommands::Whale => {
+                hooks::hook_cmd::run_whale()?;
                 0
             }
             HookCommands::Check { agent: _, command } => {
@@ -2684,6 +2696,17 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_init_agent_whale() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "whale"]).unwrap();
+        match cli.command {
+            Commands::Init { agent, .. } => {
+                assert_eq!(agent, Some(AgentTarget::Whale));
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
     fn test_try_parse_kubectl_get_alias() {
         let cli = Cli::try_parse_from(["rtk", "kubectl", "get", "pods", "-n", "default"]).unwrap();
 
@@ -2703,6 +2726,20 @@ mod tests {
                 agent, uninstall, ..
             } => {
                 assert_eq!(agent, Some(AgentTarget::Hermes));
+                assert!(uninstall);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_try_parse_init_agent_whale_uninstall() {
+        let cli = Cli::try_parse_from(["rtk", "init", "--agent", "whale", "--uninstall"]).unwrap();
+        match cli.command {
+            Commands::Init {
+                agent, uninstall, ..
+            } => {
+                assert_eq!(agent, Some(AgentTarget::Whale));
                 assert!(uninstall);
             }
             _ => panic!("Expected Init command"),

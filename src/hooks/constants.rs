@@ -39,3 +39,7 @@ pub const HERMES_PLUGINS_SUBDIR: &str = "plugins";
 pub const HERMES_PLUGIN_NAME: &str = "rtk-rewrite";
 pub const HERMES_PLUGIN_INIT_FILE: &str = "__init__.py";
 pub const HERMES_PLUGIN_MANIFEST_FILE: &str = "plugin.yaml";
+
+pub const WHALE_DIR: &str = ".whale";
+pub const WHALE_HOME_ENV: &str = "WHALE_HOME";
+pub const WHALE_CONFIG_FILE: &str = "config.toml";
