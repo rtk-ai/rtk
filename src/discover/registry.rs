@@ -133,7 +133,7 @@ pub fn classify_command(cmd: &str) -> Classification {
         let has_redirect = cmd_clean
             .split_whitespace()
             .skip(1)
-            .any(|t| t.starts_with('>') || t == "<" || t.starts_with(">>"));
+            .any(|t| t.starts_with('>') || t.starts_with(">>"));
         if has_redirect {
             return Classification::Unsupported {
                 base_command: cmd_clean
@@ -467,6 +467,18 @@ fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
 /// Also strips user-configured transparent wrapper prefixes
 /// (`[hooks].transparent_prefixes` in `config.toml`) before routing.
 ///
+/// Returns true when the command redirects stdout to a file.
+///
+/// We skip rewriting in this case because the file consumer expects raw
+/// output, not RTK's filtered format.
+fn has_stdout_redirect(cmd: &str) -> bool {
+    let tokens = tokenize(cmd);
+    tokens.iter().any(|t| {
+        matches!(t.kind, TokenKind::Redirect)
+            && (t.value == ">" || t.value == ">>" || t.value.starts_with("&>"))
+    })
+}
+
 /// A transparent prefix is a wrapper command that doesn't change *what* is
 /// being run, only *how* it's run — e.g. `docker exec mycontainer`,
 /// `direnv exec .`, `poetry run`, or `bundle exec`. Stripping it lets the inner
@@ -512,11 +524,61 @@ pub fn rewrite_command(
         return Some(trimmed.to_string());
     }
 
+    // Unix philosophy: for simple commands, skip rewrite when stdout is
+    // redirected to a file or pipe.  Compound commands are handled per-segment
+    // inside rewrite_compound.
+    if !has_compound && has_stdout_redirect(trimmed) {
+        return None;
+    }
+
     rewrite_compound(trimmed, &compiled, &normalized_prefixes)
 }
 
-/// Rewrite a compound command (with `&&`, `||`, `;`, `|`) by rewriting each segment.
+/// Rewrite a compound command (with `&&`, `||`, `;`, `|`).
+///
+/// Rule: if the command contains ANY `|`, find the LAST one and only process
+/// what comes after it. Everything before the last `|` stays raw. If there's
+/// no `|`, process normally (check redirect, rewrite if clean).
 fn rewrite_compound(
+    cmd: &str,
+    excluded: &[ExcludePattern],
+    transparent_prefixes: &[String],
+) -> Option<String> {
+    let tokens = tokenize(cmd);
+
+    // Check if ANY pipe exists in the entire command.
+    let has_pipe = tokens.iter().any(|t| matches!(t.kind, TokenKind::Pipe));
+
+    if has_pipe {
+        // Find the LAST pipe token globally.
+        let last_pipe = tokens.iter().rfind(|t| matches!(t.kind, TokenKind::Pipe));
+
+        if let Some(pipe_tok) = last_pipe {
+            // Everything before the last pipe stays raw.
+            let before = &cmd[..pipe_tok.offset + pipe_tok.value.len()];
+            // The command after the last pipe (preserve leading space for formatting).
+            let after = &cmd[pipe_tok.offset + pipe_tok.value.len()..];
+
+            if after.is_empty() {
+                return None;
+            }
+
+            // Process the AFTER portion with normal per-segment logic.
+            if let Some(rewritten_after) = rewrite_segments(after, excluded, transparent_prefixes) {
+                return Some(format!("{} {}", before, rewritten_after.trim_start()));
+            } else {
+                return None;
+            }
+        }
+    }
+
+    // No pipes: normal per-segment processing.
+    rewrite_segments(cmd, excluded, transparent_prefixes)
+}
+
+/// Apply per-segment rewrite to a command string (no pipe handling).
+/// Splits by `&&`, `||`, `;`, `&` and rewrites each segment independently.
+fn rewrite_segments(
     cmd: &str,
     excluded: &[ExcludePattern],
     transparent_prefixes: &[String],
@@ -530,11 +592,18 @@ fn rewrite_compound(
         if tok.offset < seg_start {
             continue;
         }
+
+        let seg = cmd[seg_start..tok.offset].trim();
+
         match tok.kind {
             TokenKind::Operator => {
-                let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
-                    .unwrap_or_else(|| seg.to_string());
+                let should_rewrite = !has_stdout_redirect(seg);
+                let rewritten = if should_rewrite {
+                    rewrite_segment(seg, excluded, transparent_prefixes)
+                        .unwrap_or_else(|| seg.to_string())
+                } else {
+                    seg.to_string()
+                };
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -555,46 +624,14 @@ fn rewrite_compound(
                     seg_start += 1;
                 }
             }
-            TokenKind::Pipe => {
-                let seg = cmd[seg_start..tok.offset].trim();
-                let is_pipe_incompatible = seg.starts_with("find ")
-                    || seg == "find"
-                    || seg.starts_with("fd ")
-                    || seg == "fd";
-                let rewritten = if is_pipe_incompatible {
-                    seg.to_string()
-                } else {
+            TokenKind::Shellism if tok.value == "&" => {
+                let should_rewrite = !has_stdout_redirect(seg);
+                let rewritten = if should_rewrite {
                     rewrite_segment(seg, excluded, transparent_prefixes)
                         .unwrap_or_else(|| seg.to_string())
+                } else {
+                    seg.to_string()
                 };
-                if rewritten != seg {
-                    any_changed = true;
-                }
-                result.push_str(&rewritten);
-
-                let pipe_group_end = tokens.iter().find(|t| {
-                    t.offset > tok.offset
-                        && (t.kind == TokenKind::Operator
-                            || (t.kind == TokenKind::Shellism && t.value == "&"))
-                });
-
-                match pipe_group_end {
-                    Some(next_op) => {
-                        result.push(' ');
-                        result.push_str(cmd[tok.offset..next_op.offset].trim());
-                        seg_start = next_op.offset;
-                    }
-                    None => {
-                        result.push(' ');
-                        result.push_str(cmd[tok.offset..].trim_start());
-                        return if any_changed { Some(result) } else { None };
-                    }
-                }
-            }
-            TokenKind::Shellism if tok.value == "&" => {
-                let seg = cmd[seg_start..tok.offset].trim();
-                let rewritten = rewrite_segment(seg, excluded, transparent_prefixes)
-                    .unwrap_or_else(|| seg.to_string());
                 if rewritten != seg {
                     any_changed = true;
                 }
@@ -609,9 +646,14 @@ fn rewrite_compound(
         }
     }
 
+    // Final segment — outputs to terminal.
     let seg = cmd[seg_start..].trim();
-    let rewritten =
-        rewrite_segment(seg, excluded, transparent_prefixes).unwrap_or_else(|| seg.to_string());
+    let should_rewrite = !has_stdout_redirect(seg);
+    let rewritten = if should_rewrite {
+        rewrite_segment(seg, excluded, transparent_prefixes).unwrap_or_else(|| seg.to_string())
+    } else {
+        seg.to_string()
+    };
     if rewritten != seg {
         any_changed = true;
     }
@@ -795,6 +837,11 @@ fn rewrite_segment_inner(
         if args.starts_with('-') && !args.starts_with("-n ") && !args.starts_with("-n\t") {
             return None;
         }
+    }
+
+    // cat with input redirect but no file argument: "cat < file.txt" → "rtk read - < file.txt"
+    if cmd_part == "cat" && redirect_suffix.trim_start().starts_with('<') {
+        return Some(format!("rtk read -{}", redirect_suffix));
     }
 
     // Use classify_command for correct ignore/prefix handling
@@ -1481,17 +1528,16 @@ mod tests {
 
     #[test]
     fn test_rewrite_pipe_first_only() {
-        // After a pipe, the filter command stays raw
+        // Pipe: first segment stays raw, last segment gets rtk.
         assert_eq!(
             rewrite_command_no_prefixes("git log -10 | grep feat", &[]),
-            Some("rtk git log -10 | grep feat".into())
+            Some("git log -10 | rtk grep feat".into())
         );
     }
 
     #[test]
     fn test_rewrite_find_pipe_skipped() {
-        // find in a pipe should NOT be rewritten — rtk find output format
-        // is incompatible with pipe consumers like xargs (#439)
+        // find in a pipe: find stays raw, xargs grep is not a supported segment.
         assert_eq!(
             rewrite_command_no_prefixes("find . -name '*.rs' | xargs grep 'fn run'", &[]),
             None
@@ -1500,9 +1546,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_find_pipe_xargs_wc() {
+        // find stays raw, wc gets rtk.
         assert_eq!(
             rewrite_command_no_prefixes("find src -type f | wc -l", &[]),
-            None
+            Some("find src -type f | rtk wc -l".into())
         );
     }
 
@@ -1513,6 +1560,84 @@ mod tests {
             rewrite_command_no_prefixes("find . -name '*.rs'", &[]),
             Some("rtk find . -name '*.rs'".into())
         );
+    }
+
+    // --- stdout redirect / pipe detection ---
+
+    #[test]
+    fn test_rewrite_redirect_stdout_skipped() {
+        // Output redirected to file → raw command.
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff > file.patch", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_stdout_append_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("git log >> history.log", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_redirect_combined_skipped() {
+        assert_eq!(
+            rewrite_command_no_prefixes("cargo test &> output.log", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_stderr_merge_still_rewritten() {
+        // 2>! merges stderr into stdout — output still reaches the terminal.
+        assert_eq!(
+            rewrite_command_no_prefixes("git status 2>&1", &[]),
+            Some("rtk git status 2>&1".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_cat_input_redirect() {
+        // cat with input redirect but no file arg: rtk read reads from stdin.
+        assert_eq!(
+            rewrite_command_no_prefixes("cat < file.txt", &[]),
+            Some("rtk read - < file.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_grep_input_redirect() {
+        // grep with input redirect: stdin from file, stdout to terminal.
+        assert_eq!(
+            rewrite_command_no_prefixes("grep \"pattern\" < file.txt", &[]),
+            Some("rtk grep \"pattern\" < file.txt".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_redirect_first_segment_raw() {
+        // First segment redirects stdout → raw; second segment unsupported → no rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff > file.patch && echo done", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_redirect_first_segment_raw_second_supported() {
+        // First segment redirects stdout → raw; second segment supported → rewrite.
+        assert_eq!(
+            rewrite_command_no_prefixes("git diff > file.patch && git status", &[]),
+            Some("git diff > file.patch && rtk git status".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_compound_pipe_first_segment_raw() {
+        // cat without file argument cannot be rewritten.
+        assert_eq!(rewrite_command_no_prefixes("git log | cat", &[]), None);
     }
 
     #[test]
@@ -1671,9 +1796,10 @@ mod tests {
 
     #[test]
     fn test_rewrite_redirect_2_gt_amp_1_with_pipe() {
+        // Pipe: first segment stays raw.
         assert_eq!(
             rewrite_command_no_prefixes("cargo test 2>&1 | head", &[]),
-            Some("rtk cargo test 2>&1 | head".into())
+            None
         );
     }
 
@@ -1704,18 +1830,19 @@ mod tests {
 
     #[test]
     fn test_rewrite_redirect_amp_gt_devnull() {
+        // Combined stdout+stderr redirect → raw command.
         assert_eq!(
             rewrite_command_no_prefixes("cargo test &>/dev/null", &[]),
-            Some("rtk cargo test &>/dev/null".into())
+            None
         );
     }
 
     #[test]
     fn test_rewrite_redirect_double() {
-        // Double redirect: only last one stripped, but full command rewrites correctly
+        // Double redirect to file → raw command.
         assert_eq!(
             rewrite_command_no_prefixes("git status 2>&1 >/dev/null", &[]),
-            Some("rtk git status 2>&1 >/dev/null".into())
+            None
         );
     }
 
@@ -3117,18 +3244,19 @@ mod tests {
 
     #[test]
     fn test_rewrite_compound_pipe_raw_filter() {
-        // Pipe: rewrite first segment only, pass through rest unchanged
+        // Pipe: first segment raw, last gets rtk.
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | grep FAILED", &[]),
-            Some("rtk cargo test | grep FAILED".into())
+            Some("cargo test | rtk grep FAILED".into())
         );
     }
 
     #[test]
     fn test_rewrite_compound_pipe_git_grep() {
+        // Pipe: first segment raw, last gets rtk.
         assert_eq!(
             rewrite_command_no_prefixes("git log -10 | grep feat", &[]),
-            Some("rtk git log -10 | grep feat".into())
+            Some("git log -10 | rtk grep feat".into())
         );
     }
 
@@ -3860,52 +3988,60 @@ mod tests {
 
     #[test]
     fn test_rewrite_pipe_then_and() {
+        // head -5 without file is not supported → raw; git stash → rtk.
         assert_eq!(
             rewrite_command_no_prefixes("git log | head -5 && git stash", &[]),
-            Some("rtk git log | head -5 && rtk git stash".into())
+            Some("git log | head -5 && rtk git stash".into())
         );
     }
 
     #[test]
     fn test_rewrite_pipe_then_semicolon() {
+        // head without file is not supported → raw; git status → rtk.
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | head; git status", &[]),
-            Some("rtk cargo test | head; rtk git status".into())
+            Some("cargo test | head; rtk git status".into())
         );
     }
 
     #[test]
     fn test_rewrite_pipe_then_or() {
+        // grep FAIL → rtk; git stash → rtk (both output to terminal).
         assert_eq!(
             rewrite_command_no_prefixes("cargo test | grep FAIL || git stash", &[]),
-            Some("rtk cargo test | grep FAIL || rtk git stash".into())
+            Some("cargo test | rtk grep FAIL || rtk git stash".into())
         );
     }
 
     #[test]
     fn test_rewrite_env_pipe_then_and() {
+        // grep FAILED → rtk; git stash → rtk (both output to terminal).
         assert_eq!(
             rewrite_command_no_prefixes(
                 "RUST_BACKTRACE=1 cargo test 2>&1 | grep FAILED && git stash",
                 &[]
             ),
-            Some("RUST_BACKTRACE=1 rtk cargo test 2>&1 | grep FAILED && rtk git stash".into())
+            Some("RUST_BACKTRACE=1 cargo test 2>&1 | rtk grep FAILED && rtk git stash".into())
         );
     }
 
     #[test]
     fn test_rewrite_and_then_pipe() {
+        // Last | is between "cargo test" and "grep FAIL".
+        // Everything before last | stays raw; after gets rtk.
         assert_eq!(
             rewrite_command_no_prefixes("git status && cargo test | grep FAIL", &[]),
-            Some("rtk git status && rtk cargo test | grep FAIL".into())
+            Some("git status && cargo test | rtk grep FAIL".into())
         );
     }
 
     #[test]
     fn test_rewrite_multi_pipe_then_and() {
+        // tail without file is not supported → raw; git status → rtk.
+        // tail without file is not supported → raw; git status → rtk.
         assert_eq!(
             rewrite_command_no_prefixes("git log | head | tail && git status", &[]),
-            Some("rtk git log | head | tail && rtk git status".into())
+            Some("git log | head | tail && rtk git status".into())
         );
     }
 
