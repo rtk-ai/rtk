@@ -5,6 +5,20 @@ All notable changes to rtk (Rust Token Killer) will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.3](https://github.com/rtk-ai/rtk/compare/v0.42.2...v0.42.3) (2026-06-05)
+
+
+### Bug Fixes
+
+* **openclaw:** no execSync to avoid async dangerous cmds ([f525cee](https://github.com/rtk-ai/rtk/commit/f525ceecf4dbaa522d70b83ca36cac5992684a92))
+* **permissions:** &gt;&file redirect no allow + scope Gemini/Cursor config ([e16aa26](https://github.com/rtk-ai/rtk/commit/e16aa26162a95bd99c954c0236b5353ffe89db00))
+* **permissions:** add test for cursor and gemini settings perm ([1ccf6e3](https://github.com/rtk-ai/rtk/commit/1ccf6e3da72b6c2feff43bbc4d9fc3ed2e4cd083))
+* **permissions:** cursor and gemini use correct permissions settings file ([a4bb55e](https://github.com/rtk-ai/rtk/commit/a4bb55efa9be1b0bf69ccc2cff9ddcbf2af7a48d))
+* **permissions:** never auto-allow not evaluable + defer to the agent ([952245d](https://github.com/rtk-ai/rtk/commit/952245d39d099ed9a804dbba21bb0486f6aede16))
+* **permissions:** project-first config lookup for Gemini/Cursor ([f88b6be](https://github.com/rtk-ai/rtk/commit/f88b6bec1323265cfced77c449bd795f2506cc90))
+* **security:** port permission hardening from master + Copilot CLI adaptation ([e1cd274](https://github.com/rtk-ai/rtk/commit/e1cd274ab9f3d473b694547e511e5baf1eae9734))
+* semgrep markers on test-fixture sensitive paths ([66d66b1](https://github.com/rtk-ai/rtk/commit/66d66b1fe6293e0f93d9797ae04e72b7ca40eaa0))
+
 ## [0.42.2](https://github.com/rtk-ai/rtk/compare/v0.42.1...v0.42.2) (2026-06-05)
 
 
