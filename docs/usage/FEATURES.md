@@ -182,7 +182,9 @@ Records input/output tokens, savings %, execution times with 90-day retention.
 rtk find [args...]
 ```
 
-Supporte a la fois la syntaxe RTK et la syntaxe native `find` (`-name`, `-type`, etc.).
+Supporte a la fois la syntaxe RTK et les recherches natives simples (`-name`, `-iname`, `-type`, `-maxdepth`).
+
+Pour les expressions natives composees ou les actions (`(...)`, `-o`, `!`, `-exec`, `-delete`, `-print0`, etc.), `rtk find` bascule automatiquement vers `find` natif. Utilisez `rtk proxy find ...` si vous voulez demander explicitement la sortie native non filtree.
 
 **Economies :** ~80%
 
@@ -522,6 +524,8 @@ rtk test npm test
 rtk test bun test
 rtk test pytest
 ```
+
+`rtk test` attend une commande de runner de tests. Ce n'est pas le builtin POSIX `test`; pour verifier une condition shell, utilisez `rtk run "test -d path"` ou `test -d path` directement.
 
 **Avant / Apres :**
 ```

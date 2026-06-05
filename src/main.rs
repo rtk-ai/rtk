@@ -1144,6 +1144,24 @@ const RTK_META_COMMANDS: &[&str] = &[
     "rewrite",
 ];
 
+const POSIX_TEST_UNARY_FLAGS: &[&str] = &[
+    "-b", "-c", "-d", "-e", "-f", "-g", "-h", "-k", "-L", "-n", "-O", "-p", "-r", "-S", "-s", "-u",
+    "-w", "-x", "-z", "-G",
+];
+
+fn posix_test_misuse_message(command: &[String]) -> Option<String> {
+    let first = command.first()?;
+    if !POSIX_TEST_UNARY_FLAGS.contains(&first.as_str()) {
+        return None;
+    }
+
+    let expression = command.join(" ");
+    Some(format!(
+        "rtk test is for test runners, not POSIX test; use `rtk run \"test {}\"` or direct `test {}`",
+        expression, expression
+    ))
+}
+
 fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -1665,6 +1683,9 @@ fn run_cli() -> Result<i32> {
         }
 
         Commands::Test { command } => {
+            if let Some(message) = posix_test_misuse_message(&command) {
+                anyhow::bail!("{}", message);
+            }
             let cmd = command.join(" ");
             runner::run_test(&cmd, cli.verbose)?
         }
@@ -1692,10 +1713,7 @@ fn run_cli() -> Result<i32> {
             0
         }
 
-        Commands::Find { args } => {
-            find_cmd::run_from_args(&args, cli.verbose)?;
-            0
-        }
+        Commands::Find { args } => find_cmd::run_from_args(&args, cli.verbose)?,
 
         Commands::Diff { file1, file2 } => {
             if let Some(f2) = file2 {
@@ -2847,6 +2865,32 @@ mod tests {
                 assert_eq!(args, vec!["echo", "hello"]);
             }
             _ => panic!("Expected Run command"),
+        }
+    }
+
+    #[test]
+    fn test_posix_test_flag_gets_targeted_message() {
+        let command = vec!["-d".to_string(), "path".to_string()];
+        let message = posix_test_misuse_message(&command).unwrap();
+        assert!(message.contains("rtk test is for test runners"));
+        assert!(message.contains("rtk run \"test -d path\""));
+    }
+
+    #[test]
+    fn test_test_runner_command_does_not_get_posix_message() {
+        let command = vec!["cargo".to_string(), "test".to_string()];
+        assert!(posix_test_misuse_message(&command).is_none());
+    }
+
+    #[test]
+    fn test_test_command_with_dash_d_still_parses() {
+        let cli = Cli::try_parse_from(["rtk", "test", "-d", "path"]).unwrap();
+        match cli.command {
+            Commands::Test { command } => {
+                assert_eq!(command, vec!["-d", "path"]);
+                assert!(posix_test_misuse_message(&command).is_some());
+            }
+            _ => panic!("Expected Test command"),
         }
     }
 

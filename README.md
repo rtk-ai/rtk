@@ -153,6 +153,8 @@ rtk grep "pattern" .            # Grouped search results
 rtk diff file1 file2            # Condensed diff
 ```
 
+`rtk find` compacts simple searches such as `-name`, `-iname`, `-type`, and `-maxdepth`. Compound native expressions/actions such as `(...)`, `-o`, `!`, `-exec`, `-delete`, or `-print0` automatically fall back to native `find`; use `rtk proxy find ...` when you want raw native behavior explicitly.
+
 ### Git
 ```bash
 rtk git status                  # Compact status
@@ -185,6 +187,8 @@ rtk rspec                       # RSpec tests (JSON, -60%+)
 rtk err <cmd>                   # Filter errors only from any command
 rtk test <cmd>                  # Generic test wrapper - failures only (-90%)
 ```
+
+`rtk test` expects a test-runner command, for example `rtk test cargo test`. It is not POSIX `test`; use `rtk run "test -d path"` or direct `test -d path` for shell condition checks.
 
 ### Build & Lint
 ```bash

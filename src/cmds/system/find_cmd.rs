@@ -1,10 +1,11 @@
 //! Filters find results by grouping files by directory.
 
-use crate::core::tracking;
+use crate::core::{tracking, utils};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Stdio;
 
 /// Match a filename against a glob pattern (supports `*` and `?`).
 fn glob_match(pattern: &str, name: &str) -> bool {
@@ -62,17 +63,85 @@ fn has_native_find_flags(args: &[String]) -> bool {
         .any(|a| a == "-name" || a == "-type" || a == "-maxdepth" || a == "-iname")
 }
 
-/// Native find flags that RTK cannot handle correctly.
-/// These involve compound predicates, actions, or semantics we don't support.
-const UNSUPPORTED_FIND_FLAGS: &[&str] = &[
-    "-not", "!", "-or", "-o", "-and", "-a", "-exec", "-execdir", "-delete", "-print0", "-newer",
-    "-perm", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-empty", "-link",
-    "-regex", "-iregex",
+/// Native find tokens that RTK's compact parser should not try to emulate.
+/// These involve compound predicates, actions, output formats, or unsupported
+/// native semantics. Fall back to native `find` instead.
+const NATIVE_FIND_FALLBACK_TOKENS: &[&str] = &[
+    "(", ")", "\\(", "\\)", "-not", "!", "-or", "-o", "-and", "-a", "-exec", "-execdir",
+    "-ok", "-okdir", "-delete", "-print", "-print0", "-printf", "-fprint", "-fprint0",
+    "-fprintf", "-ls", "-fls", "-prune", "-quit", "-depth", "-mindepth", "-newer", "-perm",
+    "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-empty", "-link",
+    "-links", "-regex", "-iregex", "-path", "-ipath", "-wholename", "-iwholename", "-user",
+    "-group", "-uid", "-gid", "-readable", "-writable", "-executable", "-xtype", "-samefile",
+    "-inum", "-true", "-false",
 ];
 
-fn has_unsupported_find_flags(args: &[String]) -> bool {
+const SUPPORTED_NATIVE_FIND_FLAGS: &[&str] = &["-name", "-iname", "-type", "-maxdepth"];
+const NATIVE_FIND_ACTION_TOKENS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir", "-delete"];
+const NATIVE_FIND_NARROWING_PREDICATES: &[&str] = &[
+    "-name",
+    "-iname",
+    "-type",
+    "-newer",
+    "-perm",
+    "-size",
+    "-mtime",
+    "-mmin",
+    "-atime",
+    "-amin",
+    "-ctime",
+    "-cmin",
+    "-empty",
+    "-link",
+    "-links",
+    "-regex",
+    "-iregex",
+    "-path",
+    "-ipath",
+    "-wholename",
+    "-iwholename",
+    "-user",
+    "-group",
+    "-uid",
+    "-gid",
+    "-readable",
+    "-writable",
+    "-executable",
+    "-xtype",
+    "-samefile",
+    "-inum",
+];
+
+fn has_native_find_action(args: &[String]) -> bool {
     args.iter()
-        .any(|a| UNSUPPORTED_FIND_FLAGS.contains(&a.as_str()))
+        .any(|a| NATIVE_FIND_ACTION_TOKENS.contains(&a.as_str()))
+}
+
+fn has_native_find_narrowing_predicate(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| NATIVE_FIND_NARROWING_PREDICATES.contains(&a.as_str()))
+}
+
+fn should_reject_native_find_action(args: &[String]) -> bool {
+    has_native_find_action(args) && !has_native_find_narrowing_predicate(args)
+}
+
+fn should_run_native_find(args: &[String]) -> bool {
+    if should_reject_native_find_action(args) {
+        return false;
+    }
+
+    if args
+        .iter()
+        .any(|a| NATIVE_FIND_FALLBACK_TOKENS.contains(&a.as_str()))
+    {
+        return true;
+    }
+
+    has_native_find_flags(args)
+        && args.iter().any(|a| {
+            a.starts_with('-') && !SUPPORTED_NATIVE_FIND_FLAGS.contains(&a.as_str())
+        })
 }
 
 /// Parse arguments from raw args vec, supporting both native find and RTK syntax.
@@ -82,12 +151,6 @@ fn has_unsupported_find_flags(args: &[String]) -> bool {
 fn parse_find_args(args: &[String]) -> Result<FindArgs> {
     if args.is_empty() {
         return Ok(FindArgs::default());
-    }
-
-    if has_unsupported_find_flags(args) {
-        anyhow::bail!(
-            "rtk find does not support compound predicates or actions (e.g. -not, -exec). Use `find` directly."
-        );
     }
 
     if has_native_find_flags(args) {
@@ -177,7 +240,17 @@ fn parse_rtk_find_args(args: &[String]) -> Result<FindArgs> {
 }
 
 /// Entry point from main.rs — parses raw args then delegates to run().
-pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
+pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
+    if should_reject_native_find_action(args) {
+        anyhow::bail!(
+            "rtk find refuses native find actions like -delete/-exec without a narrowing predicate; use `rtk proxy find ...` for raw native find behavior"
+        );
+    }
+
+    if should_run_native_find(args) {
+        return run_native_find(args, verbose);
+    }
+
     let parsed = parse_find_args(args)?;
     run(
         &parsed.pattern,
@@ -187,7 +260,38 @@ pub fn run_from_args(args: &[String], verbose: u8) -> Result<()> {
         &parsed.file_type,
         parsed.case_insensitive,
         verbose,
-    )
+    )?;
+    Ok(0)
+}
+
+fn run_native_find(args: &[String], verbose: u8) -> Result<i32> {
+    let timer = tracking::TimedExecution::start();
+    let command_text = if args.is_empty() {
+        "find".to_string()
+    } else {
+        format!("find {}", args.join(" "))
+    };
+    let rtk_command_text = if args.is_empty() {
+        "rtk find (native fallback)".to_string()
+    } else {
+        format!("rtk find {} (native fallback)", args.join(" "))
+    };
+
+    if verbose > 0 {
+        eprintln!("rtk find: using native find for {}", args.join(" "));
+    }
+
+    let status = utils::resolved_command("find")
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to execute native find")?;
+
+    timer.track_passthrough(&command_text, &rtk_command_text);
+
+    Ok(utils::exit_code_from_status(&status, "find"))
 }
 
 pub fn run(
@@ -493,20 +597,73 @@ mod tests {
         assert_eq!(parsed.path, ".");
     }
 
-    // --- parse_find_args: unsupported flags ---
+    // --- native fallback detection ---
 
     #[test]
-    fn parse_native_find_rejects_not() {
-        let result = parse_find_args(&args(&[".", "-name", "*.rs", "-not", "-name", "*_test.rs"]));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("compound predicates"));
+    fn native_find_fallback_detects_not() {
+        assert!(should_run_native_find(&args(&[
+            ".",
+            "-name",
+            "*.rs",
+            "-not",
+            "-name",
+            "*_test.rs"
+        ])));
     }
 
     #[test]
-    fn parse_native_find_rejects_exec() {
-        let result = parse_find_args(&args(&[".", "-name", "*.tmp", "-exec", "rm", "{}", ";"]));
+    fn native_find_fallback_detects_exec() {
+        assert!(should_run_native_find(&args(&[
+            ".", "-name", "*.tmp", "-exec", "rm", "{}", ";"
+        ])));
+    }
+
+    #[test]
+    fn native_find_action_rejects_bare_delete() {
+        let command = args(&["-delete"]);
+        assert!(should_reject_native_find_action(&command));
+        assert!(!should_run_native_find(&command));
+
+        let result = run_from_args(&command, 0);
         assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("refuses"));
+    }
+
+    #[test]
+    fn native_find_action_rejects_exec_without_predicate() {
+        assert!(should_reject_native_find_action(&args(&[
+            ".", "-exec", "rm", "{}", ";"
+        ])));
+    }
+
+    #[test]
+    fn native_find_action_allows_predicated_delete() {
+        let command = args(&[".", "-name", "*.tmp", "-delete"]);
+        assert!(!should_reject_native_find_action(&command));
+        assert!(should_run_native_find(&command));
+    }
+
+    #[test]
+    fn native_find_fallback_detects_compound_or_expression() {
+        assert!(should_run_native_find(&args(&[
+            ".",
+            "-type",
+            "f",
+            "(",
+            "-name",
+            "package.json",
+            "-o",
+            "-name",
+            "Cargo.toml",
+            ")"
+        ])));
+    }
+
+    #[test]
+    fn native_find_fallback_ignores_simple_native_expression() {
+        assert!(!should_run_native_find(&args(&[
+            ".", "-name", "*.rs", "-type", "f", "-maxdepth", "3"
+        ])));
     }
 
     // --- parse_find_args: RTK syntax ---
