@@ -90,7 +90,7 @@ pub const RULES: &[RtkRule] = &[
     },
     RtkRule {
         pattern: r"^(rg|grep)\s+",
-        rtk_cmd: "rtk grep",
+        rtk_cmd: "rtk rg",
         rewrite_prefixes: &["rg", "grep"],
         category: "Files",
         savings_pct: 75.0,

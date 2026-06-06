@@ -1417,7 +1417,15 @@ mod tests {
     fn test_rewrite_rg_pattern() {
         assert_eq!(
             rewrite_command_no_prefixes("rg \"fn main\"", &[]),
-            Some("rtk grep \"fn main\"".into())
+            Some("rtk rg \"fn main\"".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_rg_with_version() {
+        assert_eq!(
+            rewrite_command_no_prefixes("rg --version", &[]),
+            Some("rtk rg --version".into())
         );
     }
 
