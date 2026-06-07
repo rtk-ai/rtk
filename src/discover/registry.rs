@@ -1422,6 +1422,14 @@ mod tests {
     }
 
     #[test]
+    fn test_rewrite_grep_pattern() {
+        assert_eq!(
+            rewrite_command_no_prefixes("grep -rn pattern src/", &[]),
+            Some("rtk grep -rn pattern src/".into())
+        );
+    }
+
+    #[test]
     fn test_rewrite_rg_with_version() {
         assert_eq!(
             rewrite_command_no_prefixes("rg --version", &[]),
