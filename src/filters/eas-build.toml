@@ -1,0 +1,49 @@
+[filters.eas-build]
+description = "Compact `eas build` output — strip fingerprint/compress/upload/wait noise, keep build URL, status, artifacts, errors"
+match_command = "^(npx\\s+)?eas\\s+build\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*Computing project fingerprint",
+  "^\\s*✔ Computed project fingerprint",
+  "^\\s*Compressing project files",
+  "^\\s*✔ Compressed project files",
+  "^\\s*Uploading to EAS Build",
+  "^\\s*✔ Uploaded to EAS Build",
+  "^\\s*Using remote .* credentials",
+  "^\\s*Waiting for build to complete\\.",
+  "^\\s*Loading ",
+]
+max_lines = 50
+on_empty = "eas build: ok"
+
+[[tests.eas-build]]
+name = "strips upload/fingerprint noise, keeps build url, status and artifact"
+input = """
+Computing project fingerprint
+✔ Computed project fingerprint
+Compressing project files
+✔ Uploaded to EAS Build (12.3 MB)
+Build details: https://expo.dev/accounts/adam/projects/mova/builds/abc123
+Waiting for build to complete. You can press Ctrl+C to exit.
+✔ Build finished
+🤖 Android app:
+https://expo.dev/artifacts/eas/xyz.aab
+"""
+expected = "Build details: https://expo.dev/accounts/adam/projects/mova/builds/abc123\n✔ Build finished\n🤖 Android app:\nhttps://expo.dev/artifacts/eas/xyz.aab"
+
+[[tests.eas-build]]
+name = "keeps build errors"
+input = """
+Computing project fingerprint
+Compressing project files
+✔ Uploaded to EAS Build (12.3 MB)
+Error: Gradle build failed with unknown error. See logs for the "Run gradlew" phase for more information.
+Build failed
+"""
+expected = "Error: Gradle build failed with unknown error. See logs for the \"Run gradlew\" phase for more information.\nBuild failed"
+
+[[tests.eas-build]]
+name = "empty input returns on_empty message"
+input = ""
+expected = "eas build: ok"

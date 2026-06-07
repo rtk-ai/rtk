@@ -1,0 +1,34 @@
+[filters.expo]
+description = "Compact Expo CLI output — strip Metro bundler progress and interactive hints, keep warnings, errors and results"
+match_command = "^(npx\\s+)?expo\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*Starting Metro Bundler",
+  "^\\s*Starting project at",
+  "^\\w+ Bundling \\d",
+  "^\\s*› ",
+  "^\\s*Logs for your project will appear below",
+  "^\\s*Waiting on http://",
+]
+max_lines = 50
+on_empty = "expo: ok"
+
+[[tests.expo]]
+name = "strips bundler progress and hints, keeps bundling-complete, warnings and errors"
+input = """
+Starting Metro Bundler
+Android Bundling 0%
+Android Bundling 45%
+Android Bundling complete 1234ms
+› Press a │ open Android
+› Press r │ reload app
+Warning: useEffect has a missing dependency
+error: Unable to resolve module './Foo' from App.tsx
+"""
+expected = "Android Bundling complete 1234ms\nWarning: useEffect has a missing dependency\nerror: Unable to resolve module './Foo' from App.tsx"
+
+[[tests.expo]]
+name = "empty input returns on_empty message"
+input = ""
+expected = "expo: ok"
