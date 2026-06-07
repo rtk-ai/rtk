@@ -950,6 +950,73 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_mvn_test_with_global_options() {
+        assert_eq!(
+            classify_command("mvn -q -Dtest=UserServiceTest test"),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                category: "Build",
+                estimated_savings_pct: 80.0,
+                status: RtkStatus::Existing,
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_mvn_verify_and_integration_test() {
+        for cmd in ["mvn verify", "mvn clean verify", "mvn integration-test"] {
+            assert_eq!(
+                classify_command(cmd),
+                Classification::Supported {
+                    rtk_equivalent: "rtk mvn",
+                    category: "Build",
+                    estimated_savings_pct: 80.0,
+                    status: RtkStatus::Existing,
+                },
+                "classify({}) did not return the verify/integration-test savings",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_mvnw_variants() {
+        for cmd in [
+            "mvnw test",
+            "./mvnw test",
+            "./mvnw -q -Dtest=Foo test",
+            "mvnw clean verify",
+            "./mvnw clean verify -DskipITs=false",
+            "mvnw integration-test",
+            "mvnw.cmd test",
+            "mvnw.bat clean install",
+        ] {
+            assert!(
+                matches!(
+                    classify_command(cmd),
+                    Classification::Supported {
+                        rtk_equivalent: "rtk mvn",
+                        ..
+                    }
+                ),
+                "classify({}) did not route to rtk mvn",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_mvnw_with_env_prefix() {
+        assert!(matches!(
+            classify_command(r#"MAVEN_OPTS="-Xmx1g" ./mvnw test"#),
+            Classification::Supported {
+                rtk_equivalent: "rtk mvn",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn test_classify_npx_tsc() {
         assert_eq!(
             classify_command("npx tsc --noEmit"),
@@ -1280,6 +1347,70 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("cargo test", &[]),
             Some("rtk cargo test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvn_test_variants() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn test", &[]),
+            Some("rtk mvn test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn -q -Dtest=UserServiceTest test", &[]),
+            Some("rtk mvn -q -Dtest=UserServiceTest test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn clean test", &[]),
+            Some("rtk mvn clean test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn verify", &[]),
+            Some("rtk mvn verify".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn clean verify -DskipITs=false", &[]),
+            Some("rtk mvn clean verify -DskipITs=false".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvn integration-test", &[]),
+            Some("rtk mvn integration-test".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_mvnw_variants() {
+        assert_eq!(
+            rewrite_command_no_prefixes("mvnw test", &[]),
+            Some("rtk mvn test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./mvnw test", &[]),
+            Some("rtk mvn test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./mvnw -q -Dtest=Foo test", &[]),
+            Some("rtk mvn -q -Dtest=Foo test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvnw clean verify", &[]),
+            Some("rtk mvn clean verify".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("./mvnw clean verify -DskipITs=false", &[]),
+            Some("rtk mvn clean verify -DskipITs=false".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvnw integration-test", &[]),
+            Some("rtk mvn integration-test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvnw.cmd test", &[]),
+            Some("rtk mvn test".into())
+        );
+        assert_eq!(
+            rewrite_command_no_prefixes("mvnw.bat clean install", &[]),
+            Some("rtk mvn clean install".into())
         );
     }
 

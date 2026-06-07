@@ -1,0 +1,91 @@
+[INFO] Scanning for projects...
+[INFO]
+[INFO] ------------------------< com.example:userapp >------------------------
+[INFO] Building userapp 1.0-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-surefire-plugin/3.2.5/maven-surefire-plugin-3.2.5.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/plugins/maven-surefire-plugin/3.2.5/maven-surefire-plugin-3.2.5.pom (12 kB at 84 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/apache/maven/surefire/surefire-junit-platform/3.2.5/surefire-junit-platform-3.2.5.pom
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/apache/maven/surefire/surefire-junit-platform/3.2.5/surefire-junit-platform-3.2.5.pom (3.4 kB at 64 kB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/junit/jupiter/junit-jupiter-engine/5.10.1/junit-jupiter-engine-5.10.1.jar
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/junit/jupiter/junit-jupiter-engine/5.10.1/junit-jupiter-engine-5.10.1.jar (252 kB at 1.3 MB/s)
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:resources (default-resources) @ userapp ---
+[INFO] Copying 1 resource from src/main/resources to target/classes
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) @ userapp ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.1:testResources (default-testResources) @ userapp ---
+[INFO] skip non existing resourceDirectory /home/runner/work/userapp/src/test/resources
+[INFO]
+[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) @ userapp ---
+[INFO] Changes detected - recompiling the module! :dependency
+[INFO] Compiling 4 source files with javac [debug parameters release 17] to target/test-classes
+[INFO]
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ userapp ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO]
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.userapp.CalculatorTest
+WARNING: A Java agent has been loaded dynamically (/home/runner/.m2/repository/net/bytebuddy/byte-buddy-agent/1.14.5/byte-buddy-agent-1.14.5.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.412 s -- in com.example.userapp.CalculatorTest
+[INFO] Running com.example.userapp.UserServiceTest
+[ERROR] Tests run: 5, Failures: 2, Errors: 0, Skipped: 0, Time elapsed: 0.183 s <<< FAILURE! -- in com.example.userapp.UserServiceTest
+[ERROR] com.example.userapp.UserServiceTest.shouldCreateUserWithValidEmail -- Time elapsed: 0.024 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: expected: <201> but was: <500>
+	at org.junit.jupiter.api.AssertionFailureBuilder.build(AssertionFailureBuilder.java:151)
+	at org.junit.jupiter.api.AssertionFailureBuilder.buildAndThrow(AssertionFailureBuilder.java:132)
+	at org.junit.jupiter.api.AssertEquals.failNotEqual(AssertEquals.java:197)
+	at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:182)
+	at org.junit.jupiter.api.AssertEquals.assertEquals(AssertEquals.java:177)
+	at org.junit.jupiter.api.Assertions.assertEquals(Assertions.java:1145)
+	at com.example.userapp.UserServiceTest.shouldCreateUserWithValidEmail(UserServiceTest.java:42)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:725)
+	at org.junit.jupiter.engine.execution.MethodInvocation.proceed(MethodInvocation.java:60)
+	at org.junit.jupiter.engine.execution.InvocationInterceptorChain$ValidatingInvocation.proceed(InvocationInterceptorChain.java:131)
+
+[ERROR] com.example.userapp.UserServiceTest.shouldRejectDuplicateUsername -- Time elapsed: 0.012 s <<< FAILURE!
+java.lang.NullPointerException: Cannot invoke "com.example.userapp.User.getEmail()" because "newUser" is null
+	at com.example.userapp.UserServiceTest.shouldRejectDuplicateUsername(UserServiceTest.java:67)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.junit.platform.commons.util.ReflectionUtils.invokeMethod(ReflectionUtils.java:725)
+
+[INFO] Running com.example.userapp.AuthTokenTest
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 1, Time elapsed: 0.087 s -- in com.example.userapp.AuthTokenTest
+[INFO] Running com.example.userapp.PasswordHasherTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.034 s -- in com.example.userapp.PasswordHasherTest
+[INFO]
+[INFO] Results:
+[INFO]
+[ERROR] Failures:
+[ERROR]   UserServiceTest.shouldCreateUserWithValidEmail:42 expected: <201> but was: <500>
+[ERROR]   UserServiceTest.shouldRejectDuplicateUsername:67 Cannot invoke "com.example.userapp.User.getEmail()" because "newUser" is null
+[INFO]
+[ERROR] Tests run: 23, Failures: 2, Errors: 0, Skipped: 1
+[INFO]
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD FAILURE
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  4.812 s
+[INFO] Finished at: 2026-05-16T10:42:13+02:00
+[INFO] ------------------------------------------------------------------------
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project userapp: There are test failures.
+[ERROR]
+[ERROR] Please refer to /home/runner/work/userapp/target/surefire-reports for the individual test results.
+[ERROR] Please refer to dump files (if any exist) [date].dump, [date]-jvmRun[N].dump and [date].dumpstream.
+[ERROR] -> [Help 1]
+[ERROR]
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+[ERROR]
+[ERROR] For more information about the errors and possible solutions, please read the following articles:
+[ERROR] [Help 1] http://cwiki.apache.org/confluence/display/MAVEN/MojoFailureException

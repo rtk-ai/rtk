@@ -85,6 +85,13 @@ struct TomlFilterFile {
 struct TomlFilterDef {
     description: Option<String>,
     match_command: String,
+    /// Optional negative match. When set, a filter that would otherwise match
+    /// `match_command` is skipped if `match_command_excludes` also matches.
+    /// Use for routing: e.g. `mvn-build` matches build goals but excludes
+    /// commands carrying a `test`/`verify`/`integration-test` token so those
+    /// fall through to `mvn-test`. Substitutes for negative lookahead, which
+    /// the `regex` crate does not support.
+    match_command_excludes: Option<String>,
     #[serde(default)]
     strip_ansi: bool,
     /// Regex substitutions, applied line-by-line before match_output (stage 2).
@@ -140,6 +147,9 @@ pub struct CompiledFilter {
     #[allow(dead_code)]
     pub description: Option<String>,
     match_regex: Regex,
+    /// Compiled `match_command_excludes`. When `Some` and matches the command,
+    /// `find_filter_in` skips this filter — see TomlFilterDef field docs.
+    exclude_regex: Option<Regex>,
     strip_ansi: bool,
     replace: Vec<CompiledReplaceRule>,
     match_output: Vec<CompiledMatchOutputRule>,
@@ -322,6 +332,12 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
     let match_regex = Regex::new(&def.match_command)
         .map_err(|e| format!("invalid match_command regex: {}", e))?;
 
+    let exclude_regex = def
+        .match_command_excludes
+        .as_deref()
+        .map(|s| Regex::new(s).map_err(|e| format!("invalid match_command_excludes regex: {}", e)))
+        .transpose()?;
+
     // Shadow warning: if match_command matches a Rust-handled command, this filter
     // will never activate (Clap routes before run_fallback). Warn the author.
     for cmd in RUST_HANDLED_COMMANDS {
@@ -388,6 +404,7 @@ fn compile_filter(name: String, def: TomlFilterDef) -> Result<CompiledFilter, St
         name,
         description: def.description,
         match_regex,
+        exclude_regex,
         strip_ansi: def.strip_ansi,
         replace,
         match_output,
@@ -419,7 +436,13 @@ pub fn find_filter_in<'a>(
     command: &str,
     filters: &'a [CompiledFilter],
 ) -> Option<&'a CompiledFilter> {
-    filters.iter().find(|f| f.match_regex.is_match(command))
+    filters.iter().find(|f| {
+        f.match_regex.is_match(command)
+            && !f
+                .exclude_regex
+                .as_ref()
+                .is_some_and(|r| r.is_match(command))
+    })
 }
 
 /// Apply a compiled filter pipeline to raw stdout. Pure String -> String.
@@ -1583,6 +1606,7 @@ match_command = "^make\\b"
             "mix-compile",
             "mix-format",
             "mvn-build",
+            "mvn-test",
             "ping",
             "pio-run",
             "poetry-install",
@@ -1621,8 +1645,8 @@ match_command = "^make\\b"
         let filters = make_filters(BUILTIN_TOML);
         assert_eq!(
             filters.len(),
-            59,
-            "Expected exactly 59 built-in filters, got {}. \
+            60,
+            "Expected exactly 60 built-in filters, got {}. \
              Update this count when adding/removing filters in src/filters/.",
             filters.len()
         );
@@ -1657,6 +1681,85 @@ match_command = "^make\\b"
         );
     }
 
+    #[test]
+    fn test_maven_builtin_filter_command_matching() {
+        let filters = make_filters(BUILTIN_TOML);
+        let cases = [
+            ("mvn test", "mvn-test"),
+            ("mvn -q -Dtest=UserServiceTest test", "mvn-test"),
+            ("mvn clean test", "mvn-test"),
+            ("mvn clean test -Dtest=UserServiceTest", "mvn-test"),
+            ("mvn verify", "mvn-test"),
+            ("mvn clean verify", "mvn-test"),
+            ("mvn clean verify -DskipITs=false", "mvn-test"),
+            ("mvn integration-test", "mvn-test"),
+            ("mvn clean install integration-test", "mvn-test"),
+            ("mvn package", "mvn-build"),
+            ("mvn clean package -DskipTests", "mvn-build"),
+            ("mvn -q clean -DskipTests", "mvn-build"),
+            ("mvn clean -q", "mvn-build"),
+            ("mvn clean install", "mvn-build"),
+        ];
+
+        for (cmd, expected_filter) in cases {
+            let found = find_filter_in(cmd, &filters)
+                .unwrap_or_else(|| panic!("expected Maven filter for command: {}", cmd));
+            assert_eq!(
+                found.name, expected_filter,
+                "wrong Maven filter matched for command: {}",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_mvn_test_fixture_savings_and_failure_preservation() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("mvn test", &filters).expect("mvn-test built-in");
+        let input = include_str!("../../tests/fixtures/mvn_test_raw.txt");
+        let out = apply_filter(filter, input);
+
+        let input_words = input.split_whitespace().count();
+        let out_words = out.split_whitespace().count();
+        let savings = 100.0 - (out_words as f64 / input_words as f64 * 100.0);
+        assert!(
+            savings >= 75.0,
+            "mvn-test fixture: expected >=75% savings on a failing-build fixture, \
+             got {:.1}% (in={} out={})",
+            savings,
+            input_words,
+            out_words
+        );
+
+        for required in [
+            "UserServiceTest.shouldCreateUserWithValidEmail",
+            "expected: <201> but was: <500>",
+            "Tests run: 23, Failures: 2",
+            "BUILD FAILURE",
+        ] {
+            assert!(
+                out.contains(required),
+                "mvn-test fixture: filtered output must preserve {:?}, got:\n{}",
+                required,
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn test_mvn_test_filter_crlf_safe() {
+        let filters = make_filters(BUILTIN_TOML);
+        let filter = find_filter_in("mvn test", &filters).expect("mvn-test built-in");
+        let lf = include_str!("../../tests/fixtures/mvn_test_raw.txt");
+        let crlf = lf.replace('\n', "\r\n");
+        let out_lf = apply_filter(filter, lf);
+        let out_crlf = apply_filter(filter, &crlf).replace('\r', "");
+        assert_eq!(
+            out_lf, out_crlf,
+            "mvn-test must produce identical output for LF and CRLF input"
+        );
+    }
+
     /// Verify that adding a new filter entry to any TOML content makes it
     /// immediately discoverable via find_filter_in — simulating how a new
     /// src/filters/my-tool.toml would work after cargo build.
@@ -1679,11 +1782,11 @@ expected = "output line 1\noutput line 2"
         let combined = format!("{}\n\n{}", BUILTIN_TOML, new_filter);
         let filters = make_filters(&combined);
 
-        // All 59 existing filters still present + 1 new = 60
+        // All 60 existing filters still present + 1 new = 61
         assert_eq!(
             filters.len(),
-            60,
-            "Expected 60 filters after concat (59 built-in + 1 new)"
+            61,
+            "Expected 61 filters after concat (60 built-in + 1 new)"
         );
 
         // New filter is discoverable

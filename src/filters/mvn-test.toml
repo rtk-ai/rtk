@@ -1,0 +1,122 @@
+[filters.mvn-test]
+description = "Compact Maven Surefire/Failsafe test output"
+match_command = "^mvn(?:\\s+\\S+)*\\s+(?:test|verify|integration-test)\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\[INFO\\] Scanning for projects",
+  "^\\[INFO\\] ---",
+  "^\\[INFO\\] Building\\s",
+  "^\\[INFO\\] Downloading\\s",
+  "^\\[INFO\\] Downloaded\\s",
+  "^\\[INFO\\] -+$",
+  "^\\[INFO\\]\\s+from\\s+pom\\.xml",
+  "^\\[INFO\\] Copying\\s",
+  "^\\[INFO\\] Nothing to compile",
+  "^\\[INFO\\] skip non existing",
+  "^\\[INFO\\] Changes detected",
+  "^\\[INFO\\] Compiling \\d+ source",
+  "^\\[INFO\\] Using auto detected provider",
+  "^\\[INFO\\]\\s+T E S T S\\s*$",
+  "^\\[INFO\\] Running\\s+",
+  "^\\[INFO\\] Tests run: \\d+, Failures: 0, Errors: 0, Skipped: \\d+",
+  "^\\[INFO\\]\\s*$",
+  "^\\s*$",
+  "^Downloading:",
+  "^Downloaded:",
+  "^Progress",
+  "^WARNING:",
+  "^\\s*at (java|javax|jdk\\.internal|sun|org\\.junit|org\\.apache\\.maven\\.surefire|org\\.testng)\\.",
+  "^\\s*at java\\.base/",
+  "^\\s*at app//(org\\.junit|org\\.apache\\.maven\\.surefire|org\\.testng)\\.",
+  "^\\[ERROR\\] To see the full stack trace",
+  "^\\[ERROR\\] Re-run Maven using the -X switch",
+  "^\\[ERROR\\] For more information about the errors and possible solutions",
+  "^\\[ERROR\\] \\[Help 1\\]",
+  "^\\[ERROR\\] -> \\[Help",
+  "^\\[ERROR\\] Please refer to ",
+  "^\\[ERROR\\]\\s*$",
+]
+head_lines = 40
+tail_lines = 60
+on_empty = "mvn test: ok"
+
+[[tests.mvn-test]]
+name = "strips surefire noise and preserves failure context"
+input = """
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ app ---
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.CalculatorTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.123 s -- in com.example.CalculatorTest
+[INFO] Running com.example.UserServiceTest
+[ERROR] Tests run: 2, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.042 s <<< FAILURE! -- in com.example.UserServiceTest
+[ERROR] com.example.UserServiceTest.shouldCreateUser -- Time elapsed: 0.010 s <<< FAILURE!
+org.opentest4j.AssertionFailedError: expected: <201> but was: <500>
+    at com.example.UserServiceTest.shouldCreateUser(UserServiceTest.java:42)
+[INFO]
+[INFO] Results:
+[INFO]
+[ERROR] Failures:
+[ERROR]   UserServiceTest.shouldCreateUser:42 expected: <201> but was: <500>
+[ERROR] Tests run: 5, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+[INFO] Total time: 2.345 s
+[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project app: There are test failures.
+[ERROR] Please refer to /repo/target/surefire-reports for the individual test results.
+[ERROR] To see the full stack trace of the errors, re-run Maven with the -e switch.
+[ERROR] Re-run Maven using the -X switch to enable full debug logging.
+"""
+expected = "[ERROR] Tests run: 2, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.042 s <<< FAILURE! -- in com.example.UserServiceTest\n[ERROR] com.example.UserServiceTest.shouldCreateUser -- Time elapsed: 0.010 s <<< FAILURE!\norg.opentest4j.AssertionFailedError: expected: <201> but was: <500>\n    at com.example.UserServiceTest.shouldCreateUser(UserServiceTest.java:42)\n[INFO] Results:\n[ERROR] Failures:\n[ERROR]   UserServiceTest.shouldCreateUser:42 expected: <201> but was: <500>\n[ERROR] Tests run: 5, Failures: 1, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE\n[INFO] Total time: 2.345 s\n[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test (default-test) on project app: There are test failures."
+
+[[tests.mvn-test]]
+name = "successful test run keeps build summary"
+input = """
+[INFO] --- maven-surefire-plugin:3.2.5:test (default-test) @ app ---
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.CalculatorTest
+[INFO] Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.123 s -- in com.example.CalculatorTest
+[INFO] BUILD SUCCESS
+[INFO] Total time: 1.234 s
+[INFO] Finished at: 2026-05-16T10:30:00+02:00
+"""
+expected = "[INFO] BUILD SUCCESS\n[INFO] Total time: 1.234 s\n[INFO] Finished at: 2026-05-16T10:30:00+02:00"
+
+[[tests.mvn-test]]
+name = "preserves test compilation errors"
+input = """
+[INFO] --- maven-compiler-plugin:3.11.0:testCompile (default-testCompile) @ app ---
+[ERROR] /repo/src/test/java/com/example/FooTest.java:[12,13] cannot find symbol
+[ERROR]   symbol:   method missing()
+[ERROR]   location: class com.example.Foo
+[INFO] BUILD FAILURE
+[INFO] Total time: 0.876 s
+"""
+expected = "[ERROR] /repo/src/test/java/com/example/FooTest.java:[12,13] cannot find symbol\n[ERROR]   symbol:   method missing()\n[ERROR]   location: class com.example.Foo\n[INFO] BUILD FAILURE\n[INFO] Total time: 0.876 s"
+
+[[tests.mvn-test]]
+name = "quiet successful test run reports ok"
+input = ""
+expected = "mvn test: ok"
+
+[[tests.mvn-test]]
+name = "failsafe integration-test output keeps failure summary"
+input = """
+[INFO] --- maven-failsafe-plugin:3.2.5:integration-test (default) @ app ---
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running com.example.AppIT
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.301 s <<< FAILURE! -- in com.example.AppIT
+[ERROR] com.example.AppIT.shouldReturn200 -- Time elapsed: 0.290 s <<< FAILURE!
+java.lang.AssertionError: status code mismatch
+    at com.example.AppIT.shouldReturn200(AppIT.java:55)
+[INFO] Results:
+[ERROR] Failures:
+[ERROR]   AppIT.shouldReturn200:55 status code mismatch
+[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0
+[INFO] BUILD FAILURE
+"""
+expected = "[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 0.301 s <<< FAILURE! -- in com.example.AppIT\n[ERROR] com.example.AppIT.shouldReturn200 -- Time elapsed: 0.290 s <<< FAILURE!\njava.lang.AssertionError: status code mismatch\n    at com.example.AppIT.shouldReturn200(AppIT.java:55)\n[INFO] Results:\n[ERROR] Failures:\n[ERROR]   AppIT.shouldReturn200:55 status code mismatch\n[ERROR] Tests run: 1, Failures: 1, Errors: 0, Skipped: 0\n[INFO] BUILD FAILURE"

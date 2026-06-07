@@ -1,6 +1,13 @@
 [filters.mvn-build]
 description = "Compact Maven build output"
-match_command = "^mvn\\s+(compile|package|clean|install)\\b"
+# Match Maven build goals, but defer to `mvn-test` if the invocation also
+# carries a bare `test`, `verify`, or `integration-test` goal. Filters are
+# loaded in alphabetical order and find_filter_in is first-match-wins, so
+# `mvn-build` is checked before `mvn-test`; the excludes regex keeps the
+# routing correct without needing negative lookahead (unsupported in the
+# `regex` crate).
+match_command = "^mvn\\s+(?:\\S+\\s+)*(compile|package|clean|install)\\b"
+match_command_excludes = "(?:^|\\s)(?:test|verify|integration-test)(?:\\s|$)"
 strip_ansi = true
 strip_lines_matching = [
   "^\\[INFO\\] ---",
