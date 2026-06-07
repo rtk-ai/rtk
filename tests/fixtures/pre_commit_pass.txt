@@ -1,0 +1,23 @@
+[WARNING] Unstaged files detected.
+[INFO] Stashing unstaged files to /tmp/pre-commit-patch.tmp.
+Detect hardcoded secrets.................................................Passed
+bandit...................................................................Passed
+pip-audit...............................................................Skipped
+detect private key.......................................................Passed
+check for added large files..............................................Passed
+don't commit to branch...................................................Passed
+check python ast.........................................................Passed
+debug statements (python)................................................Passed
+check docstring is first.................................................Passed
+check builtin type constructor use.......................................Passed
+check for merge conflicts................................................Passed
+check yaml...........................................(no files to check)Skipped
+check json...........................................(no files to check)Skipped
+check toml...........................................(no files to check)Skipped
+fix end of files.........................................................Passed
+trim trailing whitespace.................................................Passed
+mixed line ending........................................................Passed
+ruff (legacy alias)......................................................Passed
+ruff format..............................................................Passed
+flake8...................................................................Passed
+[INFO] Restored changes from /tmp/pre-commit-patch.tmp.

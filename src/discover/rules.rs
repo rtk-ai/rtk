@@ -726,11 +726,17 @@ pub const RULES: &[RtkRule] = &[
         subcmd_status: &[],
     },
     RtkRule {
-        pattern: r"^pre-commit\b",
+        // Match both `pre-commit run ...` and `uv run pre-commit run ...`.
+        // The latter is the canonical way to invoke pre-commit inside a uv
+        // project, where the binary lives in `.venv/bin/` and isn't on PATH.
+        pattern: r"^(?:uv run )?pre-commit\b",
         rtk_cmd: "rtk pre-commit",
-        rewrite_prefixes: &["pre-commit"],
+        // Longest prefix first — strip_word_prefix tries each in order.
+        rewrite_prefixes: &["uv run pre-commit", "pre-commit"],
         category: "Build",
-        savings_pct: 65.0,
+        // Measured ~96% on a real repo's passing run; conservative 90
+        // to allow for failing-hook output that retains full error context.
+        savings_pct: 90.0,
         subcmd_savings: &[],
         subcmd_status: &[],
     },

@@ -16,7 +16,7 @@ use cmds::js::{
     vitest_cmd,
 };
 use cmds::jvm::gradlew_cmd;
-use cmds::python::{mypy_cmd, pip_cmd, pytest_cmd, ruff_cmd};
+use cmds::python::{mypy_cmd, pip_cmd, precommit_cmd, pytest_cmd, ruff_cmd};
 use cmds::ruby::{rake_cmd, rspec_cmd, rubocop_cmd};
 use cmds::rust::{cargo_cmd, runner};
 use cmds::system::{
@@ -676,6 +676,14 @@ enum Commands {
     /// Mypy type checker with grouped error output
     Mypy {
         /// Mypy arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Pre-commit framework with compact summary (run subcommand only)
+    #[command(name = "pre-commit")]
+    PreCommit {
+        /// Pre-commit arguments (e.g., run --all-files)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -2161,6 +2169,8 @@ fn run_cli() -> Result<i32> {
 
         Commands::Mypy { args } => mypy_cmd::run(&args, cli.verbose)?,
 
+        Commands::PreCommit { args } => precommit_cmd::run(&args, cli.verbose)?,
+
         Commands::Rake { args } => rake_cmd::run(&args, cli.verbose)?,
 
         Commands::Rubocop { args } => rubocop_cmd::run(&args, cli.verbose)?,
@@ -2523,6 +2533,7 @@ fn is_operational_command(cmd: &Commands) -> bool {
             | Commands::Curl { .. }
             | Commands::Ruff { .. }
             | Commands::Pytest { .. }
+            | Commands::PreCommit { .. }
             | Commands::Rake { .. }
             | Commands::Rubocop { .. }
             | Commands::Rspec { .. }
