@@ -1098,6 +1098,14 @@ fn insert_hook_entry(root: &mut serde_json::Value, hook_command: &str) -> Result
             "timeout": 10
         }]
     }));
+    pre_tool_use.push(serde_json::json!({
+        "matcher": "PowerShell",
+        "hooks": [{
+            "type": "command",
+            "command": hook_command,
+            "timeout": 10
+        }]
+    }));
     Ok(())
 }
 
