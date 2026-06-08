@@ -29,11 +29,9 @@ fn read_stdin_limited() -> Result<String> {
 
 /// Format detected from the preToolUse JSON input.
 enum HookFormat {
-    /// VS Code Copilot Chat: "run_in_terminal" (v1.121+) / "runTerminalCommand" / "Bash".
-    /// Uses deny-with-suggestion because updatedInput is ignored and causes an infinite loop.
+    /// VS Code Copilot Chat: "run_in_terminal". Uses updatedInput for transparent rewrite.
     VsCode,
-    /// Copilot CLI v1.0.24+: "bash" (lowercase).
-    /// Supports transparent rewrite via modifiedArgs.
+    /// Copilot CLI: "bash" (lowercase). Uses modifiedArgs for transparent rewrite.
     CopilotCli,
     /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
     PassThrough,
@@ -75,22 +73,36 @@ fn process_vscode_payload(v: &Value) -> Option<Value> {
         .and_then(|c| c.as_str())
         .filter(|c| !c.is_empty())?;
 
-    let rewritten = get_rewritten(cmd)?;
-    audit_log("deny", cmd, &rewritten);
-    Some(build_vscode_deny_output(&rewritten))
-}
-
-fn build_vscode_deny_output(rewritten: &str) -> Value {
-    json!({
-        "hookSpecificOutput": {
-            "hookEventName": PRE_TOOL_USE_KEY,
-            "permissionDecision": "deny",
-            "permissionDecisionReason": format!(
-                "Token savings: use `{}` instead (rtk saves 60-90% tokens)",
-                rewritten
-            )
+    let (decision, rewritten) = match decide_hook_action(cmd, permissions::Host::Claude) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return None;
         }
-    })
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) => ("allow", r),
+        HookDecision::AskRewrite(r) => ("ask", r),
+    };
+
+    audit_log("rewrite", cmd, &rewritten);
+
+    let mut updated_input = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(obj) = updated_input.as_object_mut() {
+        obj.insert("command".into(), Value::String(rewritten));
+    }
+
+    let mut hook_output = json!({
+        "hookEventName": PRE_TOOL_USE_KEY,
+        "permissionDecisionReason": "RTK auto-rewrite",
+        "updatedInput": updated_input
+    });
+    if decision == "allow" {
+        hook_output
+            .as_object_mut()
+            .unwrap()
+            .insert("permissionDecision".into(), json!("allow"));
+    }
+
+    Some(json!({ "hookSpecificOutput": hook_output }))
 }
 
 fn detect_format(v: &Value) -> HookFormat {
@@ -110,7 +122,7 @@ fn detect_format(v: &Value) -> HookFormat {
 
     match tool_name {
         "bash" => HookFormat::CopilotCli,
-        "run_in_terminal" | "runTerminalCommand" | "Bash" => HookFormat::VsCode,
+        "run_in_terminal" => HookFormat::VsCode,
         _ => HookFormat::PassThrough,
     }
 }
@@ -164,12 +176,15 @@ fn process_copilot_payload(v: &Value) -> Option<Value> {
         .and_then(|c| c.as_str())
         .filter(|c| !c.is_empty())?;
 
-    if permissions::check_command(cmd) == PermissionVerdict::Deny {
-        audit_log("deny", cmd, "");
-        return None;
-    }
+    let rewritten = match decide_hook_action(cmd, permissions::Host::Claude) {
+        HookDecision::Deny => {
+            audit_log("deny", cmd, "");
+            return None;
+        }
+        HookDecision::Defer => return None,
+        HookDecision::AllowRewrite(r) | HookDecision::AskRewrite(r) => r,
+    };
 
-    let rewritten = get_rewritten(cmd)?;
     audit_log("rewrite", cmd, &rewritten);
 
     let mut modified_args = v.get("tool_input").cloned().unwrap_or_else(|| json!({}));
@@ -517,18 +532,20 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_vscode_bash() {
+    fn test_detect_vscode_bash_uppercase_is_passthrough() {
+        // "Bash" (uppercase) is the Claude Code tool name, handled by run_claude() not run_copilot()
         assert!(matches!(
             detect_format(&vscode_input("Bash", "git status")),
-            HookFormat::VsCode
+            HookFormat::PassThrough
         ));
     }
 
     #[test]
-    fn test_detect_vscode_run_terminal_command() {
+    fn test_detect_run_terminal_command_is_passthrough() {
+        // "runTerminalCommand" was an older VS Code name; current VS Code uses "run_in_terminal"
         assert!(matches!(
             detect_format(&vscode_input("runTerminalCommand", "cargo test")),
-            HookFormat::VsCode
+            HookFormat::PassThrough
         ));
     }
 
@@ -552,7 +569,7 @@ mod tests {
             assert!(matches!(detect_format(&v), HookFormat::CopilotCli));
         }
 
-        let raw = format!("\u{feff}{}", vscode_input("Bash", "git status"));
+        let raw = format!("\u{feff}{}", vscode_input("run_in_terminal", "git status"));
         let v: Value = serde_json::from_str(strip_leading_bom(&raw).trim()).unwrap();
         assert!(matches!(detect_format(&v), HookFormat::VsCode));
     }
@@ -1173,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vscode_run_in_terminal_returns_deny() {
+    fn test_vscode_run_in_terminal_returns_updated_input() {
         let input = json!({
             "tool_name": "run_in_terminal",
             "tool_input": {
@@ -1190,22 +1207,22 @@ mod tests {
             v.get("modifiedArgs").is_none(),
             "VsCode must not use modifiedArgs"
         );
+        let updated = v.pointer("/hookSpecificOutput/updatedInput").unwrap();
+        assert_eq!(updated["command"], "rtk git status");
+        // extra fields preserved
+        assert_eq!(updated["mode"], "sync");
+        assert_eq!(updated["timeout"], 60000);
         assert_eq!(
-            v.pointer("/hookSpecificOutput/permissionDecision")
+            v.pointer("/hookSpecificOutput/hookEventName")
                 .and_then(|d| d.as_str()),
-            Some("deny")
+            Some(PRE_TOOL_USE_KEY)
         );
-        let reason = v
-            .pointer("/hookSpecificOutput/permissionDecisionReason")
-            .and_then(|r| r.as_str())
-            .unwrap_or("");
-        assert!(reason.contains("rtk"), "reason should suggest rtk command");
     }
 
     #[test]
-    fn test_vscode_bash_uppercase_returns_deny() {
+    fn test_vscode_run_in_terminal_returns_updated_input_simple() {
         let input = json!({
-            "tool_name": "Bash",
+            "tool_name": "run_in_terminal",
             "tool_input": { "command": "git status" }
         })
         .to_string();
@@ -1216,9 +1233,9 @@ mod tests {
             "VsCode must not use modifiedArgs"
         );
         assert_eq!(
-            v.pointer("/hookSpecificOutput/permissionDecision")
+            v.pointer("/hookSpecificOutput/updatedInput/command")
                 .and_then(|d| d.as_str()),
-            Some("deny")
+            Some("rtk git status")
         );
     }
 
