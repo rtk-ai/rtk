@@ -69,6 +69,7 @@ Typical savings: 60-99%.
 | `ruff check` | 75% | Violations grouped by file |
 | `mypy` | 75% | Type errors grouped by file |
 | `pip install` | 70% | Installed packages only, progress stripped |
+| `pre-commit run` / `prek run` | 65% | Dots removed, compact hook status, errors in full |
 
 ## Go
 

@@ -7,6 +7,7 @@
 - `pytest_cmd.rs` uses a state machine text parser (no JSON available from pytest)
 - `ruff_cmd.rs` uses JSON for check mode (`--output-format=json`) and text filtering for format mode
 - `pip_cmd.rs` auto-detects `uv` as a pip alternative and routes accordingly
+- `pre_commit_cmd.rs` filters pre-commit/prek output: removes `...` separators, uses `[Status]` brackets, shows hook-id + full error on failures
 - `python -m pytest` and `python3 -m mypy` are rewritten by the hook registry to `rtk pytest` / `rtk mypy`
 
 ## Cross-command
