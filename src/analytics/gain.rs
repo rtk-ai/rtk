@@ -2,7 +2,7 @@
 
 use crate::core::display_helpers::{format_duration, print_period_table};
 use crate::core::tracking::{DayStats, MonthStats, Tracker, WeekStats};
-use crate::core::utils::format_tokens;
+use crate::core::utils::{format_tokens, truncate};
 use crate::hooks::hook_check;
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -246,11 +246,7 @@ pub fn run(
                 println!("──────────────────────────────────────────────────────────");
                 for rec in recent {
                     let time = rec.timestamp.with_timezone(&Local).format("%m-%d %H:%M");
-                    let cmd_short = if rec.rtk_cmd.len() > 25 {
-                        format!("{}...", &rec.rtk_cmd[..22])
-                    } else {
-                        rec.rtk_cmd.clone()
-                    };
+                    let cmd_short = truncate_history_command(&rec.rtk_cmd);
                     // added: tier indicators by savings level
                     let sign = if rec.savings_pct >= 70.0 {
                         "▲"
@@ -373,6 +369,10 @@ fn style_command_cell(cmd: &str) -> String {
         return cmd.to_string();
     }
     cmd.bright_cyan().bold().to_string()
+}
+
+fn truncate_history_command(cmd: &str) -> String {
+    truncate(cmd, 25)
 }
 
 /// Render a proportional bar chart segment (TTY-aware). // added
@@ -761,4 +761,19 @@ fn confirm_reset() -> Result<bool> {
         .context("Failed to read confirmation")?;
 
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_history_command_handles_cjk_filenames() {
+        let cmd = "rtk ls -la 停止小工具.command 启动小工具.command 内存监视.app";
+
+        let truncated = truncate_history_command(cmd);
+
+        assert_eq!(truncated.chars().count(), 25);
+        assert!(truncated.ends_with("..."));
+    }
 }
