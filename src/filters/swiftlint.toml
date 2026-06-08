@@ -1,0 +1,44 @@
+[filters.swiftlint]
+description = "Compact swiftlint output — strip progress noise, keep violations and summary"
+match_command = "^swiftlint\\b"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^Linting Swift files.*$",
+  "^Linting '.*' \\(\\d+/\\d+\\)$",
+  "^Correcting Swift files.*$",
+  "^Correcting '.*' \\(\\d+/\\d+\\)$",
+  "^Loading configuration from .*$",
+  "^Collecting Swift files.*$",
+  "^Found \\d+ Swift files.*$",
+]
+max_lines = 120
+on_empty = "swiftlint: ok"
+
+[[tests.swiftlint]]
+name = "strips progress and keeps violations plus summary"
+input = """
+Loading configuration from '.swiftlint.yml'
+Linting Swift files in current working directory
+Linting 'DashboardView.swift' (1/2)
+Linting 'SettingsView.swift' (2/2)
+/App/DashboardView.swift:42:1: warning: Line Length Violation: Line should be 120 characters or less; currently 139 characters (line_length)
+/App/SettingsView.swift:12:5: error: Force Cast Violation: Force casts should be avoided (force_cast)
+Done linting! Found 2 violations, 1 serious in 2 files.
+"""
+expected = """
+/App/DashboardView.swift:42:1: warning: Line Length Violation: Line should be 120 characters or less; currently 139 characters (line_length)
+/App/SettingsView.swift:12:5: error: Force Cast Violation: Force casts should be avoided (force_cast)
+Done linting! Found 2 violations, 1 serious in 2 files.
+"""
+
+[[tests.swiftlint]]
+name = "keeps clean summary"
+input = """
+Linting Swift files in current working directory
+Linting 'DashboardView.swift' (1/1)
+Done linting! Found 0 violations, 0 serious in 1 file.
+"""
+expected = """
+Done linting! Found 0 violations, 0 serious in 1 file.
+"""
