@@ -29,16 +29,22 @@ fn read_stdin_limited() -> Result<String> {
 
 /// Format detected from the preToolUse JSON input.
 ///
-/// Payload format is determined by the event name in the hook config:
-///   "preToolUse" (camelCase)  → camelCase keys (toolName/toolArgs) — used by Copilot CLI
-///   "PreToolUse" (PascalCase) → snake_case keys (tool_name/tool_input) — always used by VS Code
+/// Two payload formats exist, selected by the event name in the hook config:
+///   "preToolUse" (camelCase)  → CamelCaseCmd: toolName/toolArgs (JSON string)
+///   "PreToolUse" (PascalCase) → SnakeCaseCmd: tool_name/tool_input
+///
+/// Host support:
+///   Copilot CLI: supports both formats (camelCase is preferred/official)
+///   VS Code Copilot Chat: SnakeCaseCmd only (always sends snake_case)
 enum HookFormat {
-    /// VS Code Copilot Chat: always snake_case, tool_name="run_in_terminal".
-    /// Uses hookSpecificOutput.updatedInput for transparent rewrite.
-    VsCode,
-    /// Copilot CLI: camelCase format ("preToolUse" config), toolName="bash", toolArgs=JSON string.
-    /// Uses modifiedArgs for transparent rewrite.
-    CopilotCli,
+    /// snake_case format: tool_name + tool_input.
+    /// Used by VS Code Copilot Chat (always) and Copilot CLI with "PreToolUse" config.
+    /// Returns hookSpecificOutput.updatedInput for transparent rewrite.
+    SnakeCaseCmd,
+    /// camelCase format: toolName + toolArgs as JSON string.
+    /// Used by Copilot CLI with "preToolUse" config (recommended).
+    /// Returns modifiedArgs for transparent rewrite.
+    CamelCaseCmd,
     /// Non-bash tool, already uses rtk, or unknown format — pass through silently.
     PassThrough,
 }
@@ -63,8 +69,8 @@ pub fn run_copilot() -> Result<()> {
     };
 
     let output = match detect_format(&v) {
-        HookFormat::CopilotCli => process_copilot_payload(&v),
-        HookFormat::VsCode => process_vscode_payload(&v),
+        HookFormat::CamelCaseCmd => process_copilot_payload(&v),
+        HookFormat::SnakeCaseCmd => process_vscode_payload(&v),
         HookFormat::PassThrough => None,
     };
     if let Some(output) = output {
@@ -112,16 +118,16 @@ fn process_vscode_payload(v: &Value) -> Option<Value> {
 }
 
 fn detect_format(v: &Value) -> HookFormat {
-    // Copilot CLI: camelCase keys, "preToolUse" config (version: 1)
+    // CamelCaseCmd: Copilot CLI with "preToolUse" config
     // toolArgs is a JSON-encoded string
     if let Some(tool_name) = v.get("toolName").and_then(|t| t.as_str()) {
         if tool_name == "bash" && v.get("toolArgs").and_then(|a| a.as_str()).is_some() {
-            return HookFormat::CopilotCli;
+            return HookFormat::CamelCaseCmd;
         }
         return HookFormat::PassThrough;
     }
 
-    // VS Code Copilot Chat: snake_case keys, "PreToolUse" config
+    // SnakeCaseCmd: VS Code Copilot Chat (always) or Copilot CLI with "PreToolUse" config
     let Some(tool_name) = v.get("tool_name").and_then(|t| t.as_str()) else {
         return HookFormat::PassThrough;
     };
@@ -137,7 +143,7 @@ fn detect_format(v: &Value) -> HookFormat {
     }
 
     match tool_name {
-        "run_in_terminal" => HookFormat::VsCode,
+        "bash" | "run_in_terminal" => HookFormat::SnakeCaseCmd,
         _ => HookFormat::PassThrough,
     }
 }
@@ -585,12 +591,12 @@ mod tests {
         ] {
             let cleaned = strip_leading_bom(&raw).trim();
             let v: Value = serde_json::from_str(cleaned).expect("BOM-stripped JSON must parse");
-            assert!(matches!(detect_format(&v), HookFormat::CopilotCli));
+            assert!(matches!(detect_format(&v), HookFormat::CamelCaseCmd));
         }
 
         let raw = format!("\u{feff}{}", vscode_input("run_in_terminal", "git status"));
         let v: Value = serde_json::from_str(strip_leading_bom(&raw).trim()).unwrap();
-        assert!(matches!(detect_format(&v), HookFormat::VsCode));
+        assert!(matches!(detect_format(&v), HookFormat::SnakeCaseCmd));
     }
 
     #[test]
@@ -1196,7 +1202,7 @@ mod tests {
     fn test_detect_vscode_run_in_terminal() {
         assert!(matches!(
             detect_format(&vscode_input("run_in_terminal", "git log --oneline -15")),
-            HookFormat::VsCode
+            HookFormat::SnakeCaseCmd
         ));
     }
 
@@ -1209,16 +1215,16 @@ mod tests {
     fn test_detect_copilot_cli_camelcase() {
         assert!(matches!(
             detect_format(&copilot_cli_input("git status")),
-            HookFormat::CopilotCli
+            HookFormat::CamelCaseCmd
         ));
     }
 
     #[test]
-    fn test_detect_bash_snake_case_is_passthrough() {
-        // snake_case "bash" (without toolArgs) is not Copilot CLI format
+    fn test_detect_bash_snake_case_is_snake_case_cmd() {
+        // snake_case "bash" (Copilot CLI with "PreToolUse" config) → SnakeCaseCmd
         assert!(matches!(
             detect_format(&vscode_input("bash", "git status")),
-            HookFormat::PassThrough
+            HookFormat::SnakeCaseCmd
         ));
     }
 
@@ -1277,8 +1283,8 @@ mod tests {
     fn run_copilot_inner(input: &str) -> Option<String> {
         let v: Value = serde_json::from_str(input).ok()?;
         match detect_format(&v) {
-            HookFormat::CopilotCli => process_copilot_payload(&v),
-            HookFormat::VsCode => process_vscode_payload(&v),
+            HookFormat::CamelCaseCmd => process_copilot_payload(&v),
+            HookFormat::SnakeCaseCmd => process_vscode_payload(&v),
             HookFormat::PassThrough => None,
         }
         .map(|o| o.to_string())
