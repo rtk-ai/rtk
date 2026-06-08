@@ -1215,6 +1215,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_classify_pyright() {
+        assert!(matches!(
+            classify_command("pyright src/"),
+            Classification::Supported {
+                rtk_equivalent: "rtk pyright",
+                ..
+            }
+        ));
+    }
+
     // --- rewrite_command tests ---
 
     #[test]
@@ -2299,6 +2310,14 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("ruff check .", &[]),
             Some("rtk ruff check .".into())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_pyright() {
+        assert_eq!(
+            rewrite_command("pyright src/", &[]),
+            Some("rtk pyright src/".into())
         );
     }
 
