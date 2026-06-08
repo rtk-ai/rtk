@@ -187,11 +187,9 @@ fn read_stored_hash(path: &Path) -> Result<String> {
     Ok(hash.to_string())
 }
 
-/// Resolve the default hook path (e.g. ~/.claude/hooks/rtk-rewrite.sh)
-/// Respects CLAUDE_CONFIG_DIR and RTK_CLAUDE_DIR overrides.
+/// Resolve the default hook path (~/.claude/hooks/rtk-rewrite.sh)
 pub fn resolve_hook_path() -> Result<PathBuf> {
-    let claude_dir = resolve_claude_dir()?;
-    Ok(claude_dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE))
+    resolve_claude_dir().map(|dir| dir.join(HOOKS_SUBDIR).join(REWRITE_HOOK_FILE))
 }
 
 /// Run integrity check and print results (for `rtk verify` subcommand)

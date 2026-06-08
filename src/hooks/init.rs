@@ -2714,21 +2714,16 @@ fn resolve_home_subdir(subdir: &str) -> Result<PathBuf> {
 
 pub fn resolve_claude_dir() -> Result<PathBuf> {
     resolve_claude_dir_from(
-        std::env::var_os("RTK_CLAUDE_DIR").map(PathBuf::from),
         std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
         dirs::home_dir(),
     )
 }
 
 fn resolve_claude_dir_from(
-    rtk_override: Option<PathBuf>,
-    claude_config_dir: Option<PathBuf>,
+    claude_dir: Option<PathBuf>,
     home_dir: Option<PathBuf>,
 ) -> Result<PathBuf> {
-    if let Some(path) = rtk_override.filter(|p| !p.as_os_str().is_empty()) {
-        return Ok(path);
-    }
-    if let Some(path) = claude_config_dir.filter(|p| !p.as_os_str().is_empty()) {
+    if let Some(path) = claude_dir.filter(|path| !path.as_os_str().is_empty()) {
         return Ok(path);
     }
     home_dir
@@ -4807,7 +4802,6 @@ mod tests {
     fn test_resolve_claude_dir_prefers_rtk_override() {
         let result = resolve_claude_dir_from(
             Some(PathBuf::from("/custom/rtk-claude")),
-            Some(PathBuf::from("/custom/claude-config")),
             Some(PathBuf::from("/home/user")),
         )
         .unwrap();
@@ -4817,7 +4811,6 @@ mod tests {
     #[test]
     fn test_resolve_claude_dir_uses_claude_config_dir() {
         let result = resolve_claude_dir_from(
-            None,
             Some(PathBuf::from("/custom/claude-config")),
             Some(PathBuf::from("/home/user")),
         )
@@ -4827,33 +4820,21 @@ mod tests {
 
     #[test]
     fn test_resolve_claude_dir_falls_back_to_home() {
-        let result =
-            resolve_claude_dir_from(None, None, Some(PathBuf::from("/home/user"))).unwrap();
+        let result = resolve_claude_dir_from(None, Some(PathBuf::from("/home/user"))).unwrap();
         assert_eq!(result, PathBuf::from("/home/user/.claude"));
     }
 
     #[test]
     fn test_resolve_claude_dir_ignores_empty_overrides() {
-        let empty_rtk = resolve_claude_dir_from(
-            Some(PathBuf::new()),
-            None,
-            Some(PathBuf::from("/home/user")),
-        )
-        .unwrap();
-        assert_eq!(empty_rtk, PathBuf::from("/home/user/.claude"));
-
-        let empty_claude = resolve_claude_dir_from(
-            None,
-            Some(PathBuf::new()),
-            Some(PathBuf::from("/home/user")),
-        )
-        .unwrap();
-        assert_eq!(empty_claude, PathBuf::from("/home/user/.claude"));
+        let empty =
+            resolve_claude_dir_from(Some(PathBuf::new()), Some(PathBuf::from("/home/user")))
+                .unwrap();
+        assert_eq!(empty, PathBuf::from("/home/user/.claude"));
     }
 
     #[test]
     fn test_resolve_claude_dir_errors_without_home() {
-        let err = resolve_claude_dir_from(None, None, None).unwrap_err();
+        let err = resolve_claude_dir_from(None, None).unwrap_err();
         assert!(err.to_string().contains("Cannot determine Claude config"));
     }
 
@@ -5627,12 +5608,12 @@ mod tests {
         let claude_dir = tmp.path().join(CLAUDE_DIR);
         fs::create_dir_all(&claude_dir).unwrap();
 
-        let orig = std::env::var_os("RTK_CLAUDE_DIR");
-        std::env::set_var("RTK_CLAUDE_DIR", &claude_dir);
+        let orig = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_dir);
         f(&claude_dir);
         match orig {
-            Some(v) => std::env::set_var("RTK_CLAUDE_DIR", v),
-            None => std::env::remove_var("RTK_CLAUDE_DIR"),
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
         }
     }
 
