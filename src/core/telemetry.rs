@@ -6,7 +6,7 @@ use crate::core::tracking;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static CACHED_SALT: OnceLock<String> = OnceLock::new();
@@ -352,7 +352,17 @@ fn detect_hook_type() -> String {
         Some(h) => h,
         None => return "unknown".to_string(),
     };
+    let cwd = std::env::current_dir().ok();
+    let whale_home = whale_home_from_env();
 
+    detect_hook_type_from_paths(&home, cwd.as_deref(), whale_home.as_deref())
+}
+
+fn detect_hook_type_from_paths(
+    home: &Path,
+    cwd: Option<&Path>,
+    whale_home: Option<&Path>,
+) -> String {
     // Check in order of popularity
     let checks = [
         (home.join(".claude/hooks/rtk-rewrite.sh"), "claude"),
@@ -368,17 +378,49 @@ fn detect_hook_type() -> String {
         }
     }
 
+    match whale_home {
+        Some(whale_home) => {
+            if whale_config_has_rtk_hook(&whale_home.join("config.toml")) {
+                return "whale".to_string();
+            }
+        }
+        None => {
+            if whale_config_has_rtk_hook(&home.join(".whale/config.toml"))
+                || whale_config_has_rtk_hook(&home.join(".whale/config.local.toml"))
+            {
+                return "whale".to_string();
+            }
+        }
+    }
+
     // Check project-level hooks (Claude script + project-scoped Copilot config)
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Some(cwd) = cwd {
         if cwd.join(".claude/hooks/rtk-rewrite.sh").exists() {
             return "claude".to_string();
         }
         if cwd.join(".github/hooks/rtk-rewrite.json").exists() {
             return "copilot".to_string();
         }
+        if whale_config_has_rtk_hook(&cwd.join(".whale/config.toml"))
+            || whale_config_has_rtk_hook(&cwd.join(".whale/config.local.toml"))
+        {
+            return "whale".to_string();
+        }
     }
 
     "none".to_string()
+}
+
+fn whale_home_from_env() -> Option<PathBuf> {
+    let value = std::env::var_os("WHALE_HOME")?;
+    let value = value.to_string_lossy().trim().to_string();
+    (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
+fn whale_config_has_rtk_hook(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|content| content.contains("rtk hook whale"))
+        .unwrap_or(false)
 }
 
 /// Count user-defined TOML filter files (project-local + global).
@@ -574,7 +616,7 @@ mod tests {
         assert!(stats.low_savings_commands.len() <= 5);
         assert!((0.0..=100.0).contains(&stats.avg_savings_per_command));
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "none", "unknown"]
+            ["claude", "gemini", "codex", "cursor", "copilot", "whale", "none", "unknown",]
                 .iter()
                 .any(|&h| stats.hook_type.starts_with(h)),
             "Unexpected hook type: {}",
@@ -586,10 +628,68 @@ mod tests {
     fn test_detect_hook_type_returns_known() {
         let ht = detect_hook_type();
         assert!(
-            ["claude", "gemini", "codex", "cursor", "copilot", "none", "unknown"]
+            ["claude", "gemini", "codex", "cursor", "copilot", "whale", "none", "unknown",]
                 .contains(&ht.as_str()),
             "Unexpected hook type: {}",
             ht
+        );
+    }
+
+    #[test]
+    fn test_whale_config_detects_local_hook_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.local.toml");
+        std::fs::write(
+            &config,
+            "[[hooks.PreToolUse]]\nmatch = \"shell_run\"\ncommand = \"rtk hook whale\"\n",
+        )
+        .unwrap();
+
+        assert!(whale_config_has_rtk_hook(&config));
+    }
+
+    #[test]
+    fn test_whale_home_overrides_default_home_config() {
+        let default_home = tempfile::tempdir().unwrap();
+        let default_whale_dir = default_home.path().join(".whale");
+        std::fs::create_dir_all(&default_whale_dir).unwrap();
+        std::fs::write(
+            default_whale_dir.join("config.toml"),
+            "[[hooks.PreToolUse]]\nmatch = \"shell_run\"\ncommand = \"rtk hook whale\"\n",
+        )
+        .unwrap();
+
+        let whale_home = tempfile::tempdir().unwrap();
+        std::fs::write(whale_home.path().join("config.toml"), "# no RTK hook\n").unwrap();
+
+        assert_eq!(
+            detect_hook_type_from_paths(default_home.path(), None, Some(whale_home.path())),
+            "none"
+        );
+    }
+
+    #[test]
+    fn test_whale_project_config_still_detected_with_whale_home() {
+        let default_home = tempfile::tempdir().unwrap();
+        let whale_home = tempfile::tempdir().unwrap();
+        std::fs::write(whale_home.path().join("config.toml"), "# no RTK hook\n").unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let project_whale_dir = project.path().join(".whale");
+        std::fs::create_dir_all(&project_whale_dir).unwrap();
+        std::fs::write(
+            project_whale_dir.join("config.local.toml"),
+            "[[hooks.PreToolUse]]\nmatch = \"shell_run\"\ncommand = \"rtk hook whale\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            detect_hook_type_from_paths(
+                default_home.path(),
+                Some(project.path()),
+                Some(whale_home.path())
+            ),
+            "whale"
         );
     }
 

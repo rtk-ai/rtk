@@ -89,7 +89,7 @@ This data directly drives our roadmap. For example, if telemetry shows that 40% 
 
 | Field | Example | Purpose |
 |-------|---------|---------|
-| `hook_type` | `claude` | Which AI agent hook is installed (claude/gemini/codex/cursor/none) |
+| `hook_type` | `claude` | Which AI agent hook is installed (claude/gemini/codex/cursor/copilot/whale/none) |
 | `custom_toml_filters` | `3` | Number of user-created TOML filter files — DSL adoption |
 
 ### Configuration (user maturity)

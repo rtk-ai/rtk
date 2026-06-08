@@ -44,6 +44,7 @@ claudedocs
 
 # Vitals provenance data
 .vitals/
+.omx/
 .worktrees/
 
 # icm 

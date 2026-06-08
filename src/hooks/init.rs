@@ -17,7 +17,8 @@ use super::constants::{
     GEMINI_HOOK_FILE, HERMES_DIR, HERMES_PLUGINS_SUBDIR, HERMES_PLUGIN_INIT_FILE,
     HERMES_PLUGIN_MANIFEST_FILE, HERMES_PLUGIN_NAME, HOOKS_JSON, HOOKS_SUBDIR,
     PI_CODING_AGENT_DIR_ENV, PI_DIR, PI_EXTENSIONS_SUBDIR, PI_LOCAL_DIR, PI_PLUGIN_FILE,
-    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON,
+    PRE_TOOL_USE_KEY, REWRITE_HOOK_FILE, SETTINGS_JSON, WHALE_CONFIG_FILE, WHALE_DIR,
+    WHALE_HOME_ENV,
 };
 use super::integrity;
 
@@ -70,6 +71,8 @@ const GEMINI_MD: &str = "GEMINI.md";
 
 const RTK_BLOCK_START: &str = "<!-- rtk-instructions";
 const RTK_BLOCK_END: &str = "<!-- /rtk-instructions -->";
+const WHALE_RTK_BLOCK_START: &str = "# rtk-whale-hook-start";
+const WHALE_RTK_BLOCK_END: &str = "# rtk-whale-hook-end";
 
 /// Control flow for settings.json patching
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2906,6 +2909,180 @@ fn print_pi_result(plugin_path: &Path, installed: bool) {
     println!();
     println!("Pi will load the extension automatically on next start.");
     println!("Verify: pi -e {} --no-session", plugin_path.display());
+}
+
+fn resolve_whale_home() -> Result<PathBuf> {
+    if let Some(raw) = std::env::var_os(WHALE_HOME_ENV) {
+        let trimmed = raw.to_string_lossy().trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
+    dirs::home_dir()
+        .map(|home| home.join(WHALE_DIR))
+        .context("Could not determine home directory for Whale config")
+}
+
+fn whale_config_path(global: bool) -> Result<PathBuf> {
+    if global {
+        Ok(resolve_whale_home()?.join(WHALE_CONFIG_FILE))
+    } else {
+        Ok(PathBuf::from(WHALE_DIR).join(WHALE_CONFIG_FILE))
+    }
+}
+
+fn whale_hook_block() -> &'static str {
+    r#"# rtk-whale-hook-start
+[[hooks.PreToolUse]]
+match = "shell_run"
+command = "rtk hook whale"
+timeout = 30
+# rtk-whale-hook-end
+"#
+}
+
+fn patch_whale_config(existing: &str) -> String {
+    let without_managed = remove_whale_rtk_block(existing);
+    if without_managed.contains("rtk hook whale") {
+        return without_managed;
+    }
+
+    let mut patched = without_managed.trim_end().to_string();
+    if !patched.is_empty() {
+        patched.push_str("\n\n");
+    }
+    patched.push_str(whale_hook_block());
+    patched
+}
+
+fn remove_whale_rtk_block(existing: &str) -> String {
+    let Some(start) = existing.find(WHALE_RTK_BLOCK_START) else {
+        return existing.to_string();
+    };
+    let Some(end_rel) = existing[start..].find(WHALE_RTK_BLOCK_END) else {
+        return existing.to_string();
+    };
+
+    let mut end = start + end_rel + WHALE_RTK_BLOCK_END.len();
+    if existing[end..].starts_with("\r\n") {
+        end += 2;
+    } else if existing[end..].starts_with('\n') {
+        end += 1;
+    }
+
+    let mut cleaned = String::with_capacity(existing.len() - (end - start));
+    cleaned.push_str(&existing[..start]);
+    cleaned.push_str(&existing[end..]);
+    while cleaned.contains("\n\n\n") {
+        cleaned = cleaned.replace("\n\n\n", "\n\n");
+    }
+    cleaned.trim_end().to_string()
+}
+
+pub fn run_whale_mode(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let config_path = whale_config_path(global)?;
+    let existing = if config_path.exists() {
+        fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read Whale config: {}", config_path.display()))?
+    } else {
+        String::new()
+    };
+    let patched = patch_whale_config(&existing);
+
+    if patched == existing {
+        if dry_run {
+            println!(
+                "[dry-run] Whale config already contains RTK hook: {}",
+                config_path.display()
+            );
+            print_dry_run_footer();
+        } else {
+            println!("RTK Whale hook already configured:");
+            println!("  Config: {}", config_path.display());
+        }
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would update Whale config: {}",
+            config_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", patched);
+        }
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create Whale config directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+    atomic_write(&config_path, &patched)
+        .with_context(|| format!("Failed to write Whale config: {}", config_path.display()))?;
+
+    println!("RTK configured for Whale:");
+    println!("  Config: {}", config_path.display());
+    println!("  Hook: rtk hook whale");
+    println!();
+    println!("Restart Whale. Project hooks may need review; run `/hooks trust all` if prompted.");
+    Ok(())
+}
+
+pub fn uninstall_whale(global: bool, ctx: InitContext) -> Result<()> {
+    let InitContext { verbose, dry_run } = ctx;
+    let config_path = whale_config_path(global)?;
+    if !config_path.exists() {
+        println!("RTK Whale hook was not installed (nothing to remove)");
+        if dry_run {
+            print_dry_run_footer();
+        }
+        return Ok(());
+    }
+
+    let existing = fs::read_to_string(&config_path)
+        .with_context(|| format!("Failed to read Whale config: {}", config_path.display()))?;
+    let patched = remove_whale_rtk_block(&existing);
+    if patched == existing {
+        println!("RTK Whale managed hook block was not found (nothing to remove)");
+        if dry_run {
+            print_dry_run_footer();
+        }
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "[dry-run] would update Whale config: {}",
+            config_path.display()
+        );
+        if verbose > 0 {
+            println!("[dry-run] content:\n{}", patched);
+        }
+        print_dry_run_footer();
+        return Ok(());
+    }
+
+    if patched.trim().is_empty() {
+        // nosemgrep: filesystem-deletion -- uninstall removes only an empty RTK-managed Whale config file.
+        fs::remove_file(&config_path)
+            .with_context(|| format!("Failed to remove Whale config: {}", config_path.display()))?;
+        println!("RTK uninstalled (Whale):");
+        println!("  - Removed empty config: {}", config_path.display());
+    } else {
+        atomic_write(&config_path, &patched)
+            .with_context(|| format!("Failed to write Whale config: {}", config_path.display()))?;
+        println!("RTK uninstalled (Whale):");
+        println!("  - Config: removed RTK hook block");
+    }
+    Ok(())
 }
 
 /// Return OpenCode plugin path: ~/.config/opencode/plugins/rtk.ts
@@ -6386,6 +6563,46 @@ mod tests {
             plugin.exists(),
             "dry-run uninstall must not remove the local Pi extension"
         );
+    }
+
+    #[test]
+    fn test_patch_whale_config_adds_managed_hook_block() {
+        let patched = patch_whale_config("model = \"deepseek-v4\"\n");
+        assert!(patched.contains(WHALE_RTK_BLOCK_START));
+        assert!(patched.contains("[[hooks.PreToolUse]]"));
+        assert!(patched.contains("match = \"shell_run\""));
+        assert!(patched.contains("command = \"rtk hook whale\""));
+        assert!(patched.starts_with("model = \"deepseek-v4\""));
+    }
+
+    #[test]
+    fn test_patch_whale_config_is_idempotent() {
+        let once = patch_whale_config("");
+        let twice = patch_whale_config(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn test_patch_whale_config_does_not_duplicate_manual_hook() {
+        let existing =
+            "[[hooks.PreToolUse]]\nmatch = \"shell_run\"\ncommand = \"rtk hook whale\"\n";
+        assert_eq!(patch_whale_config(existing), existing);
+    }
+
+    #[test]
+    fn test_remove_whale_rtk_block_preserves_user_config() {
+        let existing = format!(
+            "model = \"deepseek-v4\"\n\n{}[other]\nvalue = 1\n",
+            whale_hook_block()
+        );
+        let cleaned = remove_whale_rtk_block(&existing);
+        assert_eq!(cleaned, "model = \"deepseek-v4\"\n\n[other]\nvalue = 1");
+    }
+
+    #[test]
+    fn test_remove_whale_rtk_block_ignores_unmanaged_config() {
+        let existing = "[[hooks.PreToolUse]]\ncommand = \"echo ok\"\n";
+        assert_eq!(remove_whale_rtk_block(existing), existing);
     }
 
     // ─── Copilot tests ───────────────────────────────────────────────

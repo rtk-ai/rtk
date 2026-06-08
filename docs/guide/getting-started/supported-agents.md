@@ -37,6 +37,7 @@ Agent runs "cargo test"
 | OpenClaw | TypeScript plugin (`before_tool_call`) | Yes |
 | Pi | TypeScript extension (`tool_call` event) | Yes |
 | Hermes | Python plugin (`terminal` command mutation) | Yes |
+| Whale | Shell hook (`PreToolUse`) | Yes |
 | Cline / Roo Code | Rules file (prompt-level) | N/A |
 | Windsurf | Rules file (prompt-level) | N/A |
 | Codex CLI | AGENTS.md instructions | N/A |
@@ -119,6 +120,27 @@ rtk init --uninstall --agent pi --global
 
 Removes only the installed Pi extension file.
 
+### Whale
+
+```bash
+# Project-local (default)
+rtk init --agent whale
+
+# Global — all projects, respects $WHALE_HOME
+rtk init --agent whale --global
+```
+
+Creates or updates `.whale/config.toml` (local) or `~/.whale/config.toml` / `$WHALE_HOME/config.toml` (global) with a `[[hooks.PreToolUse]]` entry for `shell_run`. The hook calls `rtk hook whale` and returns Whale's `updated_input` format for transparent command rewrite.
+
+Uninstall:
+
+```bash
+rtk init --uninstall --agent whale
+rtk init --uninstall --agent whale --global
+```
+
+Removes only RTK's managed Whale hook block.
+
 ### OpenClaw
 
 ```bash
@@ -200,7 +222,7 @@ For full hook support on Windows, use [WSL](https://learn.microsoft.com/en-us/wi
 
 ## Graceful degradation
 
-Hooks never block command execution. If RTK is missing, the hook exits cleanly and the raw command runs unchanged:
+Hooks never block command execution because of hook failures. If RTK is missing, the hook exits cleanly and the raw command runs unchanged. Commands may still be blocked when your RTK permission rules explicitly deny them:
 
 - RTK binary not found: warning to stderr, exit 0
 - Invalid JSON input: pass through unchanged

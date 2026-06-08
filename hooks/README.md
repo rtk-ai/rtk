@@ -52,6 +52,7 @@ Each agent subdirectory has its own README with hook-specific details:
 | GitHub Copilot CLI | Rust binary (`rtk hook copilot`) | Deny-with-suggestion | No (agent retries) |
 | Cursor | Shell hook (`preToolUse`) | Transparent rewrite | Yes (`updated_input`) |
 | Gemini CLI | Rust binary (`rtk hook gemini`) | Transparent rewrite | Yes (`hookSpecificOutput`) |
+| Whale | Rust binary (`rtk hook whale`) | Transparent rewrite | Yes (`updated_input`) |
 | Cline / Roo Code | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Windsurf | Custom instructions (rules file) | Prompt-level guidance | N/A |
 | Codex CLI | AGENTS.md / instructions | Prompt-level guidance | N/A |
@@ -213,7 +214,7 @@ Example: `cargo fmt --all && cargo test` becomes `rtk cargo fmt --all && rtk car
 
 ## Exit Code Contract
 
-Hooks must **never block command execution**. All error paths (missing binary, bad JSON, rewrite failure) must exit 0 so the agent's command runs unmodified. A hook that exits non-zero prevents the user's command from executing.
+Hooks must **never block command execution because of hook failures**. All error paths (missing binary, bad JSON, rewrite failure) must exit 0 so the agent's command runs unmodified. A hook may still block when the user's RTK permission rules explicitly deny the command.
 
 When there is no rewrite to apply, the hook must produce no output (or `{}` for Cursor, which requires JSON on all paths).
 
@@ -223,7 +224,7 @@ When there is no rewrite to apply, the hook must produce no output (or `{}` for 
 
 ## Graceful Degradation
 
-Hooks are **non-blocking** -- they never prevent a command from executing:
+Hooks are **fail-open** -- they never prevent a command from executing because RTK itself failed:
 
 - jq not installed: warning to stderr, exit 0 (command runs raw)
 - rtk binary not found: warning to stderr, exit 0
