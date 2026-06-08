@@ -499,7 +499,7 @@ fn prompt_telemetry_consent() -> Result<()> {
 
 fn print_manual_instructions(hook_command: &str, include_opencode: bool) {
     let settings_path = resolve_claude_dir()
-        .unwrap_or_else(|_| PathBuf::from(CLAUDE_DIR))
+        .unwrap_or_else(|_| PathBuf::from(format!("~/{}", CLAUDE_DIR)))
         .join(SETTINGS_JSON);
     println!("\n  MANUAL STEP: Add this to {}:", settings_path.display());
     println!("  {{");
